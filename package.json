@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "serve": "bash scripts/serve.sh",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:file": "bun test",

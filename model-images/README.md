@@ -13,16 +13,20 @@ without ever committing the heavy files.
 
 ## Using it with Ollama
 
-To make Ollama store its model blobs here instead of the default `~/.ollama`,
-point it at this folder before starting the server:
+**Start Ollama via the project script on every machine** — this is the uniform
+process, and it points Ollama's storage here automatically:
 
 ```sh
-export OLLAMA_MODELS="$(pwd)/model-images"
-ollama serve
+bun run serve     # = scripts/serve.sh → `ollama serve` with OLLAMA_MODELS=<repo>/model-images
 ```
 
-Then `ollama pull qwen3:8b` (or the framework's autonomous pull) writes the
-blobs under `model-images/`. Leaving `OLLAMA_MODELS` unset is also fine — Ollama
-falls back to `~/.ollama` and the framework still works.
+(Quit the Ollama menu-bar app first, or it will hold port 11434 and use the
+wrong storage dir — `scripts/serve.sh` checks for this and warns you.)
+
+Then `ollama pull qwen3:8b` — or the framework's autonomous pull — writes the
+blobs here. Because storage is set by the **server** process (not our CLI),
+starting Ollama this way is what guarantees models land in `model-images/`
+identically on the laptop and the Mac Mini.
 
 > Heavy files here are intentionally ignored by git (see the repo `.gitignore`).
+> Each machine keeps its own local copy; nothing here is committed.

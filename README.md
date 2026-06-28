@@ -45,7 +45,21 @@ bun install                 # install dependencies (pinned, see below)
 bun run typecheck           # type-check
 bun test                    # run the test suite (no model needed — uses a mock)
 bun run lint                # lint + format check (Biome)
+```
 
+**Start Ollama the project way (do this on every machine).** Quit the Ollama
+menu-bar app first, then:
+
+```sh
+bun run serve               # runs `ollama serve` with OLLAMA_MODELS=./model-images
+```
+
+This is the **uniform process across all machines** — laptop, Mac Mini, etc.
+Models always live under [`model-images/`](model-images/README.md) (git-ignored,
+so each machine keeps its own copy), and the framework pulls anything missing on
+first use. Then, in another terminal:
+
+```sh
 # Real end-to-end (downloads qwen3:8b on first run):
 echo "The quick brown fox jumps over the lazy dog." > /tmp/sample.txt
 bun run src/cli/chat.ts "What animal is in /tmp/sample.txt?"
