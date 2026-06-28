@@ -55,7 +55,7 @@ export function warmModel(
   model: string,
   baseUrl: string = DEFAULT_BASE_URL,
 ): Promise<void> {
-  return postJson(baseUrl, '/api/generate', { model });
+  return postJson(baseUrl, '/api/generate', { model, stream: false });
 }
 
 /** Unload a model from memory immediately (keep_alive: 0). */
@@ -63,5 +63,9 @@ export function unloadModel(
   model: string,
   baseUrl: string = DEFAULT_BASE_URL,
 ): Promise<void> {
-  return postJson(baseUrl, '/api/generate', { model, keep_alive: 0 });
+  return postJson(baseUrl, '/api/generate', {
+    model,
+    keep_alive: 0,
+    stream: false,
+  });
 }

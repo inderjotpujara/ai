@@ -2,6 +2,8 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import {
   isModelInstalled,
   pullModel,
+  unloadModel,
+  warmModel,
 } from '../../src/resource/ollama-control.ts';
 
 afterEach(() => {
@@ -30,6 +32,33 @@ test('pullModel POSTs the model field and resolves on 200', async () => {
   expect(url).toBe('http://localhost:11434/api/pull');
   expect(JSON.parse(init.body as string)).toEqual({
     model: 'qwen3:8b',
+    stream: false,
+  });
+});
+
+test('warmModel POSTs to /api/generate with stream: false', async () => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify({}), { status: 200 }),
+  );
+  await warmModel('qwen3:8b');
+  const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+  expect(url).toBe('http://localhost:11434/api/generate');
+  expect(JSON.parse(init.body as string)).toEqual({
+    model: 'qwen3:8b',
+    stream: false,
+  });
+});
+
+test('unloadModel POSTs to /api/generate with keep_alive: 0 and stream: false', async () => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify({}), { status: 200 }),
+  );
+  await unloadModel('qwen3:8b');
+  const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+  expect(url).toBe('http://localhost:11434/api/generate');
+  expect(JSON.parse(init.body as string)).toEqual({
+    model: 'qwen3:8b',
+    keep_alive: 0,
     stream: false,
   });
 });
