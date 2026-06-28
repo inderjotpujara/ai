@@ -21,12 +21,12 @@ test('readFileText returns file contents', async () => {
 test('tool execute returns text on success', async () => {
   const p = join(dir, 'note.txt');
   await writeFile(p, 'tool content');
-  const result = await readFileTool.execute!({ path: p }, {} as never);
+  const result = await readFileTool.execute?.({ path: p }, {} as never);
   expect(result).toEqual({ text: 'tool content' });
 });
 
 test('tool execute returns a structured error for a missing file', async () => {
-  const result = await readFileTool.execute!(
+  const result = await readFileTool.execute?.(
     { path: join(dir, 'missing.txt') },
     {} as never,
   );

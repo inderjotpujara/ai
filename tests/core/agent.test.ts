@@ -25,7 +25,12 @@ test('agent calls the tool then returns the final answer', async () => {
           ],
           finishReason: { unified: 'tool-calls', raw: undefined },
           usage: {
-            inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+            inputTokens: {
+              total: 1,
+              noCache: undefined,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
             outputTokens: { total: 1, text: undefined, reasoning: undefined },
           },
           warnings: [],
@@ -35,7 +40,12 @@ test('agent calls the tool then returns the final answer', async () => {
         content: [{ type: 'text', text: 'The file says hello.' }],
         finishReason: { unified: 'stop', raw: undefined },
         usage: {
-          inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+          inputTokens: {
+            total: 1,
+            noCache: undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
           outputTokens: { total: 1, text: undefined, reasoning: undefined },
         },
         warnings: [],
@@ -58,6 +68,9 @@ test('agent calls the tool then returns the final answer', async () => {
     tools,
   });
 
-  expect(execute).toHaveBeenCalledWith({ path: '/tmp/x.txt' }, expect.anything());
+  expect(execute).toHaveBeenCalledWith(
+    { path: '/tmp/x.txt' },
+    expect.anything(),
+  );
   expect(text).toBe('The file says hello.');
 });

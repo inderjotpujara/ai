@@ -6,7 +6,9 @@ import {
 } from '../../src/resource/hardware.ts';
 
 test('gpu budget is 75% of total ram, floored', () => {
-  expect(gpuBudgetBytes(24 * 1024 ** 3)).toBe(Math.floor(24 * 1024 ** 3 * 0.75));
+  expect(gpuBudgetBytes(24 * 1024 ** 3)).toBe(
+    Math.floor(24 * 1024 ** 3 * 0.75),
+  );
 });
 
 test('fitsBudget compares model size to budget', () => {
