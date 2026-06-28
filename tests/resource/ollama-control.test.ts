@@ -9,10 +9,13 @@ afterEach(() => {
 });
 
 test('isModelInstalled returns true when /api/tags lists the model by name', async () => {
-  spyOn(globalThis, 'fetch').mockResolvedValue(
-    new Response(JSON.stringify({ models: [{ name: 'qwen3:8b' }] }), {
-      status: 200,
-    }),
+  // biome-ignore lint/suspicious/noExplicitAny: spyOn requires dynamic property access
+  spyOn(globalThis, 'fetch' as any).mockImplementation(() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ models: [{ name: 'qwen3:8b' }] }), {
+        status: 200,
+      }),
+    ),
   );
   expect(await isModelInstalled('qwen3:8b')).toBe(true);
   expect(await isModelInstalled('llama3:8b')).toBe(false);

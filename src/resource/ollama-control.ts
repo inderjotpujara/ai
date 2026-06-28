@@ -35,9 +35,10 @@ export async function isModelInstalled(
   } catch (cause) {
     throw new ProviderError('Ollama /api/tags failed', { cause });
   }
-  if (!res.ok)
+  if (!res.ok) {
     throw new ProviderError(`Ollama /api/tags returned ${res.status}`);
-  const data = (await res.clone().json()) as TagsResponse;
+  }
+  const data = (await res.json()) as TagsResponse;
   return (data.models ?? []).some((m) => m.name === model);
 }
 
