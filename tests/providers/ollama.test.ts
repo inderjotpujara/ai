@@ -10,5 +10,5 @@ test('qwen-fast declaration targets qwen3:8b on ollama', () => {
 
 test('createOllamaModel returns a model whose id matches the declaration', () => {
   const model = createOllamaModel(qwenFast);
-  expect(model.modelId).toBe('qwen3:8b');
+  expect((model as { modelId: string }).modelId).toBe('qwen3:8b');
 });
