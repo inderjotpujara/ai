@@ -4,6 +4,7 @@ import { createFileTools } from '../mcp/client.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
 import { estimateModelBytes } from '../resource/footprint.ts';
 import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
+import { isProjectStoreActive } from '../resource/model-store.ts';
 import {
   isModelInstalled,
   pullModel,
@@ -39,6 +40,14 @@ async function main(): Promise<void> {
     await pullModel(qwenFast.model);
   }
   await warmModel(qwenFast.model);
+
+  if (isProjectStoreActive()) {
+    console.error('Using project-local models from ./model-images');
+  } else {
+    console.error(
+      '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+    );
+  }
 
   const model = createOllamaModel(qwenFast);
   const { tools, close } = await createFileTools();
