@@ -21,14 +21,15 @@ export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
     : { ollama: { options: { num_ctx: numCtx } } };
 }
 
-/** Run an agent definition against a task, optionally at a chosen context size. */
+/** Run an agent definition against a task, optionally at a chosen context size and model. */
 export function runDefinedAgent(
   agent: Agent,
   task: string,
   numCtx?: number,
+  modelOverride?: LanguageModel,
 ): ReturnType<typeof runAgent> {
   return runAgent({
-    model: agent.model,
+    model: modelOverride ?? agent.model,
     systemPrompt: agent.systemPrompt,
     prompt: task,
     tools: agent.tools,
