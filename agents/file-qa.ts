@@ -1,6 +1,7 @@
 import type { ToolSet } from 'ai';
 import qwenFast from '../models/qwen-fast.ts';
 import type { Agent } from '../src/core/agent-def.ts';
+import { Capability, PreferPolicy } from '../src/core/types.ts';
 import { createOllamaModel } from '../src/providers/ollama.ts';
 
 const SYSTEM_PROMPT =
@@ -12,9 +13,14 @@ export function createFileQaAgent(tools: ToolSet): Agent {
     name: 'file_qa',
     description:
       'Answers questions about, and summarizes, the contents of a specific local file using read_file.',
-    model: createOllamaModel(qwenFast),
+    model: createOllamaModel(qwenFast), // default binding; selector may override live
     systemPrompt: SYSTEM_PROMPT,
     tools,
     modelDecl: qwenFast,
+    modelReq: {
+      role: 'general reasoning + tool use',
+      requires: [Capability.Tools],
+      prefer: PreferPolicy.LargestThatFits,
+    },
   };
 }

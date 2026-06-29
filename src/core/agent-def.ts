@@ -1,7 +1,7 @@
 import type { ProviderOptions } from '@ai-sdk/provider-utils';
 import type { LanguageModel, ToolSet } from 'ai';
 import { runAgent } from './agent.ts';
-import type { ModelDeclaration } from './types.ts';
+import type { ModelDeclaration, ModelRequirement } from './types.ts';
 
 /** A reusable agent: its own model + system prompt + tools, plus a routing description. */
 export type Agent = {
@@ -10,8 +10,10 @@ export type Agent = {
   model: LanguageModel;
   systemPrompt: string;
   tools: ToolSet;
-  /** Declaration of the agent's model, for the resource manager (optional; mock agents omit it). */
+  /** Declaration of the agent's model, for the resource manager (optional). */
   modelDecl?: ModelDeclaration;
+  /** Capability requirement resolved LIVE by the selector via onBeforeDelegate. */
+  modelReq?: ModelRequirement;
 };
 
 /** Build provider options that set Ollama's context window for this call. */
