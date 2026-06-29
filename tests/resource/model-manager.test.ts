@@ -23,6 +23,7 @@ function fakes(
     pull: mock(async () => {}),
     warm: mock(async () => {}),
     unload: mock(async () => {}),
+    warn: mock(() => {}), // no-op so eviction warnings never leak to console
     ...overrides,
   };
 }
@@ -46,8 +47,8 @@ test('not installed: pulls then warms', async () => {
   expect(f.warm).toHaveBeenCalledWith('m8');
 });
 
-test('fits alongside pinned: warms, no eviction', async () => {
-  // pinned router (4*1.2=4.8e9) loaded; target 8*1.2=9.6e9; budget 20e9 → fits
+test('fits in free headroom: warms, no eviction', async () => {
+  // target 8*1.2=9.6e9; free headroom 20e9 → fits without touching the loaded router.
   const f = fakes({
     listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
   });
@@ -57,30 +58,54 @@ test('fits alongside pinned: warms, no eviction', async () => {
   expect(f.warm).toHaveBeenCalledWith('m8');
 });
 
-test('over budget: evicts non-pinned, keeps pinned, then warms', async () => {
-  // resident: r4 (pinned 4.8e9) + old8 (9.6e9) = 14.4e9; target new8 9.6e9; budget 16e9
-  // must evict old8 (non-pinned); after evict resident 4.8 + 9.6 = 14.4 <= 16 → warm
+test('insufficient free: evicts non-pinned to grow headroom, keeps pinned, then warms', async () => {
+  // free headroom 2e9; target new8 needs 9.6e9 → must evict. Evicting old8 (non-pinned,
+  // 9.6e9) returns its bytes → headroom 2 + 9.6 = 11.6 ≥ 9.6 → warm. Pinned r4 untouched.
   const f = fakes({
     listLoaded: mock(async () => [
       { name: 'r4', sizeBytes: 4.8e9 },
       { name: 'old8', sizeBytes: 9.6e9 },
     ]),
   });
-  const mgr = createModelManager({ budgetBytes: 16e9, ...f });
+  const mgr = createModelManager({ budgetBytes: 2e9, ...f });
   await mgr.ensureReady(decl('new8', 8), { pinned: ['r4'] });
   expect(f.unload).toHaveBeenCalledWith('old8');
   expect(f.unload).not.toHaveBeenCalledWith('r4');
   expect(f.warm).toHaveBeenCalledWith('new8');
 });
 
-test('cannot fit with pinned: throws ResourceError, warms nothing', async () => {
-  // pinned r8 resident 9.6e9; target big 9.6e9; budget 12e9 → 9.6+9.6 > 12 and only pinned remains
+test('budget given as a function is resolved live on each ensureReady', async () => {
+  // function form (the live-budget shape); target 9.6e9 ≤ 20e9 free headroom → no eviction.
+  const f = fakes({
+    listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
+  });
+  const budgetBytes = mock(async () => 20e9);
+  const mgr = createModelManager({ budgetBytes, ...f });
+  await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
+  expect(budgetBytes).toHaveBeenCalled();
+  expect(f.unload).not.toHaveBeenCalled();
+  expect(f.warm).toHaveBeenCalledWith('m8');
+});
+
+test('best-effort pin: evicts the pinned model when it is all that is left to free', async () => {
+  // free headroom 2e9; only the pinned router r8 (9.6e9) is loaded; target big needs 9.6e9.
+  // Degrade: evict r8 → headroom 2 + 9.6 = 11.6 ≥ 9.6 → warm. Run stays functional.
   const f = fakes({
     listLoaded: mock(async () => [{ name: 'r8', sizeBytes: 9.6e9 }]),
   });
-  const mgr = createModelManager({ budgetBytes: 12e9, ...f });
+  const mgr = createModelManager({ budgetBytes: 2e9, ...f });
+  await mgr.ensureReady(decl('big', 8), { pinned: ['r8'] });
+  expect(f.unload).toHaveBeenCalledWith('r8');
+  expect(f.warm).toHaveBeenCalledWith('big');
+  expect(f.warn).toHaveBeenCalled();
+});
+
+test('target alone exceeds budget: throws ResourceError, warms nothing', async () => {
+  // nothing loaded; target needs 9.6e9 but budget is 8e9 → cannot fit even alone.
+  const f = fakes();
+  const mgr = createModelManager({ budgetBytes: 8e9, ...f });
   await expect(
-    mgr.ensureReady(decl('big', 8), { pinned: ['r8'] }),
+    mgr.ensureReady(decl('big', 8), { pinned: [] }),
   ).rejects.toBeInstanceOf(ResourceError);
   expect(f.warm).not.toHaveBeenCalled();
 });
