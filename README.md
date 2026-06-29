@@ -162,8 +162,9 @@ interface — no agent code changes. See
 | **Next** | Resource manager (multi-model scheduling, dynamic selection, hardware/context-aware agent graphs) + **model discovery** (auto-fetch latest models per machine) | Planned |
 | **Later** | Agent-builder (auto-create agents on a capability gap) · declarative `mcp.json` mount registry · Codex backup · resumable long/multimodal jobs (e.g. book→audiobook) · response-format tooling · streaming CLI | Planned |
 
-Design specs and implementation plans live in
-[`docs/superpowers/`](docs/superpowers/).
+**Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
+daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
+implementation plans live in [`docs/superpowers/`](docs/superpowers/).
 
 ---
 

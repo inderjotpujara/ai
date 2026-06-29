@@ -59,8 +59,14 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
 - **Telemetry / eval** — log per-agent latency, tokens, tool-call success rate; a small **eval harness** scoring routing accuracy (did the orchestrator pick the right specialist?).
 - **Resumable long jobs** — the run store + journal already support replay; wire `--resume <run-id>` for multi-hour multimodal jobs.
 
+## Runtimes & scale (alternate model backends)
+
+- **LM Studio / dedicated MLX-server adapters** (deferred since Slice 1) — behind the same AI SDK `LanguageModel` interface: a dedicated MLX server with **persistent KV-cache (omlx)** or **high concurrency (vMLX / LM Studio)** for heavy agent loops, when Ollama's sequential serving + idle-unload isn't enough.
+- **Raw `llama.cpp`-server adapter** — for low-level control (custom sampling/flags) if ever needed; Ollama remains the default.
+
 ## Bigger leaps — the Mac Mini era
 
+- **MLX backend + bigger models** — the Mac Mini (>32 GB unified memory) engages Ollama's MLX backend (Ollama 0.19+) and can host larger specialists (e.g. `qwen3.5:14b`+, `llama4:scout` long-context) that don't fit the 24 GB laptop budget — the Model Manager already budgets to the host, so this is mostly a declaration change.
 - **Always-on daemon** — the orchestrator as a background service with a task **queue**: fire tasks, collect results later.
 - **Scheduled / triggered agents** — cron- or event-driven (file added → process it) — the n8n "trigger" concept.
 - **Multi-machine** — laptop delegates heavy work to the Mac Mini over the network.
@@ -78,4 +84,6 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
 
 - Declarative **`mcp.json` mount registry** (list servers + which agents get them, loaded at startup) — generalizes Slice 3's in-code mounts.
 - **Codex** heavy-lifting backup (`@openai/codex-sdk`, personal plan) as an opt-in delegate agent.
-- Migrate `biome.json` off the deprecated `recommended` field; periodic Minor-findings cleanup from per-slice reviews.
+- Migrate `biome.json` off the deprecated `recommended` field.
+- **Per-slice Minor review findings** are recorded in `.superpowers/sdd/progress.md` (the SDD ledger) as each slice completes — e.g. run-journal O(n²) append, `runAgent.providerOptions` cross-package type, gap `message` hardcoded English, `ensureReady` post-pull comment, hardcoded `kvBytesPerToken`. Sweep them opportunistically; none are blocking.
+- **Hardware/context-aware guardrails for deeper composition** (recorded constraint): the agent-graph/parallel-fan-out slices MUST bound delegation depth, add cross-agent cycle detection, reuse warm models (shared-model agents = one resident copy), keep returned answers concise, and schedule concurrency within the Model Manager's budget. Cost compounds ~15× for naive orchestrator-workers, so depth/fan-out are bounded deliberately.
