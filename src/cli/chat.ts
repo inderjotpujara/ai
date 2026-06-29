@@ -46,19 +46,25 @@ async function main(): Promise<void> {
   );
 
   const fileServer = await createFileTools();
-  const fetchServer = await createFetchTools();
   try {
-    const orchestrator = createSuperAgent(fileServer.tools, fetchServer.tools);
-    const result = await runChat({
-      orchestrator,
-      task,
-      runsRoot: 'runs',
-      runId: `run-${process.pid}`,
-    });
-    console.log(result.kind === 'answer' ? result.text : result.message);
+    const fetchServer = await createFetchTools();
+    try {
+      const orchestrator = createSuperAgent(
+        fileServer.tools,
+        fetchServer.tools,
+      );
+      const result = await runChat({
+        orchestrator,
+        task,
+        runsRoot: 'runs',
+        runId: `run-${process.pid}`,
+      });
+      console.log(result.kind === 'answer' ? result.text : result.message);
+    } finally {
+      await fetchServer.close();
+    }
   } finally {
     await fileServer.close();
-    await fetchServer.close();
     await unloadModel(qwenFast.model);
   }
 }

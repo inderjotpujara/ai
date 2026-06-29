@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { expect, test } from 'bun:test';
 import { mountMcpServer } from '../../src/mcp/client.ts';
 
 // Proves mountMcpServer is generic (not hardcoded to one server) by mounting our
