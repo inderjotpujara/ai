@@ -11,10 +11,12 @@ import {
   delegateToolName,
 } from './delegate.ts';
 import { MaxStepsError } from './errors.ts';
+import type { ResourceCapture } from './resource-capture.ts';
 
 export type OrchestratorResult =
   | { kind: 'answer'; text: string }
-  | { kind: 'gap'; missingCapability: string; message: string };
+  | { kind: 'gap'; missingCapability: string; message: string }
+  | { kind: 'resource'; message: string };
 
 /** Build the orchestrator's system prompt: routing rules + the agent catalog. */
 export function buildRoutingPrompt(
@@ -61,11 +63,12 @@ export function createOrchestrator(opts: {
   };
 }
 
-/** Run the orchestrator; return either the answer or a reported capability gap. */
+/** Run the orchestrator; return the answer, a capability gap, or a resource failure. */
 export async function runOrchestrator(
   orchestrator: Agent,
   task: string,
   numCtx?: number,
+  capture?: ResourceCapture,
 ): Promise<OrchestratorResult> {
   let text: string;
   let steps: Parameters<typeof findCapabilityGap>[0];
@@ -75,10 +78,11 @@ export async function runOrchestrator(
     text = result.text;
     steps = result.steps;
   } catch (err) {
+    // A genuine resource failure during delegation takes precedence over anything else.
+    if (capture?.error) {
+      return { kind: 'resource', message: capture.error.message };
+    }
     if (err instanceof MaxStepsError) {
-      // Intentional: if report_capability_gap was called during the run, the
-      // result is classified as kind:'gap' (gap takes precedence) regardless of
-      // whether the agent produced any delegate output or final text.
       const gap = findCapabilityGap(
         err.steps as Parameters<typeof findCapabilityGap>[0],
       );
@@ -93,8 +97,10 @@ export async function runOrchestrator(
     throw err;
   }
 
-  // Intentional: if report_capability_gap was called in the run, the result is
-  // classified as kind:'gap' (gap takes precedence) regardless of any delegate output.
+  if (capture?.error) {
+    return { kind: 'resource', message: capture.error.message };
+  }
+
   const gap = findCapabilityGap(steps);
   if (gap) {
     return {
