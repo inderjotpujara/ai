@@ -1,16 +1,9 @@
 import { ResourceError } from '../core/errors.ts';
 import type { ModelDeclaration } from '../core/types.ts';
+import { runtimeFor } from '../runtime/registry.ts';
+import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
 import { kvCacheBytes, weightsBytes } from './footprint.ts';
 import { liveBudgetBytes } from './hardware.ts';
-import {
-  getModelMaxContext,
-  isModelInstalled,
-  type LoadedModel,
-  listLoadedModels,
-  pullModel,
-  unloadModel,
-  warmModel,
-} from './ollama-control.ts';
 
 export const MIN_CTX = 4096;
 const DEFAULT_KV_PER_TOKEN = 131072;
@@ -21,28 +14,19 @@ export type EnsureOpts = { pinned?: string[] };
 /** A live budget figure, or a (sync/async) provider that computes one on demand. */
 export type BudgetSource = number | (() => number | Promise<number>);
 
-/** Injectable dependencies (real Ollama by default; fakes in tests). */
+/** Injectable dependencies (real runtimes by default; fakes in tests). */
 export type ManagerDeps = {
   budgetBytes: BudgetSource;
-  isInstalled: (model: string) => Promise<boolean>;
-  listLoaded: () => Promise<LoadedModel[]>;
-  pull: (model: string) => Promise<void>;
-  warm: (model: string, numCtx?: number) => Promise<void>;
-  unload: (model: string) => Promise<void>;
   warn: (message: string) => void;
-  getModelMax: (model: string) => Promise<number | undefined>;
+  /** Resolve the lifecycle control for a declaration's runtime. */
+  controlFor: (decl: ModelDeclaration) => RuntimeControl;
 };
 
 function defaultDeps(): ManagerDeps {
   return {
     budgetBytes: liveBudgetBytes,
-    isInstalled: (m) => isModelInstalled(m),
-    listLoaded: () => listLoadedModels(),
-    pull: (m) => pullModel(m),
-    warm: (m, n) => warmModel(m, n),
-    unload: (m) => unloadModel(m),
     warn: (message) => console.error(message),
-    getModelMax: (m) => getModelMaxContext(m),
+    controlFor: (decl) => runtimeFor(decl.provider).control,
   };
 }
 
@@ -52,19 +36,20 @@ async function resolveBudget(source: BudgetSource): Promise<number> {
 }
 
 /** Loads/unloads models to keep the active + pinned set within the GPU budget. */
-export function createModelManager(deps: Partial<ManagerDeps> = {}) {
+export function createModelManager(deps: ManagerDeps = defaultDeps()) {
   const d: ManagerDeps = { ...defaultDeps(), ...deps };
   const lastUsed = new Map<string, number>();
   const chosenCtxByModel = new Map<string, number>();
   const maxCtxByModel = new Map<string, number>();
+  const runtimeByModel = new Map<string, ModelDeclaration>(); // remember how to unload
   let tick = 0;
 
-  async function modelMaxFor(model: string): Promise<number | undefined> {
+  async function modelMaxFor(c: RuntimeControl, model: string): Promise<number | undefined> {
     const cached = maxCtxByModel.get(model);
     if (cached !== undefined) return cached;
     let probed: number | undefined;
     try {
-      probed = await d.getModelMax(model);
+      probed = await c.getModelMax(model);
     } catch {
       probed = undefined;
     }
@@ -76,13 +61,14 @@ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
     decl: ModelDeclaration,
     opts: EnsureOpts = {},
   ): Promise<number> {
+    const c = d.controlFor(decl);
     const pinned = new Set(opts.pinned ?? []);
     const target = decl.model;
     const desired = decl.params.numCtx ?? MIN_CTX;
 
-    if (!(await d.isInstalled(target))) await d.pull(target);
+    if (!(await c.isInstalled(target))) await c.pull(target);
 
-    let loaded = await d.listLoaded();
+    let loaded = await c.listLoaded();
     if (loaded.some((m) => m.name === target)) {
       lastUsed.set(target, ++tick);
       return chosenCtxByModel.get(target) ?? desired;
@@ -116,7 +102,7 @@ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
           `[model-manager] live memory budget (~${gb(freeBudget)}GB) too low to keep ${evict.name} pinned; evicting it to load ${target} (best-effort pin — it will reload on demand).`,
         );
       }
-      await d.unload(evict.name);
+      await c.unload(evict.name);
       lastUsed.delete(evict.name);
       chosenCtxByModel.delete(evict.name);
       headroom += evict.sizeBytes;
@@ -124,7 +110,7 @@ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
     }
 
     // Scale context up into the remaining headroom, clamped by the live model max.
-    const probedMax = await modelMaxFor(target);
+    const probedMax = await modelMaxFor(c, target);
     const ceiling = Math.min(
       decl.maxContext ?? Number.POSITIVE_INFINITY,
       probedMax ?? Number.POSITIVE_INFINITY,
@@ -135,18 +121,21 @@ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
     chosenCtx -= chosenCtx % CTX_ROUNDING;
     chosenCtx = Math.max(MIN_CTX, chosenCtx);
 
-    await d.warm(target, chosenCtx);
+    await c.warm(target, chosenCtx);
     lastUsed.set(target, ++tick);
     chosenCtxByModel.set(target, chosenCtx);
+    runtimeByModel.set(target, decl);
     return chosenCtx;
   }
 
   async function unloadAll(): Promise<void> {
     for (const model of [...lastUsed.keys()]) {
-      await d.unload(model);
+      const decl = runtimeByModel.get(model);
+      if (decl) await d.controlFor(decl).unload(model);
     }
     lastUsed.clear();
     chosenCtxByModel.clear();
+    runtimeByModel.clear();
   }
 
   return { ensureReady, unloadAll };
