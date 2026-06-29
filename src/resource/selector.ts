@@ -4,6 +4,9 @@ import {
   type ModelRequirement,
 } from '../core/types.ts';
 import { weightsBytes } from './footprint.ts';
+import { ResourceError } from '../core/errors.ts';
+import type { EnsureOpts } from './model-manager.ts';
+import type { LoadedModel } from './ollama-control.ts';
 
 function hasAll(decl: ModelDeclaration, requires: Capability[]): boolean {
   const caps = new Set(decl.capabilities ?? []);
@@ -35,5 +38,53 @@ export function selectCandidates(
       if (la !== lb) return la - lb; // resident first
     }
     return 0;
+  });
+}
+
+/** Dependencies for the live resolve loop. */
+export type ResolveDeps = {
+  ensureReady: (d: ModelDeclaration, o?: EnsureOpts) => Promise<number>;
+  /** Optional resident-set probe; enables the warm-aware bias. */
+  listLoaded?: () => Promise<LoadedModel[]>;
+  /** Optional callback fired before each ensureReady attempt (e.g. selection notice). */
+  onAttempt?: (decl: ModelDeclaration) => void | Promise<void>;
+};
+
+/**
+ * LIVE. Walk candidates best-first; the first the manager can ready wins. On a
+ * genuine ResourceError, drop to the next candidate; if none fit, rethrow a real
+ * ResourceError. The manager remains the single fit-authority (real /api/ps sizes).
+ */
+export async function resolveModel(
+  req: ModelRequirement,
+  registry: ModelDeclaration[],
+  deps: ResolveDeps,
+  opts?: EnsureOpts,
+): Promise<{ decl: ModelDeclaration; numCtx: number }> {
+  const loaded = deps.listLoaded
+    ? new Set((await deps.listLoaded()).map((mm) => mm.name))
+    : undefined;
+  const candidates = selectCandidates(req, registry, loaded);
+  if (candidates.length === 0) {
+    throw new ResourceError(
+      `No model in the registry satisfies requirements: ${req.requires.join(', ')}.`,
+    );
+  }
+  let lastErr: unknown;
+  for (const decl of candidates) {
+    await deps.onAttempt?.(decl);
+    try {
+      const numCtx = await deps.ensureReady(decl, opts);
+      return { decl, numCtx };
+    } catch (err) {
+      if (err instanceof ResourceError) {
+        lastErr = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new ResourceError(`No candidate model fits the live budget for ${req.role}.`, {
+    cause: lastErr,
   });
 }
