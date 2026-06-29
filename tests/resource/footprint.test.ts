@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test';
-import { estimateModelBytes } from '../../src/resource/footprint.ts';
+import {
+  estimateModelBytes,
+  kvCacheBytes,
+  weightsBytes,
+} from '../../src/resource/footprint.ts';
 
 test('estimates an 8B Q4_K_M model with 8k context', () => {
   // weights = 8e9 * 0.56 * 1.2 = 5,376,000,000 ; kv = 8192 * 131072 = 1,073,741,824
@@ -20,4 +24,14 @@ test('zero context means weights-only', () => {
     kvBytesPerToken: 999,
   });
   expect(bytes).toBe(1e9 * 2 * 1.2);
+});
+
+test('weightsBytes applies the 1.2 runtime overhead', () => {
+  expect(weightsBytes(1, 1)).toBe(1.2e9);
+  expect(weightsBytes(4, 0.56)).toBe(4 * 1e9 * 0.56 * 1.2);
+});
+
+test('kvCacheBytes is contextTokens times bytes-per-token', () => {
+  expect(kvCacheBytes(4096, 131072)).toBe(4096 * 131072);
+  expect(kvCacheBytes(0, 131072)).toBe(0);
 });

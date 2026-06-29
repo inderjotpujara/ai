@@ -8,13 +8,29 @@ export type FootprintInput = {
 
 const RUNTIME_OVERHEAD = 1.2;
 
+/** Resident bytes of the weights (quantized) plus runtime overhead — no KV cache. */
+export function weightsBytes(
+  paramsBillions: number,
+  bytesPerWeight: number,
+): number {
+  return paramsBillions * 1e9 * bytesPerWeight * RUNTIME_OVERHEAD;
+}
+
+/** KV-cache bytes for a given context window. */
+export function kvCacheBytes(
+  contextTokens: number,
+  kvBytesPerToken: number,
+): number {
+  return contextTokens * kvBytesPerToken;
+}
+
 /**
  * Estimate the RAM a model needs before loading it.
- * weights = params * bytesPerWeight * overhead; plus a KV-cache term that grows with context.
+ * weights (with overhead) plus a KV-cache term that grows with context.
  */
 export function estimateModelBytes(input: FootprintInput): number {
-  const weights =
-    input.paramsBillions * 1e9 * input.bytesPerWeight * RUNTIME_OVERHEAD;
-  const kvCache = input.contextTokens * input.kvBytesPerToken;
-  return weights + kvCache;
+  return (
+    weightsBytes(input.paramsBillions, input.bytesPerWeight) +
+    kvCacheBytes(input.contextTokens, input.kvBytesPerToken)
+  );
 }
