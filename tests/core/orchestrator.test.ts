@@ -131,6 +131,27 @@ test('multi-agent selection: only the chosen delegate runs', async () => {
   expect(b.ran()).toBe(1);
 });
 
+test('routes a URL task to web_fetch and a file task to file_qa', async () => {
+  const fileQa = subAgent('file_qa', 'file answer');
+  const webFetch = subAgent('web_fetch', 'web answer');
+
+  // model that picks delegate_to_web_fetch
+  const orchWeb = createOrchestrator({
+    model: orchModel('delegate_to_web_fetch', {
+      task: 'summarize https://example.com',
+    }),
+    systemPrompt: 'route',
+    agents: [fileQa.agent, webFetch.agent],
+  });
+  const webResult = await runOrchestrator(
+    orchWeb,
+    'summarize https://example.com',
+  );
+  expect(webResult.kind).toBe('answer');
+  expect(fileQa.ran()).toBe(0);
+  expect(webFetch.ran()).toBe(1);
+});
+
 test('gap detected from MaxStepsError: orchestrator resolves kind:gap when runAgent throws after report_capability_gap', async () => {
   // A model that ALWAYS returns a report_capability_gap tool-call and never
   // produces final text. The loop hits the step ceiling (MaxStepsError is thrown
