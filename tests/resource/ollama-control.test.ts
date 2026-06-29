@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import {
   isModelInstalled,
+  listLoadedModels,
   pullModel,
   unloadModel,
   warmModel,
@@ -61,4 +62,26 @@ test('unloadModel POSTs to /api/generate with keep_alive: 0 and stream: false', 
     keep_alive: 0,
     stream: false,
   });
+});
+
+test('listLoadedModels maps /api/ps name + size to LoadedModel[]', async () => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(
+      JSON.stringify({ models: [{ name: 'qwen3:8b', size: 6_000_000_000 }, { name: 'qwen3:4b', size: 3_500_000_000 }] }),
+      { status: 200 },
+    ),
+  );
+  const loaded = await listLoadedModels();
+  expect(loaded).toEqual([
+    { name: 'qwen3:8b', sizeBytes: 6_000_000_000 },
+    { name: 'qwen3:4b', sizeBytes: 3_500_000_000 },
+  ]);
+  expect((fetchSpy.mock.calls[0] as [string])[0]).toBe('http://localhost:11434/api/ps');
+});
+
+test('listLoadedModels returns [] when nothing is loaded', async () => {
+  spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify({ models: [] }), { status: 200 }),
+  );
+  expect(await listLoadedModels()).toEqual([]);
 });

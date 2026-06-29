@@ -4,6 +4,11 @@ const DEFAULT_BASE_URL = 'http://localhost:11434';
 
 type TagsResponse = { models?: Array<{ name: string }> };
 
+/** A model currently resident in Ollama, with its memory footprint. */
+export type LoadedModel = { name: string; sizeBytes: number };
+
+type PsResponse = { models?: Array<{ name: string; size: number }> };
+
 async function postJson(
   baseUrl: string,
   path: string,
@@ -68,4 +73,19 @@ export function unloadModel(
     keep_alive: 0,
     stream: false,
   });
+}
+
+/** Models currently loaded in memory, from `GET /api/ps`. */
+export async function listLoadedModels(
+  baseUrl: string = DEFAULT_BASE_URL,
+): Promise<LoadedModel[]> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/ps`);
+  } catch (cause) {
+    throw new ProviderError('Ollama /api/ps failed', { cause });
+  }
+  if (!res.ok) throw new ProviderError(`Ollama /api/ps returned ${res.status}`);
+  const data = (await res.json()) as PsResponse;
+  return (data.models ?? []).map((m) => ({ name: m.name, sizeBytes: m.size }));
 }
