@@ -161,3 +161,10 @@ Apple Silicon, Ollama 0.19+ already runs on an MLX backend.
   Gap-takes-precedence; `report_capability_gap` is the future agent-builder's seam.
 - **Run** — one invocation, recorded under `runs/<id>/` with artifacts + a
   JSONL journal (resumable).
+- **Mounting an MCP server (Slice 3, built)** — `mountMcpServer({command,args,env?})`
+  in `src/mcp/client.ts` connects to ANY stdio MCP server and returns its
+  `{ tools, close }`. This is the integration primitive: adding a capability =
+  pointing at a server, not writing tool code. `createFileTools` (our `read_file`
+  server) and `createFetchTools` (keyless `uvx mcp-server-fetch`, tool `fetch`)
+  are presets. An agent holds a mounted server's tools (e.g. `web_fetch` holds
+  `fetch`); the CLI mounts each server and closes it on every path.

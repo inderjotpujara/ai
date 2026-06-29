@@ -5,10 +5,10 @@ agents against **local models** (no API keys), orchestrated by a super-agent,
 on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
 Mini.
 
-> **Status:** Slice 2 complete — a generic **orchestrator (super-agent)** routes
-> your request to a matching sub-agent (currently file-Q&A) via agents-as-tools,
-> or clearly reports a capability gap ("I don't have a capability for X yet")
-> instead of guessing. Built on Slice 1's local-model + MCP-tool foundation. See
+> **Status:** Slice 3 complete — capabilities are now **pluggable**:
+> `mountMcpServer()` connects to any MCP server, so adding a skill = pointing at
+> a server. The orchestrator routes between **file-Q&A** and a new **web-fetch**
+> agent (keyless `uvx mcp-server-fetch`), or reports a capability gap. See
 > [Roadmap](#roadmap).
 
 ---
@@ -40,7 +40,9 @@ No manual steps. No API keys. Everything runs locally.
 ## Quick start
 
 **Prerequisites:** [Bun](https://bun.com) ≥ 1.3, [Ollama](https://ollama.com)
-(running locally), an Apple Silicon Mac.
+(running locally), an Apple Silicon Mac, and [`uvx`](https://docs.astral.sh/uv/)
+(for the keyless web-fetch agent — `uvx mcp-server-fetch`). The unit/mock test
+suite needs none of these; only the CLI and opt-in live tests do.
 
 ```sh
 bun install                 # install dependencies (pinned, see below)
@@ -156,8 +158,9 @@ interface — no agent code changes. See
 |---|---|---|
 | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
 | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
-| **3** | Full resource manager (multi-model scheduling, dynamic selection) + **model discovery** (auto-fetch latest models per machine, no hardcoded list) | Planned |
-| **Later** | Codex backup · resumable long/multimodal jobs (e.g. book→audiobook) · LM Studio / MLX-server adapters · streaming CLI | Planned |
+| **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
+| **Next** | Resource manager (multi-model scheduling, dynamic selection, hardware/context-aware agent graphs) + **model discovery** (auto-fetch latest models per machine) | Planned |
+| **Later** | Agent-builder (auto-create agents on a capability gap) · declarative `mcp.json` mount registry · Codex backup · resumable long/multimodal jobs (e.g. book→audiobook) · response-format tooling · streaming CLI | Planned |
 
 Design specs and implementation plans live in
 [`docs/superpowers/`](docs/superpowers/).
