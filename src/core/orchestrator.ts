@@ -5,7 +5,11 @@ import {
   capabilityGapTool,
   findCapabilityGap,
 } from './capability-gap.ts';
-import { asDelegateTool, delegateToolName } from './delegate.ts';
+import {
+  asDelegateTool,
+  type BeforeDelegate,
+  delegateToolName,
+} from './delegate.ts';
 import { MaxStepsError } from './errors.ts';
 
 export type OrchestratorResult =
@@ -38,10 +42,14 @@ export function createOrchestrator(opts: {
   model: LanguageModel;
   systemPrompt: string;
   agents: Agent[];
+  onBeforeDelegate?: BeforeDelegate;
 }): Agent {
   const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
   for (const agent of opts.agents) {
-    tools[delegateToolName(agent)] = asDelegateTool(agent);
+    tools[delegateToolName(agent)] = asDelegateTool(
+      agent,
+      opts.onBeforeDelegate,
+    );
   }
   return {
     name: opts.name ?? 'orchestrator',

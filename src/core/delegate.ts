@@ -7,11 +7,17 @@ export function delegateToolName(agent: Agent): string {
   return `delegate_to_${agent.name}`;
 }
 
+/** A hook run just before a delegated agent executes (e.g. ensure its model is loaded). */
+export type BeforeDelegate = (agent: Agent) => Promise<void>;
+
 /**
  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
  * structured error (so the orchestrator model can react) rather than throwing.
  */
-export function asDelegateTool(agent: Agent) {
+export function asDelegateTool(
+  agent: Agent,
+  onBeforeDelegate?: BeforeDelegate,
+) {
   return tool({
     description: agent.description,
     inputSchema: z.object({
@@ -19,6 +25,7 @@ export function asDelegateTool(agent: Agent) {
     }),
     execute: async ({ task }) => {
       try {
+        if (onBeforeDelegate) await onBeforeDelegate(agent);
         const { text } = await runDefinedAgent(agent, task);
         return { text };
       } catch (cause) {
