@@ -3,6 +3,28 @@ export enum ProviderKind {
   Ollama = 'Ollama',
 }
 
+/** A capability a model advertises and an agent can require. String enum (extensible). */
+export enum Capability {
+  Tools = 'tools',
+  // future: Vision = 'vision', LongContext = 'long-context', Coding = 'coding'
+}
+
+/** How the selector ranks the candidates that survive the hard filter. */
+export enum PreferPolicy {
+  LargestThatFits = 'largest-that-fits',
+  // future: SmallestThatFits, QualityRanked, GlobalSchedule
+}
+
+/** What a requirement-driven agent declares instead of a concrete model name. */
+export type ModelRequirement = {
+  /** Human description of the role. */
+  role: string;
+  /** HARD filter — every listed capability must be present on the model. */
+  requires: Capability[];
+  /** SOFT rank over the survivors. */
+  prefer: PreferPolicy;
+};
+
 /** Tunable inference parameters carried by a model declaration. */
 export type ModelParams = {
   temperature?: number;
@@ -18,6 +40,8 @@ export type ModelDeclaration = {
   model: string;
   params: ModelParams;
   role: string;
+  /** Capabilities this model provides; selector hard-filters on these. Missing = none. */
+  capabilities?: Capability[];
   /** Pre-load sizing hint for the model manager. */
   footprint: {
     approxParamsBillions: number;
