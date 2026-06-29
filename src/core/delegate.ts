@@ -10,6 +10,7 @@ export function delegateToolName(agent: Agent): string {
 /** A hook run just before a delegated agent executes; may return a chosen context size. */
 export type BeforeDelegate = (
   agent: Agent,
+  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing; changing to `undefined` would break all void-returning callsites.
 ) => Promise<{ numCtx?: number } | void>;
 
 /**
