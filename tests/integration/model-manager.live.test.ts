@@ -2,7 +2,10 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import qwenFast from '../../models/qwen-fast.ts';
 import qwenRouter from '../../models/qwen-router.ts';
 import { createModelManager } from '../../src/resource/model-manager.ts';
-import { listLoadedModels } from '../../src/resource/ollama-control.ts';
+import {
+  getModelMaxContext,
+  listLoadedModels,
+} from '../../src/resource/ollama-control.ts';
 import { ollamaReady } from './ollama-available.ts';
 
 const ready =
@@ -28,6 +31,16 @@ describe.skipIf(!ready)(
       await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
       loaded = (await listLoadedModels()).map((m) => m.name);
       expect(loaded).toContain(qwenRouter.model);
+    }, 180_000);
+
+    test('ensureReady returns a sane chosen context within the model max', async () => {
+      const max = await getModelMaxContext(qwenFast.model);
+      const ctx = await manager.ensureReady(qwenFast, {
+        pinned: [qwenRouter.model],
+      });
+      expect(ctx).toBeGreaterThanOrEqual(4096);
+      expect(ctx % 1024).toBe(0);
+      if (max !== undefined) expect(ctx).toBeLessThanOrEqual(max);
     }, 180_000);
   },
 );
