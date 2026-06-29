@@ -1,4 +1,4 @@
-import { tool, type generateText } from 'ai';
+import { type generateText, tool } from 'ai';
 import { z } from 'zod';
 
 /** The tool the orchestrator calls when no registered agent can handle a task. */

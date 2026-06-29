@@ -20,9 +20,10 @@ export type RunAgentInput = {
 };
 
 /** Run one agent turn: model + tools loop, bounded by a step guard. Returns text + steps. */
-export async function runAgent(
-  input: RunAgentInput,
-): Promise<{ text: string; steps: Awaited<ReturnType<typeof generateText>>['steps'] }> {
+export async function runAgent(input: RunAgentInput): Promise<{
+  text: string;
+  steps: Awaited<ReturnType<typeof generateText>>['steps'];
+}> {
   const result = await generateText({
     model: input.model,
     system: input.systemPrompt,

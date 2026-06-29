@@ -11,7 +11,12 @@ test('runDefinedAgent runs the agent on the task and returns text', async () => 
       content: [{ type: 'text', text: 'done' }],
       finishReason: { unified: 'stop', raw: undefined },
       usage: {
-        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+        inputTokens: {
+          total: 1,
+          noCache: undefined,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
         outputTokens: { total: 1, text: undefined, reasoning: undefined },
       },
       warnings: [],
@@ -22,7 +27,9 @@ test('runDefinedAgent runs the agent on the task and returns text', async () => 
     description: 'does math',
     model,
     systemPrompt: 'You do math.',
-    tools: { add: tool({ description: 'add', inputSchema: z.object({}), execute }) },
+    tools: {
+      add: tool({ description: 'add', inputSchema: z.object({}), execute }),
+    },
   };
 
   const { text } = await runDefinedAgent(agent, 'what is 40+2?');

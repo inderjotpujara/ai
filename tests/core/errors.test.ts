@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test';
-import { DelegationError, ProviderError, ResourceError } from '../../src/core/errors.ts';
+import {
+  DelegationError,
+  ProviderError,
+  ResourceError,
+} from '../../src/core/errors.ts';
 
 test('typed errors carry their class name and message', () => {
   const err = new ResourceError('model does not fit budget');
