@@ -9,6 +9,8 @@ export type LoadedModel = { name: string; sizeBytes: number };
 
 type PsResponse = { models?: Array<{ name: string; size: number }> };
 
+type ShowResponse = { model_info?: Record<string, unknown> };
+
 async function postJson(
   baseUrl: string,
   path: string,
@@ -55,12 +57,44 @@ export function pullModel(
   return postJson(baseUrl, '/api/pull', { model, stream: false });
 }
 
-/** Warm/preload a model into memory with an empty-prompt generate. */
+/** Warm/preload a model into memory, optionally reserving a context window. */
 export function warmModel(
   model: string,
+  numCtx?: number,
   baseUrl: string = DEFAULT_BASE_URL,
 ): Promise<void> {
-  return postJson(baseUrl, '/api/generate', { model, stream: false });
+  const body: Record<string, unknown> = { model, stream: false };
+  if (numCtx !== undefined) body.options = { num_ctx: numCtx };
+  return postJson(baseUrl, '/api/generate', body);
+}
+
+/**
+ * The model's true maximum context window, read live from `POST /api/show`
+ * (`model_info["<arch>.context_length"]`). Returns undefined if not reported.
+ */
+export async function getModelMaxContext(
+  model: string,
+  baseUrl: string = DEFAULT_BASE_URL,
+): Promise<number | undefined> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+  } catch (cause) {
+    throw new ProviderError('Ollama /api/show failed', { cause });
+  }
+  if (!res.ok) {
+    throw new ProviderError(`Ollama /api/show returned ${res.status}`);
+  }
+  const data = (await res.json()) as ShowResponse;
+  const info = data.model_info ?? {};
+  const arch = info['general.architecture'];
+  if (typeof arch !== 'string') return undefined;
+  const ctx = info[`${arch}.context_length`];
+  return typeof ctx === 'number' ? ctx : undefined;
 }
 
 /** Unload a model from memory immediately (keep_alive: 0). */

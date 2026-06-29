@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import {
+  getModelMaxContext,
   isModelInstalled,
   listLoadedModels,
   pullModel,
@@ -91,4 +92,50 @@ test('listLoadedModels returns [] when nothing is loaded', async () => {
     new Response(JSON.stringify({ models: [] }), { status: 200 }),
   );
   expect(await listLoadedModels()).toEqual([]);
+});
+
+test('warmModel includes options.num_ctx when a context is given', async () => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify({}), { status: 200 }),
+  );
+  await warmModel('m', 8192);
+  const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+  const body = JSON.parse(init.body as string) as Record<string, unknown>;
+  expect(body).toMatchObject({ model: 'm', stream: false });
+  expect((body.options as { num_ctx: number }).num_ctx).toBe(8192);
+});
+
+test('warmModel omits options when no context is given', async () => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify({}), { status: 200 }),
+  );
+  await warmModel('m');
+  const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+  const body = JSON.parse(init.body as string) as Record<string, unknown>;
+  expect(body.options).toBeUndefined();
+});
+
+test('getModelMaxContext reads model_info architecture context_length', async () => {
+  spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        model_info: {
+          'general.architecture': 'qwen35',
+          'qwen35.context_length': 262144,
+        },
+      }),
+      { status: 200 },
+    ),
+  );
+  expect(await getModelMaxContext('qwen3.5:4b')).toBe(262144);
+});
+
+test('getModelMaxContext returns undefined when the field is absent', async () => {
+  spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(
+      JSON.stringify({ model_info: { 'general.architecture': 'qwen35' } }),
+      { status: 200 },
+    ),
+  );
+  expect(await getModelMaxContext('qwen3.5:4b')).toBeUndefined();
 });
