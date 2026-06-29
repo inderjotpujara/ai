@@ -1,13 +1,16 @@
-import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
+import {
+  Capability,
+  type ModelDeclaration,
+  ProviderKind,
+} from '../src/core/types.ts';
 
 /** Fast general-purpose local model with reliable tool-calling. */
 const qwenFast: ModelDeclaration = {
   provider: ProviderKind.Ollama,
   model: 'qwen3.5:9b',
-  // Desired context for the role; the true max is detected live from Ollama
-  // and the manager clamps this down under memory pressure.
   params: { temperature: 0.2, numCtx: 16384 },
   role: 'general reasoning + tool use',
+  capabilities: [Capability.Tools],
   footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
 };
 

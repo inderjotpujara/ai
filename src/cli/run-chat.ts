@@ -3,6 +3,7 @@ import {
   type OrchestratorResult,
   runOrchestrator,
 } from '../core/orchestrator.ts';
+import type { ResourceCapture } from '../core/resource-capture.ts';
 import { appendJournal } from '../run/journal.ts';
 import { createRun, writeArtifact } from '../run/run-store.ts';
 
@@ -12,6 +13,7 @@ export type ChatDeps = {
   runsRoot: string;
   runId: string;
   routerNumCtx?: number;
+  capture?: ResourceCapture;
 };
 
 /** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
@@ -23,6 +25,7 @@ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
     deps.orchestrator,
     deps.task,
     deps.routerNumCtx,
+    deps.capture,
   );
 
   if (result.kind === 'answer') {
@@ -31,11 +34,17 @@ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
       step: 'answer',
       data: { text: result.text },
     });
-  } else {
+  } else if (result.kind === 'gap') {
     await writeArtifact(run, 'gap.txt', result.message);
     await appendJournal(run.dir, {
       step: 'gap',
       data: { missingCapability: result.missingCapability },
+    });
+  } else {
+    await writeArtifact(run, 'resource.txt', result.message);
+    await appendJournal(run.dir, {
+      step: 'resource',
+      data: { message: result.message },
     });
   }
   return result;

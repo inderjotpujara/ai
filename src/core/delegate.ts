@@ -1,3 +1,4 @@
+import type { LanguageModel } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
@@ -7,11 +8,15 @@ export function delegateToolName(agent: Agent): string {
   return `delegate_to_${agent.name}`;
 }
 
-/** A hook run just before a delegated agent executes; may return a chosen context size. */
+/**
+ * A hook run just before a delegated agent executes. May return a chosen context
+ * size, a model to bind for this call, and/or an `abort` message that skips the
+ * delegation entirely (returned to the orchestrator as a soft tool error).
+ */
 export type BeforeDelegate = (
   agent: Agent,
-  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing; changing to `undefined` would break all void-returning callsites.
-) => Promise<{ numCtx?: number } | void>;
+  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing.
+) => Promise<{ numCtx?: number; model?: LanguageModel; abort?: string } | void>;
 
 /**
  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
@@ -31,7 +36,15 @@ export function asDelegateTool(
         const pre = onBeforeDelegate
           ? await onBeforeDelegate(agent)
           : undefined;
-        const { text } = await runDefinedAgent(agent, task, pre?.numCtx);
+        if (pre?.abort) {
+          return { error: pre.abort };
+        }
+        const { text } = await runDefinedAgent(
+          agent,
+          task,
+          pre?.numCtx,
+          pre?.model,
+        );
         return { text };
       } catch (cause) {
         return {

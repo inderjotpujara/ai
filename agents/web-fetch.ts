@@ -1,6 +1,7 @@
 import type { ToolSet } from 'ai';
 import qwenFast from '../models/qwen-fast.ts';
 import type { Agent } from '../src/core/agent-def.ts';
+import { Capability, PreferPolicy } from '../src/core/types.ts';
 import { createOllamaModel } from '../src/providers/ollama.ts';
 
 const SYSTEM_PROMPT =
@@ -12,9 +13,14 @@ export function createWebFetchAgent(tools: ToolSet): Agent {
     name: 'web_fetch',
     description:
       'Fetches a URL and answers questions about or summarizes the content of a web page.',
-    model: createOllamaModel(qwenFast),
+    model: createOllamaModel(qwenFast), // default binding; selector may override live
     systemPrompt: SYSTEM_PROMPT,
     tools,
     modelDecl: qwenFast,
+    modelReq: {
+      role: 'general reasoning + tool use',
+      requires: [Capability.Tools],
+      prefer: PreferPolicy.LargestThatFits,
+    },
   };
 }

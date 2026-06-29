@@ -16,8 +16,10 @@ formal designs, see [`docs/superpowers/specs`](superpowers/specs).
   degrade first → if still tight, ask once → on approval reclaim everything
   except a protected set. Never silent.)
 - **Model freshness is runtime behavior, not a code change.** Model choices are
-  *data* (a declaration), and Slice 3 adds discovery that fetches the latest
-  models per machine — no hardcoded model list in logic.
+  *data*: agents declare a capability requirement (`requires` / `prefer`) and
+  Slice 5's selector resolves it against a registry. Slice 6 (planned) will replace
+  the current static bootstrap registry with per-machine runtime discovery — so the
+  model list is never hardcoded in inference logic.
 - **Small, modular, plain code.** One responsibility per file, loose coupling,
   self-explanatory code. The layers below each have a narrow interface.
 - **Ports & adapters.** Runtime (Ollama) and tool source (MCP) sit behind
@@ -36,7 +38,7 @@ client, and a mock model for tests. We write only the thin layers on top.
 | **CLI** | `src/cli/` | Entry + orchestration of one run | everything below |
 | **Agent** | `src/core/agent.ts` | The tool-calling loop with a step guard | AI SDK only (model + `ToolSet`) |
 | **Providers** | `src/providers/` | Build a `LanguageModel` from a declaration | AI SDK + Ollama provider |
-| **Resource** | `src/resource/` | Live budget (vm_stat), footprint, dynamic num_ctx, warm (with ctx)/unload, model-max probe | Ollama HTTP + `os` |
+| **Resource** | `src/resource/` | Live budget (vm_stat), footprint, dynamic num_ctx, warm (with ctx)/unload, model-max probe, selector (capability filter + largest-that-fits + `resolveModel` fallback loop) | Ollama HTTP + `os` |
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; expose & consume over MCP | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir, artifacts, resumable journal | filesystem |
 | **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
@@ -118,7 +120,7 @@ fraction overrides.
 - `footprint.kvBytesPerToken` is an optional per-model declaration field
   (default 131072); the old hardcoded value is resolved.
 
-**Dynamic `num_ctx` sizing (`src/model-manager.ts`, `src/resource/ollama-control.ts`):**
+**Dynamic `num_ctx` sizing (`src/resource/model-manager.ts`, `src/resource/ollama-control.ts`):**
 `chosenCtx = min(desired, modelMax, maxCtxByFit)`, floored at `MIN_CTX = 4096`,
 rounded to `CTX_ROUNDING = 1024`.
 - `desired` = `decl.params.numCtx` (router 8192, specialist 16384).
@@ -138,6 +140,21 @@ Write requests use field `model`; `/api/tags` and `/api/ps` report it as `name`.
 **Best-effort pinning:** a pinned model IS evicted as a last resort if it is the
 only way to fit the target (logged as a warning). `ResourceError` is thrown only
 when nothing is left to evict.
+
+### Dynamic model selection (Slice 5)
+
+**Selector (`src/resource/selector.ts`).** `selectCandidates` (pure: capability hard-filter + largest-that-fits rank + warm-aware tie-break) feeds `resolveModel`, a live fallback loop that walks candidates best-first against `manager.ensureReady` (the single fit-authority); on a `ResourceError` it drops to the next candidate, and throws only when nothing fits. The chosen model is bound lazily at delegation time via `onBeforeDelegate` (`src/cli/select-hook.ts`), which also prints a one-line selection notice (`src/cli/selection-notice.ts`: size · context · footprint · installed-or-pulling · budget) once per new model. Agents declare a capability `ModelRequirement` (`requires` / `prefer`); the registry (`models/registry.ts` = `qwen3.5:4b` + `qwen3.5:9b`) is a machine-adaptive bootstrap ladder — the fits-filter makes bigger rungs inert where they don't fit, and Slice 6 discovery will populate it per-machine at runtime. A genuine no-fit is recorded in a `ResourceCapture` seam (`src/core/resource-capture.ts`) and surfaced by `runOrchestrator` as `{kind:'resource'}` → the CLI prints the message and exits non-zero (no hallucinated answer).
+
+Selection flow:
+
+```
+selectCandidates(req, registry, loaded)   ← pure: hard-filter + largest-that-fits + warm tie-break
+  → resolveModel (live fallback loop)
+      → manager.ensureReady(decl)          ← single fit-authority; ResourceError → next candidate
+        → returns { decl, numCtx }
+onBeforeDelegate binds the chosen model + numCtx (and prints the selection notice)
+no-fit (all candidates exhausted) → ResourceCapture → runOrchestrator { kind:'resource' } → non-zero exit
+```
 
 **Slice 4 data flow (addition to the Slice 1 diagram above):**
 
@@ -195,12 +212,15 @@ Apple Silicon, Ollama 0.19+ already runs on an MLX backend.
   super-agent (`agents/super.ts`) is an `Agent` (`src/core/orchestrator.ts`)
   whose tools are `delegate_to_<name>(task)` wrappers around sub-agents plus a
   `report_capability_gap` tool. Routing = the orchestrator model's tool
-  selection. `runOrchestrator` returns `{kind:'answer'}` or `{kind:'gap'}` by
-  inspecting the run's `steps` (deterministic — even when the step guard trips).
-  Gap-takes-precedence; `report_capability_gap` is the future agent-builder's seam.
+  selection. `runOrchestrator` returns `{kind:'answer'}`, `{kind:'gap'}`, or
+  `{kind:'resource'}` (when the selector cannot fit any model — read from the
+  `ResourceCapture` seam) by inspecting the run's `steps` (deterministic — even
+  when the step guard trips). Resource- and gap-take-precedence over an answer;
+  `report_capability_gap` is the future agent-builder's seam.
 - **Run** — one invocation, recorded under `runs/<id>/` with artifacts + a
   JSONL journal (resumable).
-- **Model Manager** — `src/model-manager.ts`. `ensureReady(model, ctx?)` drives the full lifecycle: compute `liveBudgetBytes()`, check footprint, evict LRU non-pinned models until the target fits, evict pinned as a last resort (best-effort), then warm with the chosen `num_ctx`. Returns `{ chosenCtx }` so inference reuses the same context size.
+- **Model Manager** — `src/resource/model-manager.ts`. `ensureReady(model, ctx?)` drives the full lifecycle: compute `liveBudgetBytes()`, check footprint, evict LRU non-pinned models until the target fits, evict pinned as a last resort (best-effort), then warm with the chosen `num_ctx`. Returns the chosen context size so inference reuses it.
+- **Dynamic model selection (Slice 5, built)** — agents declare a capability `ModelRequirement` (`requires` / `prefer`); `selectCandidates` (pure: capability filter + largest-that-fits rank + warm-aware tie-break, `src/resource/selector.ts`) feeds `resolveModel`, a live fallback loop against `ensureReady` that degrades to a smaller model on `ResourceError` and throws only when nothing fits. The chosen model binds lazily via `onBeforeDelegate` (`src/cli/select-hook.ts`); a no-fit becomes `{kind:'resource'}` via the `ResourceCapture` seam. The registry (`models/registry.ts`) is a static bootstrap ladder Slice 6 discovery will replace.
 - **Live budget** — `liveBudgetBytes()` in `src/resource/hardware.ts`: `min(0.75 × total Metal cap, 0.8 × availableRamBytes())`. `availableRamBytes()` parses `vm_stat` to get the full pool of reclaimable macOS memory; falls back to `os.freemem()` or half total RAM if unavailable. Recomputed on each delegation.
 - **Dynamic num_ctx** — context window chosen per delegation: `min(desired, modelMax, maxCtxByFit)`, floor `MIN_CTX = 4096`, rounded to `CTX_ROUNDING = 1024`. `modelMax` probed live via `POST /api/show`. The same value is used for both warm and inference to avoid an Ollama runner reload.
 - **Mounting an MCP server (Slice 3, built)** — `mountMcpServer({command,args,env?})`

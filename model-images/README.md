@@ -23,8 +23,8 @@ bun run serve     # = scripts/serve.sh → `ollama serve` with OLLAMA_MODELS=<re
 (Quit the Ollama menu-bar app first, or it will hold port 11434 and use the
 wrong storage dir — `scripts/serve.sh` checks for this and warns you.)
 
-Then `ollama pull qwen3:8b` — or the framework's autonomous pull — writes the
-blobs here. Because storage is set by the **server** process (not our CLI),
+Then `ollama pull qwen3.5:9b` (or let the framework's autonomous pull handle it)
+writes the blobs here. Because storage is set by the **server** process (not our CLI),
 starting Ollama this way is what guarantees models land in `model-images/`
 identically on the laptop and the Mac Mini.
 
