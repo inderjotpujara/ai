@@ -1,6 +1,7 @@
 import type { ToolSet } from 'ai';
-import qwenFast from '../models/qwen-fast.ts';
+import qwenRouter from '../models/qwen-router.ts';
 import type { Agent } from '../src/core/agent-def.ts';
+import type { BeforeDelegate } from '../src/core/delegate.ts';
 import { createOrchestrator } from '../src/core/orchestrator.ts';
 import { createOllamaModel } from '../src/providers/ollama.ts';
 import { createFileQaAgent } from './file-qa.ts';
@@ -13,13 +14,15 @@ const BASE_PROMPT =
 export function createSuperAgent(
   fileQaTools: ToolSet,
   fetchTools: ToolSet,
+  onBeforeDelegate?: BeforeDelegate,
 ): Agent {
   const fileQa = createFileQaAgent(fileQaTools);
   const webFetch = createWebFetchAgent(fetchTools);
   return createOrchestrator({
     name: 'super',
-    model: createOllamaModel(qwenFast),
+    model: createOllamaModel(qwenRouter),
     systemPrompt: BASE_PROMPT,
     agents: [fileQa, webFetch],
+    onBeforeDelegate,
   });
 }

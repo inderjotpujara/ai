@@ -15,5 +15,6 @@ export function createWebFetchAgent(tools: ToolSet): Agent {
     model: createOllamaModel(qwenFast),
     systemPrompt: SYSTEM_PROMPT,
     tools,
+    modelDecl: qwenFast,
   };
 }
