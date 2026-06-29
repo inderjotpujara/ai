@@ -18,4 +18,6 @@ export type ModelDeclaration = {
   model: string;
   params: ModelParams;
   role: string;
+  /** Pre-load sizing hint for the model manager. */
+  footprint: { approxParamsBillions: number; bytesPerWeight: number };
 };
