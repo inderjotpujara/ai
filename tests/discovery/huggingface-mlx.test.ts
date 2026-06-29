@@ -44,7 +44,9 @@ test('builds an MLX candidate from config.json + chat_template + tree', async ()
     hostTotalRamBytes: 24e9,
   });
   expect(cands.length).toBe(1);
-  expect(cands[0]!.provider).toBe(ProviderKind.MlxServer);
-  expect(cands[0]!.model).toBe('mlx-community/Qwen2.5-7B-Instruct-4bit');
-  expect(cands[0]!.capabilities).toContain(Capability.Tools);
+  const cand = cands[0];
+  if (!cand) throw new Error('expected a candidate');
+  expect(cand.provider).toBe(ProviderKind.MlxServer);
+  expect(cand.model).toBe('mlx-community/Qwen2.5-7B-Instruct-4bit');
+  expect(cand.capabilities).toContain(Capability.Tools);
 });

@@ -64,7 +64,7 @@ async function candidateFor(
     model: repo,
     params: {},
     role: 'discovered MLX general reasoning + tool use',
-    capabilities: [Capability.Tools],
+    capabilities: detectTools(tmpl) ? [Capability.Tools] : [],
     contentPolicy: UNCENSORED_RE.test(repo)
       ? ContentPolicy.Uncensored
       : ContentPolicy.Default,

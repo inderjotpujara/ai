@@ -1,6 +1,6 @@
 import { BOOTSTRAP } from '../../models/registry.ts';
 import type { ModelDeclaration } from '../core/types.ts';
-import { availableRuntimes } from '../runtime/registry.ts';
+import { availableRuntimes, runtimeFor } from '../runtime/registry.ts';
 import { readCatalog } from './catalog-cache.ts';
 import type { Candidate } from './catalog-source.ts';
 
@@ -8,6 +8,12 @@ export type BuildRegistryDeps = {
   bootstrap?: ModelDeclaration[];
   installed?: () => Promise<ModelDeclaration[]>;
   readCatalog?: () => Candidate[] | undefined;
+  /**
+   * Probe whether a catalog candidate is installed locally.
+   * Defaults to checking via the candidate's runtime control.
+   * Throws / offline → treat as NOT installed (candidate excluded).
+   */
+  isInstalled?: (decl: ModelDeclaration) => Promise<boolean>;
 };
 
 async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
@@ -30,7 +36,26 @@ async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
   return out;
 }
 
-/** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ cached catalog, deduped by (provider,model). */
+function defaultIsInstalled(decl: ModelDeclaration): Promise<boolean> {
+  return runtimeFor(decl.provider).control.isInstalled(decl.model);
+}
+
+async function filterInstalledCatalog(
+  catalog: Candidate[],
+  probe: (decl: ModelDeclaration) => Promise<boolean>,
+): Promise<ModelDeclaration[]> {
+  const results: ModelDeclaration[] = [];
+  for (const c of catalog) {
+    try {
+      if (await probe(c)) results.push(c);
+    } catch {
+      /* runtime offline or throws → exclude candidate */
+    }
+  }
+  return results;
+}
+
+/** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ catalog (installed-only), deduped by (provider,model). */
 export async function buildRegistry(
   deps: BuildRegistryDeps = {},
 ): Promise<ModelDeclaration[]> {
@@ -41,7 +66,9 @@ export async function buildRegistry(
   } catch {
     installed = [];
   }
-  const catalog = (deps.readCatalog ?? (() => readCatalog()))() ?? [];
+  const rawCatalog = (deps.readCatalog ?? (() => readCatalog()))() ?? [];
+  const probe = deps.isInstalled ?? defaultIsInstalled;
+  const catalog = await filterInstalledCatalog(rawCatalog, probe);
 
   const byKey = new Map<string, ModelDeclaration>();
   for (const d of [...bootstrap, ...installed, ...catalog]) {

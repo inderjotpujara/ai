@@ -37,7 +37,7 @@ async function resolveBudget(source: BudgetSource): Promise<number> {
 
 /** Loads/unloads models to keep the active + pinned set within the GPU budget. */
 export function createModelManager(deps: ManagerDeps = defaultDeps()) {
-  const d: ManagerDeps = { ...defaultDeps(), ...deps };
+  const d = deps;
   const lastUsed = new Map<string, number>();
   const chosenCtxByModel = new Map<string, number>();
   const maxCtxByModel = new Map<string, number>();

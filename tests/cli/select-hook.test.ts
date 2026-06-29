@@ -3,7 +3,12 @@ import { BOOTSTRAP } from '../../models/registry.ts';
 import { createSelectHook } from '../../src/cli/select-hook.ts';
 import type { Agent } from '../../src/core/agent-def.ts';
 import { ResourceError } from '../../src/core/errors.ts';
-import { Capability, PreferPolicy } from '../../src/core/types.ts';
+import type { ModelDeclaration } from '../../src/core/types.ts';
+import {
+  Capability,
+  PreferPolicy,
+  ProviderKind,
+} from '../../src/core/types.ts';
 
 function specialist(): Agent {
   return {
@@ -19,6 +24,15 @@ function specialist(): Agent {
     },
   };
 }
+
+const mlxDecl: ModelDeclaration = {
+  provider: ProviderKind.MlxServer,
+  model: 'mlx-community/Qwen2.5-7B-Instruct-4bit',
+  params: {},
+  role: 'general reasoning + tool use',
+  capabilities: [Capability.Tools],
+  footprint: { approxParamsBillions: 7, bytesPerWeight: 0.55 },
+};
 
 test('hook resolves a model + numCtx and returns a bound model', async () => {
   const ensureReady = mock(async () => 16384);
@@ -67,4 +81,19 @@ test('agent without modelReq is a no-op', async () => {
   });
   expect(pre).toEqual({});
   expect(ensureReady).not.toHaveBeenCalled();
+});
+
+test('hook builds via MLX runtime for MlxServer decl: model defined, numCtx undefined', async () => {
+  const ensureReady = mock(async () => 8192);
+  const capture = {};
+  const hook = createSelectHook({
+    registry: [mlxDecl],
+    ensureReady,
+    pinned: [],
+    capture,
+  });
+  const pre = await hook(specialist());
+  expect(pre && 'model' in pre && pre.model).toBeTruthy();
+  // numCtx is undefined for non-Ollama providers — num_ctx is an Ollama-specific option
+  expect(pre && 'numCtx' in pre ? pre.numCtx : 'absent').toBeUndefined();
 });

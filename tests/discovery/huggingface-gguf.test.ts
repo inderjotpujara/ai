@@ -44,7 +44,8 @@ test('builds a fitting tool-capable GGUF candidate', async () => {
     hostTotalRamBytes: 24e9,
   });
   expect(cands.length).toBe(1);
-  const cand = cands[0]!;
+  const cand = cands[0];
+  if (!cand) throw new Error('expected a candidate');
   expect(cand.provider).toBe(ProviderKind.Ollama);
   expect(cand.model).toBe('hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M');
   expect(cand.capabilities).toContain(Capability.Tools);
