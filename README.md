@@ -26,8 +26,8 @@ Under the hood, one CLI run autonomously:
 1. **Checks the memory budget** — computes the live budget
    (`min(75% × Metal cap, 80% × available RAM)`, recomputed each delegation),
    estimates the model's footprint, and confirms it fits.
-2. **Ensures the model is present** — pulls `qwen3:8b` if it isn't installed
-   (no hardcoded download step you have to run).
+2. **Ensures the model is present** — pulls the chosen specialist model (e.g.
+   `qwen3.5:9b`) if it isn't installed (no hardcoded download step you have to run).
 3. **Warms the model** into memory.
 4. **Runs the agent loop** — the model calls a `read_file` tool (exposed over
    **MCP**) and composes an answer.
@@ -68,7 +68,7 @@ so each machine keeps its own copy), and the framework pulls anything missing on
 first use. Then, in another terminal:
 
 ```sh
-# Real end-to-end (downloads qwen3:8b on first run):
+# Real end-to-end (downloads the specialist model, e.g. qwen3.5:9b, on first run):
 echo "The quick brown fox jumps over the lazy dog." > /tmp/sample.txt
 bun run src/cli/chat.ts "What animal is in /tmp/sample.txt?"
 ```
@@ -109,14 +109,14 @@ they're reusable across other agent tools (Claude Code, Cursor, …).
 
 | Path | Responsibility |
 |---|---|
-| `src/core/` | `agent.ts` (the loop), `types.ts`, `errors.ts` |
+| `src/core/` | `agent.ts` (the loop), `agent-def.ts`, `delegate.ts`, `orchestrator.ts`, `capability-gap.ts`, `resource-capture.ts` (the `{kind:'resource'}` seam), `types.ts`, `errors.ts` |
 | `src/providers/` | `ollama.ts` — builds an AI SDK model from a declaration |
-| `src/resource/` | `hardware.ts` (static Metal cap + live free-RAM via `vm_stat`), `footprint.ts` (weights + KV split), `ollama-control.ts` (pull/warm with `numCtx`/unload/`getModelMaxContext`) |
+| `src/resource/` | `hardware.ts` (live free-RAM via `vm_stat` + Metal-cap ceiling), `footprint.ts` (weights + KV split), `model-manager.ts` (load/evict/pin + dynamic `num_ctx`), `selector.ts` (capability filter + largest-that-fits + `resolveModel` fallback loop), `ollama-control.ts` (pull/warm/unload/`getModelMaxContext`) |
 | `src/run/` | `run-store.ts` (run dirs + artifacts), `journal.ts` (resumable JSONL log) |
 | `src/tools/` | `read-file.ts` — the `read_file` tool |
 | `src/mcp/` | `server.ts` (exposes tools over MCP), `client.ts` (consumes them) |
-| `src/cli/` | `chat.ts` (entrypoint), `answer-file-question.ts` (testable orchestration) |
-| `models/` | model **declarations** (data, not weights) — e.g. `qwen-fast.ts` |
+| `src/cli/` | `chat.ts` (entrypoint), `run-chat.ts` (testable orchestration), `select-hook.ts` (selector-driven `onBeforeDelegate`), `selection-notice.ts` (per-delegation notice) |
+| `models/` | model **declarations** (data, not weights) — `qwen-fast.ts`, `qwen-router.ts`, `registry.ts` (bootstrap capability ladder) |
 | `agents/` | agent definitions — **all agents live here** ([readme](agents/README.md)) |
 | `model-images/` | local model blob files (git-ignored, [readme](model-images/README.md)) |
 | `docs/` | architecture + the design specs/plans under `docs/superpowers/` |
