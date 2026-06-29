@@ -1,8 +1,6 @@
 import { ResourceError } from '../core/errors.ts';
-import type {
-  Capability,
-  ModelDeclaration,
-  ModelRequirement,
+import {
+  type Capability, ContentPolicy, type ModelDeclaration, type ModelRequirement,
 } from '../core/types.ts';
 import { weightsBytes } from './footprint.ts';
 import type { EnsureOpts } from './model-manager.ts';
@@ -24,7 +22,11 @@ export function selectCandidates(
   registry: ModelDeclaration[],
   loaded?: ReadonlySet<string>,
 ): ModelDeclaration[] {
-  const capable = registry.filter((d) => hasAll(d, req.requires));
+  const capable = registry.filter(
+    (d) =>
+      hasAll(d, req.requires) &&
+      (req.allowUncensored === true || d.contentPolicy !== ContentPolicy.Uncensored),
+  );
   return [...capable].sort((a, b) => {
     const pa = a.footprint.approxParamsBillions;
     const pb = b.footprint.approxParamsBillions;
