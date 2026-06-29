@@ -17,3 +17,6 @@ export class MaxStepsError extends FrameworkError {}
 
 /** A model cannot fit the machine's memory budget. */
 export class ResourceError extends FrameworkError {}
+
+/** A delegated sub-agent run failed irrecoverably. */
+export class DelegationError extends FrameworkError {}
