@@ -130,3 +130,45 @@ test('multi-agent selection: only the chosen delegate runs', async () => {
   expect(a.ran()).toBe(0);
   expect(b.ran()).toBe(1);
 });
+
+test('gap detected from MaxStepsError: orchestrator resolves kind:gap when runAgent throws after report_capability_gap', async () => {
+  // A model that ALWAYS returns a report_capability_gap tool-call and never
+  // produces final text. The loop hits the step ceiling (MaxStepsError is thrown
+  // with steps attached), and runOrchestrator must detect the gap from those steps.
+  const gapOnlyModel = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'report_capability_gap',
+          input: JSON.stringify({ missingCapability: 'translate language' }),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
+      usage: {
+        inputTokens: {
+          total: 1,
+          noCache: undefined,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
+        outputTokens: { total: 1, text: undefined, reasoning: undefined },
+      },
+      warnings: [],
+    }),
+  });
+  const orch = createOrchestrator({
+    model: gapOnlyModel,
+    systemPrompt: 'route',
+    agents: [],
+  });
+  // Default 10 steps: the loop will exhaust and throw MaxStepsError; runOrchestrator
+  // must catch it, find the gap in err.steps, and resolve (not rethrow).
+  const result = await runOrchestrator(orch, 'translate this document');
+  expect(result.kind).toBe('gap');
+  if (result.kind === 'gap') {
+    expect(result.missingCapability).toBe('translate language');
+    expect(result.message).toContain('translate language');
+  }
+});

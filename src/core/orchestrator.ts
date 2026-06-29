@@ -6,6 +6,7 @@ import {
   findCapabilityGap,
 } from './capability-gap.ts';
 import { asDelegateTool, delegateToolName } from './delegate.ts';
+import { MaxStepsError } from './errors.ts';
 
 export type OrchestratorResult =
   | { kind: 'answer'; text: string }
@@ -16,7 +17,9 @@ export function buildRoutingPrompt(
   basePrompt: string,
   agents: Agent[],
 ): string {
-  const catalog = agents.map((a) => `- ${a.name}: ${a.description}`).join('\n');
+  const catalog = agents
+    .map((a) => `- ${delegateToolName(a)}: ${a.description}`)
+    .join('\n');
   return [
     basePrompt,
     '',
@@ -55,7 +58,34 @@ export async function runOrchestrator(
   orchestrator: Agent,
   task: string,
 ): Promise<OrchestratorResult> {
-  const { text, steps } = await runDefinedAgent(orchestrator, task);
+  let text: string;
+  let steps: Parameters<typeof findCapabilityGap>[0];
+
+  try {
+    const result = await runDefinedAgent(orchestrator, task);
+    text = result.text;
+    steps = result.steps;
+  } catch (err) {
+    if (err instanceof MaxStepsError) {
+      // Intentional: if report_capability_gap was called during the run, the
+      // result is classified as kind:'gap' (gap takes precedence) regardless of
+      // whether the agent produced any delegate output or final text.
+      const gap = findCapabilityGap(
+        err.steps as Parameters<typeof findCapabilityGap>[0],
+      );
+      if (gap) {
+        return {
+          kind: 'gap',
+          missingCapability: gap.missingCapability,
+          message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
+        };
+      }
+    }
+    throw err;
+  }
+
+  // Intentional: if report_capability_gap was called in the run, the result is
+  // classified as kind:'gap' (gap takes precedence) regardless of any delegate output.
   const gap = findCapabilityGap(steps);
   if (gap) {
     return {

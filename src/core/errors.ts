@@ -13,10 +13,13 @@ export class ProviderError extends FrameworkError {}
 export class ToolError extends FrameworkError {}
 
 /** The agent loop hit its step ceiling without finishing. */
-export class MaxStepsError extends FrameworkError {}
+export class MaxStepsError extends FrameworkError {
+  readonly steps: unknown[];
+  constructor(message: string, steps: unknown[] = []) {
+    super(message);
+    this.steps = steps;
+  }
+}
 
 /** A model cannot fit the machine's memory budget. */
 export class ResourceError extends FrameworkError {}
-
-/** A delegated sub-agent run failed irrecoverably. */
-export class DelegationError extends FrameworkError {}

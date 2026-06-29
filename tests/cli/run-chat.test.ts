@@ -78,3 +78,42 @@ test('runChat records a gap run and writes the gap artifact', async () => {
   const journal = await readJournal(join(root, 'run-1'));
   expect(journal.map((e) => e.step)).toEqual(['start', 'gap']);
 });
+
+function answerOrchestrator(): Agent {
+  // orchestrator model that produces final text directly (no tool calls)
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [{ type: 'text', text: 'Here is your answer.' }],
+      finishReason: { unified: 'stop', raw: undefined },
+      usage: {
+        inputTokens: {
+          total: 1,
+          noCache: undefined,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
+        outputTokens: { total: 1, text: undefined, reasoning: undefined },
+      },
+      warnings: [],
+    }),
+  });
+  return createOrchestrator({ model, systemPrompt: 'route', agents: [] });
+}
+
+test('runChat records an answer run and writes the answer artifact', async () => {
+  const result = await runChat({
+    orchestrator: answerOrchestrator(),
+    task: 'what is 2+2?',
+    runsRoot: root,
+    runId: 'run-2',
+  });
+  expect(result.kind).toBe('answer');
+  if (result.kind === 'answer') {
+    expect(result.text).toBe('Here is your answer.');
+  }
+  expect(await readFile(join(root, 'run-2', 'answer.txt'), 'utf8')).toBe(
+    'Here is your answer.',
+  );
+  const journal = await readJournal(join(root, 'run-2'));
+  expect(journal.map((e) => e.step)).toEqual(['start', 'answer']);
+});

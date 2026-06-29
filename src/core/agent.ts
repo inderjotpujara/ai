@@ -37,6 +37,7 @@ export async function runAgent(input: RunAgentInput): Promise<{
   if (text.trim() === '' && finishReason !== 'stop') {
     throw new MaxStepsError(
       `Agent exhausted step ceiling (${steps.length} steps) without producing a final answer.`,
+      steps,
     );
   }
   return { text, steps };
