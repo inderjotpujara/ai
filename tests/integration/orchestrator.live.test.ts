@@ -3,21 +3,21 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSuperAgent } from '../../agents/super.ts';
+import qwenFast from '../../models/qwen-fast.ts';
 import { runOrchestrator } from '../../src/core/orchestrator.ts';
 import { createFileTools } from '../../src/mcp/client.ts';
 import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
 import { ollamaReady } from './ollama-available.ts';
 
-const MODEL = 'qwen3:8b';
-const ready = await ollamaReady(MODEL);
+const ready = await ollamaReady(qwenFast.model);
 
 describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
   afterAll(async () => {
-    await unloadModel(MODEL);
+    await unloadModel(qwenFast.model);
   });
 
   test('delegates a file question to file-qa and answers', async () => {
-    await warmModel(MODEL);
+    await warmModel(qwenFast.model);
     const dir = await mkdtemp(join(tmpdir(), 'live-'));
     const path = join(dir, 'animals.txt');
     await writeFile(path, 'The fox and the dog are friends.');
@@ -39,7 +39,7 @@ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
   }, 120_000);
 
   test('reports a capability gap for an out-of-scope request', async () => {
-    await warmModel(MODEL);
+    await warmModel(qwenFast.model);
     const { tools, close } = await createFileTools();
     try {
       const orch = createSuperAgent(tools, {});

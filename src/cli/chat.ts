@@ -1,24 +1,9 @@
 import { createSuperAgent } from '../../agents/super.ts';
-import qwenFast from '../../models/qwen-fast.ts';
-import { ResourceError } from '../core/errors.ts';
+import qwenRouter from '../../models/qwen-router.ts';
 import { createFetchTools, createFileTools } from '../mcp/client.ts';
-import { estimateModelBytes } from '../resource/footprint.ts';
-import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
+import { createModelManager } from '../resource/model-manager.ts';
 import { isProjectStoreActive } from '../resource/model-store.ts';
-import {
-  isModelInstalled,
-  pullModel,
-  unloadModel,
-  warmModel,
-} from '../resource/ollama-control.ts';
 import { runChat } from './run-chat.ts';
-
-const FOOTPRINT = estimateModelBytes({
-  paramsBillions: 8,
-  bytesPerWeight: 0.56,
-  contextTokens: qwenFast.params.numCtx ?? 8192,
-  kvBytesPerToken: 131072,
-});
 
 async function main(): Promise<void> {
   const task = process.argv.slice(2).join(' ').trim();
@@ -27,23 +12,23 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const budget = machineBudgetBytes();
-  if (!fitsBudget(FOOTPRINT, budget)) {
-    throw new ResourceError(
-      `${qwenFast.model} (~${Math.round(FOOTPRINT / 1e9)}GB) exceeds the GPU budget (~${Math.round(budget / 1e9)}GB)`,
-    );
-  }
-
-  if (!(await isModelInstalled(qwenFast.model))) {
-    console.error(`Pulling ${qwenFast.model} (first run only)...`);
-    await pullModel(qwenFast.model);
-  }
-  await warmModel(qwenFast.model);
+  const manager = createModelManager();
+  // Warm + pin the small router model the orchestrator runs on.
+  console.error(`Preparing router model ${qwenRouter.model}...`);
+  await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
   console.error(
     isProjectStoreActive()
       ? 'Using project-local models from ./model-images'
       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
   );
+
+  // Specialists' models are loaded on demand, keeping the router pinned-resident.
+  const onBeforeDelegate = (agent: {
+    modelDecl?: import('../core/types.ts').ModelDeclaration;
+  }) =>
+    agent.modelDecl
+      ? manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] })
+      : Promise.resolve();
 
   const fileServer = await createFileTools();
   try {
@@ -52,6 +37,7 @@ async function main(): Promise<void> {
       const orchestrator = createSuperAgent(
         fileServer.tools,
         fetchServer.tools,
+        onBeforeDelegate,
       );
       const result = await runChat({
         orchestrator,
@@ -65,7 +51,7 @@ async function main(): Promise<void> {
     }
   } finally {
     await fileServer.close();
-    await unloadModel(qwenFast.model);
+    await manager.unloadAll();
   }
 }
 
