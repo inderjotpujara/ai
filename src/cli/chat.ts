@@ -1,7 +1,7 @@
+import { createSuperAgent } from '../../agents/super.ts';
 import qwenFast from '../../models/qwen-fast.ts';
 import { ResourceError } from '../core/errors.ts';
 import { createFileTools } from '../mcp/client.ts';
-import { createOllamaModel } from '../providers/ollama.ts';
 import { estimateModelBytes } from '../resource/footprint.ts';
 import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
 import { isProjectStoreActive } from '../resource/model-store.ts';
@@ -11,9 +11,8 @@ import {
   unloadModel,
   warmModel,
 } from '../resource/ollama-control.ts';
-import { answerFileQuestion } from './answer-file-question.ts';
+import { runChat } from './run-chat.ts';
 
-// qwen3:8b @ Q4_K_M, 8k context — rough footprint for the budget check.
 const FOOTPRINT = estimateModelBytes({
   paramsBillions: 8,
   bytesPerWeight: 0.56,
@@ -22,9 +21,9 @@ const FOOTPRINT = estimateModelBytes({
 });
 
 async function main(): Promise<void> {
-  const question = process.argv.slice(2).join(' ').trim();
-  if (question.length === 0) {
-    console.error('Usage: bun run src/cli/chat.ts "<question about a file>"');
+  const task = process.argv.slice(2).join(' ').trim();
+  if (task.length === 0) {
+    console.error('Usage: bun run src/cli/chat.ts "<your request>"');
     process.exit(1);
   }
 
@@ -40,26 +39,22 @@ async function main(): Promise<void> {
     await pullModel(qwenFast.model);
   }
   await warmModel(qwenFast.model);
+  console.error(
+    isProjectStoreActive()
+      ? 'Using project-local models from ./model-images'
+      : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+  );
 
-  if (isProjectStoreActive()) {
-    console.error('Using project-local models from ./model-images');
-  } else {
-    console.error(
-      '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
-    );
-  }
-
-  const model = createOllamaModel(qwenFast);
   const { tools, close } = await createFileTools();
   try {
-    const answer = await answerFileQuestion({
-      model,
-      tools,
-      question,
+    const orchestrator = createSuperAgent(tools);
+    const result = await runChat({
+      orchestrator,
+      task,
       runsRoot: 'runs',
       runId: `run-${process.pid}`,
     });
-    console.log(answer);
+    console.log(result.kind === 'answer' ? result.text : result.message);
   } finally {
     await close();
     await unloadModel(qwenFast.model);
