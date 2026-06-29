@@ -9,10 +9,14 @@ export async function hfGet(path: string): Promise<unknown> {
   if (token) headers.authorization = `Bearer ${token}`;
   let res: Response;
   try {
-    res = await fetch(`${HF}${path}`, { headers, signal: AbortSignal.timeout(8000) });
+    res = await fetch(`${HF}${path}`, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
   } catch (cause) {
     throw new DiscoveryError(`HF GET ${path} failed`, { cause });
   }
-  if (!res.ok) throw new DiscoveryError(`HF GET ${path} returned ${res.status}`);
+  if (!res.ok)
+    throw new DiscoveryError(`HF GET ${path} returned ${res.status}`);
   return res.json();
 }

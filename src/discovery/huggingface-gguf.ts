@@ -1,9 +1,29 @@
-import { Capability, ContentPolicy, type ModelDeclaration, ProviderKind } from '../core/types.ts';
-import type { Candidate, CatalogSource, DiscoveryQuery, HostCapabilities } from './catalog-source.ts';
+import {
+  Capability,
+  ContentPolicy,
+  type ModelDeclaration,
+  ProviderKind,
+} from '../core/types.ts';
+import type {
+  Candidate,
+  CatalogSource,
+  DiscoveryQuery,
+  HostCapabilities,
+} from './catalog-source.ts';
 import { hfGet } from './hf-client.ts';
-import { bytesPerWeightForQuant, pickBestQuantThatFits, type QuantFile } from './quant.ts';
+import {
+  bytesPerWeightForQuant,
+  pickBestQuantThatFits,
+  type QuantFile,
+} from './quant.ts';
 
-export const TRUSTED_PUBLISHERS = ['bartowski', 'unsloth', 'MaziyarPanahi', 'Qwen', 'lmstudio-community'];
+export const TRUSTED_PUBLISHERS = [
+  'bartowski',
+  'unsloth',
+  'MaziyarPanahi',
+  'Qwen',
+  'lmstudio-community',
+];
 const PER_AUTHOR_LIMIT = 20;
 const UNCENSORED_RE = /(abliterated|uncensored|dolphin)/i;
 const QUANT_RE = /-(IQ?\d[\w_]*|Q\d[\w_]*|F16|FP16)\.gguf$/i;
@@ -14,7 +34,9 @@ export function detectTools(chatTemplate: string): boolean {
 }
 
 type ListItem = { id: string; downloads?: number };
-type GgufInfo = { gguf?: { total?: number; context_length?: number; chat_template?: string } };
+type GgufInfo = {
+  gguf?: { total?: number; context_length?: number; chat_template?: string };
+};
 type TreeEntry = { path: string; size?: number; lfs?: { size?: number } };
 
 function quantOf(path: string): string | undefined {
@@ -22,20 +44,33 @@ function quantOf(path: string): string | undefined {
   return m?.[1]?.toUpperCase();
 }
 
-async function candidateFor(item: ListItem, q: DiscoveryQuery): Promise<Candidate | undefined> {
+async function candidateFor(
+  item: ListItem,
+  q: DiscoveryQuery,
+): Promise<Candidate | undefined> {
   const repo = item.id;
   let info: GgufInfo;
-  try { info = (await hfGet(`/api/models/${repo}`)) as GgufInfo; } catch { return undefined; }
+  try {
+    info = (await hfGet(`/api/models/${repo}`)) as GgufInfo;
+  } catch {
+    return undefined;
+  }
   const tmpl = info.gguf?.chat_template ?? '';
-  if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl)) return undefined;
+  if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl))
+    return undefined;
 
   let tree: TreeEntry[];
-  try { tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[]; } catch { return undefined; }
+  try {
+    tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[];
+  } catch {
+    return undefined;
+  }
   const files: QuantFile[] = [];
   for (const e of tree) {
     const quant = quantOf(e.path);
     const sizeBytes = e.lfs?.size ?? e.size;
-    if (quant && typeof sizeBytes === 'number') files.push({ quant, sizeBytes });
+    if (quant && typeof sizeBytes === 'number')
+      files.push({ quant, sizeBytes });
   }
   const best = pickBestQuantThatFits(files, q.budgetBytes);
   if (!best) return undefined;
@@ -47,14 +82,26 @@ async function candidateFor(item: ListItem, q: DiscoveryQuery): Promise<Candidat
     params: {},
     role: 'discovered general reasoning + tool use',
     capabilities: detectTools(tmpl) ? [Capability.Tools] : [],
-    contentPolicy: UNCENSORED_RE.test(repo) ? ContentPolicy.Uncensored : ContentPolicy.Default,
+    contentPolicy: UNCENSORED_RE.test(repo)
+      ? ContentPolicy.Uncensored
+      : ContentPolicy.Default,
     footprint: {
-      approxParamsBillions: params > 0 ? params : best.sizeBytes / 1e9 / bytesPerWeightForQuant(best.quant),
+      approxParamsBillions:
+        params > 0
+          ? params
+          : best.sizeBytes / 1e9 / bytesPerWeightForQuant(best.quant),
       bytesPerWeight: bytesPerWeightForQuant(best.quant),
     },
     maxContext: info.gguf?.context_length,
   };
-  return { ...decl, repo, quant: best.quant, fileSizeBytes: best.sizeBytes, downloads: item.downloads ?? 0, installed: false };
+  return {
+    ...decl,
+    repo,
+    quant: best.quant,
+    fileSizeBytes: best.sizeBytes,
+    downloads: item.downloads ?? 0,
+    installed: false,
+  };
 }
 
 export const hfGgufSource: CatalogSource = {
@@ -68,7 +115,9 @@ export const hfGgufSource: CatalogSource = {
           `/api/models?filter=gguf&author=${author}&sort=downloads&direction=-1&limit=${PER_AUTHOR_LIMIT}`,
         )) as ListItem[];
         items.push(...page);
-      } catch { /* skip this author on failure; degrade gracefully */ }
+      } catch {
+        /* skip this author on failure; degrade gracefully */
+      }
     }
     const out: Candidate[] = [];
     for (const item of items) {

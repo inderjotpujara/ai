@@ -1,4 +1,10 @@
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type { Candidate } from './catalog-source.ts';
 
@@ -7,10 +13,14 @@ export function catalogPath(): string {
   return join(process.cwd(), 'model-images', 'catalog.json');
 }
 
-export function readCatalog(path: string = catalogPath()): Candidate[] | undefined {
+export function readCatalog(
+  path: string = catalogPath(),
+): Candidate[] | undefined {
   try {
     if (!existsSync(path)) return undefined;
-    const data = JSON.parse(readFileSync(path, 'utf8')) as { candidates?: Candidate[] };
+    const data = JSON.parse(readFileSync(path, 'utf8')) as {
+      candidates?: Candidate[];
+    };
     return data.candidates;
   } catch {
     return undefined; // corrupt cache → treat as absent
@@ -18,9 +28,19 @@ export function readCatalog(path: string = catalogPath()): Candidate[] | undefin
 }
 
 /** Atomic write (temp + rename) so a failure never corrupts an existing catalog. */
-export function writeCatalog(candidates: Candidate[], path: string = catalogPath()): void {
+export function writeCatalog(
+  candidates: Candidate[],
+  path: string = catalogPath(),
+): void {
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ writtenAt: new Date().toISOString(), candidates }, null, 2));
+  writeFileSync(
+    tmp,
+    JSON.stringify(
+      { writtenAt: new Date().toISOString(), candidates },
+      null,
+      2,
+    ),
+  );
   renameSync(tmp, path);
 }
 

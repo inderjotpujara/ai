@@ -1,5 +1,5 @@
+import { BOOTSTRAP } from '../../models/registry.ts';
 import type { ModelDeclaration } from '../core/types.ts';
-import { REGISTRY } from '../../models/registry.ts'; // becomes BOOTSTRAP in Task 11
 import { availableRuntimes } from '../runtime/registry.ts';
 import { readCatalog } from './catalog-cache.ts';
 import type { Candidate } from './catalog-source.ts';
@@ -15,19 +15,32 @@ async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
   for (const rt of await availableRuntimes()) {
     try {
       for (const m of await rt.control.listLoaded()) {
-        out.push({ provider: rt.kind, model: m.name, params: {}, role: 'installed',
-          footprint: { approxParamsBillions: 0, bytesPerWeight: 0 } });
+        out.push({
+          provider: rt.kind,
+          model: m.name,
+          params: {},
+          role: 'installed',
+          footprint: { approxParamsBillions: 0, bytesPerWeight: 0 },
+        });
       }
-    } catch { /* runtime down → contributes nothing */ }
+    } catch {
+      /* runtime down → contributes nothing */
+    }
   }
   return out;
 }
 
 /** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ cached catalog, deduped by (provider,model). */
-export async function buildRegistry(deps: BuildRegistryDeps = {}): Promise<ModelDeclaration[]> {
-  const bootstrap = deps.bootstrap ?? REGISTRY;
+export async function buildRegistry(
+  deps: BuildRegistryDeps = {},
+): Promise<ModelDeclaration[]> {
+  const bootstrap = deps.bootstrap ?? BOOTSTRAP;
   let installed: ModelDeclaration[] = [];
-  try { installed = await (deps.installed ?? installedFromRuntimes)(); } catch { installed = []; }
+  try {
+    installed = await (deps.installed ?? installedFromRuntimes)();
+  } catch {
+    installed = [];
+  }
   const catalog = (deps.readCatalog ?? (() => readCatalog()))() ?? [];
 
   const byKey = new Map<string, ModelDeclaration>();

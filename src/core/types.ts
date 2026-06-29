@@ -1,15 +1,15 @@
 /** Which local runtime backs a model. String enum per project style. */
 export enum ProviderKind {
-  Ollama = 'Ollama',         // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
-  MlxServer = 'MlxServer',   // MLX via a local OpenAI-compatible server (LM Studio / vllm-mlx)
+  Ollama = 'Ollama', // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
+  MlxServer = 'MlxServer', // MLX via a local OpenAI-compatible server (LM Studio / vllm-mlx)
 }
 
 /** A capability a model advertises and an agent can require. Selector hard-filters on these. */
 export enum Capability {
   Tools = 'tools',
   Vision = 'vision', // image input (Slice 8)
-  Audio = 'audio',   // speech in/out (Slice 9)
-  Video = 'video',   // frames/clips (Slice 10)
+  Audio = 'audio', // speech in/out (Slice 9)
+  Video = 'video', // frames/clips (Slice 10)
 }
 
 /** Content moderation posture. Uncensored is gated behind a future mode (Slice 11). */

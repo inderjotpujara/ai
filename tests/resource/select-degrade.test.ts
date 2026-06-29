@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'bun:test';
-import { REGISTRY } from '../../models/registry.ts';
+import { BOOTSTRAP } from '../../models/registry.ts';
 import { Capability, PreferPolicy } from '../../src/core/types.ts';
 import { createModelManager } from '../../src/resource/model-manager.ts';
 import { resolveModel } from '../../src/resource/selector.ts';
@@ -30,7 +30,7 @@ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
   };
 }
 
-test('degrade-to-4b: resolveModel over real REGISTRY falls back to qwen3.5:4b under 4 GB budget', async () => {
+test('degrade-to-4b: resolveModel over real BOOTSTRAP falls back to qwen3.5:4b under 4 GB budget', async () => {
   const control = fakeControl();
   const mgr = createModelManager({
     budgetBytes: BUDGET_BYTES,
@@ -44,7 +44,7 @@ test('degrade-to-4b: resolveModel over real REGISTRY falls back to qwen3.5:4b un
     prefer: PreferPolicy.LargestThatFits,
   };
 
-  const { decl, numCtx } = await resolveModel(req, REGISTRY, {
+  const { decl, numCtx } = await resolveModel(req, BOOTSTRAP, {
     ensureReady: mgr.ensureReady,
     listLoaded: control.listLoaded,
   });

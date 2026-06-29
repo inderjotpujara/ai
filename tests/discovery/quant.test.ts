@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test';
-import { bytesPerWeightForQuant, pickBestQuantThatFits } from '../../src/discovery/quant.ts';
+import {
+  bytesPerWeightForQuant,
+  pickBestQuantThatFits,
+} from '../../src/discovery/quant.ts';
 
 test('maps common GGUF quants to bytes/weight', () => {
   expect(bytesPerWeightForQuant('Q4_K_M')).toBeCloseTo(0.56, 2);

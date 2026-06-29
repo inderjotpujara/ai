@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'bun:test';
-import { REGISTRY } from '../../models/registry.ts';
+import { BOOTSTRAP } from '../../models/registry.ts';
 import { createSelectHook } from '../../src/cli/select-hook.ts';
 import type { Agent } from '../../src/core/agent-def.ts';
 import { ResourceError } from '../../src/core/errors.ts';
@@ -24,7 +24,7 @@ test('hook resolves a model + numCtx and returns a bound model', async () => {
   const ensureReady = mock(async () => 16384);
   const capture = {};
   const hook = createSelectHook({
-    registry: REGISTRY,
+    registry: BOOTSTRAP,
     ensureReady,
     pinned: ['qwen3.5:4b'],
     capture,
@@ -40,7 +40,7 @@ test('hook records ResourceError into capture and returns abort', async () => {
   });
   const capture: { error?: ResourceError } = {};
   const hook = createSelectHook({
-    registry: REGISTRY,
+    registry: BOOTSTRAP,
     ensureReady,
     pinned: ['qwen3.5:4b'],
     capture,
@@ -53,7 +53,7 @@ test('hook records ResourceError into capture and returns abort', async () => {
 test('agent without modelReq is a no-op', async () => {
   const ensureReady = mock(async () => 0);
   const hook = createSelectHook({
-    registry: REGISTRY,
+    registry: BOOTSTRAP,
     ensureReady,
     pinned: [],
     capture: {},

@@ -8,4 +8,4 @@ import qwenRouter from './qwen-router.ts';
  * not fit. Only rungs verified on this hardware ship here; Slice 6 discovery will
  * replace this static array with a per-machine runtime fetch.
  */
-export const REGISTRY: ModelDeclaration[] = [qwenRouter, qwenFast];
+export const BOOTSTRAP: ModelDeclaration[] = [qwenRouter, qwenFast];

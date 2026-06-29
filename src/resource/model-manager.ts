@@ -44,7 +44,10 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
   const runtimeByModel = new Map<string, ModelDeclaration>(); // remember how to unload
   let tick = 0;
 
-  async function modelMaxFor(c: RuntimeControl, model: string): Promise<number | undefined> {
+  async function modelMaxFor(
+    c: RuntimeControl,
+    model: string,
+  ): Promise<number | undefined> {
     const cached = maxCtxByModel.get(model);
     if (cached !== undefined) return cached;
     let probed: number | undefined;

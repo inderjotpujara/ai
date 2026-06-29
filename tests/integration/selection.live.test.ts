@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import qwenFast from '../../models/qwen-fast.ts';
-import { REGISTRY } from '../../models/registry.ts';
+import { BOOTSTRAP } from '../../models/registry.ts';
 import { Capability, PreferPolicy } from '../../src/core/types.ts';
 import { createModelManager } from '../../src/resource/model-manager.ts';
 import { unloadModel } from '../../src/resource/ollama-control.ts';
@@ -22,7 +22,7 @@ describe.skipIf(!ready)('live dynamic model selection (real Ollama)', () => {
         requires: [Capability.Tools],
         prefer: PreferPolicy.LargestThatFits,
       },
-      REGISTRY,
+      BOOTSTRAP,
       { ensureReady: (d, o) => manager.ensureReady(d, o) },
     );
     expect(decl.model).toBe('qwen3.5:9b');

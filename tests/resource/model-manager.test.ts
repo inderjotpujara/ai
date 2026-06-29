@@ -31,7 +31,11 @@ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
 }
 
 function fakes(
-  overrides: { control?: RuntimeControl; budgetBytes?: number; warn?: (m: string) => void } = {},
+  overrides: {
+    control?: RuntimeControl;
+    budgetBytes?: number;
+    warn?: (m: string) => void;
+  } = {},
 ) {
   const control = overrides.control ?? fakeControl();
   return {
@@ -220,7 +224,10 @@ test('routes lifecycle through controlFor(decl.provider)', async () => {
   const f = fakes();
   const mgr = createModelManager(f.deps);
   await mgr.ensureReady({
-    provider: ProviderKind.Ollama, model: 'm7', params: { numCtx: 0 }, role: 't',
+    provider: ProviderKind.Ollama,
+    model: 'm7',
+    params: { numCtx: 0 },
+    role: 't',
     footprint: { approxParamsBillions: 7, bytesPerWeight: 1 },
   });
   expect(f.control.warm).toHaveBeenCalledWith('m7', expect.any(Number));

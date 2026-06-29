@@ -1,6 +1,6 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { ProviderKind } from '../core/types.ts';
 import type { ModelDeclaration } from '../core/types.ts';
+import { ProviderKind } from '../core/types.ts';
 import type { LoadedModel, Runtime } from './runtime.ts';
 
 const BASE = process.env.MLX_BASE_URL ?? 'http://localhost:1234/v1';
@@ -9,7 +9,9 @@ const provider = createOpenAICompatible({ name: 'mlx-server', baseURL: BASE });
 
 async function listIds(): Promise<string[]> {
   try {
-    const res = await fetch(`${BASE}/models`, { signal: AbortSignal.timeout(1500) });
+    const res = await fetch(`${BASE}/models`, {
+      signal: AbortSignal.timeout(1500),
+    });
     if (!res.ok) return [];
     const data = (await res.json()) as { data?: Array<{ id: string }> };
     return (data.data ?? []).map((m) => m.id);
@@ -27,7 +29,9 @@ export const mlxServerRuntime: Runtime = {
   kind: ProviderKind.MlxServer,
   async isAvailable() {
     try {
-      const res = await fetch(`${BASE}/models`, { signal: AbortSignal.timeout(1500) });
+      const res = await fetch(`${BASE}/models`, {
+        signal: AbortSignal.timeout(1500),
+      });
       return res.ok;
     } catch {
       return false;
@@ -38,7 +42,9 @@ export const mlxServerRuntime: Runtime = {
     isInstalled: async (m) => (await listIds()).includes(m),
     pull: async (m) => {
       if ((await listIds()).includes(m)) return;
-      throw new Error(`MLX model "${m}" is not loaded in the MLX server at ${BASE}. Load it there (e.g. in LM Studio), then retry.`);
+      throw new Error(
+        `MLX model "${m}" is not loaded in the MLX server at ${BASE}. Load it there (e.g. in LM Studio), then retry.`,
+      );
     },
     warm: async () => {},
     unload: async () => {},

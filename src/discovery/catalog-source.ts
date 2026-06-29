@@ -1,4 +1,8 @@
-import type { Capability, ModelDeclaration, ProviderKind } from '../core/types.ts';
+import type {
+  Capability,
+  ModelDeclaration,
+  ProviderKind,
+} from '../core/types.ts';
 
 export class DiscoveryError extends Error {}
 

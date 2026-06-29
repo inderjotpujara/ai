@@ -1,8 +1,12 @@
 import { ProviderKind } from '../core/types.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
 import {
-  getModelMaxContext, isModelInstalled, listLoadedModels,
-  pullModel, unloadModel, warmModel,
+  getModelMaxContext,
+  isModelInstalled,
+  listLoadedModels,
+  pullModel,
+  unloadModel,
+  warmModel,
 } from '../resource/ollama-control.ts';
 import type { Runtime } from './runtime.ts';
 
@@ -12,7 +16,9 @@ export const ollamaRuntime: Runtime = {
   kind: ProviderKind.Ollama,
   async isAvailable() {
     try {
-      const res = await fetch(`${BASE}/api/version`, { signal: AbortSignal.timeout(1500) });
+      const res = await fetch(`${BASE}/api/version`, {
+        signal: AbortSignal.timeout(1500),
+      });
       return res.ok;
     } catch {
       return false;

@@ -1,8 +1,8 @@
 import { createSuperAgent } from '../../agents/super.ts';
 import qwenRouter from '../../models/qwen-router.ts';
-import { REGISTRY } from '../../models/registry.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
+import { buildRegistry } from '../discovery/build-registry.ts';
 import { createFetchTools, createFileTools } from '../mcp/client.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
 import { createModelManager, MIN_CTX } from '../resource/model-manager.ts';
@@ -57,8 +57,9 @@ async function main(): Promise<void> {
     );
   };
 
+  const registry = await buildRegistry();
   const onBeforeDelegate = createSelectHook({
-    registry: REGISTRY,
+    registry,
     ensureReady: (decl, opts) => manager.ensureReady(decl, opts),
     listLoaded: () => listLoadedModels(),
     pinned: [qwenRouter.model],
