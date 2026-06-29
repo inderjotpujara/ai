@@ -32,6 +32,10 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
 | **6** | **Model discovery** — auto-fetch the latest models from Hugging Face, pull on demand, keep declarations current (no hardcoded list); feeds the Slice-5 registry | Slice 5 | "Always on the latest models" becomes runtime behavior |
 | **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
 
+**Slice 5 must also fix two latent Model-Manager items** (from the Slice-4 final review — safe today because the 4b+9b budget has huge headroom, but they bite once varied/larger models compete):
+1. **Propagate `ResourceError` from `onBeforeDelegate`** — today a "can't fit" error becomes a soft tool-result (AI SDK wraps tool-`execute` throws). When selection introduces models that can genuinely fail to fit, surface it as a real resource failure (e.g. pre-flight the chosen model at the CLI, or a capture-and-check seam).
+2. **Budget from real sizes, not the lower-bound estimate** — `ensureReady` compares real `/api/ps` resident bytes against `estimateModelBytes` (a lower bound). Selection-time sizing should use real/probed sizes or a conservative safety margin so it never warms a model that doesn't truly fit.
+
 ## Headline next — self-extension
 
 | Slice | Capability | Depends on | Notes |

@@ -5,11 +5,11 @@ agents against **local models** (no API keys), orchestrated by a super-agent,
 on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
 Mini.
 
-> **Status:** Slice 3 complete — capabilities are now **pluggable**:
-> `mountMcpServer()` connects to any MCP server, so adding a skill = pointing at
-> a server. The orchestrator routes between **file-Q&A** and a new **web-fetch**
-> agent (keyless `uvx mcp-server-fetch`), or reports a capability gap. See
-> [Roadmap](#roadmap).
+> **Status:** Slice 4 complete — **multi-model, hardware-aware**. The
+> orchestrator routes on a small pinned `qwen3.5:4b`; specialists load
+> `qwen3.5:9b` on demand, and the Model Manager evicts non-pinned models to stay
+> within the GPU budget (~18 GB) — agents can now use different local models
+> safely. Built on Slice 3's pluggable integrations. See [Roadmap](#roadmap).
 
 ---
 
@@ -159,8 +159,9 @@ interface — no agent code changes. See
 | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
 | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
 | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
-| **Next** | Resource manager (multi-model scheduling, dynamic selection, hardware/context-aware agent graphs) + **model discovery** (auto-fetch latest models per machine) | Planned |
-| **Later** | Agent-builder (auto-create agents on a capability gap) · declarative `mcp.json` mount registry · Codex backup · resumable long/multimodal jobs (e.g. book→audiobook) · response-format tooling · streaming CLI | Planned |
+| **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · budget-aware load/evict/pin · `/api/ps` awareness | ✅ Done |
+| **Next** | **Slice 5 — dynamic model selection** (role → registry → pick best model that fits → manager loads); then **Slice 6 — model discovery** (auto-fetch latest from Hugging Face) | Planned |
+| **Later** | Agent-builder ⭐ (self-extend on a capability gap) · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
 
 **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
 daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
