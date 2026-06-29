@@ -58,7 +58,12 @@ function textModel(label: string) {
       content: [{ type: 'text', text: label }],
       finishReason: { unified: 'stop', raw: undefined },
       usage: {
-        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+        inputTokens: {
+          total: 1,
+          noCache: undefined,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
         outputTokens: { total: 1, text: undefined, reasoning: undefined },
       },
       warnings: [],
@@ -77,8 +82,13 @@ function agent(): Agent {
 }
 
 test('uses the model override returned by onBeforeDelegate', async () => {
-  const t = asDelegateTool(agent(), async () => ({ model: textModel('OVERRIDE MODEL') }));
-  const out = await t.execute?.({ task: 'hi' }, { toolCallId: 't', messages: [] });
+  const t = asDelegateTool(agent(), async () => ({
+    model: textModel('OVERRIDE MODEL'),
+  }));
+  const out = await t.execute?.(
+    { task: 'hi' },
+    { toolCallId: 't', messages: [] },
+  );
   expect(out).toEqual({ text: 'OVERRIDE MODEL' });
 });
 
@@ -92,7 +102,10 @@ test('abort short-circuits: agent never runs, returns soft error', async () => {
     },
   });
   const t = asDelegateTool(a, async () => ({ abort: 'no fit' }));
-  const out = await t.execute?.({ task: 'hi' }, { toolCallId: 't', messages: [] });
+  const out = await t.execute?.(
+    { task: 'hi' },
+    { toolCallId: 't', messages: [] },
+  );
   expect(out).toEqual({ error: 'no fit' });
   expect(ran).toBe(false);
 });

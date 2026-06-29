@@ -30,7 +30,10 @@ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
 
   if (result.kind === 'answer') {
     await writeArtifact(run, 'answer.txt', result.text);
-    await appendJournal(run.dir, { step: 'answer', data: { text: result.text } });
+    await appendJournal(run.dir, {
+      step: 'answer',
+      data: { text: result.text },
+    });
   } else if (result.kind === 'gap') {
     await writeArtifact(run, 'gap.txt', result.message);
     await appendJournal(run.dir, {
@@ -39,7 +42,10 @@ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
     });
   } else {
     await writeArtifact(run, 'resource.txt', result.message);
-    await appendJournal(run.dir, { step: 'resource', data: { message: result.message } });
+    await appendJournal(run.dir, {
+      step: 'resource',
+      data: { message: result.message },
+    });
   }
   return result;
 }

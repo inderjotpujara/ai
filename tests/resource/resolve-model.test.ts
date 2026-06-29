@@ -20,7 +20,11 @@ function m(model: string, b: number): ModelDeclaration {
 }
 
 const reg = [m('big', 9), m('small', 4)];
-const req = { role: 'r', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits };
+const req = {
+  role: 'r',
+  requires: [Capability.Tools],
+  prefer: PreferPolicy.LargestThatFits,
+};
 
 test('returns the largest model when it fits', async () => {
   const ensureReady = mock(async () => 8192);
@@ -44,14 +48,18 @@ test('throws ResourceError when nothing fits', async () => {
   const ensureReady = mock(async () => {
     throw new ResourceError('no fit');
   });
-  await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(ResourceError);
+  await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(
+    ResourceError,
+  );
 });
 
 test('non-resource errors propagate immediately', async () => {
   const ensureReady = mock(async () => {
     throw new TypeError('boom');
   });
-  await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(TypeError);
+  await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(
+    TypeError,
+  );
 });
 
 test('passes the resident set to the ranker and calls onAttempt', async () => {

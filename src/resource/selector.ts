@@ -1,10 +1,10 @@
-import {
-  type Capability,
-  type ModelDeclaration,
-  type ModelRequirement,
+import { ResourceError } from '../core/errors.ts';
+import type {
+  Capability,
+  ModelDeclaration,
+  ModelRequirement,
 } from '../core/types.ts';
 import { weightsBytes } from './footprint.ts';
-import { ResourceError } from '../core/errors.ts';
 import type { EnsureOpts } from './model-manager.ts';
 import type { LoadedModel } from './ollama-control.ts';
 
@@ -84,7 +84,10 @@ export async function resolveModel(
       throw err;
     }
   }
-  throw new ResourceError(`No candidate model fits the live budget for ${req.role}.`, {
-    cause: lastErr,
-  });
+  throw new ResourceError(
+    `No candidate model fits the live budget for ${req.role}.`,
+    {
+      cause: lastErr,
+    },
+  );
 }

@@ -1,5 +1,5 @@
-import { tool } from 'ai';
 import type { LanguageModel } from 'ai';
+import { tool } from 'ai';
 import { z } from 'zod';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
 

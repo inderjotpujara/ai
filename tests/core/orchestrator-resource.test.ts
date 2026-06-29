@@ -15,7 +15,12 @@ function answeringAgent(): Agent {
         content: [{ type: 'text', text: 'a normal answer' }],
         finishReason: { unified: 'stop', raw: undefined },
         usage: {
-          inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+          inputTokens: {
+            total: 1,
+            noCache: undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
           outputTokens: { total: 1, text: undefined, reasoning: undefined },
         },
         warnings: [],
@@ -26,7 +31,12 @@ function answeringAgent(): Agent {
 
 test('captured ResourceError yields kind:resource, overriding the answer', async () => {
   const capture = { error: new ResourceError('no model fits') };
-  const result = await runOrchestrator(answeringAgent(), 'do it', undefined, capture);
+  const result = await runOrchestrator(
+    answeringAgent(),
+    'do it',
+    undefined,
+    capture,
+  );
   expect(result.kind).toBe('resource');
   if (result.kind === 'resource') {
     expect(result.message).toBe('no model fits');
@@ -34,6 +44,11 @@ test('captured ResourceError yields kind:resource, overriding the answer', async
 });
 
 test('no capture -> normal answer path unaffected', async () => {
-  const result = await runOrchestrator(answeringAgent(), 'do it', undefined, {});
+  const result = await runOrchestrator(
+    answeringAgent(),
+    'do it',
+    undefined,
+    {},
+  );
   expect(result.kind).toBe('answer');
 });
