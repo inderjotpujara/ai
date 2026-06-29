@@ -46,6 +46,7 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
 
 - **Deeper agent graphs** — a "researcher" agent that itself delegates to `web_fetch` + `file_qa` (composability already exists via agents-as-tools), with the **hardware/context-aware guardrails**: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns.
 - **Parallel fan-out** — when sub-tasks are independent, run specialists **concurrently** within the memory budget the Model Manager enforces.
+  - **Explicit `maxLoaded` cap on the Model Manager** — today the manager has **no count limit** on co-resident models; it loads until the live free-RAM headroom is exhausted, and the only count cap is Ollama's `OLLAMA_MAX_LOADED_MODELS` (default **3** on single-GPU Metal) acting as an implicit backstop. For deterministic parallel fan-out we should add a first-class `maxLoaded` to the manager (bound concurrency in our own scheduler rather than relying on Ollama's env default), so concurrency is governed by both the RAM headroom **and** an explicit model-count ceiling.
 - **Response-format tooling** — shape answers into JSON / markdown / tables on request (user-confirmed needed).
 - **Memory / RAG** — a local vector store + local embeddings model so agents recall past runs and indexed docs.
 - **Image/vision agent** — a local multimodal model (e.g. Gemma 4) describing screenshots/images.
