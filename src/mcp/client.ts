@@ -13,7 +13,9 @@ export type McpServerSpec = {
 export type MountedServer = { tools: ToolSet; close: () => Promise<void> };
 
 /** Connect to ANY stdio MCP server and expose its tools. The integration primitive. */
-export async function mountMcpServer(spec: McpServerSpec): Promise<MountedServer> {
+export async function mountMcpServer(
+  spec: McpServerSpec,
+): Promise<MountedServer> {
   const client = await createMCPClient({
     transport: new StdioMCPTransport(spec),
   });

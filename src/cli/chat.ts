@@ -1,7 +1,7 @@
 import { createSuperAgent } from '../../agents/super.ts';
 import qwenFast from '../../models/qwen-fast.ts';
 import { ResourceError } from '../core/errors.ts';
-import { createFileTools } from '../mcp/client.ts';
+import { createFetchTools, createFileTools } from '../mcp/client.ts';
 import { estimateModelBytes } from '../resource/footprint.ts';
 import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
 import { isProjectStoreActive } from '../resource/model-store.ts';
@@ -45,9 +45,10 @@ async function main(): Promise<void> {
       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
   );
 
-  const { tools, close } = await createFileTools();
+  const fileServer = await createFileTools();
+  const fetchServer = await createFetchTools();
   try {
-    const orchestrator = createSuperAgent(tools);
+    const orchestrator = createSuperAgent(fileServer.tools, fetchServer.tools);
     const result = await runChat({
       orchestrator,
       task,
@@ -56,7 +57,8 @@ async function main(): Promise<void> {
     });
     console.log(result.kind === 'answer' ? result.text : result.message);
   } finally {
-    await close();
+    await fileServer.close();
+    await fetchServer.close();
     await unloadModel(qwenFast.model);
   }
 }
