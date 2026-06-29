@@ -49,6 +49,9 @@ agents/
 src/cli/
   chat.ts           # now drives the orchestrator (was: file-qa directly)
   answer-file-question.ts  # folded into / replaced by the orchestrator run path
+tests/integration/
+  ollama-available.ts          # probe: is Ollama up + qwen3:8b installed?
+  orchestrator.live.test.ts    # opt-in live test (auto-skips when unavailable)
 ```
 
 ### 3.1 The units
@@ -135,7 +138,13 @@ CLI (chat.ts)
 - **Multi-agent selection:** register 2+ **mock** agents; mock model picks one; assert only the
   selected delegate's `execute` ran. Proves N-agent routing without a contrived real agent.
 - `asDelegateTool` / `runDefinedAgent` unit-tested with a mock model + a trivial tool.
-- Real-Ollama run is the manual end-to-end check (delegate path + a gap prompt).
+- **Opt-in live integration test** (`tests/integration/orchestrator.live.test.ts`): runs the real
+  orchestrator against local Ollama + `qwen3:8b`. It **auto-skips** when Ollama is unreachable
+  (`GET /api/version` fails) or the model isn't installed, so `bun test` stays green on any machine.
+  When it runs, it asserts: (a) a file question delegates to file-Q&A and returns a correct
+  `kind:'answer'`; (b) a clearly out-of-capability request returns `kind:'gap'` (no hallucinated
+  attempt). This checks the model's real *judgment*, which the mock tests cannot. A small
+  `tests/integration/ollama-available.ts` helper does the reachability/model probe.
 
 ## 7. Definition of done
 A CLI talking to the orchestrator where: (a) "what does /tmp/x.txt say?" → delegates to file-Q&A →
