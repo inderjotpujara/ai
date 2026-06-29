@@ -2,7 +2,7 @@
 
 The long-range plan for this local-first, self-owned multi-agent platform. Each
 item below becomes its own **brainstorm → spec → plan → subagent-driven build**
-cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
+cycle (the same flow used for Slices 1–5). Order is a recommendation driven by
 **dependencies + leverage**, not a contract — reprioritize freely.
 
 > **North stars:** local-first & self-owned (no API keys) · one orchestrator
@@ -19,20 +19,26 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
 | **3** | `mountMcpServer` (mount any MCP server) · web-fetch agent (`uvx mcp-server-fetch`) | ✅ shipped + live-verified |
 
 | **4** | **Model Manager** — multi-model, hardware-aware: live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation); load/evict/pin within budget; best-effort pin (pinned evicted only as last resort); dynamic `num_ctx` sized from headroom, clamped by live model max (`POST /api/show`), floored at 4096; orchestrator on pinned `qwen3.5:4b`, specialists on `qwen3.5:9b` on demand | ✅ shipped + live-verified |
+| **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; a bootstrap registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` and a non-zero exit instead of a hallucinated answer | ✅ shipped + live-verified |
 
 ## Near-term — finish the resource-manager line
 
-> Slice 5 is the next active slice; not yet started.
-
 | Slice | Capability | Depends on | Notes |
 |---|---|---|---|
-| **5** | **Dynamic model selection** — an agent declares a *role/requirements* (`requires:['tools'], prefer:'fits-budget'`); a model **registry** + selector picks the best model that fits; the manager loads it | Slice 4 | Turns model choice from hardcoded into capability-driven |
 | **6** | **Model discovery** — auto-fetch the latest models from Hugging Face, pull on demand, keep declarations current (no hardcoded list); feeds the Slice-5 registry | Slice 5 | "Always on the latest models" becomes runtime behavior |
 | **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
 
-**Slice 5 must also fix one remaining latent Model-Manager item** (from the Slice-4 final review — safe today because the 4b+9b budget has huge headroom, but it bites once varied/larger models compete):
-1. **Propagate `ResourceError` from `onBeforeDelegate`** — today a "can't fit" error becomes a soft tool-result (AI SDK wraps tool-`execute` throws). When selection introduces models that can genuinely fail to fit, surface it as a real resource failure (e.g. pre-flight the chosen model at the CLI, or a capture-and-check seam).
-2. ~~**Budget from real sizes, not the lower-bound estimate**~~ — **resolved**: `ensureReady` now uses `weightsBytes`/`kvCacheBytes` helpers against the live `liveBudgetBytes()` budget (recomputed each delegation from `vm_stat`); the static `estimateModelBytes` lower-bound issue is fixed.
+### Future Work (from Slice 5 brainstorm)
+
+The following items were identified during Slice 5 design (see spec §8) as valuable but deliberately deferred. They are committed for future slices — none are blocking:
+
+- **Global / lookahead scheduler** — today selection is greedy and per-delegation; a planner-aware scheduler with a task DAG could pre-warm models and schedule concurrent delegations globally rather than locally. Depends on a task planner / DAG component.
+- **Parallel fan-out memory arbitration** — when multiple specialists run concurrently, their combined footprints must be co-scheduled within the live budget. Requires an explicit `maxLoaded` cap on the Model Manager (today the only count ceiling is Ollama's `OLLAMA_MAX_LOADED_MODELS` env default) so concurrency is governed by both RAM headroom and a first-class model-count limit.
+- **Interactive resource arbitration** ("user takes calls") — when memory is genuinely exhausted and degradation has already bottomed out, surface a user-visible ask before killing non-essential processes. Overlaps with Reclaim (Slice 4.5); design together.
+- **Quality-ranked selection** — once Slice 6 populates the registry with richer metadata (benchmark scores, eval results), the selector can rank by quality-within-budget rather than pure size. This is the Slice 6 signal.
+- **Richer registry + discovery** — the current registry is a static bootstrap ladder; Slice 6 replaces it with a per-machine runtime fetch from Hugging Face. Includes per-machine capability metadata, pulled-model tracking, and multi-quantization awareness.
+- **Router-as-selected** — today the router (`qwen3.5:4b`) is pinned and hardcoded. A future slice could run it through the selector too, so even the routing model is capability-declared and hardware-adaptive.
+- **Fuller anti-churn / hysteresis** — the warm-aware tie-break in `selectCandidates` is a lightweight first step. A proper hysteresis policy (e.g. don't evict a resident model unless the challenger is significantly better, or a cooldown window after a recent load) would reduce unnecessary model thrashing under oscillating load.
 
 ## Headline next — self-extension
 
@@ -81,7 +87,7 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
 2. **Model discovery (Slice 6)** — keeps the system on the latest models automatically.
 3. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
 
-(Slices 5 → 6 are the natural continuation of the resource line currently being built; the agent-builder can also be pulled forward if it's the exciting one.)
+(Slice 6 is the natural continuation of the resource line; the agent-builder can also be pulled forward if it's the exciting one.)
 
 ## Deferred technical items (cross-cutting, fold in opportunistically)
 

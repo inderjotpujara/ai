@@ -139,6 +139,8 @@ Write requests use field `model`; `/api/tags` and `/api/ps` report it as `name`.
 only way to fit the target (logged as a warning). `ResourceError` is thrown only
 when nothing is left to evict.
 
+**Selector (`src/resource/selector.ts`).** `selectCandidates` (pure: capability hard-filter + largest-that-fits rank + warm-aware tie-break) feeds `resolveModel`, a live fallback loop that walks candidates best-first against `manager.ensureReady` (the single fit-authority). The chosen model is bound lazily at delegation time via `onBeforeDelegate` (`src/cli/select-hook.ts`). A genuine no-fit is recorded in a `ResourceCapture` seam and surfaced by `runOrchestrator` as `{kind:'resource'}`.
+
 **Slice 4 data flow (addition to the Slice 1 diagram above):**
 
 ```

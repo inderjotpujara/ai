@@ -5,15 +5,12 @@ agents against **local models** (no API keys), orchestrated by a super-agent,
 on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
 Mini.
 
-> **Status:** Slice 4 complete — **multi-model, hardware-aware**. The
-> orchestrator routes on a small pinned `qwen3.5:4b`; specialists load
-> `qwen3.5:9b` on demand. The Model Manager uses a **live free-RAM budget**
-> (`min(75% × Metal cap, 80% × available RAM)`, recomputed each delegation via
-> `vm_stat`) to load/evict models; pinned models are evicted only as a last resort
-> (best-effort pinning). Context windows are sized **dynamically** from live
-> headroom, clamped by the model's true max detected live (`POST /api/show`),
-> floored at 4096 tokens — no hardcoded budgets or context sizes. Built on Slice
-> 3's pluggable integrations. See [Roadmap](#roadmap).
+> **Status:** Slice 5 complete — **dynamic model selection**. Specialists declare
+> a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`)
+> rather than a fixed model; a selector picks the largest registry model that fits
+> the live RAM budget (degrading 9b→4b under pressure). Built on Slice 4's
+> hardware-aware Model Manager (live free-RAM budget via `vm_stat`, dynamic
+> `num_ctx`, best-effort pinning). See [Roadmap](#roadmap).
 
 ---
 
@@ -39,6 +36,8 @@ Under the hood, one CLI run autonomously:
 6. **Unloads the model** to free memory.
 
 No manual steps. No API keys. Everything runs locally.
+
+**Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder that Slice 6 discovery will populate at runtime.
 
 ---
 
@@ -165,7 +164,8 @@ interface — no agent code changes. See
 | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
 | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
 | **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation) · best-effort pin (pinned evicted only as last resort) · dynamic `num_ctx` sized from headroom, clamped by live model max, floored at 4096 | ✅ Done |
-| **Next** | **Slice 5 — dynamic model selection** (role → registry → pick best model that fits → manager loads); then **Slice 6 — model discovery** (auto-fetch latest from Hugging Face). The two latent Slice-4 items (live budget + dynamic context sizing) are now shipped, unblocking Slice 5. | Planned |
+| **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
+| **Next** | **Slice 6 — model discovery** (auto-fetch latest models from Hugging Face, pull on demand, keep registry current — no hardcoded list) | Planned |
 | **Later** | Agent-builder ⭐ (self-extend on a capability gap) · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
 
 **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
