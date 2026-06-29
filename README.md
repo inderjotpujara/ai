@@ -7,9 +7,13 @@ Mini.
 
 > **Status:** Slice 4 complete — **multi-model, hardware-aware**. The
 > orchestrator routes on a small pinned `qwen3.5:4b`; specialists load
-> `qwen3.5:9b` on demand, and the Model Manager evicts non-pinned models to stay
-> within the GPU budget (~18 GB) — agents can now use different local models
-> safely. Built on Slice 3's pluggable integrations. See [Roadmap](#roadmap).
+> `qwen3.5:9b` on demand. The Model Manager uses a **live free-RAM budget**
+> (`min(75% × Metal cap, 80% × available RAM)`, recomputed each delegation via
+> `vm_stat`) to load/evict models; pinned models are evicted only as a last resort
+> (best-effort pinning). Context windows are sized **dynamically** from live
+> headroom, clamped by the model's true max detected live (`POST /api/show`),
+> floored at 4096 tokens — no hardcoded budgets or context sizes. Built on Slice
+> 3's pluggable integrations. See [Roadmap](#roadmap).
 
 ---
 
@@ -22,8 +26,9 @@ bun run src/cli/chat.ts "What animal is mentioned in /tmp/sample.txt?"
 
 Under the hood, one CLI run autonomously:
 
-1. **Checks the memory budget** — estimates the model's footprint and confirms
-   it fits the machine's GPU-usable memory (~75% of unified RAM).
+1. **Checks the memory budget** — computes the live budget
+   (`min(75% × Metal cap, 80% × available RAM)`, recomputed each delegation),
+   estimates the model's footprint, and confirms it fits.
 2. **Ensures the model is present** — pulls `qwen3:8b` if it isn't installed
    (no hardcoded download step you have to run).
 3. **Warms the model** into memory.
@@ -107,7 +112,7 @@ they're reusable across other agent tools (Claude Code, Cursor, …).
 |---|---|
 | `src/core/` | `agent.ts` (the loop), `types.ts`, `errors.ts` |
 | `src/providers/` | `ollama.ts` — builds an AI SDK model from a declaration |
-| `src/resource/` | `hardware.ts` (budget), `footprint.ts` (RAM estimate), `ollama-control.ts` (pull/warm/unload) |
+| `src/resource/` | `hardware.ts` (static Metal cap + live free-RAM via `vm_stat`), `footprint.ts` (weights + KV split), `ollama-control.ts` (pull/warm with `numCtx`/unload/`getModelMaxContext`) |
 | `src/run/` | `run-store.ts` (run dirs + artifacts), `journal.ts` (resumable JSONL log) |
 | `src/tools/` | `read-file.ts` — the `read_file` tool |
 | `src/mcp/` | `server.ts` (exposes tools over MCP), `client.ts` (consumes them) |
@@ -159,8 +164,8 @@ interface — no agent code changes. See
 | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
 | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
 | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
-| **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · budget-aware load/evict/pin · `/api/ps` awareness | ✅ Done |
-| **Next** | **Slice 5 — dynamic model selection** (role → registry → pick best model that fits → manager loads); then **Slice 6 — model discovery** (auto-fetch latest from Hugging Face) | Planned |
+| **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation) · best-effort pin (pinned evicted only as last resort) · dynamic `num_ctx` sized from headroom, clamped by live model max, floored at 4096 | ✅ Done |
+| **Next** | **Slice 5 — dynamic model selection** (role → registry → pick best model that fits → manager loads); then **Slice 6 — model discovery** (auto-fetch latest from Hugging Face). The two latent Slice-4 items (live budget + dynamic context sizing) are now shipped, unblocking Slice 5. | Planned |
 | **Later** | Agent-builder ⭐ (self-extend on a capability gap) · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
 
 **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,

@@ -36,7 +36,7 @@ client, and a mock model for tests. We write only the thin layers on top.
 | **CLI** | `src/cli/` | Entry + orchestration of one run | everything below |
 | **Agent** | `src/core/agent.ts` | The tool-calling loop with a step guard | AI SDK only (model + `ToolSet`) |
 | **Providers** | `src/providers/` | Build a `LanguageModel` from a declaration | AI SDK + Ollama provider |
-| **Resource** | `src/resource/` | Budget, footprint, warm/unload | Ollama HTTP + `os` |
+| **Resource** | `src/resource/` | Live budget (vm_stat), footprint, dynamic num_ctx, warm (with ctx)/unload, model-max probe | Ollama HTTP + `os` |
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; expose & consume over MCP | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir, artifacts, resumable journal | filesystem |
 | **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
@@ -98,17 +98,56 @@ sequenceDiagram
 
 ## 4. Resource model (Apple Silicon)
 
-- **Budget = ~75% of unified memory** (the Metal GPU working-set / wired limit),
-  not `os.freemem()` (unreliable on macOS). See `resource/hardware.ts`.
-- **Footprint estimate** = `params × bytes-per-weight × 1.2` (runtime overhead)
-  `+ KV-cache` (grows with context). See `resource/footprint.ts`.
-- **Control** via Ollama HTTP: warm = empty-prompt `POST /api/generate`
-  (`stream:false`); pin = `keep_alive:-1`; unload = `keep_alive:0`; inspect =
-  `GET /api/ps`. Note: write requests use the field `model`; `/api/tags` and
-  `/api/ps` report it back as `name`.
-- Slice 1 uses a static budget check + warm + unload for one model. Slice 3 adds
-  the scheduler (concurrent-vs-sequential multi-model loading), dynamic model
-  selection, and memory reclaim.
+Slice 4 replaced the static 75%-of-total budget with live budgeting and dynamic
+context sizing.
+
+**Live budget (`liveBudgetBytes`, `src/resource/hardware.ts`):**
+`min(0.75 × total Metal cap, 0.8 × live free RAM)`, recomputed on every
+delegation. Live free RAM = `availableRamBytes()`, which parses `vm_stat` and
+sums `free + inactive + speculative + purgeable` pages. This matters on macOS
+because `os.freemem()` only counts truly-free pages and massively understates
+reclaimable memory; `vm_stat` captures the full pool macOS can reclaim instantly.
+Fallback chain if `vm_stat` is unavailable: `os.freemem()` → half of total RAM.
+`machineBudgetBytes()` (the static Metal cap) remains as a fallback.
+`AGENT_GPU_BUDGET_FRACTION` / `AGENT_FREE_BUDGET_FRACTION` are fallback-only
+fraction overrides.
+
+**Footprint helpers (`src/resource/footprint.ts`):**
+- `weightsBytes(paramsBillions, bytesPerWeight)` — model weight RAM.
+- `kvCacheBytes(contextTokens, kvBytesPerToken)` — KV-cache RAM.
+- `footprint.kvBytesPerToken` is an optional per-model declaration field
+  (default 131072); the old hardcoded value is resolved.
+
+**Dynamic `num_ctx` sizing (`src/model-manager.ts`, `src/resource/ollama-control.ts`):**
+`chosenCtx = min(desired, modelMax, maxCtxByFit)`, floored at `MIN_CTX = 4096`,
+rounded to `CTX_ROUNDING = 1024`.
+- `desired` = `decl.params.numCtx` (router 8192, specialist 16384).
+- `modelMax` is detected live: `getModelMaxContext` calls `POST /api/show` and
+  reads `model_info["<arch>.context_length"]` (e.g. qwen35 arch → 262 144 tokens).
+  Never hardcoded; falls back to `decl.maxContext` then `desired`.
+- `maxCtxByFit = floor((headroom − weights) / kvPerToken)`.
+- The **same** `chosenCtx` is passed to both warm (`options.num_ctx`) and
+  inference (`providerOptions.ollama.options.num_ctx`), so the Ollama runner
+  never needs a reload between warm and first request.
+
+**Control endpoints** via Ollama HTTP: warm = empty-prompt `POST /api/generate`
+(`stream:false`, with `options:{num_ctx}`); pin = `keep_alive:-1`; unload =
+`keep_alive:0`; inspect = `GET /api/ps`; model-max probe = `POST /api/show`.
+Write requests use field `model`; `/api/tags` and `/api/ps` report it as `name`.
+
+**Best-effort pinning:** a pinned model IS evicted as a last resort if it is the
+only way to fit the target (logged as a warning). `ResourceError` is thrown only
+when nothing is left to evict.
+
+**Slice 4 data flow (addition to the Slice 1 diagram above):**
+
+```
+liveBudgetBytes()
+  → POST /api/show  (getModelMaxContext)
+  → choose chosenCtx  (min of desired / modelMax / headroom-fit, floor 4096)
+  → warm with options.num_ctx = chosenCtx
+  → inference reuses chosenCtx via providerOptions.ollama.options.num_ctx
+```
 
 ---
 
@@ -161,6 +200,9 @@ Apple Silicon, Ollama 0.19+ already runs on an MLX backend.
   Gap-takes-precedence; `report_capability_gap` is the future agent-builder's seam.
 - **Run** — one invocation, recorded under `runs/<id>/` with artifacts + a
   JSONL journal (resumable).
+- **Model Manager** — `src/model-manager.ts`. `ensureReady(model, ctx?)` drives the full lifecycle: compute `liveBudgetBytes()`, check footprint, evict LRU non-pinned models until the target fits, evict pinned as a last resort (best-effort), then warm with the chosen `num_ctx`. Returns `{ chosenCtx }` so inference reuses the same context size.
+- **Live budget** — `liveBudgetBytes()` in `src/resource/hardware.ts`: `min(0.75 × total Metal cap, 0.8 × availableRamBytes())`. `availableRamBytes()` parses `vm_stat` to get the full pool of reclaimable macOS memory; falls back to `os.freemem()` or half total RAM if unavailable. Recomputed on each delegation.
+- **Dynamic num_ctx** — context window chosen per delegation: `min(desired, modelMax, maxCtxByFit)`, floor `MIN_CTX = 4096`, rounded to `CTX_ROUNDING = 1024`. `modelMax` probed live via `POST /api/show`. The same value is used for both warm and inference to avoid an Ollama runner reload.
 - **Mounting an MCP server (Slice 3, built)** — `mountMcpServer({command,args,env?})`
   in `src/mcp/client.ts` connects to ANY stdio MCP server and returns its
   `{ tools, close }`. This is the integration primitive: adding a capability =
