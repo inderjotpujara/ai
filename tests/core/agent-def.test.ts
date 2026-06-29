@@ -2,7 +2,11 @@ import { expect, mock, test } from 'bun:test';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
-import { type Agent, runDefinedAgent } from '../../src/core/agent-def.ts';
+import {
+  type Agent,
+  ollamaCtxOptions,
+  runDefinedAgent,
+} from '../../src/core/agent-def.ts';
 
 test('runDefinedAgent runs the agent on the task and returns text', async () => {
   const execute = mock(async () => ({ value: 42 }));
@@ -34,4 +38,14 @@ test('runDefinedAgent runs the agent on the task and returns text', async () => 
 
   const { text } = await runDefinedAgent(agent, 'what is 40+2?');
   expect(text).toBe('done');
+});
+
+test('ollamaCtxOptions nests num_ctx under ollama.options', () => {
+  expect(ollamaCtxOptions(8192)).toEqual({
+    ollama: { options: { num_ctx: 8192 } },
+  });
+});
+
+test('ollamaCtxOptions returns undefined when no context is given', () => {
+  expect(ollamaCtxOptions()).toBeUndefined();
 });

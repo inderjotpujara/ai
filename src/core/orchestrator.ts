@@ -65,12 +65,13 @@ export function createOrchestrator(opts: {
 export async function runOrchestrator(
   orchestrator: Agent,
   task: string,
+  numCtx?: number,
 ): Promise<OrchestratorResult> {
   let text: string;
   let steps: Parameters<typeof findCapabilityGap>[0];
 
   try {
-    const result = await runDefinedAgent(orchestrator, task);
+    const result = await runDefinedAgent(orchestrator, task, numCtx);
     text = result.text;
     steps = result.steps;
   } catch (err) {

@@ -7,8 +7,10 @@ export function delegateToolName(agent: Agent): string {
   return `delegate_to_${agent.name}`;
 }
 
-/** A hook run just before a delegated agent executes (e.g. ensure its model is loaded). */
-export type BeforeDelegate = (agent: Agent) => Promise<void>;
+/** A hook run just before a delegated agent executes; may return a chosen context size. */
+export type BeforeDelegate = (
+  agent: Agent,
+) => Promise<{ numCtx?: number } | void>;
 
 /**
  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
@@ -25,8 +27,10 @@ export function asDelegateTool(
     }),
     execute: async ({ task }) => {
       try {
-        if (onBeforeDelegate) await onBeforeDelegate(agent);
-        const { text } = await runDefinedAgent(agent, task);
+        const pre = onBeforeDelegate
+          ? await onBeforeDelegate(agent)
+          : undefined;
+        const { text } = await runDefinedAgent(agent, task, pre?.numCtx);
         return { text };
       } catch (cause) {
         return {
