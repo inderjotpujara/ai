@@ -5,8 +5,10 @@ agents against **local models** (no API keys), orchestrated by a super-agent,
 on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
 Mini.
 
-> **Status:** Slice 1 complete — a runnable CLI where you ask a question about a
-> local file and a local model answers it by reading the file as a tool. See
+> **Status:** Slice 2 complete — a generic **orchestrator (super-agent)** routes
+> your request to a matching sub-agent (currently file-Q&A) via agents-as-tools,
+> or clearly reports a capability gap ("I don't have a capability for X yet")
+> instead of guessing. Built on Slice 1's local-model + MCP-tool foundation. See
 > [Roadmap](#roadmap).
 
 ---
@@ -153,7 +155,7 @@ interface — no agent code changes. See
 | Slice | Scope | Status |
 |---|---|---|
 | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
-| **2** | Super-agent (agents-as-tools) delegating to sub-agents | Planned |
+| **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
 | **3** | Full resource manager (multi-model scheduling, dynamic selection) + **model discovery** (auto-fetch latest models per machine, no hardcoded list) | Planned |
 | **Later** | Codex backup · resumable long/multimodal jobs (e.g. book→audiobook) · LM Studio / MLX-server adapters · streaming CLI | Planned |
 

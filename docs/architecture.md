@@ -152,7 +152,12 @@ Apple Silicon, Ollama 0.19+ already runs on an MLX backend.
   params + role) or an agent. Not weights, not logic.
 - **Model image** — the on-disk model blob/weights (GGUF). Lives in
   `model-images/` (git-ignored) or `~/.ollama`.
-- **Agents-as-tools** — the orchestration pattern (Slice 2): the super-agent is
-  an agent whose tools delegate to other agents.
+- **Agents-as-tools** — the orchestration pattern (**Slice 2, built**): the
+  super-agent (`agents/super.ts`) is an `Agent` (`src/core/orchestrator.ts`)
+  whose tools are `delegate_to_<name>(task)` wrappers around sub-agents plus a
+  `report_capability_gap` tool. Routing = the orchestrator model's tool
+  selection. `runOrchestrator` returns `{kind:'answer'}` or `{kind:'gap'}` by
+  inspecting the run's `steps` (deterministic — even when the step guard trips).
+  Gap-takes-precedence; `report_capability_gap` is the future agent-builder's seam.
 - **Run** — one invocation, recorded under `runs/<id>/` with artifacts + a
   JSONL journal (resumable).
