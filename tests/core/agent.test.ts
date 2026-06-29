@@ -62,7 +62,7 @@ test('agent calls the tool then returns the final answer', async () => {
     }),
   };
 
-  const { text } = await runAgent({
+  const { text, steps } = await runAgent({
     model,
     systemPrompt: 'You answer questions about files.',
     prompt: 'What does /tmp/x.txt say?',
@@ -74,6 +74,8 @@ test('agent calls the tool then returns the final answer', async () => {
     expect.anything(),
   );
   expect(text).toBe('The file says hello.');
+  expect(Array.isArray(steps)).toBe(true);
+  expect(steps.length).toBeGreaterThanOrEqual(2);
 });
 
 test('runAgent throws MaxStepsError when step ceiling is hit without a final answer', async () => {
