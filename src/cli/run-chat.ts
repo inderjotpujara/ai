@@ -11,6 +11,7 @@ export type ChatDeps = {
   task: string;
   runsRoot: string;
   runId: string;
+  routerNumCtx?: number;
 };
 
 /** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
@@ -18,7 +19,11 @@ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
   const run = await createRun(deps.runsRoot, deps.runId);
   await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
 
-  const result = await runOrchestrator(deps.orchestrator, deps.task);
+  const result = await runOrchestrator(
+    deps.orchestrator,
+    deps.task,
+    deps.routerNumCtx,
+  );
 
   if (result.kind === 'answer') {
     await writeArtifact(run, 'answer.txt', result.text);

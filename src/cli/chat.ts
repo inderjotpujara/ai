@@ -15,23 +15,27 @@ async function main(): Promise<void> {
   const manager = createModelManager();
   // Warm + pin the small router model the orchestrator runs on.
   console.error(`Preparing router model ${qwenRouter.model}...`);
-  await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
+  const routerNumCtx = await manager.ensureReady(qwenRouter, {
+    pinned: [qwenRouter.model],
+  });
   console.error(
     isProjectStoreActive()
       ? 'Using project-local models from ./model-images'
       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
   );
 
-  // Specialists' models are loaded on demand, keeping the router pinned-resident.
+  // Specialists' models are loaded on demand at a budget-clamped context size,
+  // keeping the router pinned-resident.
   const onBeforeDelegate = async (agent: {
     modelDecl?: import('../core/types.ts').ModelDeclaration;
-  }): Promise<void> => {
-    if (agent.modelDecl) {
-      await manager.ensureReady(agent.modelDecl, {
-        pinned: [qwenRouter.model],
-      });
-    }
-  };
+  }): Promise<{ numCtx?: number }> =>
+    agent.modelDecl
+      ? {
+          numCtx: await manager.ensureReady(agent.modelDecl, {
+            pinned: [qwenRouter.model],
+          }),
+        }
+      : {};
 
   const fileServer = await createFileTools();
   try {
@@ -47,6 +51,7 @@ async function main(): Promise<void> {
         task,
         runsRoot: 'runs',
         runId: `run-${process.pid}`,
+        routerNumCtx,
       });
       console.log(result.kind === 'answer' ? result.text : result.message);
     } finally {
