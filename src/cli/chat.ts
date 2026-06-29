@@ -23,12 +23,15 @@ async function main(): Promise<void> {
   );
 
   // Specialists' models are loaded on demand, keeping the router pinned-resident.
-  const onBeforeDelegate = (agent: {
+  const onBeforeDelegate = async (agent: {
     modelDecl?: import('../core/types.ts').ModelDeclaration;
-  }) =>
-    agent.modelDecl
-      ? manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] })
-      : Promise.resolve();
+  }): Promise<void> => {
+    if (agent.modelDecl) {
+      await manager.ensureReady(agent.modelDecl, {
+        pinned: [qwenRouter.model],
+      });
+    }
+  };
 
   const fileServer = await createFileTools();
   try {

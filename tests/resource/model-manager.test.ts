@@ -1,7 +1,10 @@
 import { expect, mock, test } from 'bun:test';
 import { ResourceError } from '../../src/core/errors.ts';
 import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
-import { createModelManager } from '../../src/resource/model-manager.ts';
+import {
+  createModelManager,
+  MIN_CTX,
+} from '../../src/resource/model-manager.ts';
 
 function decl(model: string, b: number): ModelDeclaration {
   return {
@@ -12,7 +15,7 @@ function decl(model: string, b: number): ModelDeclaration {
     footprint: { approxParamsBillions: b, bytesPerWeight: 1 }, // bytes = b*1e9*1.2
   };
 }
-// declBytes(decl(_, b)) === b*1e9*1.2
+// weightsBytes(b, 1) === b*1e9*1.2
 
 function fakes(
   overrides: Partial<Parameters<typeof createModelManager>[0]> = {},
@@ -24,7 +27,18 @@ function fakes(
     warm: mock(async () => {}),
     unload: mock(async () => {}),
     warn: mock(() => {}), // no-op so eviction warnings never leak to console
+    getModelMax: mock(async () => 262144),
     ...overrides,
+  };
+}
+
+function declCtx(model: string, b: number, numCtx: number): ModelDeclaration {
+  return {
+    provider: ProviderKind.Ollama,
+    model,
+    params: { numCtx },
+    role: 'test',
+    footprint: { approxParamsBillions: b, bytesPerWeight: 1 },
   };
 }
 
@@ -44,7 +58,7 @@ test('not installed: pulls then warms', async () => {
   const mgr = createModelManager({ budgetBytes: 100e9, ...f });
   await mgr.ensureReady(decl('m8', 8));
   expect(f.pull).toHaveBeenCalledWith('m8');
-  expect(f.warm).toHaveBeenCalledWith('m8');
+  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
 });
 
 test('fits in free headroom: warms, no eviction', async () => {
@@ -55,7 +69,7 @@ test('fits in free headroom: warms, no eviction', async () => {
   const mgr = createModelManager({ budgetBytes: 20e9, ...f });
   await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
   expect(f.unload).not.toHaveBeenCalled();
-  expect(f.warm).toHaveBeenCalledWith('m8');
+  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
 });
 
 test('insufficient free: evicts non-pinned to grow headroom, keeps pinned, then warms', async () => {
@@ -71,7 +85,7 @@ test('insufficient free: evicts non-pinned to grow headroom, keeps pinned, then 
   await mgr.ensureReady(decl('new8', 8), { pinned: ['r4'] });
   expect(f.unload).toHaveBeenCalledWith('old8');
   expect(f.unload).not.toHaveBeenCalledWith('r4');
-  expect(f.warm).toHaveBeenCalledWith('new8');
+  expect(f.warm).toHaveBeenCalledWith('new8', MIN_CTX);
 });
 
 test('budget given as a function is resolved live on each ensureReady', async () => {
@@ -84,7 +98,7 @@ test('budget given as a function is resolved live on each ensureReady', async ()
   await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
   expect(budgetBytes).toHaveBeenCalled();
   expect(f.unload).not.toHaveBeenCalled();
-  expect(f.warm).toHaveBeenCalledWith('m8');
+  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
 });
 
 test('best-effort pin: evicts the pinned model when it is all that is left to free', async () => {
@@ -96,7 +110,7 @@ test('best-effort pin: evicts the pinned model when it is all that is left to fr
   const mgr = createModelManager({ budgetBytes: 2e9, ...f });
   await mgr.ensureReady(decl('big', 8), { pinned: ['r8'] });
   expect(f.unload).toHaveBeenCalledWith('r8');
-  expect(f.warm).toHaveBeenCalledWith('big');
+  expect(f.warm).toHaveBeenCalledWith('big', MIN_CTX);
   expect(f.warn).toHaveBeenCalled();
 });
 
@@ -118,4 +132,53 @@ test('unloadAll unloads every warmed model', async () => {
   await mgr.unloadAll();
   expect(f.unload).toHaveBeenCalledWith('a');
   expect(f.unload).toHaveBeenCalledWith('b');
+});
+
+test('ample headroom: chosenCtx is the desired value, warmed at it', async () => {
+  const f = fakes();
+  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
+  expect(ctx).toBe(16384);
+  expect(f.warm).toHaveBeenCalledWith('m1', 16384);
+});
+
+test('tight headroom: chosenCtx shrinks to fit, floored & rounded to 1024', async () => {
+  // weights(1,1)=1.2e9; kv/token=131072. budget chosen so maxCtxByFit == 8192:
+  // headroom-weights = 8192*131072 = 1073741824 → budget = 1073741824 + 1.2e9.
+  const f = fakes();
+  const mgr = createModelManager({ budgetBytes: 1073741824 + 1.2e9, ...f });
+  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
+  expect(ctx).toBe(8192);
+  expect(ctx % 1024).toBe(0);
+  expect(f.warm).toHaveBeenCalledWith('m1', 8192);
+});
+
+test('chosenCtx is capped by the live-probed model max', async () => {
+  const f = fakes({ getModelMax: mock(async () => 6144) });
+  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
+  expect(ctx).toBe(6144);
+});
+
+test('probe failure falls back to decl.maxContext', async () => {
+  const f = fakes({
+    getModelMax: mock(async () => {
+      throw new Error('no show');
+    }),
+  });
+  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+  const decl = { ...declCtx('m1', 1, 16384), maxContext: 5120 };
+  const ctx = await mgr.ensureReady(decl);
+  expect(ctx).toBe(5120);
+  expect(f.getModelMax).toHaveBeenCalled();
+});
+
+test('cannot fit even the MIN_CTX floor: throws, warms nothing', async () => {
+  // minNeed = weights(1,1)=1.2e9 + 4096*131072 ≈ 1.737e9; budget 1e9 < minNeed, nothing to evict.
+  const f = fakes();
+  const mgr = createModelManager({ budgetBytes: 1e9, ...f });
+  await expect(
+    mgr.ensureReady(declCtx('big', 1, 16384)),
+  ).rejects.toBeInstanceOf(ResourceError);
+  expect(f.warm).not.toHaveBeenCalled();
 });

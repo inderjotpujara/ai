@@ -1,8 +1,9 @@
 import { ResourceError } from '../core/errors.ts';
 import type { ModelDeclaration } from '../core/types.ts';
-import { estimateModelBytes } from './footprint.ts';
+import { kvCacheBytes, weightsBytes } from './footprint.ts';
 import { liveBudgetBytes } from './hardware.ts';
 import {
+  getModelMaxContext,
   isModelInstalled,
   type LoadedModel,
   listLoadedModels,
@@ -10,6 +11,10 @@ import {
   unloadModel,
   warmModel,
 } from './ollama-control.ts';
+
+export const MIN_CTX = 4096;
+const DEFAULT_KV_PER_TOKEN = 131072;
+const CTX_ROUNDING = 1024;
 
 export type EnsureOpts = { pinned?: string[] };
 
@@ -22,20 +27,11 @@ export type ManagerDeps = {
   isInstalled: (model: string) => Promise<boolean>;
   listLoaded: () => Promise<LoadedModel[]>;
   pull: (model: string) => Promise<void>;
-  warm: (model: string) => Promise<void>;
+  warm: (model: string, numCtx?: number) => Promise<void>;
   unload: (model: string) => Promise<void>;
   warn: (message: string) => void;
+  getModelMax: (model: string) => Promise<number | undefined>;
 };
-
-/** Estimated resident bytes of a model from its declaration. */
-export function declBytes(decl: ModelDeclaration): number {
-  return estimateModelBytes({
-    paramsBillions: decl.footprint.approxParamsBillions,
-    bytesPerWeight: decl.footprint.bytesPerWeight,
-    contextTokens: decl.params.numCtx ?? 8192,
-    kvBytesPerToken: 131072,
-  });
-}
 
 function defaultDeps(): ManagerDeps {
   return {
@@ -43,9 +39,10 @@ function defaultDeps(): ManagerDeps {
     isInstalled: (m) => isModelInstalled(m),
     listLoaded: () => listLoadedModels(),
     pull: (m) => pullModel(m),
-    warm: (m) => warmModel(m),
+    warm: (m, n) => warmModel(m, n),
     unload: (m) => unloadModel(m),
     warn: (message) => console.error(message),
+    getModelMax: (m) => getModelMaxContext(m),
   };
 }
 
@@ -58,49 +55,60 @@ async function resolveBudget(source: BudgetSource): Promise<number> {
 export function createModelManager(deps: Partial<ManagerDeps> = {}) {
   const d: ManagerDeps = { ...defaultDeps(), ...deps };
   const lastUsed = new Map<string, number>();
+  const chosenCtxByModel = new Map<string, number>();
+  const maxCtxByModel = new Map<string, number>();
   let tick = 0;
+
+  async function modelMaxFor(model: string): Promise<number | undefined> {
+    const cached = maxCtxByModel.get(model);
+    if (cached !== undefined) return cached;
+    let probed: number | undefined;
+    try {
+      probed = await d.getModelMax(model);
+    } catch {
+      probed = undefined;
+    }
+    if (probed !== undefined) maxCtxByModel.set(model, probed);
+    return probed;
+  }
 
   async function ensureReady(
     decl: ModelDeclaration,
     opts: EnsureOpts = {},
-  ): Promise<void> {
+  ): Promise<number> {
     const pinned = new Set(opts.pinned ?? []);
     const target = decl.model;
+    const desired = decl.params.numCtx ?? MIN_CTX;
 
     if (!(await d.isInstalled(target))) await d.pull(target);
 
     let loaded = await d.listLoaded();
     if (loaded.some((m) => m.name === target)) {
       lastUsed.set(target, ++tick);
-      return;
+      return chosenCtxByModel.get(target) ?? desired;
     }
 
-    const needed = declBytes(decl);
-    // Free headroom right now, resolved live per delegation. This is free system
-    // RAM (already net of every loaded model), so the question is simply "does the
-    // target fit in what's free?" — never `resident() + needed`, which would
-    // double-count models the free figure already excludes.
+    const weights = weightsBytes(
+      decl.footprint.approxParamsBillions,
+      decl.footprint.bytesPerWeight,
+    );
+    const kvPerToken = decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN;
+    const minNeed = weights + kvCacheBytes(MIN_CTX, kvPerToken);
     const freeBudget = await resolveBudget(d.budgetBytes);
     const gb = (bytes: number) => Math.round(bytes / 1e9);
 
     const lru = (a: LoadedModel, b: LoadedModel) =>
       (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1);
 
-    // Evicting a model returns its REAL resident bytes (from /api/ps) to the pool,
-    // so headroom grows as we evict. Keep evicting until the target fits.
+    // Fit the model at its minimum context; evicting returns real bytes to headroom.
     let headroom = freeBudget;
-    while (needed > headroom) {
+    while (minNeed > headroom) {
       const evictable = loaded.filter((m) => m.name !== target);
-      // Prefer non-pinned LRU; fall back to pinned LRU (pinning is best-effort —
-      // under real memory pressure we degrade and let the pinned model reload on
-      // its next turn rather than failing the run).
       const nonPinned = evictable.filter((m) => !pinned.has(m.name)).sort(lru);
       const evict = nonPinned[0] ?? evictable.sort(lru)[0];
       if (evict === undefined) {
-        // Nothing left to evict and it still doesn't fit — a genuine resource
-        // failure (the model is too big for this machine's free RAM right now).
         throw new ResourceError(
-          `Cannot load ${target} (~${gb(needed)}GB): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
+          `Cannot load ${target} (needs ~${gb(minNeed)}GB at min context): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
         );
       }
       if (pinned.has(evict.name)) {
@@ -110,12 +118,27 @@ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
       }
       await d.unload(evict.name);
       lastUsed.delete(evict.name);
+      chosenCtxByModel.delete(evict.name);
       headroom += evict.sizeBytes;
       loaded = loaded.filter((m) => m.name !== evict.name);
     }
 
-    await d.warm(target);
+    // Scale context up into the remaining headroom, clamped by the live model max.
+    const probedMax = await modelMaxFor(target);
+    const ceiling = Math.min(
+      decl.maxContext ?? Number.POSITIVE_INFINITY,
+      probedMax ?? Number.POSITIVE_INFINITY,
+    );
+    const maxCtxByFit = Math.floor((headroom - weights) / kvPerToken);
+    let chosenCtx = Math.min(desired, ceiling, maxCtxByFit);
+    chosenCtx = Math.max(MIN_CTX, chosenCtx);
+    chosenCtx -= chosenCtx % CTX_ROUNDING;
+    chosenCtx = Math.max(MIN_CTX, chosenCtx);
+
+    await d.warm(target, chosenCtx);
     lastUsed.set(target, ++tick);
+    chosenCtxByModel.set(target, chosenCtx);
+    return chosenCtx;
   }
 
   async function unloadAll(): Promise<void> {
@@ -123,6 +146,7 @@ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
       await d.unload(model);
     }
     lastUsed.clear();
+    chosenCtxByModel.clear();
   }
 
   return { ensureReady, unloadAll };
