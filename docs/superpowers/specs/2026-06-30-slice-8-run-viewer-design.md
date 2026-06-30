@@ -32,6 +32,7 @@ So this slice is **instrument + render**, in that order:
 4. **Viewer = terminal/CLI** (`bun run runs`), zero new UI deps; supports **`--follow`** (live-tail). Polished TUI/web stays in Phase F.
 5. **OTLP seam is wired now**, env-gated (`AGENT_OTLP_ENDPOINT`) — the "plug in any OSS tool" promise is real and tested this slice (JSONL + OTLP processors run side-by-side).
 6. **Telemetry is best-effort:** it never throws into the agent path; with no provider registered the AI SDK falls back to the no-op tracer (tests stay span-free unless they opt in).
+7. **Telemetry is modular and extended by every later feature (standing rule).** `src/telemetry/` is built as a reusable subsystem, not a one-off for this slice. Adding observability for a new feature = add a `withXSpan`/`recordX` helper + `ATTR` keys in `src/telemetry/spans.ts` following the existing pattern; the exporter/provider layer and the OTLP backend seam are untouched. See §6½.
 
 ---
 
@@ -183,6 +184,15 @@ Outcome → root span: `answer` ⇒ `OK` + `agent.outcome=answer`; `gap` ⇒ `OK
 - **Live (`*.live`, skipped unless Ollama up + models pulled)** — a real `chat` run produces `spans.jsonl` containing `agent.run` + `agent.delegation` + `agent.model.*` + `ai.generateText`/`ai.toolCall` spans; `bun run runs <id>` renders a non-empty timeline; `bun run runs` lists it.
 
 ---
+
+## 6½. Extending telemetry (STANDING RULE — every later slice)
+
+This slice builds the telemetry **layer**, not its final set of spans. It is designed to be extended, and **every later feature MUST extend it as it lands** (mirrored in `docs/ROADMAP.md`'s "observable by default" cross-cutting principle and the `reference-otel-run-viewer-constraint` memory):
+
+- **The extension point is `src/telemetry/spans.ts`.** A new subsystem that does meaningful work adds a `withXSpan(...)`/`recordX(...)` helper + any new `ATTR` keys there, following the `withDelegationSpan`/`recordModelSelect` pattern. It does **not** touch `provider.ts`/`jsonl-exporter.ts` (the transport) or any call path's wiring beyond calling the helper.
+- **Because all spans funnel through the OTel `SpanExporter` seam,** the local `runs` viewer *and* any OSS backend (`AGENT_OTLP_ENDPOINT` → Jaeger/Tempo/Phoenix/Honeycomb) pick up new spans automatically — zero re-instrumentation.
+- **Concrete future spans (non-binding map, to be filled in by those slices):** workflow/DAG engine → span per step / branch / map-fan-out with data-flow attrs; crews → span per role / task / process; memory/RAG → `retrieve → rerank → generate` spans (+ `gen_ai.*` on embeddings/generation); grounded verification → faithfulness-judge / citation-check spans + a `verdict` attr; agent-builder → capability-gap → generate-agent span; triggers/daemon → trigger-fired root spans; Engine-line scheduler → pre-warm / fan-out arbitration spans.
+- **Process requirement:** **every future spec and plan MUST include a "Telemetry to emit" note** naming the spans/events/attributes that slice adds. A slice that does real orchestration work and emits nothing is incomplete.
 
 ## 6. Out of scope (future / later phases)
 - Polished TUI / local web UI (Phase F — this slice is the data layer + a plain terminal renderer).
