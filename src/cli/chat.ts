@@ -5,9 +5,14 @@ import type { ModelDeclaration } from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { createFetchTools, createFileTools } from '../mcp/client.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
-import { createModelManager, MIN_CTX } from '../resource/model-manager.ts';
+import {
+  effectiveKvBytesPerToken,
+  f16KvBytesPerToken,
+} from '../resource/kv-cache.ts';
+import { createModelManager } from '../resource/model-manager.ts';
 import { isProjectStoreActive } from '../resource/model-store.ts';
 import {
+  getModelKvArch,
   isModelInstalled,
   listLoadedModels,
 } from '../resource/ollama-control.ts';
@@ -40,17 +45,26 @@ async function main(): Promise<void> {
 
   // Announce each NEW model decision (size, context, footprint, install state) once.
   const announced = new Set<string>();
-  const notify = async (decl: ModelDeclaration): Promise<void> => {
+  const notify = async (
+    decl: ModelDeclaration,
+    numCtx: number,
+  ): Promise<void> => {
     if (announced.has(decl.model)) return;
     announced.add(decl.model);
-    const [installed, budget] = await Promise.all([
+    const [installed, budget, arch] = await Promise.all([
       isModelInstalled(decl.model),
       liveBudgetBytes(),
+      getModelKvArch(decl.model).catch(() => undefined),
     ]);
+    const f16 = arch
+      ? f16KvBytesPerToken(arch)
+      : (decl.footprint.kvBytesPerToken ?? 131072);
+    const kvBytesPerToken = effectiveKvBytesPerToken(f16);
     console.error(
       formatSelectionNotice({
         decl,
-        numCtx: decl.params.numCtx ?? MIN_CTX,
+        numCtx,
+        kvBytesPerToken,
         budgetBytes: budget,
         installed,
       }),
@@ -64,7 +78,7 @@ async function main(): Promise<void> {
     listLoaded: () => listLoadedModels(),
     pinned: [qwenRouter.model],
     capture,
-    onAttempt: notify,
+    notify,
   });
 
   const fileServer = await createFileTools();
