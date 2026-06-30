@@ -26,6 +26,7 @@ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
     unload: mock(async () => {}),
     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
     getModelMax: mock(async () => 262144),
+    getModelKvArch: mock(async () => undefined),
     ...over,
   };
 }

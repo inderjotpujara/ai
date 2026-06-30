@@ -51,5 +51,6 @@ export const mlxServerRuntime: Runtime = {
     listLoaded: async (): Promise<LoadedModel[]> =>
       (await listIds()).map((name) => ({ name, sizeBytes: 0 })),
     getModelMax: async () => undefined,
+    getModelKvArch: async () => undefined,
   },
 };

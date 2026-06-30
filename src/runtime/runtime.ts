@@ -1,5 +1,6 @@
 import type { LanguageModel } from 'ai';
 import type { ModelDeclaration, ProviderKind } from '../core/types.ts';
+import type { KvArch } from '../resource/kv-cache.ts';
 import type { LoadedModel } from '../resource/ollama-control.ts';
 
 export type { LoadedModel };
@@ -12,6 +13,7 @@ export type RuntimeControl = {
   unload(model: string): Promise<void>;
   listLoaded(): Promise<LoadedModel[]>;
   getModelMax(model: string): Promise<number | undefined>;
+  getModelKvArch(model: string): Promise<KvArch | undefined>;
 };
 
 /** A model runtime: builds AI-SDK models and owns their lifecycle + availability. */

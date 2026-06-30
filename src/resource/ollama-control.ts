@@ -1,4 +1,5 @@
 import { ProviderError } from '../core/errors.ts';
+import type { KvArch } from './kv-cache.ts';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 
@@ -122,4 +123,41 @@ export async function listLoadedModels(
   if (!res.ok) throw new ProviderError(`Ollama /api/ps returned ${res.status}`);
   const data = (await res.json()) as PsResponse;
   return (data.models ?? []).map((m) => ({ name: m.name, sizeBytes: m.size }));
+}
+
+/** The model's KV attention dims, read live from POST /api/show. Undefined if unavailable. */
+export async function getModelKvArch(
+  model: string,
+  baseUrl: string = DEFAULT_BASE_URL,
+): Promise<KvArch | undefined> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json()) as { model_info?: Record<string, unknown> };
+  const info = data.model_info ?? {};
+  const arch = info['general.architecture'];
+  if (typeof arch !== 'string') return undefined;
+  const num = (key: string): number | undefined => {
+    const v = info[`${arch}.${key}`];
+    return typeof v === 'number' ? v : undefined;
+  };
+  const blockCount = num('block_count');
+  const headCountKv = num('attention.head_count_kv');
+  const keyLength = num('attention.key_length');
+  const valueLength = num('attention.value_length');
+  if (
+    blockCount === undefined || headCountKv === undefined ||
+    keyLength === undefined || valueLength === undefined
+  ) {
+    return undefined;
+  }
+  return { blockCount, headCountKv, keyLength, valueLength, expertCount: num('expert_count') ?? 0 };
 }
