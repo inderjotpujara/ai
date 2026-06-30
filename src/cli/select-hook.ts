@@ -14,8 +14,8 @@ export type SelectHookDeps = {
   pinned: string[];
   capture: ResourceCapture;
   listLoaded?: () => Promise<LoadedModel[]>;
-  /** Fired before each ensureReady attempt (e.g. to print a selection notice). */
-  onAttempt?: (decl: ModelDeclaration) => void | Promise<void>;
+  /** Fired once after resolveModel succeeds, with the chosen ctx. */
+  notify?: (decl: ModelDeclaration, numCtx: number) => void | Promise<void>;
 };
 
 /**
@@ -33,10 +33,10 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
         {
           ensureReady: deps.ensureReady,
           listLoaded: deps.listLoaded,
-          onAttempt: deps.onAttempt,
         },
         { pinned: deps.pinned },
       );
+      await deps.notify?.(decl, numCtx);
       const model = runtimeFor(decl.provider).createModel(decl);
       return {
         model,

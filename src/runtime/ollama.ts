@@ -1,6 +1,7 @@
 import { ProviderKind } from '../core/types.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
 import {
+  getModelKvArch,
   getModelMaxContext,
   isModelInstalled,
   listLoadedModels,
@@ -32,5 +33,6 @@ export const ollamaRuntime: Runtime = {
     unload: (m) => unloadModel(m),
     listLoaded: () => listLoadedModels(),
     getModelMax: (m) => getModelMaxContext(m),
+    getModelKvArch: (m) => getModelKvArch(m),
   },
 };

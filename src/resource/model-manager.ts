@@ -4,6 +4,13 @@ import { runtimeFor } from '../runtime/registry.ts';
 import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
 import { kvCacheBytes, weightsBytes } from './footprint.ts';
 import { liveBudgetBytes } from './hardware.ts';
+import {
+  activeKvCacheType,
+  effectiveKvBytesPerToken,
+  f16KvBytesPerToken,
+  isKvQuantRisky,
+  KvCacheType,
+} from './kv-cache.ts';
 
 export const MIN_CTX = 4096;
 const DEFAULT_KV_PER_TOKEN = 131072;
@@ -42,6 +49,8 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
   const chosenCtxByModel = new Map<string, number>();
   const maxCtxByModel = new Map<string, number>();
   const runtimeByModel = new Map<string, ModelDeclaration>(); // remember how to unload
+  const kvF16ByModel = new Map<string, number>();
+  const kvRiskWarned = new Set<string>();
   let tick = 0;
 
   async function modelMaxFor(
@@ -58,6 +67,40 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
     }
     if (probed !== undefined) maxCtxByModel.set(model, probed);
     return probed;
+  }
+
+  async function kvF16For(
+    c: RuntimeControl,
+    model: string,
+    decl: ModelDeclaration,
+  ): Promise<number> {
+    const cached = kvF16ByModel.get(model);
+    if (cached !== undefined) return cached;
+    let arch: Awaited<ReturnType<RuntimeControl['getModelKvArch']>>;
+    try {
+      arch = await c.getModelKvArch(model);
+    } catch {
+      arch = undefined;
+    }
+    if (arch) {
+      // generalized, arch-derived risk advisory (type is global, so this is informational)
+      const type = activeKvCacheType();
+      if (
+        type !== KvCacheType.F16 &&
+        isKvQuantRisky(arch) &&
+        !kvRiskWarned.has(model)
+      ) {
+        kvRiskWarned.add(model);
+        d.warn(
+          `[model-manager] ${model}: arch (small head_dim / MoE) may lose accuracy under ${type} KV cache; set AGENT_KV_CACHE_TYPE=f16 if quality matters for it.`,
+        );
+      }
+    }
+    const f16 = arch
+      ? f16KvBytesPerToken(arch)
+      : (decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN);
+    kvF16ByModel.set(model, f16);
+    return f16;
   }
 
   async function ensureReady(
@@ -81,7 +124,8 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
       decl.footprint.approxParamsBillions,
       decl.footprint.bytesPerWeight,
     );
-    const kvPerToken = decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN;
+    const f16Base = await kvF16For(c, target, decl);
+    const kvPerToken = effectiveKvBytesPerToken(f16Base);
     const minNeed = weights + kvCacheBytes(MIN_CTX, kvPerToken);
     const freeBudget = await resolveBudget(d.budgetBytes);
     const gb = (bytes: number) => Math.round(bytes / 1e9);

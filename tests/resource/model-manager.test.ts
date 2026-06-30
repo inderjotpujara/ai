@@ -1,4 +1,15 @@
-import { expect, mock, test } from 'bun:test';
+import { afterAll, beforeAll, expect, mock, test } from 'bun:test';
+
+let __prevKv: string | undefined;
+beforeAll(() => {
+  __prevKv = process.env.AGENT_KV_CACHE_TYPE;
+  process.env.AGENT_KV_CACHE_TYPE = 'f16';
+});
+afterAll(() => {
+  if (__prevKv === undefined) delete process.env.AGENT_KV_CACHE_TYPE;
+  else process.env.AGENT_KV_CACHE_TYPE = __prevKv;
+});
+
 import { ResourceError } from '../../src/core/errors.ts';
 import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
 import {
@@ -26,6 +37,7 @@ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
     unload: mock(async () => {}),
     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
     getModelMax: mock(async () => 262144),
+    getModelKvArch: mock(async () => undefined),
     ...over,
   };
 }

@@ -1,4 +1,5 @@
 import { ProviderError } from '../core/errors.ts';
+import type { KvArch } from './kv-cache.ts';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 
@@ -122,4 +123,57 @@ export async function listLoadedModels(
   if (!res.ok) throw new ProviderError(`Ollama /api/ps returned ${res.status}`);
   const data = (await res.json()) as PsResponse;
   return (data.models ?? []).map((m) => ({ name: m.name, sizeBytes: m.size }));
+}
+
+/** The model's KV attention dims, read live from POST /api/show. Undefined if unavailable. */
+export async function getModelKvArch(
+  model: string,
+  baseUrl: string = DEFAULT_BASE_URL,
+): Promise<KvArch | undefined> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json()) as { model_info?: Record<string, unknown> };
+  const info = data.model_info ?? {};
+  const arch = info['general.architecture'];
+  if (typeof arch !== 'string') return undefined;
+  const num = (key: string): number | undefined => {
+    const v = info[`${arch}.${key}`];
+    return typeof v === 'number' ? v : undefined;
+  };
+  const blockCount = num('block_count');
+  const headCount = num('attention.head_count');
+  const embeddingLength = num('embedding_length');
+  // null head_count_kv means no GQA — same as head_count
+  const headCountKv = num('attention.head_count_kv') ?? headCount;
+  // derive head_dim from embedding_length / head_count when key_length absent
+  const headDim =
+    num('attention.key_length') ??
+    (embeddingLength !== undefined && headCount !== undefined
+      ? Math.floor(embeddingLength / headCount)
+      : undefined);
+  const keyLength = headDim;
+  const valueLength = num('attention.value_length') ?? keyLength;
+  if (
+    blockCount === undefined ||
+    headCountKv === undefined ||
+    keyLength === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    blockCount,
+    headCountKv,
+    keyLength,
+    valueLength: valueLength ?? keyLength,
+    expertCount: num('expert_count') ?? 0,
+  };
 }

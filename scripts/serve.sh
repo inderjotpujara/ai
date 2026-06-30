@@ -25,4 +25,10 @@ if curl -fsS --max-time 1 http://localhost:11434/api/version >/dev/null 2>&1; th
 fi
 
 echo "Starting Ollama — OLLAMA_MODELS=$OLLAMA_MODELS"
+export OLLAMA_FLASH_ATTENTION=1
+export OLLAMA_KV_CACHE_TYPE="${AGENT_KV_CACHE_TYPE:-q8_0}"
+echo "KV cache: $OLLAMA_KV_CACHE_TYPE (flash-attention on; required on Apple Silicon)"
+if [ "$OLLAMA_KV_CACHE_TYPE" = "q4_0" ]; then
+  echo "⚠ q4_0 KV degrades long-context recall + tool-calling, and arch-risky models (small head_dim / MoE). Prefer q8_0 unless verified." >&2
+fi
 exec ollama serve
