@@ -5,6 +5,7 @@ import {
   stepCountIs,
   type ToolSet,
 } from 'ai';
+import { recordIoEnabled } from '../telemetry/provider.ts';
 import { MaxStepsError } from './errors.ts';
 
 const DEFAULT_MAX_STEPS = 10;
@@ -17,6 +18,7 @@ export type RunAgentInput = {
   maxSteps?: number;
   temperature?: number;
   providerOptions?: ProviderOptions;
+  functionId?: string;
 };
 
 /** Run one agent turn: model + tools loop, bounded by a step guard. Returns text + steps. */
@@ -32,6 +34,12 @@ export async function runAgent(input: RunAgentInput): Promise<{
     temperature: input.temperature,
     providerOptions: input.providerOptions,
     stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
+    experimental_telemetry: {
+      isEnabled: true,
+      functionId: input.functionId,
+      recordInputs: recordIoEnabled(),
+      recordOutputs: recordIoEnabled(),
+    },
   });
   const { text, finishReason, steps } = result;
   if (text.trim() === '' && finishReason !== 'stop') {

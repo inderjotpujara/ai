@@ -7,6 +7,7 @@ import type { EnsureOpts } from '../resource/model-manager.ts';
 import type { LoadedModel } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
+import { recordModelSelect } from '../telemetry/spans.ts';
 
 export type SelectHookDeps = {
   registry: ModelDeclaration[];
@@ -36,6 +37,12 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
         },
         { pinned: deps.pinned },
       );
+      recordModelSelect({
+        modelId: decl.model,
+        provider: decl.provider,
+        numCtx,
+        paramsBillions: decl.footprint.approxParamsBillions,
+      });
       await deps.notify?.(decl, numCtx);
       const model = runtimeFor(decl.provider).createModel(decl);
       return {

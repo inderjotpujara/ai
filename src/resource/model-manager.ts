@@ -2,6 +2,7 @@ import { ResourceError } from '../core/errors.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
+import { recordEvict, withModelLoadSpan } from '../telemetry/spans.ts';
 import { kvCacheBytes, weightsBytes } from './footprint.ts';
 import { liveBudgetBytes } from './hardware.ts';
 import {
@@ -149,6 +150,10 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
           `[model-manager] live memory budget (~${gb(freeBudget)}GB) too low to keep ${evict.name} pinned; evicting it to load ${target} (best-effort pin — it will reload on demand).`,
         );
       }
+      const evictReason = pinned.has(evict.name)
+        ? 'budget-too-low-evicting-pinned'
+        : 'lru-fit';
+      recordEvict(evict.name, evict.sizeBytes, evictReason);
       await c.unload(evict.name);
       lastUsed.delete(evict.name);
       chosenCtxByModel.delete(evict.name);
@@ -168,7 +173,20 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
     chosenCtx -= chosenCtx % CTX_ROUNDING;
     chosenCtx = Math.max(MIN_CTX, chosenCtx);
 
-    await c.warm(target, chosenCtx);
+    await withModelLoadSpan(
+      target,
+      {
+        weightsBytes: weights,
+        kvF16PerToken: f16Base,
+        kvEffectivePerToken: kvPerToken,
+        kvCacheType: activeKvCacheType(),
+        chosenCtx,
+        requestedCtx: desired,
+        footprintBytes: weights + kvCacheBytes(chosenCtx, kvPerToken),
+        budgetBytes: freeBudget,
+      },
+      () => c.warm(target, chosenCtx),
+    );
     lastUsed.set(target, ++tick);
     chosenCtxByModel.set(target, chosenCtx);
     runtimeByModel.set(target, decl);

@@ -59,6 +59,23 @@ server (`mcp-server-fetch`). The next phase pivots from *engine* to *product*.
 > (faithfulness judging, citation enforcement, corrective re-retrieval). This is
 > a property of the whole platform, not a single slice.
 
+> **Cross-cutting design principle — observable by default (extend telemetry as we go).**
+> Phase A's run-viewer establishes an **OpenTelemetry tracing layer** (`src/telemetry/`)
+> that is **modular and meant to be extended by every feature we build after it.**
+> The rule, going forward: **any new subsystem that does meaningful work emits
+> spans/events** through the shared `src/telemetry/spans.ts` helpers (add a
+> `withXSpan` helper + `ATTR` keys following the existing pattern) — the workflow/DAG
+> engine (span per step/branch/fan-out), crews (span per role/task/process),
+> memory/RAG (retrieve → rerank → generate spans + `gen_ai.*`), grounded
+> verification (faithfulness/citation spans), agent-builder, triggers/daemon, and
+> the Engine-line scheduler all extend the same trace. Because everything funnels
+> through the OTel `SpanExporter` seam, the **local JSONL viewer and any OSS backend
+> (Jaeger / Tempo / Phoenix / Honeycomb via `AGENT_OTLP_ENDPOINT`) get the new
+> signal for free** — no re-instrumentation. **Telemetry is not a Phase-A
+> deliverable that ends; it is a standing obligation of every later slice.** Each
+> new spec/plan MUST include a "telemetry to emit" note. See
+> `reference-otel-run-viewer-constraint` memory.
+
 ## Foundation — SHIPPED (the engine)
 
 | Slice | Capability | Status |
@@ -83,7 +100,7 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 
 | Item | Why now | Depends on |
 |---|---|---|
-| **Run-viewer (`/runs`)** ⭐ | Renders the JSONL journals we **already write** — timeline of delegations, gaps, model loads, artifacts. Makes 7 slices of invisible engine **demoable**, and becomes the **debugging surface** you'll need the instant workflows/crews/agent-builder start misrouting. Lowest cost, highest visibility. | run store (Slice 1) |
+| **Run-viewer (`/runs`)** ⭐ | Instruments each run as an **OpenTelemetry trace** (root + delegation + model-lifecycle spans; AI-SDK gives agent/tool/token spans free) to `runs/<id>/spans.jsonl`, rendered as a terminal timeline (`bun run runs`, with `--follow`). Establishes the **extensible `src/telemetry/` layer every later feature emits into** (see the observable-by-default principle above) + a swappable OTLP backend seam. Makes 7 slices of invisible engine **demoable**, and becomes the **debugging surface** you'll need the instant workflows/crews/agent-builder start misrouting. Lowest cost, highest visibility. | run store (Slice 1) |
 | **Graceful degradation** | If `uvx` / an MCP server / a model is down, **drop that agent and tell the user** instead of failing the whole CLI. Essential for an always-on autonomous box; today a dead dependency can sink a run. | Slices 2–3 |
 | **Telemetry + eval harness** | Log per-agent latency / tokens / tool-call success; a small harness scoring **routing accuracy** (did the orchestrator pick the right specialist?) **and answer faithfulness / citation-faithfulness** (RAGAS-style: % of claims supported by retrieved evidence; penalize fabricated citations) against a ~100-item golden set. The moment agent-builder adds specialists *and* RAG adds retrieved context, routing quality + groundedness are what break — cheap insurance, measurable. | Slice 2 |
 

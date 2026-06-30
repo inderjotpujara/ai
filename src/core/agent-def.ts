@@ -36,5 +36,6 @@ export function runDefinedAgent(
     prompt: task,
     tools: agent.tools,
     providerOptions: ollamaCtxOptions(numCtx),
+    functionId: agent.name,
   });
 }

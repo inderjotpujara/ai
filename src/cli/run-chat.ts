@@ -1,11 +1,10 @@
 import type { Agent } from '../core/agent-def.ts';
-import {
-  type OrchestratorResult,
-  runOrchestrator,
-} from '../core/orchestrator.ts';
+import type { OrchestratorResult } from '../core/orchestrator.ts';
+import { runOrchestrator } from '../core/orchestrator.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
-import { appendJournal } from '../run/journal.ts';
 import { createRun, writeArtifact } from '../run/run-store.ts';
+import { initRunTelemetry } from '../telemetry/provider.ts';
+import { setRunOutcome, withRunSpan } from '../telemetry/spans.ts';
 
 export type ChatDeps = {
   orchestrator: Agent;
@@ -16,36 +15,28 @@ export type ChatDeps = {
   capture?: ResourceCapture;
 };
 
-/** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
 export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
   const run = await createRun(deps.runsRoot, deps.runId);
-  await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
-
-  const result = await runOrchestrator(
-    deps.orchestrator,
-    deps.task,
-    deps.routerNumCtx,
-    deps.capture,
-  );
-
-  if (result.kind === 'answer') {
-    await writeArtifact(run, 'answer.txt', result.text);
-    await appendJournal(run.dir, {
-      step: 'answer',
-      data: { text: result.text },
+  const tel = initRunTelemetry(run.dir);
+  try {
+    return await withRunSpan(deps.runId, deps.task, async () => {
+      const result = await runOrchestrator(
+        deps.orchestrator,
+        deps.task,
+        deps.routerNumCtx,
+        deps.capture,
+      );
+      setRunOutcome(result);
+      if (result.kind === 'answer') {
+        await writeArtifact(run, 'answer.txt', result.text);
+      } else if (result.kind === 'gap') {
+        await writeArtifact(run, 'gap.txt', result.message);
+      } else {
+        await writeArtifact(run, 'resource.txt', result.message);
+      }
+      return result;
     });
-  } else if (result.kind === 'gap') {
-    await writeArtifact(run, 'gap.txt', result.message);
-    await appendJournal(run.dir, {
-      step: 'gap',
-      data: { missingCapability: result.missingCapability },
-    });
-  } else {
-    await writeArtifact(run, 'resource.txt', result.message);
-    await appendJournal(run.dir, {
-      step: 'resource',
-      data: { message: result.message },
-    });
+  } finally {
+    await tel.shutdown();
   }
-  return result;
 }
