@@ -26,6 +26,7 @@ export type DiscoverResult = {
   found: number;
   fits: number;
   pulled: string[];
+  pullFailed: { model: string; reason: string }[];
   path: string;
 };
 
@@ -66,6 +67,7 @@ export async function runDiscovery(
   (deps.writeCatalog ?? ((c) => writeCatalogFile(c)))(ranked);
 
   const pulled: string[] = [];
+  const pullFailed: { model: string; reason: string }[] = [];
   const n = deps.prePullCount ?? 1;
   const pull =
     deps.pullTop ??
@@ -76,14 +78,18 @@ export async function runDiscovery(
     try {
       await pull(c.model, c.provider);
       pulled.push(c.model);
-    } catch {
-      /* report, don't fail */
+    } catch (err) {
+      pullFailed.push({
+        model: c.model,
+        reason: (err as Error).message ?? String(err),
+      });
     }
   }
   return {
     found: all.length,
     fits: ranked.length,
     pulled,
+    pullFailed,
     path: deps.catalogPathStr ?? catalogPath(),
   };
 }

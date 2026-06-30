@@ -4,6 +4,8 @@ import {
   type ModelDeclaration,
   ProviderKind,
 } from '../core/types.ts';
+import { kvCacheBytes, weightsBytes } from '../resource/footprint.ts';
+import { MIN_CTX } from '../resource/model-manager.ts';
 import type {
   Candidate,
   CatalogSource,
@@ -11,11 +13,7 @@ import type {
   HostCapabilities,
 } from './catalog-source.ts';
 import { hfGet } from './hf-client.ts';
-import {
-  bytesPerWeightForQuant,
-  pickBestQuantThatFits,
-  type QuantFile,
-} from './quant.ts';
+import { bytesPerWeightForQuant } from './quant.ts';
 
 export const TRUSTED_PUBLISHERS = [
   'bartowski',
@@ -26,7 +24,18 @@ export const TRUSTED_PUBLISHERS = [
 ];
 const PER_AUTHOR_LIMIT = 20;
 const UNCENSORED_RE = /(abliterated|uncensored|dolphin)/i;
-const QUANT_RE = /-(IQ?\d[\w_]*|Q\d[\w_]*|F16|FP16)\.gguf$/i;
+
+/** Bytes-per-token for the KV cache — mirrors DEFAULT_KV_PER_TOKEN in model-manager. */
+const DEFAULT_KV = 131072;
+
+/** Full-precision quant labels to exclude from candidate selection. */
+const FULL_PRECISION = new Set(['F16', 'F32', 'FP16', 'BF16']);
+
+/**
+ * Regex to extract a quant token from anywhere in a filename (case-insensitive).
+ * Matches IQ-style and Q-digit-style quants.
+ */
+const QUANT_TOKEN_RE = /\b(IQ\d\w*|Q\d[\w_]*)\b/i;
 
 /** True if a chat template exposes tool/function calling. */
 export function detectTools(chatTemplate: string): boolean {
@@ -39,8 +48,9 @@ type GgufInfo = {
 };
 type TreeEntry = { path: string; size?: number; lfs?: { size?: number } };
 
+/** Extract a quant label from anywhere in a filename. Returns uppercase or undefined. */
 function quantOf(path: string): string | undefined {
-  const m = path.match(QUANT_RE);
+  const m = path.match(QUANT_TOKEN_RE);
   return m?.[1]?.toUpperCase();
 }
 
@@ -65,20 +75,51 @@ async function candidateFor(
   } catch {
     return undefined;
   }
-  const files: QuantFile[] = [];
-  for (const e of tree) {
-    const quant = quantOf(e.path);
-    const sizeBytes = e.lfs?.size ?? e.size;
-    if (quant && typeof sizeBytes === 'number')
-      files.push({ quant, sizeBytes });
-  }
-  const best = pickBestQuantThatFits(files, q.budgetBytes);
-  if (!best) return undefined;
 
-  const params = (info.gguf?.total ?? 0) / 1e9;
+  // Group shards by quant label, summing their sizes.
+  // Exclude full-precision files and mmproj/projector files.
+  const quantSums = new Map<string, number>();
+  for (const e of tree) {
+    const filename = e.path.split('/').pop() ?? e.path;
+    if (/mmproj|projector/i.test(filename)) continue;
+
+    const quant = quantOf(filename);
+    if (!quant) continue;
+    if (FULL_PRECISION.has(quant)) continue;
+
+    const sizeBytes = e.lfs?.size ?? e.size;
+    if (typeof sizeBytes !== 'number') continue;
+
+    quantSums.set(quant, (quantSums.get(quant) ?? 0) + sizeBytes);
+  }
+
+  // Select the best quant: footprint <= budgetBytes, then largest summedBytes wins.
+  let bestQuant: string | undefined;
+  let bestSummedBytes = 0;
+
+  for (const [quant, summedBytes] of quantSums) {
+    const bpw = bytesPerWeightForQuant(quant);
+    const approxParamsBillions = summedBytes / 1e9 / bpw;
+    const footprint =
+      weightsBytes(approxParamsBillions, bpw) +
+      kvCacheBytes(MIN_CTX, DEFAULT_KV);
+
+    if (footprint > q.budgetBytes) continue;
+
+    if (summedBytes > bestSummedBytes) {
+      bestSummedBytes = summedBytes;
+      bestQuant = quant;
+    }
+  }
+
+  if (!bestQuant) return undefined;
+
+  const bpw = bytesPerWeightForQuant(bestQuant);
+  const approxParamsBillions = bestSummedBytes / 1e9 / bpw;
+
   const decl: ModelDeclaration = {
     provider: ProviderKind.Ollama,
-    model: `hf.co/${repo}:${best.quant}`,
+    model: `hf.co/${repo}:${bestQuant}`,
     params: {},
     role: 'discovered general reasoning + tool use',
     capabilities: detectTools(tmpl) ? [Capability.Tools] : [],
@@ -86,19 +127,16 @@ async function candidateFor(
       ? ContentPolicy.Uncensored
       : ContentPolicy.Default,
     footprint: {
-      approxParamsBillions:
-        params > 0
-          ? params
-          : best.sizeBytes / 1e9 / bytesPerWeightForQuant(best.quant),
-      bytesPerWeight: bytesPerWeightForQuant(best.quant),
+      approxParamsBillions,
+      bytesPerWeight: bpw,
     },
     maxContext: info.gguf?.context_length,
   };
   return {
     ...decl,
     repo,
-    quant: best.quant,
-    fileSizeBytes: best.sizeBytes,
+    quant: bestQuant,
+    fileSizeBytes: bestSummedBytes,
     downloads: item.downloads ?? 0,
     installed: false,
   };
