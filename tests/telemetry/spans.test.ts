@@ -3,9 +3,11 @@ import type {
   BasicTracerProvider,
   InMemorySpanExporter,
 } from '@opentelemetry/sdk-trace-base';
+import { runInDelegationContext } from '../../src/core/guardrails.ts';
 import {
   ATTR,
   recordEvict,
+  recordGuardrailViolation,
   setRunOutcome,
   withDelegationSpan,
   withRunSpan,
@@ -47,4 +49,35 @@ test('resource outcome sets ERROR status on the run span', async () => {
   });
   const run = exporter.getFinishedSpans().find((s) => s.name === 'agent.run');
   expect(run?.status.code).toBe(2); // SpanStatusCode.ERROR
+});
+
+test('withDelegationSpan tags delegation depth and ancestors', async () => {
+  const { exporter: localExporter, provider: localProvider } =
+    registerTestProvider();
+  await runInDelegationContext('A', undefined, () =>
+    withDelegationSpan('B', async () => {}),
+  );
+  const span = localExporter
+    .getFinishedSpans()
+    .find((s) => s.name === 'agent.delegation');
+  expect(span?.attributes['agent.delegation.depth']).toBe(2); // inside A (depth1) → entering B → depth 2
+  expect(span?.attributes['agent.delegation.ancestors']).toBe('A → B');
+  localExporter.reset();
+  await localProvider.shutdown();
+});
+
+test('recordGuardrailViolation adds a guardrail event to the active span', async () => {
+  const { exporter: localExporter, provider: localProvider } =
+    registerTestProvider();
+  await withDelegationSpan('X', async () => {
+    recordGuardrailViolation('depth_exceeded', 'too deep');
+  });
+  const span = localExporter
+    .getFinishedSpans()
+    .find((s) => s.name === 'agent.delegation');
+  const ev = span?.events.find((e) => e.name === 'agent.guardrail.violation');
+  expect(ev).toBeDefined();
+  expect(ev?.attributes?.['agent.guardrail.type']).toBe('depth_exceeded');
+  localExporter.reset();
+  await localProvider.shutdown();
 });

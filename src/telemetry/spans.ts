@@ -1,4 +1,5 @@
 import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
+import { currentDelegationContext } from '../core/guardrails.ts';
 import { recordIoEnabled } from './provider.ts';
 
 export const ATTR = {
@@ -22,6 +23,9 @@ export const ATTR = {
   EVICT_REASON: 'model.evict.reason',
   USAGE_INPUT_TOKENS: 'gen_ai.usage.input_tokens',
   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
+  GUARDRAIL_TYPE: 'agent.guardrail.type',
+  DELEGATION_DEPTH: 'agent.delegation.depth',
+  DELEGATION_ANCESTORS: 'agent.delegation.ancestors',
 } as const;
 
 export type ModelSelectInfo = {
@@ -99,7 +103,13 @@ export function withDelegationSpan<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   return inSpan('agent.delegation', async (span) => {
+    const { depth, ancestors } = currentDelegationContext();
     span.setAttribute(ATTR.DELEGATION_TARGET, target);
+    span.setAttribute(ATTR.DELEGATION_DEPTH, depth + 1);
+    span.setAttribute(
+      ATTR.DELEGATION_ANCESTORS,
+      [...ancestors, target].join(' → '),
+    );
     return fn();
   });
 }
@@ -148,5 +158,17 @@ export function recordEvict(
     [ATTR.MODEL_ID]: modelId,
     [ATTR.MODEL_SIZE_BYTES]: sizeBytes,
     [ATTR.EVICT_REASON]: reason,
+  });
+}
+
+export function recordGuardrailViolation(
+  type: 'depth_exceeded',
+  detail: string,
+): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.addEvent('agent.guardrail.violation', {
+    [ATTR.GUARDRAIL_TYPE]: type,
+    'agent.guardrail.detail': detail,
   });
 }
