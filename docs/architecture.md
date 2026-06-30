@@ -141,6 +141,22 @@ Write requests use field `model`; `/api/tags` and `/api/ps` report it as `name`.
 only way to fit the target (logged as a warning). `ResourceError` is thrown only
 when nothing is left to evict.
 
+### KV-cache quantization (Slice 7)
+
+KV-cache quantization lets the manager trade a small amount of floating-point precision for a large reduction in KV-cache RAM, which directly increases the context window available per model.
+
+**Global type via `AGENT_KV_CACHE_TYPE` / `serve.sh`.** The KV cache type (`f16`, `q8_0`, or `q4_0`) is a process-global setting in Ollama — it cannot be varied per model without running separate server processes. `scripts/serve.sh` sets `OLLAMA_KV_CACHE_TYPE=q8_0` (the default) and `OLLAMA_FLASH_ATTENTION=1` (flash attention is *required* for quantized KV caches and is *not* auto-enabled on Apple Silicon). The active type is read at runtime via `activeKvCacheType()` (`src/resource/kv-cache.ts`), which reads `AGENT_KV_CACHE_TYPE` and defaults to `q8_0`; unrecognized values fall back to `q8_0`.
+
+**Per-model f16 KV baseline from `/api/show`.** Although the type is global, the *size* of the KV cache is arch-specific. `getModelKvArch()` (`src/resource/ollama-control.ts`) calls `POST /api/show` and extracts four fields from `model_info`: `block_count`, `attention.head_count_kv`, `attention.key_length`, and `attention.value_length`. From these, `f16KvBytesPerToken(arch)` computes the f16 baseline:
+
+```
+f16 KV bytes/token = block_count × head_count_kv × (key_length + value_length) × 2
+```
+
+`effectiveKvBytesPerToken(f16Baseline)` then multiplies by the active type's RAM multiplier (`q8_0` → 0.5, `q4_0` → 0.25, `f16` → 1.0). The Model Manager uses this effective value to size `maxCtxByFit` per delegation — no arch or model-family is hardcoded.
+
+**Arch-derived risk advisory.** `isKvQuantRisky(arch)` flags a model as arch-risky when `key_length ≤ 64` (small head_dim) or `expert_count > 0` (MoE routing). Both conditions are known to degrade more under KV quantization. This check is purely arch-derived — no model-family names appear anywhere. When a risky model is loaded under a quantized cache type, the manager emits a one-line advisory so the operator can override with `AGENT_KV_CACHE_TYPE=f16` if needed.
+
 ### Dynamic model selection (Slice 5)
 
 **Selector (`src/resource/selector.ts`).** `selectCandidates` (pure: capability hard-filter + largest-that-fits rank + warm-aware tie-break) feeds `resolveModel`, a live fallback loop that walks candidates best-first against `manager.ensureReady` (the single fit-authority); on a `ResourceError` it drops to the next candidate, and throws only when nothing fits. The chosen model is bound lazily at delegation time via `onBeforeDelegate` (`src/cli/select-hook.ts`), which also prints a one-line selection notice (`src/cli/selection-notice.ts`: size · context · footprint · installed-or-pulling · budget) once per new model. Agents declare a capability `ModelRequirement` (`requires` / `prefer`); the registry (`models/registry.ts` = `qwen3.5:4b` + `qwen3.5:9b`) is a machine-adaptive bootstrap ladder — the fits-filter makes bigger rungs inert where they don't fit, and Slice 6 discovery will populate it per-machine at runtime. A genuine no-fit is recorded in a `ResourceCapture` seam (`src/core/resource-capture.ts`) and surfaced by `runOrchestrator` as `{kind:'resource'}` → the CLI prints the message and exits non-zero (no hallucinated answer).

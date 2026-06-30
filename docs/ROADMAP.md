@@ -20,12 +20,12 @@ cycle (the same flow used for Slices 1–5). Order is a recommendation driven by
 | **4** | **Model Manager** — multi-model, hardware-aware: live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation); load/evict/pin within budget; best-effort pin (pinned evicted only as last resort); dynamic `num_ctx` sized from headroom, clamped by live model max (`POST /api/show`), floored at 4096; orchestrator on pinned `qwen3.5:4b`, specialists on `qwen3.5:9b` on demand | ✅ shipped + live-verified |
 | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; a bootstrap registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` and a non-zero exit instead of a hallucinated answer | ✅ shipped + live-verified |
 | **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline `buildRegistry` merges bootstrap + local + catalog at chat time; Ollama + MLX-server runtime ports; four-axis taxonomy (capability/modality, runtime, source, content-policy); `hf-gguf` + `hf-mlx` catalog sources; host detector; live discover + MLX verify tests. See spec §11 for committed follow-ons. | ✅ shipped + live-verified |
+| **7** | **KV-cache quantization** — global `AGENT_KV_CACHE_TYPE` (default `q8_0`); `OLLAMA_FLASH_ATTENTION=1` required (not auto-enabled on Apple Silicon); per-model arch-derived sizing from `POST /api/show` (`block_count × head_count_kv × (key+value_length) × 2` × type multiplier); generalized arch-risk advisory (head_dim ≤ 64 / MoE); `AGENT_KV_CACHE_TYPE=f16\|q8_0\|q4_0` override. See committed follow-ons below (spec §6). | ✅ shipped + live-verified |
 
 ## Near-term — resource-manager & model quality line
 
 | Slice | Capability | Depends on | Notes |
 |---|---|---|---|
-| **7** | **KV-cache quantization** — `q8_0` as the default KV-cache type, `q4_0` opt-in with a high-GQA guard (safe only when GQA count is high enough to absorb the quality drop); global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION` env wiring. (See spec §11.) | Slice 6 | Cuts KV-cache RAM by 4× vs fp16 on q4_0; q8_0 default is lossless in practice |
 | **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
 
 ### Future Work (from Slice 5 brainstorm)
@@ -40,13 +40,22 @@ The following items were identified during Slice 5 design (see spec §8) as valu
 - **Router-as-selected** — today the router (`qwen3.5:4b`) is pinned and hardcoded. A future slice could run it through the selector too, so even the routing model is capability-declared and hardware-adaptive.
 - **Fuller anti-churn / hysteresis** — the warm-aware tie-break in `selectCandidates` is a lightweight first step. A proper hysteresis policy (e.g. don't evict a resident model unless the challenger is significantly better, or a cooldown window after a recent load) would reduce unnecessary model thrashing under oscillating load.
 
+## Committed follow-ons from Slice 7 (spec §6)
+
+These items were identified during Slice 7 design as natural next steps. None are blocking the shipped behavior; each requires additional infrastructure listed in Notes.
+
+- **Per-model KV *type* enforcement** — the current global type (Ollama) is the only option available through Ollama's single-server model. Enforcing a different KV type per model requires running separate per-process runtimes (llama.cpp-server, vLLM, or MLX-server); each model would then be routed to its own server instance. No code change is safe until the runtime-port layer (Slice 6) is extended with a per-process lifecycle API.
+- **Reserve-headroom / co-resident KV budgeting** — when multiple specialists run concurrently (parallel fan-out), their combined KV footprints must be co-scheduled. Today each delegation sizes KV independently; a shared reservation table on the Model Manager is needed so KV budgets don't collide under concurrent load.
+- **Context compression (Headroom)** — a separate composed slice that compresses in-context history when the context window fills. Separate from KV quantization; both can be active at once.
+- **Asymmetric K/V quantization** — applying different types to the key and value caches independently (e.g. q4_0 values, q8_0 keys). Currently broken on Apple Silicon Metal backends; deferred until upstream llama.cpp support stabilises.
+- **Server KV-type probe** — a runtime probe (`POST /api/show` or a health endpoint) to read back the *actual* KV cache type the running Ollama server was started with, so the manager can detect mismatches between `AGENT_KV_CACHE_TYPE` and the live server config and warn early.
+
 ## Committed follow-ons from Slice 6 (spec §11)
 
 These items were identified during Slice 6 design as the natural continuation of the four-axis taxonomy. The `Capability`, `ProviderKind`, and `ContentPolicy` seams are already typed; each slice activates a seam.
 
 | Slice | Capability | Depends on | Notes |
 |---|---|---|---|
-| **7** | **KV-cache quantization** — `q8_0` default KV-cache type; `q4_0` opt-in with a high-GQA guard; global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION` env wiring | Slice 6 | Cuts KV-cache RAM 2–4× vs fp16; guard prevents quality regression on low-GQA models |
 | **8** | **Vision** — activate the `Capability.Vision` seam; wire a local multimodal model (e.g. Gemma 4, LLaVA) as a specialist; add `hf-gguf` + `hf-mlx` catalog sources filtered by vision capability | Slice 6 | `Capability.Vision` is already declared in `src/core/types.ts` |
 | **9** | **Audio** — activate `Capability.Audio`; local Whisper STT + TTS specialist; audio agent exposes a `transcribe`/`speak` tool | Slice 8 | Pairs with voice-in/out UX item |
 | **10** | **Video** — activate `Capability.Video`; local video-description specialist (frame sampling + vision model) | Slice 9 | Resumable long jobs (run store already supports it) |
@@ -100,11 +109,11 @@ Additional committed items (no fixed slice yet):
 
 ## Recommended priority next
 
-1. **KV-cache quantization (Slice 7)** — immediate RAM savings with no new capabilities required; q8_0 default is safe, q4_0 opt-in with the GQA guard.
-2. **Agent-builder** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
-3. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
+1. **Agent-builder** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
+2. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
+3. **Vision (Slice 8)** — first seam activation now that KV-cache quant (Slice 7) is shipped.
 
-(Slices 8–11 [Vision/Audio/Video/Uncensored] follow naturally once KV-cache quant lands; each is a seam activation.)
+(Slices 8–11 [Vision/Audio/Video/Uncensored] follow naturally from Slice 7; each is a seam activation.)
 
 ## Deferred technical items (cross-cutting, fold in opportunistically)
 
