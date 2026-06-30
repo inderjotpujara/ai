@@ -19,7 +19,7 @@ export function formatSelectionNotice(i: NoticeInput): string {
   const install = i.installed ? 'installed' : 'not installed — will pull';
   return [
     `▸ selected ${i.decl.model}`,
-    `  ${f.approxParamsBillions}B · weights ≈${gb(w)}GB + KV ≈${gb(kv)}GB @ up to ${i.numCtx} ctx = ≈${gb(w + kv)}GB`,
+    `  ${f.approxParamsBillions.toFixed(1)}B · weights ≈${gb(w)}GB + KV ≈${gb(kv)}GB @ up to ${i.numCtx} ctx = ≈${gb(w + kv)}GB`,
     `  live budget ≈${gb(i.budgetBytes)}GB · ${install}`,
   ].join('\n');
 }
