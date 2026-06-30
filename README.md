@@ -113,7 +113,9 @@ they're reusable across other agent tools (Claude Code, Cursor, …).
 |---|---|
 | `src/core/` | `agent.ts` (the loop), `agent-def.ts`, `delegate.ts`, `orchestrator.ts`, `capability-gap.ts`, `resource-capture.ts` (the `{kind:'resource'}` seam), `types.ts`, `errors.ts` |
 | `src/providers/` | `ollama.ts` — builds an AI SDK model from a declaration |
-| `src/resource/` | `hardware.ts` (live free-RAM via `vm_stat` + Metal-cap ceiling), `footprint.ts` (weights + KV split), `model-manager.ts` (load/evict/pin + dynamic `num_ctx`), `selector.ts` (capability filter + largest-that-fits + `resolveModel` fallback loop), `ollama-control.ts` (pull/warm/unload/`getModelMaxContext`) |
+| `src/resource/` | `hardware.ts` (live free-RAM via `vm_stat` + Metal-cap ceiling), `footprint.ts` (weights + KV split), `kv-cache.ts` (per-model arch-derived KV sizing + quant-risk), `model-manager.ts` (load/evict/pin + dynamic `num_ctx`), `model-store.ts` (installed-model cache), `selector.ts` (capability filter + largest-that-fits + `resolveModel` fallback loop), `ollama-control.ts` (pull/warm/unload/`getModelMaxContext`/`getModelKvArch`) |
+| `src/runtime/` | `runtime.ts` (runtime port), `ollama.ts` + `mlx-server.ts` (adapters), `registry.ts` (runtime registry) — build a model from a declaration per provider |
+| `src/discovery/` | `discover.ts` + `build-registry.ts` (offline registry merge), `catalog-source.ts` + `huggingface-gguf.ts` + `huggingface-mlx.ts` + `hf-client.ts` (HF catalogs), `host.ts` (machine detect), `catalog-cache.ts`, `quant.ts`, `sources.ts` |
 | `src/run/` | `run-store.ts` (run dirs + artifacts), `journal.ts` (resumable JSONL log) |
 | `src/tools/` | `read-file.ts` — the `read_file` tool |
 | `src/mcp/` | `server.ts` (exposes tools over MCP), `client.ts` (consumes them) |

@@ -18,6 +18,7 @@ process, and it points Ollama's storage here automatically:
 
 ```sh
 bun run serve     # = scripts/serve.sh → `ollama serve` with OLLAMA_MODELS=<repo>/model-images
+                  #   + OLLAMA_FLASH_ATTENTION=1 + OLLAMA_KV_CACHE_TYPE=q8_0 (default; KV-cache quant, Slice 7)
 ```
 
 (Quit the Ollama menu-bar app first, or it will hold port 11434 and use the
