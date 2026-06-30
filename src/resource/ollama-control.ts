@@ -150,14 +150,22 @@ export async function getModelKvArch(
     return typeof v === 'number' ? v : undefined;
   };
   const blockCount = num('block_count');
-  const headCountKv = num('attention.head_count_kv');
-  const keyLength = num('attention.key_length');
-  const valueLength = num('attention.value_length');
+  const headCount = num('attention.head_count');
+  const embeddingLength = num('embedding_length');
+  // null head_count_kv means no GQA — same as head_count
+  const headCountKv = num('attention.head_count_kv') ?? headCount;
+  // derive head_dim from embedding_length / head_count when key_length absent
+  const headDim =
+    num('attention.key_length') ??
+    (embeddingLength !== undefined && headCount !== undefined
+      ? Math.floor(embeddingLength / headCount)
+      : undefined);
+  const keyLength = headDim;
+  const valueLength = num('attention.value_length') ?? keyLength;
   if (
     blockCount === undefined ||
     headCountKv === undefined ||
-    keyLength === undefined ||
-    valueLength === undefined
+    keyLength === undefined
   ) {
     return undefined;
   }
@@ -165,7 +173,7 @@ export async function getModelKvArch(
     blockCount,
     headCountKv,
     keyLength,
-    valueLength,
+    valueLength: valueLength ?? keyLength,
     expertCount: num('expert_count') ?? 0,
   };
 }
