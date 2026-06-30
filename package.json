@@ -10,7 +10,8 @@
     "test:file": "bun test",
     "lint": "biome check .",
     "lint:file": "biome check",
-    "discover": "bun run src/cli/discover.ts"
+    "discover": "bun run src/cli/discover.ts",
+    "runs": "bun run src/cli/runs.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.55",
