@@ -2,6 +2,10 @@ import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { Agent } from '../../src/core/agent-def.ts';
 import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
+import {
+  runInDelegationContext,
+  withRootDelegationContext,
+} from '../../src/core/guardrails.ts';
 import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 function cannedAgent(name: string, answer: string): Agent {
@@ -82,6 +86,16 @@ function agent(): Agent {
   };
 }
 
+function leaf(name: string, text: string): Agent {
+  return {
+    name,
+    description: `${name} agent`,
+    model: textModel(text),
+    systemPrompt: 's',
+    tools: {},
+  };
+}
+
 test('uses the model override returned by onBeforeDelegate', async () => {
   const t = asDelegateTool(agent(), async () => ({
     model: textModel('OVERRIDE MODEL'),
@@ -111,7 +125,7 @@ test('abort short-circuits: agent never runs, returns soft error', async () => {
   expect(ran).toBe(false);
 });
 
-// --- delegation span tests ---
+// --- delegation span + guardrails tests ---
 
 let spanExporter: ReturnType<typeof registerTestProvider>['exporter'];
 let spanProvider: ReturnType<typeof registerTestProvider>['provider'];
@@ -123,6 +137,7 @@ beforeEach(() => {
 afterEach(async () => {
   await spanProvider.shutdown();
   spanExporter.reset();
+  delete process.env.AGENT_MAX_DELEGATION_DEPTH;
 });
 
 test('asDelegateTool opens an agent.delegation span tagged with the target', async () => {
@@ -156,4 +171,50 @@ test('asDelegateTool opens an agent.delegation span tagged with the target', asy
     .find((s) => s.name === 'agent.delegation');
   expect(del).toBeDefined();
   expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
+});
+
+test('over-depth delegation returns a soft error and records a guardrail event', async () => {
+  process.env.AGENT_MAX_DELEGATION_DEPTH = '1'; // allow depth 1 only
+  const target = leaf('deep', 'answer');
+  const t = asDelegateTool(target);
+  // simulate already being at depth 1 (one delegation deep) → this call would be depth 2 → rejected
+  const result = await runInDelegationContext(
+    'parent',
+    8192,
+    async () =>
+      await t.execute?.({ task: 'go' }, { toolCallId: 'c', messages: [] }),
+  );
+  expect(result).toEqual({ error: expect.stringContaining('depth limit') });
+});
+
+test('long delegated return is truncated to the caller live cap', async () => {
+  const big = 'y'.repeat(9000);
+  const t = asDelegateTool(leaf('big', big));
+  // caller num_ctx 8192 → cap = 0.25*8192*4 = 8192
+  const result = await withRootDelegationContext(
+    8192,
+    async () =>
+      await t.execute?.({ task: 'go' }, { toolCallId: 'c', messages: [] }),
+  );
+  if (
+    result == null ||
+    typeof result !== 'object' ||
+    !('text' in result) ||
+    typeof result.text !== 'string'
+  ) {
+    throw new Error('expected text result');
+  }
+  expect(result.text.length).toBeLessThan(9000);
+  expect(result.text).toContain('…[truncated');
+});
+
+test('within-depth recursive re-entry of the same agent name is allowed', async () => {
+  const t = asDelegateTool(leaf('rec', 'ok'));
+  const result = await runInDelegationContext(
+    'rec',
+    8192,
+    async () =>
+      await t.execute?.({ task: 'again' }, { toolCallId: 'c', messages: [] }),
+  );
+  expect(result).toEqual({ text: 'ok' }); // same name 'rec' re-entered, not rejected
 });

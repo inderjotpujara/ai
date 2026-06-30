@@ -11,6 +11,7 @@ import {
   delegateToolName,
 } from './delegate.ts';
 import { MaxStepsError } from './errors.ts';
+import { withRootDelegationContext } from './guardrails.ts';
 import type { ResourceCapture } from './resource-capture.ts';
 
 export type OrchestratorResult =
@@ -74,7 +75,9 @@ export async function runOrchestrator(
   let steps: Parameters<typeof findCapabilityGap>[0];
 
   try {
-    const result = await runDefinedAgent(orchestrator, task, numCtx);
+    const result = await withRootDelegationContext(numCtx, () =>
+      runDefinedAgent(orchestrator, task, numCtx),
+    );
     text = result.text;
     steps = result.steps;
   } catch (err) {
