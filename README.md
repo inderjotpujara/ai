@@ -203,3 +203,23 @@ bun run lint -- --write             # auto-fix lint/format
   typed errors, string enums. Tests verify real behavior (the agent loop is
   tested against AI SDK's mock model; the MCP path is a real subprocess
   round-trip).
+- **First clone:** run `bun run setup` once to activate the git hooks
+  (`.githooks/`). `bun run check` runs the full pre-PR gate
+  (docs-check · typecheck · lint · tests).
+
+---
+
+## Documentation
+
+Start at the **[documentation map](docs/README.md)** — the index of every
+maintained doc. The key references:
+
+- **[`docs/architecture.md`](docs/architecture.md)** — the living technical map: module/dependency graph, runtime data-flow, every subsystem and mechanism.
+- **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — the long-range plan (local-first n8n × CrewAI, phases A–F).
+- Module docs: [`agents/README.md`](agents/README.md), [`model-images/README.md`](model-images/README.md). Per-slice design records: [`docs/superpowers/`](docs/superpowers/).
+
+**The hard line:** documentation stays current with the code — a stale doc is a
+defect, not debt. Every slice updates `architecture.md` (and this map if a doc
+is added/renamed); the slice's final review audits the doc against the diff for
+accuracy. Enforced by `bun run docs:check` (pre-commit) and a pre-push currency
+gate. See the [documentation map](docs/README.md) for details.

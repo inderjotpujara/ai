@@ -1,0 +1,5 @@
+#!/bin/sh
+# Documentation hard line — structural guard on every commit.
+# Blocks if a living doc is missing/orphaned or a src subsystem is undocumented.
+# Activate once per clone with: bun run setup
+exec bun run docs:check
