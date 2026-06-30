@@ -200,6 +200,7 @@ This slice builds the telemetry **layer**, not its final set of spans. It is des
 - Eval-harness / RAGAS faithfulness scoring (Phase A sister item, separate slice — but `gen_ai.*` token spans here are its substrate).
 - Cross-process / distributed trace context propagation (single-process runs only).
 - Shipping bundled OSS backends; we only emit OTLP — the user points it at their chosen backend.
+- **Known gap (accepted this slice):** the **router warm-up** model load happens in `chat.ts` *before* `runChat` registers the per-run telemetry provider, so that one `agent.model.load` span is emitted to the no-op tracer and does NOT appear in `spans.jsonl`. Delegated-specialist loads/evicts (inside `runChat`) ARE traced. Closing this means bracketing the router warm-up with telemetry init (hoist `initRunTelemetry` ahead of the warm-up, or move the warm-up inside `withRunSpan`); deferred as a follow-up to keep `runChat` as the single telemetry owner. The trace remains coherent and demoable without it.
 
 ---
 
