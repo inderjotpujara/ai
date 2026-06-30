@@ -1,8 +1,17 @@
 import type { LanguageModel } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
-import { withDelegationSpan } from '../telemetry/spans.ts';
+import {
+  recordGuardrailViolation,
+  withDelegationSpan,
+} from '../telemetry/spans.ts';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
+import {
+  checkDelegation,
+  concise,
+  currentDelegationContext,
+  runInDelegationContext,
+} from './guardrails.ts';
 
 /** The orchestrator-facing tool name for delegating to an agent. */
 export function delegateToolName(agent: Agent): string {
@@ -34,6 +43,12 @@ export function asDelegateTool(
     }),
     execute: async ({ task }) =>
       withDelegationSpan(agent.name, async () => {
+        const check = checkDelegation(agent.name);
+        if (!check.ok) {
+          recordGuardrailViolation(check.kind, check.reason);
+          return { error: check.reason };
+        }
+        const callerNumCtx = currentDelegationContext().numCtx;
         try {
           const pre = onBeforeDelegate
             ? await onBeforeDelegate(agent)
@@ -41,13 +56,12 @@ export function asDelegateTool(
           if (pre?.abort) {
             return { error: pre.abort };
           }
-          const { text } = await runDefinedAgent(
-            agent,
-            task,
+          const { text } = await runInDelegationContext(
+            agent.name,
             pre?.numCtx,
-            pre?.model,
+            () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
           );
-          return { text };
+          return { text: concise(text, callerNumCtx) };
         } catch (cause) {
           return {
             error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
