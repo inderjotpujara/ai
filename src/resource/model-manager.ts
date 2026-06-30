@@ -5,7 +5,11 @@ import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
 import { kvCacheBytes, weightsBytes } from './footprint.ts';
 import { liveBudgetBytes } from './hardware.ts';
 import {
-  activeKvCacheType, effectiveKvBytesPerToken, f16KvBytesPerToken, isKvQuantRisky, KvCacheType,
+  activeKvCacheType,
+  effectiveKvBytesPerToken,
+  f16KvBytesPerToken,
+  isKvQuantRisky,
+  KvCacheType,
 } from './kv-cache.ts';
 
 export const MIN_CTX = 4096;
@@ -81,14 +85,20 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
     if (arch) {
       // generalized, arch-derived risk advisory (type is global, so this is informational)
       const type = activeKvCacheType();
-      if (type !== KvCacheType.F16 && isKvQuantRisky(arch) && !kvRiskWarned.has(model)) {
+      if (
+        type !== KvCacheType.F16 &&
+        isKvQuantRisky(arch) &&
+        !kvRiskWarned.has(model)
+      ) {
         kvRiskWarned.add(model);
         d.warn(
           `[model-manager] ${model}: arch (small head_dim / MoE) may lose accuracy under ${type} KV cache; set AGENT_KV_CACHE_TYPE=f16 if quality matters for it.`,
         );
       }
     }
-    const f16 = arch ? f16KvBytesPerToken(arch) : (decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN);
+    const f16 = arch
+      ? f16KvBytesPerToken(arch)
+      : (decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN);
     kvF16ByModel.set(model, f16);
     return f16;
   }

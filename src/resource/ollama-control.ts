@@ -154,10 +154,18 @@ export async function getModelKvArch(
   const keyLength = num('attention.key_length');
   const valueLength = num('attention.value_length');
   if (
-    blockCount === undefined || headCountKv === undefined ||
-    keyLength === undefined || valueLength === undefined
+    blockCount === undefined ||
+    headCountKv === undefined ||
+    keyLength === undefined ||
+    valueLength === undefined
   ) {
     return undefined;
   }
-  return { blockCount, headCountKv, keyLength, valueLength, expertCount: num('expert_count') ?? 0 };
+  return {
+    blockCount,
+    headCountKv,
+    keyLength,
+    valueLength,
+    expertCount: num('expert_count') ?? 0,
+  };
 }
