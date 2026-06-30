@@ -10,6 +10,10 @@
     "test:file": "bun test",
     "lint": "biome check .",
     "lint:file": "biome check",
+    "lint:claude": "bun run lint",
+    "docs:check": "bun run scripts/docs-check.ts",
+    "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
+    "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
     "discover": "bun run src/cli/discover.ts",
     "runs": "bun run src/cli/runs.ts"
   },
