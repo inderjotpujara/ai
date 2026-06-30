@@ -48,6 +48,8 @@ function toRecord(span: ReadableSpan): SpanRecord {
 
 /** Best-effort local span sink. Never throws into the run. */
 export class JsonlFileExporter implements SpanExporter {
+  private writeChain: Promise<void> = Promise.resolve();
+
   constructor(private readonly filePath: string) {}
 
   export(
@@ -55,12 +57,21 @@ export class JsonlFileExporter implements SpanExporter {
     resultCallback: (result: ExportResult) => void,
   ): void {
     const payload = `${spans.map((s) => JSON.stringify(toRecord(s))).join('\n')}\n`;
-    appendFile(this.filePath, payload)
-      .then(() => resultCallback({ code: ExportResultCode.SUCCESS }))
-      .catch((error: Error) =>
+    this.writeChain = this.writeChain.then(() =>
+      appendFile(this.filePath, payload),
+    );
+    this.writeChain.then(
+      () => resultCallback({ code: ExportResultCode.SUCCESS }),
+      (error: Error) =>
         resultCallback({ code: ExportResultCode.FAILED, error }),
-      );
+    );
   }
 
-  async shutdown(): Promise<void> {}
+  async forceFlush(): Promise<void> {
+    await this.writeChain.catch(() => {});
+  }
+
+  async shutdown(): Promise<void> {
+    await this.writeChain.catch(() => {});
+  }
 }

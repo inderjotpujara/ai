@@ -49,6 +49,7 @@ export function initRunTelemetry(runDir: string): {
     );
     contextManagerSet = true;
   }
+  trace.disable();
   trace.setGlobalTracerProvider(provider);
   return {
     shutdown: async () => {

@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { context, trace } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
-import {
+import type {
   BasicTracerProvider,
   InMemorySpanExporter,
-  SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 import {
   ATTR,
@@ -13,27 +10,12 @@ import {
   withDelegationSpan,
   withRunSpan,
 } from '../../src/telemetry/spans.ts';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 let exporter: InMemorySpanExporter;
 let provider: BasicTracerProvider;
 beforeEach(() => {
-  exporter = new InMemorySpanExporter();
-  provider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
-  });
-  context.setGlobalContextManager(
-    new AsyncLocalStorageContextManager().enable(),
-  ); // returns false if already set — harmless
-  // setGlobalTracerProvider only works once per process; use setDelegate to swap for subsequent tests
-  const didSet = trace.setGlobalTracerProvider(provider);
-  if (!didSet) {
-    type TraceInternal = {
-      _proxyTracerProvider: { setDelegate: (p: BasicTracerProvider) => void };
-    };
-    (trace as unknown as TraceInternal)._proxyTracerProvider.setDelegate(
-      provider,
-    );
-  }
+  ({ exporter, provider } = registerTestProvider());
 });
 afterEach(async () => {
   await provider.shutdown();

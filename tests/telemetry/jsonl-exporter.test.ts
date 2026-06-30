@@ -40,3 +40,17 @@ test('writes one JSON line per ended span with parent linkage', async () => {
   expect(rec.attributes.k).toBe('v');
   expect(typeof rec.durationMs).toBe('number');
 });
+
+test('shutdown flushes in-flight writes before returning', async () => {
+  const file = join(dir, 'spans.jsonl');
+  const provider = new BasicTracerProvider({
+    spanProcessors: [new SimpleSpanProcessor(new JsonlFileExporter(file))],
+  });
+  const tracer = provider.getTracer('test');
+  const span = tracer.startSpan('flush-check');
+  span.end();
+  // Do NOT sleep — shutdown must await the pending write
+  await provider.shutdown();
+  const raw = await readFile(file, 'utf8');
+  expect(raw).toContain('"name":"flush-check"');
+});
