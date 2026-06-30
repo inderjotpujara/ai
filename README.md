@@ -5,6 +5,14 @@ agents against **local models** (no API keys), orchestrated by a super-agent,
 on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
 Mini.
 
+> **Where this is going:** a local-first, self-owned **n8n × CrewAI** — an
+> agent-workflow platform where you compose role-based agents + tools into
+> workflows, trigger them, watch them run, and let the system extend itself with
+> new agents on demand. Slices 1–7 built the hardware-aware **engine**; the next
+> phase builds the **product** (visibility → workflows/crews + memory/RAG +
+> grounded verification → integration library → agent-builder → triggers). See
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 > **Status:** Slice 7 complete — **KV-cache quantization**. `bun run serve` sets
 > `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE=q8_0` (default); the manager
 > sizes context per-model from live arch data (`/api/show`) and warns on arch-risky
@@ -171,11 +179,12 @@ interface — no agent code changes. See
 | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
 | **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline merge of bootstrap + local + catalog at chat time; Ollama + MLX-server runtimes; four-axis taxonomy (capability/modality, runtime, source, content-policy) | ✅ Done |
 | **7** | **KV-cache quantization** — global `AGENT_KV_CACHE_TYPE` (default q8_0); `OLLAMA_FLASH_ATTENTION=1` required; per-model arch-derived sizing from `/api/show`; generalized arch-risk advisory (small head_dim / MoE) | ✅ Done |
-| **Later** | Agent-builder ⭐ (self-extend on a capability gap) · Vision · Audio · Video · Uncensored mode · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
+| **Next (product line)** | Toward a local **n8n × CrewAI**, in phases: **A** see/trust (run-viewer · graceful degradation · eval) → **B** compose (composition guardrails · workflow/crew engine · **memory/RAG** · **grounded verification**) → **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
-**Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
-daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
-implementation plans live in [`docs/superpowers/`](docs/superpowers/).
+**Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
+the continuous hardware-aware engine line, and the recommended sequence:
+[`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and implementation plans live
+in [`docs/superpowers/`](docs/superpowers/).
 
 ---
 
