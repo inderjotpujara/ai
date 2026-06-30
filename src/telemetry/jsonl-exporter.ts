@@ -33,6 +33,9 @@ function toRecord(span: ReadableSpan): SpanRecord {
     traceId: ctx.traceId,
     spanId: ctx.spanId,
     parentSpanId: span.parentSpanContext?.spanId ?? null,
+    // Lossy: nanosecond magnitude exceeds Number.MAX_SAFE_INTEGER for wall-clock
+    // times, so sub-microsecond precision is lost. Sort-order impact only;
+    // durationMs (computed from hrTime difference) is exact.
     startUnixNano: hrTimeToMicroseconds(span.startTime) * 1000,
     endUnixNano: hrTimeToMicroseconds(span.endTime) * 1000,
     durationMs: hrTimeToMicroseconds(span.duration) / 1000,

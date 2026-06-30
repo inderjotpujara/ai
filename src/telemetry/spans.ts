@@ -20,6 +20,8 @@ export const ATTR = {
   MODEL_BUDGET_BYTES: 'model.budget_bytes',
   MODEL_SIZE_BYTES: 'model.size_bytes',
   EVICT_REASON: 'model.evict.reason',
+  USAGE_INPUT_TOKENS: 'gen_ai.usage.input_tokens',
+  USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
 } as const;
 
 export type ModelSelectInfo = {

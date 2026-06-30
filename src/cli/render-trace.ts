@@ -10,8 +10,8 @@ function spanLabel(node: TraceNode): string {
   if (typeof target === 'string') bits.push(`→ ${target}`);
   const outcome = a[ATTR.OUTCOME];
   if (typeof outcome === 'string') bits.push(`[${outcome}]`);
-  const inTok = a['gen_ai.usage.input_tokens'];
-  const outTok = a['gen_ai.usage.output_tokens'];
+  const inTok = a[ATTR.USAGE_INPUT_TOKENS];
+  const outTok = a[ATTR.USAGE_OUTPUT_TOKENS];
   if (typeof inTok === 'number' || typeof outTok === 'number') {
     bits.push(`tok ${inTok ?? '?'}/${outTok ?? '?'}`);
   }

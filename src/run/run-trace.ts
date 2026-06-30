@@ -34,7 +34,7 @@ export function buildTree(spans: SpanRecord[]): TraceNode[] {
   for (const node of byId.values()) {
     const parentId = node.span.parentSpanId;
     const parent = parentId ? byId.get(parentId) : undefined;
-    if (parent) parent.children.push(node);
+    if (parent && parent !== node) parent.children.push(node);
     else roots.push(node);
   }
   const sortByStart = (a: TraceNode, b: TraceNode) =>

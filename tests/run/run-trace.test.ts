@@ -63,6 +63,15 @@ test('buildTree promotes orphans (missing parent) to roots', () => {
   expect(tree[0]?.span.name).toBe('orphan');
 });
 
+test('buildTree treats a span whose parentSpanId equals its own spanId as a root (no infinite recursion)', () => {
+  const tree = buildTree([
+    span({ name: 'self-ref', spanId: 'loop', parentSpanId: 'loop' }),
+  ]);
+  expect(tree).toHaveLength(1);
+  expect(tree[0]?.span.name).toBe('self-ref');
+  expect(tree[0]?.children).toHaveLength(0);
+});
+
 test('readSpans parses good lines and counts malformed ones', async () => {
   const dir = join(root, 'run-1');
   await mkdir(dir, { recursive: true });

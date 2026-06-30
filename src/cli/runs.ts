@@ -65,8 +65,6 @@ async function main(): Promise<void> {
         await tick();
       }
     }, 500);
-    // Reference stopper to satisfy linter (used via clearInterval above)
-    void stopper;
     return;
   }
   console.log(await renderRun(root, id));
