@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { formatSelectionNotice } from '../../src/cli/selection-notice.ts';
 import {
   Capability,
@@ -36,4 +36,19 @@ test('not-installed notice announces a pull', () => {
     installed: false,
   });
   expect(s.toLowerCase()).toContain('pull');
+});
+
+afterEach(() => {
+  delete process.env.AGENT_KV_CACHE_TYPE;
+});
+
+test('notice labels the active KV cache type', () => {
+  process.env.AGENT_KV_CACHE_TYPE = 'q8_0';
+  const s = formatSelectionNotice({
+    decl,
+    numCtx: 16384,
+    budgetBytes: 12.3e9,
+    installed: true,
+  });
+  expect(s).toContain('KV q8_0');
 });
