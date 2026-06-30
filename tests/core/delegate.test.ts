@@ -1,7 +1,8 @@
-import { expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { Agent } from '../../src/core/agent-def.ts';
 import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 function cannedAgent(name: string, answer: string): Agent {
   return {
@@ -108,4 +109,51 @@ test('abort short-circuits: agent never runs, returns soft error', async () => {
   );
   expect(out).toEqual({ error: 'no fit' });
   expect(ran).toBe(false);
+});
+
+// --- delegation span tests ---
+
+let spanExporter: ReturnType<typeof registerTestProvider>['exporter'];
+let spanProvider: ReturnType<typeof registerTestProvider>['provider'];
+
+beforeEach(() => {
+  ({ exporter: spanExporter, provider: spanProvider } = registerTestProvider());
+});
+
+afterEach(async () => {
+  await spanProvider.shutdown();
+  spanExporter.reset();
+});
+
+test('asDelegateTool opens an agent.delegation span tagged with the target', async () => {
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [{ type: 'text', text: 'done' }],
+      finishReason: { unified: 'stop', raw: undefined },
+      usage: {
+        inputTokens: {
+          total: 1,
+          noCache: undefined,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
+        outputTokens: { total: 1, text: undefined, reasoning: undefined },
+      },
+      warnings: [],
+    }),
+  });
+  const delegateAgent: Agent = {
+    name: 'web_fetch',
+    description: 'fetches',
+    model,
+    systemPrompt: 's',
+    tools: {},
+  };
+  const tool = asDelegateTool(delegateAgent);
+  await tool.execute?.({ task: 'go' }, { toolCallId: 't', messages: [] });
+  const del = spanExporter
+    .getFinishedSpans()
+    .find((s) => s.name === 'agent.delegation');
+  expect(del).toBeDefined();
+  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
 });

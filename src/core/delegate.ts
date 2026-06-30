@@ -1,6 +1,7 @@
 import type { LanguageModel } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import { withDelegationSpan } from '../telemetry/spans.ts';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
 
 /** The orchestrator-facing tool name for delegating to an agent. */
@@ -31,26 +32,27 @@ export function asDelegateTool(
     inputSchema: z.object({
       task: z.string().describe('The task for this agent'),
     }),
-    execute: async ({ task }) => {
-      try {
-        const pre = onBeforeDelegate
-          ? await onBeforeDelegate(agent)
-          : undefined;
-        if (pre?.abort) {
-          return { error: pre.abort };
+    execute: async ({ task }) =>
+      withDelegationSpan(agent.name, async () => {
+        try {
+          const pre = onBeforeDelegate
+            ? await onBeforeDelegate(agent)
+            : undefined;
+          if (pre?.abort) {
+            return { error: pre.abort };
+          }
+          const { text } = await runDefinedAgent(
+            agent,
+            task,
+            pre?.numCtx,
+            pre?.model,
+          );
+          return { text };
+        } catch (cause) {
+          return {
+            error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+          };
         }
-        const { text } = await runDefinedAgent(
-          agent,
-          task,
-          pre?.numCtx,
-          pre?.model,
-        );
-        return { text };
-      } catch (cause) {
-        return {
-          error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
-        };
-      }
-    },
+      }),
   });
 }
