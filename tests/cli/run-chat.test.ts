@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockLanguageModelV3 } from 'ai/test';
 import { runChat } from '../../src/cli/run-chat.ts';
 import type { Agent } from '../../src/core/agent-def.ts';
 import { createOrchestrator } from '../../src/core/orchestrator.ts';
-import { readJournal } from '../../src/run/journal.ts';
+import { readSpans } from '../../src/run/run-trace.ts';
 
 let root: string;
 beforeEach(async () => {
@@ -75,8 +75,6 @@ test('runChat records a gap run and writes the gap artifact', async () => {
   expect(await readFile(join(root, 'run-1', 'gap.txt'), 'utf8')).toContain(
     'send email',
   );
-  const journal = await readJournal(join(root, 'run-1'));
-  expect(journal.map((e) => e.step)).toEqual(['start', 'gap']);
 });
 
 function answerOrchestrator(): Agent {
@@ -114,6 +112,30 @@ test('runChat records an answer run and writes the answer artifact', async () =>
   expect(await readFile(join(root, 'run-2', 'answer.txt'), 'utf8')).toBe(
     'Here is your answer.',
   );
-  const journal = await readJournal(join(root, 'run-2'));
-  expect(journal.map((e) => e.step)).toEqual(['start', 'answer']);
+});
+
+test('runChat writes spans.jsonl with a root run span carrying the outcome', async () => {
+  const result = await runChat({
+    orchestrator: gapOrchestrator(),
+    task: 'email my boss',
+    runsRoot: root,
+    runId: 'run-span',
+  });
+  expect(result.kind).toBe('gap');
+  const { spans } = await readSpans(join(root, 'run-span'));
+  const runSpan = spans.find((s) => s.name === 'agent.run');
+  expect(runSpan).toBeDefined();
+  expect(runSpan?.attributes['agent.outcome']).toBe('gap');
+});
+
+test('runChat no longer writes journal.jsonl', async () => {
+  await runChat({
+    orchestrator: gapOrchestrator(),
+    task: 'x',
+    runsRoot: root,
+    runId: 'run-nojournal',
+  });
+  await expect(
+    stat(join(root, 'run-nojournal', 'journal.jsonl')),
+  ).rejects.toThrow();
 });
