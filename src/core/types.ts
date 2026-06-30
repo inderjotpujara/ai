@@ -1,12 +1,21 @@
 /** Which local runtime backs a model. String enum per project style. */
 export enum ProviderKind {
-  Ollama = 'Ollama',
+  Ollama = 'Ollama', // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
+  MlxServer = 'MlxServer', // MLX via a local OpenAI-compatible server (LM Studio / vllm-mlx)
 }
 
-/** A capability a model advertises and an agent can require. String enum (extensible). */
+/** A capability a model advertises and an agent can require. Selector hard-filters on these. */
 export enum Capability {
   Tools = 'tools',
-  // future: Vision = 'vision', LongContext = 'long-context', Coding = 'coding'
+  Vision = 'vision', // image input (Slice 8)
+  Audio = 'audio', // speech in/out (Slice 9)
+  Video = 'video', // frames/clips (Slice 10)
+}
+
+/** Content moderation posture. Uncensored is gated behind a future mode (Slice 11). */
+export enum ContentPolicy {
+  Default = 'default',
+  Uncensored = 'uncensored',
 }
 
 /** How the selector ranks the candidates that survive the hard filter. */
@@ -23,6 +32,8 @@ export type ModelRequirement = {
   requires: Capability[];
   /** SOFT rank over the survivors. */
   prefer: PreferPolicy;
+  /** If true, uncensored models are eligible. Absent/false = filtered out. */
+  allowUncensored?: boolean;
 };
 
 /** Tunable inference parameters carried by a model declaration. */
@@ -42,6 +53,8 @@ export type ModelDeclaration = {
   role: string;
   /** Capabilities this model provides; selector hard-filters on these. Missing = none. */
   capabilities?: Capability[];
+  /** Moderation posture; absent = Default. */
+  contentPolicy?: ContentPolicy;
   /** Pre-load sizing hint for the model manager. */
   footprint: {
     approxParamsBillions: number;

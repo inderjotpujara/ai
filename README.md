@@ -5,12 +5,12 @@ agents against **local models** (no API keys), orchestrated by a super-agent,
 on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
 Mini.
 
-> **Status:** Slice 5 complete — **dynamic model selection**. Specialists declare
-> a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`)
-> rather than a fixed model; a selector picks the largest registry model that fits
-> the live RAM budget (degrading 9b→4b under pressure). Built on Slice 4's
-> hardware-aware Model Manager (live free-RAM budget via `vm_stat`, dynamic
-> `num_ctx`, best-effort pinning). See [Roadmap](#roadmap).
+> **Status:** Slice 6 complete — **model discovery**. `bun run discover` fetches
+> the latest tool-capable GGUF/MLX models from Hugging Face, writes a per-machine
+> catalog, and pre-pulls the top fit. Normal `chat` runs merge the bootstrap rungs +
+> locally-installed models + the cached catalog — no network needed at inference time.
+> Built on Slice 5's dynamic model selection (capability requirements + largest-that-fits
+> selector). See [Roadmap](#roadmap).
 
 ---
 
@@ -37,7 +37,9 @@ Under the hood, one CLI run autonomously:
 
 No manual steps. No API keys. Everything runs locally.
 
-**Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder that Slice 6 discovery will populate at runtime.
+**Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder populated at runtime by Slice 6 discovery.
+
+**Model discovery (Slice 6).** `bun run discover` fetches the latest tool-capable GGUF (and MLX, when a local MLX server is running) models from Hugging Face (trusted publishers, sized to your live RAM budget), writes a per-machine `model-images/catalog.json`, and pre-pulls the top fitting model. Normal `chat` runs read an **offline** merge of the bootstrap rungs + locally-installed models + the cached catalog — no network needed. A local MLX server (LM Studio / vllm-mlx at `MLX_BASE_URL`) is discovered + used automatically when running. Vision/audio/video and an uncensored mode are typed-in seams shipped in later slices.
 
 ---
 
@@ -165,8 +167,9 @@ interface — no agent code changes. See
 | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
 | **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation) · best-effort pin (pinned evicted only as last resort) · dynamic `num_ctx` sized from headroom, clamped by live model max, floored at 4096 | ✅ Done |
 | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
-| **Next** | **Slice 6 — model discovery** (auto-fetch latest models from Hugging Face, pull on demand, keep registry current — no hardcoded list) | Planned |
-| **Later** | Agent-builder ⭐ (self-extend on a capability gap) · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
+| **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline merge of bootstrap + local + catalog at chat time; Ollama + MLX-server runtimes; four-axis taxonomy (capability/modality, runtime, source, content-policy) | ✅ Done |
+| **Next** | **Slice 7 — KV-cache quantization** (q8_0 default, q4_0 opt-in with high-GQA guard, global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION`) | Planned |
+| **Later** | Agent-builder ⭐ (self-extend on a capability gap) · Vision · Audio · Video · Uncensored mode · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
 
 **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
 daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and

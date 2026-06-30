@@ -2,11 +2,11 @@ import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { ResourceError } from '../core/errors.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
-import type { ModelDeclaration } from '../core/types.ts';
-import { createOllamaModel } from '../providers/ollama.ts';
+import { type ModelDeclaration, ProviderKind } from '../core/types.ts';
 import type { EnsureOpts } from '../resource/model-manager.ts';
 import type { LoadedModel } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
+import { runtimeFor } from '../runtime/registry.ts';
 
 export type SelectHookDeps = {
   registry: ModelDeclaration[];
@@ -37,7 +37,11 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
         },
         { pinned: deps.pinned },
       );
-      return { model: createOllamaModel(decl), numCtx };
+      const model = runtimeFor(decl.provider).createModel(decl);
+      return {
+        model,
+        numCtx: decl.provider === ProviderKind.Ollama ? numCtx : undefined,
+      };
     } catch (err) {
       if (err instanceof ResourceError) {
         deps.capture.error = err;

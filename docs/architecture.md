@@ -168,7 +168,67 @@ liveBudgetBytes()
 
 ---
 
-## 5. Why Ollama
+## 5. Discovery & runtimes (Slice 6)
+
+Slice 6 adds the machinery that keeps the model registry current without any code change — model freshness becomes runtime behavior.
+
+### Runtime port
+
+The `Runtime` interface (`src/runtime/runtime.ts`) abstracts everything the Model Manager drives: `isAvailable`, `createModel`, and a `RuntimeControl` object (`isInstalled`/`pull`/`warm`/`unload`/`listLoaded`/`getModelMax`). Two adapters ship:
+
+- **Ollama** (`src/runtime/ollama.ts`) — the Tier-1 adapter; wraps the Ollama HTTP API already used by the resource layer.
+- **MLX server** (`src/runtime/mlx-server.ts`) — an OpenAI-compatible local server (LM Studio, vllm-mlx). Discovered automatically when `MLX_BASE_URL` is reachable (default `http://localhost:1234/v1`). `pull`/`warm`/`unload` are best-effort; the server owns model lifecycle. `listLoaded` returns the `/v1/models` list.
+
+### CatalogSource port
+
+`CatalogSource` (`src/discovery/catalog-source.ts`) is the interface for model catalogs: `appliesTo(host)` gates the source on host capabilities; `listCandidates(query)` returns `Candidate[]` ranked by downloads. Two sources ship:
+
+- **hf-gguf** (`src/discovery/huggingface-gguf.ts`) — queries the Hugging Face API for GGUF models from trusted publishers; filters by capability (tool-calling), picks the best-fitting quantization via `pickBestQuantThatFits` (`src/discovery/quant.ts`), and gates on `host.runtimes` including Ollama.
+- **hf-mlx** (`src/discovery/huggingface-mlx.ts`) — same flow for MLX-format models; gates on the MLX-server runtime being in the host's runtime list.
+
+### Host detector
+
+`detectHost` (`src/discovery/host.ts`) probes the machine at discovery time: reads live budget from `liveBudgetBytes()`, probes each registered runtime's `isAvailable()`, and returns a `HostCapabilities` object (`totalRamBytes`, `liveBudgetBytes`, `runtimes: ProviderKind[]`). The runtimes list controls which `CatalogSource`s fire.
+
+### Offline `buildRegistry`
+
+`buildRegistry` (`src/discovery/build-registry.ts`) merges three layers into a single `ModelDeclaration[]` without any network call:
+
+1. **Bootstrap rungs** — the static `BOOTSTRAP` ladder from `models/registry.ts` (always available).
+2. **Locally-installed models** — queried from each available runtime's `control.listLoaded()`.
+3. **Cached catalog** — `readCatalog()` from `model-images/catalog.json` (written by the last `discover` run; absent on a fresh machine → degraded gracefully).
+
+This is the registry `resolveModel` uses at chat time — no network needed.
+
+### `discover` pipeline + pre-pull
+
+`runDiscovery` (`src/discovery/discover.ts`) orchestrates the online path:
+
+1. Detect host (or accept an injected `HostCapabilities` for tests).
+2. For each applicable `CatalogSource`, call `listCandidates`; skip failing sources (degrade, not throw).
+3. Deduplicate by `(provider, repo)`, keep the highest-download entry per repo.
+4. Rank by downloads, then by `approxParamsBillions` descending.
+5. Write the ranked list to `model-images/catalog.json` via `writeCatalog`.
+6. Pre-pull the top `prePullCount` candidates (default 1) via the runtime's `pull`; skips on error.
+
+Accepts injected `deps` (`host`, `sources`, `writeCatalog`, `pullTop`, `prePullCount`) so the live test can run without touching disk or pulling multi-GB weights.
+
+### Four axes
+
+The catalog and registry use four orthogonal axes to classify every model entry:
+
+| Axis | Values | Where declared |
+|---|---|---|
+| **Capability / modality** | `Tools`, `Vision`, `Audio`, `Video` | `Capability` enum (`src/core/types.ts`) |
+| **Runtime** | `Ollama`, `MlxServer` | `ProviderKind` enum (`src/core/types.ts`) |
+| **Source** | `hf-gguf`, `hf-mlx` | `CatalogSource.name` |
+| **Content policy** | *(typed seam; `Uncensored` planned for Slice 11)* | `ContentPolicy` enum (`src/core/types.ts`) |
+
+Capability and content-policy filtering happen in `selectCandidates`; runtime filtering happens in `appliesTo`; source is informational.
+
+---
+
+## 7. Why Ollama
 
 We are using **llama.cpp — through Ollama.** Ollama wraps the llama.cpp engine
 (and Apple's MLX on 32 GB+ Macs) and adds the parts an agent system needs:
@@ -187,7 +247,7 @@ Apple Silicon, Ollama 0.19+ already runs on an MLX backend.
 
 ---
 
-## 6. Testing strategy
+## 8. Testing strategy
 
 - **Agent loop** — tested against AI SDK 6's `MockLanguageModelV3`: scripts a
   tool-call turn then a final-text turn, asserting the tool executed with parsed
@@ -197,12 +257,19 @@ Apple Silicon, Ollama 0.19+ already runs on an MLX backend.
 - **Run store / journal / tool** — real temp dirs and files (real I/O).
 - **MCP** — a **real round-trip**: spawns `mcp/server.ts` as a subprocess over
   stdio, discovers `read_file` through the AI SDK MCP client, reads a real file.
+- **Live discovery** (`tests/integration/discover.live.test.ts`) — skips if
+  `https://huggingface.co` is unreachable; otherwise calls `runDiscovery` with an
+  injected host + no-op `pullTop`/`prePullCount:0`, and asserts ≥1 fitting
+  candidate + catalog written. No multi-GB download.
+- **Live MLX** (`tests/integration/mlx.live.test.ts`) — skips unless
+  `mlxServerRuntime.isAvailable()` returns true; asserts `listLoaded()` returns
+  an array. Requires a running LM Studio / vllm-mlx server.
 - Tests need **no Ollama**; the only step that does is the manual end-to-end CLI
   run.
 
 ---
 
-## 7. Glossary
+## 9. Glossary
 
 - **Declaration** — a small data file describing a model (provider + name +
   params + role) or an agent. Not weights, not logic.

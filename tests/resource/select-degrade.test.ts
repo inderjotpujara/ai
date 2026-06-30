@@ -1,8 +1,9 @@
 import { expect, mock, test } from 'bun:test';
-import { REGISTRY } from '../../models/registry.ts';
+import { BOOTSTRAP } from '../../models/registry.ts';
 import { Capability, PreferPolicy } from '../../src/core/types.ts';
 import { createModelManager } from '../../src/resource/model-manager.ts';
 import { resolveModel } from '../../src/resource/selector.ts';
+import type { RuntimeControl } from '../../src/runtime/runtime.ts';
 
 /**
  * Budget math (bpw=0.56, MIN_CTX=4096, kvBytesPerToken=131072):
@@ -17,24 +18,25 @@ import { resolveModel } from '../../src/resource/selector.ts';
  */
 const BUDGET_BYTES = 4e9;
 
-function fakes(
-  overrides: Partial<Parameters<typeof createModelManager>[0]> = {},
-) {
+function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
   return {
     isInstalled: mock(async () => true),
     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
     pull: mock(async () => {}),
     warm: mock(async () => {}),
     unload: mock(async () => {}),
-    warn: mock(() => {}),
     getModelMax: mock(async () => 262144),
-    ...overrides,
+    ...over,
   };
 }
 
-test('degrade-to-4b: resolveModel over real REGISTRY falls back to qwen3.5:4b under 4 GB budget', async () => {
-  const f = fakes();
-  const mgr = createModelManager({ budgetBytes: BUDGET_BYTES, ...f });
+test('degrade-to-4b: resolveModel over real BOOTSTRAP falls back to qwen3.5:4b under 4 GB budget', async () => {
+  const control = fakeControl();
+  const mgr = createModelManager({
+    budgetBytes: BUDGET_BYTES,
+    warn: mock(() => {}),
+    controlFor: () => control,
+  });
 
   const req = {
     role: 'test-tools',
@@ -42,9 +44,9 @@ test('degrade-to-4b: resolveModel over real REGISTRY falls back to qwen3.5:4b un
     prefer: PreferPolicy.LargestThatFits,
   };
 
-  const { decl, numCtx } = await resolveModel(req, REGISTRY, {
+  const { decl, numCtx } = await resolveModel(req, BOOTSTRAP, {
     ensureReady: mgr.ensureReady,
-    listLoaded: f.listLoaded,
+    listLoaded: control.listLoaded,
   });
 
   expect(decl.model).toBe('qwen3.5:4b');

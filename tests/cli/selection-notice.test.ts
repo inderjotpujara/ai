@@ -23,7 +23,7 @@ test('notice includes model, size, ctx, budget and install state', () => {
     installed: true,
   });
   expect(s).toContain('qwen3.5:9b');
-  expect(s).toContain('9B');
+  expect(s).toContain('9.0B');
   expect(s).toContain('16384');
   expect(s).toContain('installed');
 });

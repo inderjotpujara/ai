@@ -9,14 +9,16 @@
     "test": "bun test",
     "test:file": "bun test",
     "lint": "biome check .",
-    "lint:file": "biome check"
+    "lint:file": "biome check",
+    "discover": "bun run src/cli/discover.ts"
   },
   "dependencies": {
-    "ai": "^6.0.214",
-    "zod": "^4.4.3",
-    "ollama-ai-provider-v2": "^3.6.0",
     "@ai-sdk/mcp": "^1.0.55",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@ai-sdk/openai-compatible": "^1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^6.0.214",
+    "ollama-ai-provider-v2": "^3.6.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "typescript": "^5.9.0",
