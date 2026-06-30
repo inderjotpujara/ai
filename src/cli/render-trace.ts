@@ -3,7 +3,9 @@ import { ATTR } from '../telemetry/spans.ts';
 
 function spanLabel(node: TraceNode): string {
   const a = node.span.attributes;
-  const bits: string[] = [`${node.span.name} (${node.span.durationMs}ms)`];
+  const bits: string[] = [
+    `${node.span.name} (${Math.round(node.span.durationMs)}ms)`,
+  ];
   const model = a[ATTR.MODEL_ID];
   if (typeof model === 'string') bits.push(model);
   const target = a[ATTR.DELEGATION_TARGET];
@@ -34,7 +36,7 @@ export function renderRunList(runs: RunSummary[]): string {
   const sorted = [...runs].sort((a, b) => b.startMs - a.startMs);
   const lines = sorted.map(
     (r) =>
-      `${r.id}\t${r.outcome}\t${r.durationMs}ms\t${r.models.join(',') || '-'}`,
+      `${r.id}\t${r.outcome}\t${Math.round(r.durationMs)}ms\t${r.models.join(',') || '-'}`,
   );
   return ['RUN\tOUTCOME\tDURATION\tMODELS', ...lines].join('\n');
 }

@@ -46,6 +46,26 @@ test('renderTimeline indents children and shows model + duration', () => {
   );
 });
 
+test('renders durations as rounded integer ms (no fractional float)', () => {
+  const runNode = node('agent.run', {});
+  runNode.span.durationMs = 23254.239958;
+  const tree = [runNode];
+  expect(renderTimeline(tree)).toContain('(23254ms)');
+  expect(renderTimeline(tree)).not.toContain('.239');
+
+  const list = renderRunList([
+    {
+      id: 'run-1',
+      startMs: 0,
+      durationMs: 23254.239958,
+      outcome: 'answer',
+      models: [],
+    },
+  ]);
+  expect(list).toContain('23254ms');
+  expect(list).not.toContain('.239');
+});
+
 test('renderRunList lists newest-first with id, outcome, duration', () => {
   const out = renderRunList([
     {
