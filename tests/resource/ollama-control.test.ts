@@ -25,6 +25,32 @@ test('isModelInstalled returns true when /api/tags lists the model by name', asy
   expect(await isModelInstalled('llama3:8b')).toBe(false);
 });
 
+test('isModelInstalled treats bare model name as :latest', async () => {
+  spyOn(globalThis, 'fetch' as any).mockImplementation(() =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify({
+          models: [
+            { name: 'bespoke-minicheck:latest' },
+            { name: 'qwen3-embedding:0.6b' },
+          ],
+        }),
+        { status: 200 },
+      ),
+    ),
+  );
+  // Bare query matches :latest installed tag
+  expect(await isModelInstalled('bespoke-minicheck')).toBe(true);
+  // Explicit :latest query still matches
+  expect(await isModelInstalled('bespoke-minicheck:latest')).toBe(true);
+  // Explicit tag matches
+  expect(await isModelInstalled('qwen3-embedding:0.6b')).toBe(true);
+  // Bare query of explicit-tag model fails (not :latest)
+  expect(await isModelInstalled('qwen3-embedding')).toBe(false);
+  // Non-existent model fails
+  expect(await isModelInstalled('not-there')).toBe(false);
+});
+
 test('pullModel POSTs the model field and resolves on 200', async () => {
   const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
     new Response(JSON.stringify({ status: 'success' }), { status: 200 }),
