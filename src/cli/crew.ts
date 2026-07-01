@@ -5,7 +5,9 @@ import type { CrewDef, CrewOutcome } from '../crew/types.ts';
 import { createFetchTools, createFileTools } from '../mcp/client.ts';
 import { createRun, writeArtifact } from '../run/run-store.ts';
 import { initRunTelemetry } from '../telemetry/provider.ts';
+import type { VerifyDeps } from '../verification/types.ts';
 import { createSelectionRuntime } from './select-runtime.ts';
+import { makeRealVerifyDeps } from './verify-runtime.ts';
 
 export type CrewCliDeps = {
   def: CrewDef;
@@ -15,6 +17,9 @@ export type CrewCliDeps = {
   tools: ToolSet;
   onBeforeDelegate?: CrewDeps['onBeforeDelegate']; // live model selection
   runAgentStep?: CrewDeps['runAgentStep']; // test seam
+  /** Grounded-verification deps. Presence forces every task to verify
+   *  (crew-wide default), mirroring `--verify` at the CLI. */
+  verifyDeps?: VerifyDeps;
 };
 
 /** Run a crew with telemetry + artifact persistence (mirrors runFlow). */
@@ -22,10 +27,12 @@ export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
   const run = await createRun(deps.runsRoot, deps.runId);
   const tel = initRunTelemetry(run.dir);
   try {
-    const outcome = await runCrew(deps.def, deps.input, {
+    const def = deps.verifyDeps ? { ...deps.def, verify: true } : deps.def;
+    const outcome = await runCrew(def, deps.input, {
       tools: deps.tools,
       onBeforeDelegate: deps.onBeforeDelegate,
       runAgentStep: deps.runAgentStep,
+      verifyDeps: deps.verifyDeps,
     });
     if (outcome.kind === 'done') {
       const text =
@@ -52,10 +59,22 @@ export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
   }
 }
 
+/** Split `--verify` out of the positional args (mirrors the `--flag value`
+ *  parsing in src/cli/memory.ts, simplified to a single boolean flag). */
+function parseArgs(argv: string[]): { positional: string[]; verify: boolean } {
+  const positional: string[] = [];
+  let verify = false;
+  for (const arg of argv) {
+    if (arg === '--verify') verify = true;
+    else positional.push(arg);
+  }
+  return { positional, verify };
+}
+
 async function main(): Promise<void> {
   const [name, ...rest] = process.argv.slice(2);
   if (!name) {
-    console.error('Usage: bun run crew <name> [input...]');
+    console.error('Usage: bun run crew <name> [input...] [--verify]');
     process.exit(1);
   }
   const def = getCrew(name);
@@ -63,6 +82,7 @@ async function main(): Promise<void> {
     console.error(`Unknown crew: ${name}`);
     process.exit(1);
   }
+  const { positional, verify } = parseArgs(rest);
 
   const fileServer = await createFileTools();
   try {
@@ -71,30 +91,39 @@ async function main(): Promise<void> {
       const selection = await createSelectionRuntime();
       try {
         const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
-        const outcome = await runCrewCli({
-          def,
-          input: rest.join(' ').trim(),
-          runsRoot: 'runs',
-          runId: `crew-${process.pid}`,
-          tools,
-          onBeforeDelegate: selection.onBeforeDelegate,
-        });
-        if (outcome.kind === 'done') {
-          console.log(
-            typeof outcome.output === 'string'
-              ? outcome.output
-              : JSON.stringify(outcome.output, null, 2),
-          );
-        } else if (outcome.kind === 'unverified') {
-          console.error(
-            `Crew abstained at ${outcome.failedTaskId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
-          );
-          process.exitCode = 1;
-        } else {
-          console.error(
-            `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
-          );
-          process.exitCode = 1;
+        const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
+        try {
+          const outcome = await runCrewCli({
+            def,
+            input: positional.join(' ').trim(),
+            runsRoot: 'runs',
+            runId: `crew-${process.pid}`,
+            tools,
+            onBeforeDelegate: selection.onBeforeDelegate,
+            verifyDeps: verifyRuntime?.verifyDeps,
+          });
+          if (outcome.kind === 'done') {
+            console.log(
+              typeof outcome.output === 'string'
+                ? outcome.output
+                : JSON.stringify(outcome.output, null, 2),
+            );
+          } else if (outcome.kind === 'unverified') {
+            console.error(
+              `Crew abstained at ${outcome.failedTaskId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
+            );
+            process.exitCode = 1;
+          } else {
+            console.error(
+              `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
+            );
+            process.exitCode = 1;
+          }
+        } finally {
+          if (verifyRuntime) {
+            verifyRuntime.store.close();
+            await verifyRuntime.manager.unloadAll();
+          }
         }
       } finally {
         await selection.close();

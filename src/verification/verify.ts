@@ -1,4 +1,4 @@
-import { withVerificationSpan } from '../telemetry/spans.ts';
+import { recordVerdict, withVerificationSpan } from '../telemetry/spans.ts';
 import { decomposeClaims } from './claims.ts';
 import { verifyModel, verifyThreshold } from './config.ts';
 import { verifyFaithfulness } from './judge.ts';
@@ -33,6 +33,10 @@ export async function verify(
       threshold,
       deps,
     );
+    // Annotate the verification.check span (opened above) with the verdict
+    // computed here — deferred from Task 7 since the verdict didn't exist yet
+    // when the span was seeded.
+    recordVerdict(verdict.unsupportedClaims.length);
     return verdict;
   });
 }

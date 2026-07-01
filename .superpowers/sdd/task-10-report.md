@@ -1,127 +1,266 @@
-# Task 10 Report: Recall tool + auto-inject helper
+# Task 10 Report: `--verify` CLI flag + real `VerifyDeps` wiring + `unverified.txt`
 
-## Implemented
+(Note: this filename previously held a stale report for an earlier, differently-numbered
+"Task 10" — memory recall tool, commit `80bab2d`. That work is real and already landed;
+this report replaces it with the actual Slice-13 Task 10 per the current task numbering.)
 
-`src/memory/recall-tool.ts`:
-- `formatResults(results: RetrievalResult[]): string` — citation-tagged
-  (`[mem:<id>] (<source>) <text>`, chunks joined by `\n\n`); returns the exact
-  explicit abstention string `'No supporting memory found.'` when `results` is empty.
-- `makeRecallTool(store: MemoryStore, ctx: { space?: string; namespace?: string })`
-  — an AI SDK `tool()` (description + zod input schema + `execute`) matching
-  the codebase's existing tool declarations. Zod input `{ query: string; topK?: number }`.
-  `execute` calls `store.recall(query, { space, namespace, topK })` and returns
-  `formatResults(...)`.
-- `injectRecall(store, ctx, task): Promise<string>` — reads the caller's live
-  context budget via `currentDelegationContext().numCtx` (from
-  `src/core/guardrails.ts`), calls `store.recall(task, { space, namespace, numCtx })`,
-  and if there are hits, formats them and truncates to
-  `retrievalBudgetChars(numCtx)` (from `src/memory/budget.ts`) before prepending
-  as `Relevant memory:\n<recalled>\n\n---\nTask:\n<task>`. Returns `task`
-  unchanged when nothing is found.
+## What was built
 
-## tool() schema key — CONFIRMED
+### 1. `src/verification/deps.ts` — the real `VerifyDeps` factory
 
-Grepped `src/tools/read-file.ts` and `src/core/delegate.ts` (both use `tool(...)`
-from `ai` v6.0.217). Both use **`inputSchema`**, not `parameters`:
+`makeVerifyDeps({ manager, control, generalModel, store, space }): VerifyDeps`:
 
-```ts
-export const readFileTool = tool({
-  description: '...',
-  inputSchema: z.object({ path: z.string().describe('...') }),
-  execute: async ({ path }) => { ... },
-});
+- **`generate(model, prompt)`**: builds a chat `ModelDeclaration` for `model`
+  (`chatDecl`, mirroring the shape of `models/qwen-router.ts`/`qwen-fast.ts`:
+  `ProviderKind.Ollama`, `params: {temperature:0.1, numCtx:8192}`, a
+  `footprint` sizing hint), calls `manager.ensureReady(decl)`, then
+  `generateText({ model: createOllamaModel(decl), prompt })` from `ai`,
+  returning `.text`. This mirrors `src/core/agent.ts`'s `runAgent` (same
+  `generateText` call) and `src/crew/member-agent.ts`/`src/crew/compile.ts`'s
+  `createOllamaModel(decl)` pattern — no new decl shape invented.
+- **`getByIds(space, ids)`**: delegates straight to `store.getByIds(space, ids)`
+  (`MemoryStore`'s real method, confirmed in `src/memory/store.ts` /
+  `src/memory/types.ts`'s `RetrievalResult`).
+- **`ensureJudge(model)`**: if `control.isInstalled(model)` → `{model,
+  fallback:false}`. Else, per `autoPullPolicy()`:
+  - `'always'` → `control.pull(model)` → `{model, fallback:false}`.
+  - `'prompt'` + `process.stdin.isTTY` → Node `readline` `y/N` prompt; yes →
+    pull + `{model, fallback:false}`; anything else falls through to the
+    fallback branch below.
+  - `'never'`, or `'prompt'` on a non-TTY (e.g. under `bun test`) → logs a
+    one-line `console.error` fallback notice and returns `{model:
+    generalModel, fallback:true}`.
+
+Kept the real Ollama-backed `generate`/`ensureReady` calls behind this single
+factory so no test imports Ollama directly; tests inject a fake
+`RuntimeControl`/manager/store and exercise `ensureJudge`/`getByIds` for real
+(only `generate`'s literal network path is untested — that's the seam
+`makeVerifyDeps` exists to isolate).
+
+`src/cli/verify-runtime.ts` (new, shared by both CLIs) — `makeRealVerifyDeps()`:
+builds the real Model Manager, resolves the Ollama `RuntimeControl` via
+`runtimeFor(ProviderKind.Ollama)`, builds the real memory store exactly like
+`makeRealStore` in `src/cli/memory.ts` (same embedder/cross-encoder-reranker
+wiring), and wraps it all in `makeVerifyDeps(...)` with `generalModel:
+qwenRouter.model` (the project's existing router/general-model constant, used
+the same way in `src/crew/compile.ts`'s hierarchical orchestrator and
+`src/cli/chat.ts`). Returns `{ verifyDeps, store, manager }` so the CLI can
+close the store and unload the manager's models on shutdown (mirrors
+`memory.ts`'s `storeAndManager` cleanup).
+
+### 2. CLI wiring — `src/cli/crew.ts` and `src/cli/flow.ts`
+
+Both files gained:
+- A `parseArgs`/flag-split helper that pulls `--verify` out of the positional
+  argv (crew.ts and flow.ts had **no prior flag parsing at all** — `memory.ts`
+  was the only precedent, so I mirrored its "positional vs. flags" split,
+  simplified to a single boolean since `--verify` takes no value).
+- `main()`: when `--verify` is present, calls `makeRealVerifyDeps()` once,
+  threads `verifyRuntime.verifyDeps` into `runCrewCli`/`runFlow`, and in a
+  `finally` closes the store + unloads the manager (only when verify was
+  requested — a plain run pays zero extra cost).
+
+**Crew path** (`CrewCliDeps.verifyDeps?: VerifyDeps`, new field):
+`runCrewCli` now does `const def = deps.verifyDeps ? {...deps.def, verify:
+true} : deps.def` before calling `runCrew(def, input, {..., verifyDeps})`.
+This was necessary because `CrewDeps.verifyDeps` presence alone does **not**
+force verification — `taskVerifies()` in `src/crew/compile.ts` is `task.verify
+?? crew.verify ?? false`, and neither fixture crew (`crews/research-crew.ts`)
+sets either flag. Forcing `crew.verify = true` when `verifyDeps` is supplied
+is the crew-wide equivalent of the per-task opt-in, and is the only lever the
+CLI has (it doesn't rewrite individual crew defs). `runCrewCli`'s pre-existing
+`unverified.txt`/`result.txt`/`failed.txt` branching (from Task 8) and
+`main()`'s `unverified` exit-code branch (`process.exitCode = 1`) were
+**already present** before this task — I did not need to add them, only to
+make sure `verifyDeps` actually reaches `runCrew` and that verification
+actually activates for a real crew def.
+
+**Workflow path** (`FlowDeps.verifyDeps?: VerifyDeps`, new field): unlike
+crews, `runWorkflow` takes a **compiled** `WorkflowDef` — the verify sub-graph
+must already be spliced in via `defineWorkflow(def, verifyOpts)` before
+`runWorkflow` ever runs (confirmed by reading `src/workflow/engine.ts`:
+`runWorkflow` has no `verifyDeps` parameter at all; expansion is a
+*compile-time* step, done by `crew/compile.ts` for crews and by
+`workflow/define.ts`'s `defineWorkflow` for raw workflows). So `runFlow` now:
+1. `withVerifyFlags(def)` — sets `verify: true` on every `AgentStep` (workflow
+   steps have no crew-def-style top-level default, and the CLI has no
+   per-step opt-in surface, so "every agent step" is the equivalent
+   workflow-wide default).
+2. `defineWorkflow(withVerifyFlags(def), { verifyDeps })` when `verifyDeps` is
+   present, else `deps.def` unchanged (byte-identical old path).
+3. Runs `runWorkflow` against this compiled def.
+
+**Correctness fix caught while wiring `flow.ts`**: `lastStepOutputText` reads
+`def.steps.at(-1)`'s context value to render `result.txt`. If I ran it against
+the *verify-expanded* def, the "last step" becomes a spliced-in `pass`/`abstain`
+step (`{accepted:true}` or an `UnverifiedMarker`), not the actual answer text
+— that would have silently corrupted `result.txt` for every verified,
+successful workflow run. Fixed by having `runFlow`/`main()` always compute
+`lastStepOutputText` against the **original**, pre-expansion `deps.def`/`def`:
+the answer step's id is preserved unchanged by `expandVerification` (it only
+appends steps after it, per `src/verification/expand.ts`), so indexing the
+original def's last step id into the (possibly expanded) run's output context
+still resolves to the real answer. Added a dedicated test asserting this
+(`flow.test.ts`: "result.txt still resolves the ORIGINAL answer step").
+
+### 3. `recordVerdict` wiring in `src/verification/verify.ts`
+
+`verify()`'s `withVerificationSpan({}, ...)` callback now calls
+`recordVerdict(verdict.unsupportedClaims.length)` right after
+`verifyFaithfulness` resolves, before returning the verdict — this is exactly
+the deferred piece Task 7's report flagged ("span called
+`withVerificationSpan({})` not annotated via `recordVerdict` (wire in T10)").
+
+I initially over-built this (also directly setting `VERIFICATION_SUPPORTED`/
+`FAITHFULNESS`/`FALLBACK` attributes via `trace.getActiveSpan()` inside
+`verify.ts`), then pulled back: `recordVerdict` in `src/telemetry/spans.ts`
+is documented and implemented to set **only** `ATTR.VERIFICATION_UNSUPPORTED`
+(mirrors `recordRerankOutcome`'s single-concern pattern), and that's exactly
+what `src/verification/expand.ts`'s existing call site already does
+(`recordVerdict(verdict.unsupportedClaims.length)` in `verifyStep`'s `run`).
+Matching that convention exactly (rather than inventing a second, richer
+annotation helper) keeps `verify.ts`'s span-closing behavior consistent with
+the one other call site of `recordVerdict` in the codebase. The `supported`/
+`faithfulness`/`crag`/`retries`/`fallback` attributes are set at span-*open*
+time by `withVerificationSpan(info, ...)`'s `info` argument where the caller
+already knows them in advance (e.g. `expand.ts`'s corrective step passes
+`{crag:'incorrect'}` up front) — `verify()` itself opens the span with `{}`
+because it doesn't know the verdict until after the judge runs, which is
+exactly why `recordVerdict` (a post-hoc annotator) exists.
+
+## TDD RED/GREEN evidence
+
+**RED** — ran before any implementation:
+```
+bun test tests/verification/deps.test.ts tests/verification/verify.test.ts
+```
+Result:
+- `tests/verification/deps.test.ts`: `Cannot find module
+  '../../src/verification/deps.ts'` (module didn't exist yet) — all 5 tests
+  errored at collection.
+- `tests/verification/verify.test.ts`: 3 pre-existing tests passed; the new
+  "annotates the verification.check span..." test failed with
+  `Expected: false / Received: undefined` on
+  `s?.attributes[ATTR.VERIFICATION_SUPPORTED]` (span existed — from the
+  already-wrapped `withVerificationSpan({})` — but carried no verdict
+  attributes, confirming the exact gap the brief described).
+  (This was against my first, over-built version of the test; after scoping
+  the fix down to match `recordVerdict`'s real single-attribute contract, I
+  re-ran and reconfirmed RED against the simplified assertion before
+  implementing — same failure mode: attribute `undefined` pre-fix.)
+
+**GREEN** — after implementing `src/verification/deps.ts` and the
+`recordVerdict` call in `src/verification/verify.ts`:
+```
+bun test tests/verification/deps.test.ts tests/verification/verify.test.ts tests/verification/spans.test.ts
+# 11 pass / 0 fail / 27 expect() calls
 ```
 
-The brief's Step-3 code sample used `parameters:` — that was the ambiguous/older
-shape flagged by the task's own caveat ("v6 uses `inputSchema` in some versions,
-`parameters` in others"). I mirrored the codebase's real, confirmed shape
-(`inputSchema`) instead of the brief's literal sample. `execute` destructures
-the parsed input object directly (no wrapper), and both existing tools return
-either a plain value/string or a small structured object — `recall`'s `execute`
-returns a plain string (`formatResults(...)`), consistent with that pattern.
+CLI-level wiring tests (`tests/cli/crew.test.ts`, `tests/cli/flow.test.ts`)
+were added test-first for the new `verifyDeps` field/behavior (fixtures have
+no pre-existing `verify:true` anywhere, so a naive pass-through would be
+inert) and went green together with the implementation in one pass since the
+CLI plumbing and the tests were written in the same edit session; I
+re-verified by temporarily checking that removing the `def.verify = true`
+override in `crew.ts` made the new "still verifies" crew test fail (outcome
+`'done'` instead of `'unverified'`), confirming the test isn't vacuous, then
+restored the override.
 
-## Design choices beyond the brief's literal sample
+## Full file list touched
 
-1. **`inputSchema` not `parameters`** (see above — verified against 2 existing
-   tool declarations, not guessed).
-2. **`injectRecall` is budget-fit, not just presence-gated.** The task
-   description explicitly says "prepends budget-fit recalled context" — the
-   brief's Step-3 code sample recalls with no `numCtx` and no truncation, which
-   would silently violate the "budget-fit" requirement built in Task 8
-   (`retrievalBudgetChars`). I wired `currentDelegationContext().numCtx`
-   (already used by `delegate.ts` for the same purpose) into `store.recall(...)`
-   and truncated the formatted string to `retrievalBudgetChars(numCtx)` before
-   splicing it into the task. This reuses `budget.ts` (Task 8) and
-   `guardrails.ts` (Slice 9) rather than reinventing a budget check, and keeps
-   the same behavior as the brief when `numCtx` is unset (falls back to 4096
-   via `retrievalBudgetChars`).
-3. Used `bun:test` (not the brief's `vitest`), per explicit task instructions
-   and matching every other `tests/memory/*.test.ts` file in the slice.
+New:
+- `/Users/inderjotsingh/ai/src/verification/deps.ts`
+- `/Users/inderjotsingh/ai/src/cli/verify-runtime.ts`
+- `/Users/inderjotsingh/ai/tests/verification/deps.test.ts`
 
-## TDD RED/GREEN
+Modified:
+- `/Users/inderjotsingh/ai/src/verification/verify.ts` (recordVerdict wiring)
+- `/Users/inderjotsingh/ai/src/cli/crew.ts` (`--verify` flag, `verifyDeps`
+  threading, `def.verify` override, real-deps lifecycle)
+- `/Users/inderjotsingh/ai/src/cli/flow.ts` (`--verify` flag, `verifyDeps`
+  threading, `withVerifyFlags` + `defineWorkflow` compile step, the
+  original-def `lastStepOutputText` fix, real-deps lifecycle)
+- `/Users/inderjotsingh/ai/tests/verification/verify.test.ts` (+1 test)
+- `/Users/inderjotsingh/ai/tests/cli/crew.test.ts` (+2 tests)
+- `/Users/inderjotsingh/ai/tests/cli/flow.test.ts` (+2 tests)
 
-- **RED**: wrote `tests/memory/recall-tool.test.ts` (2 tests: citation tag
-  present; empty → abstention regex `/no supporting memory/i`). Ran
-  `bun test tests/memory/recall-tool.test.ts` → failed with
-  `Cannot find module '../../src/memory/recall-tool.ts'` (module not found, as
-  expected — no implementation yet).
-- **GREEN**: wrote `src/memory/recall-tool.ts`. Re-ran the same test file →
-  `2 pass / 0 fail / 3 expect() calls`.
+## Verification run
 
-## Verification
+- `bun test tests/verification/ tests/cli/ tests/crew/ tests/workflow/ tests/telemetry/`
+  → 103 pass / 0 fail / 243 expect() calls.
+- `bun run typecheck` → clean.
+- `bun run lint:file` on all touched files → clean (one auto-fixable import-order
+  issue in `deps.ts`, fixed via `biome check --write`).
+- `bun run lint` (full repo) → `Checked 174 files... No fixes applied.`
+- `bun run test` (full suite) → **290 pass / 18 skip / 0 fail** (598
+  expect() calls, 308 tests across 101 files).
 
-- `bun test tests/memory/recall-tool.test.ts` → 2 pass, 0 fail.
-- `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
-- `bun run lint:file -- src/memory/recall-tool.ts` → `Checked 1 file... No fixes applied.`
-- Full suite: `bun test` → **245 pass / 16 skip / 0 fail** (491 expect() calls,
-  261 tests across 87 files).
+## Deviations from the brief / judgment calls
 
-## Files
+1. **Test file location**: put the new test at `tests/verification/deps.test.ts`
+   instead of the brief's literal `tests/cli/verify-deps.test.ts`, because
+   `tests/verification/` already exists and exactly mirrors `src/verification/`
+   (where `deps.ts` actually lives), matching the repo's established
+   src↔test mirroring convention (every other `src/verification/*.ts` has its
+   test under `tests/verification/`). Per the task's own instruction ("if
+   existing test directory structure clearly organizes by source module
+   location... put it there instead and note the deviation") — noting it here.
+2. **Shared `src/cli/verify-runtime.ts`** (not explicitly named in the brief):
+   factored the manager/control/store/`makeVerifyDeps` construction shared
+   identically by `crew.ts` and `flow.ts` into one small file rather than
+   duplicating ~25 lines in both CLIs, per the project's "small loosely-coupled
+   files" code-style memory. This is additive infrastructure, not a deviation
+   in behavior.
+3. **`crew.verify = true` / `withVerifyFlags` (every agent step) override**:
+   the brief says `--verify` should "set the crew/workflow `verify` flag" —
+   since neither shipped fixture def (`crews/research-crew.ts`,
+   `workflows/fetch-then-summarize.ts`) has any task/step opted in, and the
+   CLI has no surface for picking *which* task/step to verify, I applied the
+   flag at the broadest existing level (`CrewDef.verify` crew-wide default;
+   every `AgentStep` for workflows, since there's no `WorkflowDef`-level
+   default). This is the only way `--verify` has any observable effect
+   end-to-end; flagging as a judgment call since the brief didn't specify
+   "which tasks" when none are pre-annotated.
+4. **`lastStepOutputText` original-def fix**: not explicitly requested by the
+   brief, but required for correctness once workflow verify-expansion was
+   wired in (see above) — without it, a successful verified flow run would
+   have written `{"accepted":true}` (or worse, a raw `UnverifiedMarker` object)
+   to `result.txt` instead of the real answer. Covered by a new test.
+5. **`recordVerdict` scope**: kept to exactly `ATTR.VERIFICATION_UNSUPPORTED`
+   (matching the existing `expand.ts` call site and `recordVerdict`'s own
+   doc comment/implementation) rather than also duplicating
+   supported/faithfulness/fallback attribute-setting inside `verify.ts` — see
+   "Task 3" section above for the reasoning. No new telemetry ATTR constants
+   or span-annotation helpers were added.
 
-- `/Users/inderjotsingh/ai/src/memory/recall-tool.ts` (new)
-- `/Users/inderjotsingh/ai/tests/memory/recall-tool.test.ts` (new)
+## Docs hard line
 
-## Commit
+Per the task instructions, I did **not** touch `docs/architecture.md`,
+`README.md`, or `docs/ROADMAP.md` — that's explicitly out of scope for this
+task (handled by the slice-level docs pass). Have not yet attempted the
+commit at the time of writing this report; if the pre-commit `docs:check`
+hook blocks on the new `src/verification/deps.ts` / `src/cli/verify-runtime.ts`
+files, that is expected and will be reported rather than bypassed, unless it
+is a trivial one-line architecture.md mention gap (per the task's own
+"use your judgment" carve-out).
 
-`80bab2d feat(memory): recall tool (citation-tagged) + auto-inject helper`
-(pre-commit `docs-check` passed — `src/memory/` is already a documented
-subsystem in `docs/architecture.md`; the detailed memory-subsystem prose is
-explicitly stubbed there as "filled in as the slice lands (Task 14)", which is
-this slice's own convention for the final docs-sync task, not a violation of
-the per-slice doc rule.)
+## Concerns for the slice's final review
 
-## Self-review
-
-- `formatResults` matches the brief exactly: citation format
-  `[mem:<id>] (<source>) <text>`, chunks joined with a blank line, and the
-  literal abstention string.
-- `makeRecallTool`'s zod schema matches the brief: `query: z.string()`,
-  `topK: z.number().int().positive().optional()`.
-- `injectRecall`'s "return task unchanged if nothing found" path is preserved
-  (`results.length === 0 → return task`), satisfying the interface contract
-  even though the happy path adds truncation logic beyond the brief's sample.
-- No `console.log`, no `any`, no non-null assertions.
-- Reused existing exports (`retrievalBudgetChars`, `currentDelegationContext`)
-  rather than duplicating budget/context logic — keeps this task's surface
-  small and consistent with Tasks 8/9's design.
-
-## Concerns
-
-- **None blocking.** One judgment call worth flagging for the slice's final
-  review (Task 14): `injectRecall`'s truncation is a plain `.slice(0, budget)`
-  on the joined citation string, which can cut a citation tag or chunk
-  mid-text if the budget lands inside one. The brief didn't specify truncation
-  granularity; this is the simplest safe behavior (never exceeds budget) but a
-  future refinement could truncate at chunk boundaries (drop whole
-  `[mem:...]` entries that don't fit rather than slicing mid-chunk) for
-  cleaner output. Flagging rather than gold-plating since the brief's own
-  sample had no truncation at all.
-- The task named the export `makeRecallTool` per both the brief and task
-  description; the tool's registered *name* (`recall`) is not set inside the
-  `tool()` call itself (this codebase's `tool()` declarations, per
-  `read-file.ts` and `delegate.ts`, don't take a `name` field — the name is
-  assigned by whatever record/map the tool is registered into, e.g.
-  `{ recall: makeRecallTool(...) }`). This matches the existing pattern
-  exactly (`readFileTool`, `asDelegateTool` also have no in-call name) and
-  will be wired at the call site in a later task if not already covered by
-  Task 9/store integration.
+- **`chatDecl`'s footprint/params are a guess-but-reasonable default**
+  (`temperature:0.1, numCtx:8192, approxParamsBillions:4, bytesPerWeight:0.56`
+  — the same numbers as `models/qwen-router.ts`). `verify()`'s `generate` is
+  called for claim decomposition, CRAG grading, and claim-checking — all
+  short prompts — so 8192 ctx should be comfortable, but this wasn't
+  spec'd anywhere and could warrant a dedicated `models/qwen-verify.ts` (or
+  similar) declaration in a later slice if the judge model's real
+  characteristics (e.g. `bespoke-minicheck`'s actual size) diverge
+  meaningfully from this placeholder.
+- **Workflow-wide `verify: true` blanket** (point 3 above) verifies *every*
+  agent step in a `--verify` flow run, which may be more than intended for
+  multi-step workflows (e.g. `fetch-then-summarize`'s `fetch` step is a Tool
+  step so it's unaffected, but a workflow with multiple agent steps would get
+  every one gated). No per-step CLI opt-in exists yet; this is the CLI's
+  only lever until/unless a future slice adds one (e.g. `--verify-step <id>`).
+- **No test exercises `makeVerifyDeps`'s real `generate` function** (by
+  design — it requires live Ollama). This mirrors the same gap already
+  accepted for the rest of the verification stack's Ollama-backed paths.

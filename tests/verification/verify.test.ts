@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { ATTR } from '../../src/telemetry/spans.ts';
 import type { VerifyDeps } from '../../src/verification/types.ts';
 import { verify } from '../../src/verification/verify.ts';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 function deps(over: Partial<VerifyDeps> = {}): VerifyDeps {
   return {
@@ -71,5 +73,26 @@ describe('verify', () => {
     // ensureJudge must have been called with the configured verify model, not deps.generalModel ('g')
     expect(seenModels).toEqual(['bespoke-minicheck']);
     expect(v.usedFallback).toBe(true);
+  });
+
+  test('annotates the verification.check span with the computed verdict via recordVerdict', async () => {
+    const { exporter } = registerTestProvider();
+    const v = await verify(
+      'Uncited claim',
+      { query: 'q', space: 'default' },
+      deps({
+        generate: async (_m: string, p: string) =>
+          p.includes('atomic')
+            ? '[{"text":"Uncited claim","citedIds":[]}]'
+            : 'No',
+      }),
+    );
+    expect(v.unsupportedClaims.length).toBeGreaterThan(0);
+    const spans = exporter.getFinishedSpans();
+    const s = spans.find((sp) => sp.name === 'verification.check');
+    expect(s).toBeDefined();
+    expect(s?.attributes[ATTR.VERIFICATION_UNSUPPORTED]).toBe(
+      v.unsupportedClaims.length,
+    );
   });
 });

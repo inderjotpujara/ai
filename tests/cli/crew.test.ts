@@ -7,6 +7,7 @@ import { runCrewCli } from '../../src/cli/crew.ts';
 import { Capability, PreferPolicy } from '../../src/core/types.ts';
 import { defineCrew } from '../../src/crew/define.ts';
 import { type CrewDef, CrewProcess } from '../../src/crew/types.ts';
+import type { VerifyDeps } from '../../src/verification/types.ts';
 
 const crew: CrewDef = defineCrew({
   id: 'demo-crew',
@@ -32,6 +33,30 @@ const crew: CrewDef = defineCrew({
   ],
 });
 
+function fakeVerifyDeps(
+  supported: boolean,
+  over: Partial<VerifyDeps> = {},
+): VerifyDeps {
+  return {
+    generalModel: 'g',
+    ensureJudge: async (m: string) => ({ model: m, fallback: false }),
+    generate: async (_m: string, p: string) => {
+      if (p.includes('atomic factual claims'))
+        return '[{"text":"claim","citedIds":["c#0"]}]';
+      return supported ? 'Yes' : 'No';
+    },
+    getByIds: async (_s: string, ids: string[]) =>
+      ids.map((id) => ({
+        id,
+        text: 'evidence text',
+        source: 'kb',
+        score: 0,
+        namespace: '',
+      })),
+    ...over,
+  };
+}
+
 describe('runCrewCli', () => {
   it('writes spans.jsonl with crew.run + result.txt on success', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'crew-'));
@@ -49,5 +74,40 @@ describe('runCrewCli', () => {
     expect(spans).toContain('crew.run');
     const result = await readFile(join(runsRoot, 'r1', 'result.txt'), 'utf8');
     expect(result).toContain('result text');
+  });
+
+  it('verifyDeps present + a plain crew (no verify flags set) still verifies, and unverified.txt is written on abstain', async () => {
+    const runsRoot = await mkdtemp(join(tmpdir(), 'crew-verify-'));
+    const outcome = await runCrewCli({
+      def: crew, // no task.verify / crew.verify set in the fixture
+      input: 'hello',
+      runsRoot,
+      runId: 'r2',
+      tools: {},
+      runAgentStep: async () => 'a draft answer [mem:c#0]',
+      verifyDeps: fakeVerifyDeps(false),
+    });
+    expect(outcome.kind).toBe('unverified');
+    const unverified = await readFile(
+      join(runsRoot, 'r2', 'unverified.txt'),
+      'utf8',
+    );
+    expect(unverified).toContain('draft');
+  });
+
+  it('verifyDeps present + a grounded answer -> done, result.txt written', async () => {
+    const runsRoot = await mkdtemp(join(tmpdir(), 'crew-verify-ok-'));
+    const outcome = await runCrewCli({
+      def: crew,
+      input: 'hello',
+      runsRoot,
+      runId: 'r3',
+      tools: {},
+      runAgentStep: async () => 'a grounded answer [mem:c#0]',
+      verifyDeps: fakeVerifyDeps(true),
+    });
+    expect(outcome.kind).toBe('done');
+    const result = await readFile(join(runsRoot, 'r3', 'result.txt'), 'utf8');
+    expect(result).toContain('grounded answer');
   });
 });
