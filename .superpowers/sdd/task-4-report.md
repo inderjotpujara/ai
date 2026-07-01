@@ -1,58 +1,94 @@
-# Task 4 report: Crew telemetry span (Slice 11)
+# Task 4 report: Embeddings port (`RuntimeControl.embed` + probe + manager-backed wrapper)
+
+## Status: DONE
+
+Commit: `dde9348` — "feat(memory): embeddings via runtime port (weights-only, manager-backed)" on branch `slice-12-memory-rag`.
 
 ## Implemented
 
-`src/telemetry/spans.ts` (additive only, no existing behavior changed):
-- Added `ATTR.CREW_ID` (`'crew.id'`), `ATTR.CREW_PROCESS` (`'crew.process'`), `ATTR.CREW_TASK_MEMBER` (`'crew.task.member'`) to the existing `ATTR as const` object, appended before the closing `} as const;`.
-- Added `withCrewSpan<T>(crewId, process, fn)` — opens root span `'crew.run'` via the private `inSpan` helper (same pattern as `withWorkflowSpan`), tags `ATTR.CREW_ID`/`ATTR.CREW_PROCESS`, then runs `fn()` inside the active span context so any nested spans (`workflow.run`/`workflow.step` for sequential process, `agent.delegation` for hierarchical) attach beneath it automatically via OTel's active-context propagation.
+1. **`src/runtime/runtime.ts`** — added `embed(model: string, texts: string[]): Promise<number[][]>` to `RuntimeControl`.
 
-`tests/telemetry/crew-spans.test.ts` — new test file, copied verbatim from the brief:
-- `registerTestProvider()` + `withCrewSpan('research-crew', 'sequential', ...)` wrapping a nested `withStepSpan('t1', 'agent', ...)`.
-- Asserts `crew.run`'s attributes carry `ATTR.CREW_ID`/`ATTR.CREW_PROCESS`, and that the nested `workflow.step` span's `parentSpanContext?.spanId` equals `crew.run`'s `spanContext().spanId` — i.e. genuine parent/child nesting, not just co-occurrence.
+2. **`src/runtime/ollama.ts`** — added `ollamaEmbed(model, texts)`, built on AI SDK v6 `embedMany` + `ollama-ai-provider-v2`'s `createOllama({ baseURL })`. Reused the existing `/api` baseURL convention (`http://localhost:11434/api`, matching `src/providers/ollama.ts`). Wired as `control.embed`.
 
-## TDD RED → GREEN
+3. **`src/runtime/mlx-server.ts`** — `control.embed` throws `MemoryError('embeddings are not supported on the MLX runtime yet')`.
 
-**RED** — ran before touching `spans.ts`:
+4. **`src/memory/embed.ts`** (new) — `embedderDecl(model)`, `probeEmbedder(model, baseUrl?)`, `EmbedderDeps` type, `makeEmbedder(deps)`. No bogus self-import; `embedderDecl` defined locally as specified in the brief.
+
+## Provider accessor verified
+
+Inspected `node_modules/ollama-ai-provider-v2/dist/index.d.ts` (installed `3.6.0`) directly rather than trusting the brief's guess. The `OllamaProvider` interface exposes three embedding-related methods:
+- `embedding(modelId, settings?)` — current, non-deprecated
+- `textEmbedding(modelId, settings?)` — **@deprecated**, use `textEmbeddingModel` instead
+- `textEmbeddingModel(modelId, settings?)` — current, non-deprecated
+
+Used **`textEmbeddingModel`**, exactly as the brief's sketch specified — confirmed correct and not the deprecated alias.
+
+## `ModelDeclaration` fields filled (from `src/core/types.ts`)
+
+`ModelDeclaration` requires: `provider`, `model`, `params` (a `ModelParams` object — required, not optional), `role`, `footprint: { approxParamsBillions, bytesPerWeight, kvBytesPerToken? }`. Optional: `capabilities`, `contentPolicy`, `maxContext`.
+
+`embedderDecl(model)` returns:
+```ts
+{
+  provider: ProviderKind.Ollama,
+  model,
+  params: {},                 // no numCtx override — manager falls back to MIN_CTX
+  role: 'embedder',
+  footprint: {
+    approxParamsBillions: 0.6,
+    bytesPerWeight: 1,
+    kvBytesPerToken: 0,        // weights-only — no KV budget reserved
+  },
+}
 ```
-$ bun test tests/telemetry/crew-spans.test.ts
-SyntaxError: Export named 'withCrewSpan' not found in module '.../src/telemetry/spans.ts'.
-0 pass / 1 fail / 1 error
-```
+No `as ModelDeclaration` cast was needed — the object satisfies the type directly once all mandatory fields are present. Confirmed `model-manager.ts`'s `ensureReady` only reads `decl.params.numCtx` (optional-chained via `??`), `decl.model`, and `decl.footprint.*`, so an empty `params: {}` and `kvBytesPerToken: 0` are safe inputs.
 
-Implemented the 3 `ATTR` keys + `withCrewSpan` exactly per the brief's verbatim code (no deviation needed this time — the brief already used the correct `parentSpanContext?.spanId` convention from the prior Slice-10 finding).
+## `probeEmbedder`
 
-**GREEN:**
-```
-$ bun test tests/telemetry/crew-spans.test.ts
-1 pass / 0 fail / 3 expect() calls
-```
+Mirrors `getModelMaxContext`/`getModelKvArch` in `src/runtime/ollama-control.ts`: `POST /api/show` with `{ model }`, reads `model_info['general.architecture']` then `model_info['<arch>.embedding_length']` (dim) and `model_info['<arch>.context_length']` (maxInput), with fallback defaults (768 / 2048) if unreported. Not unit-tested per the brief (live-Ollama-gated; deferred to Task 12's live test).
 
-## Final verification (run before commit)
+## TDD
 
-```
-$ bun run typecheck                                   → tsc --noEmit clean
-$ bun run lint:file -- "src/telemetry/spans.ts"       → biome check: no issues
-$ bun test                                            → 210 pass, 15 skip (pre-existing/unrelated), 0 fail, 408 expect() calls, 225 tests / 72 files
-```
+- **RED**: wrote `tests/memory/embed.test.ts` (using `bun:test`, matching this repo's actual test runner — the brief's sketch showed `vitest`, which is not used here; verified via `tests/memory/define.test.ts` and other existing memory tests) importing `embedderDecl` before the module existed. Ran `bun test tests/memory/embed.test.ts` → failed with `Cannot find module '../../src/memory/embed.ts'`.
+- **GREEN**: implemented all four files; `bun test tests/memory/embed.test.ts` → 2 pass, 6 expect() calls.
 
-## Files changed
-- `src/telemetry/spans.ts` (modified, additive — 3 ATTR keys + 1 new exported function)
-- `tests/telemetry/crew-spans.test.ts` (new)
+Test asserts: `model` echoed, `provider === ProviderKind.Ollama`, `footprint.kvBytesPerToken === 0`, `footprint.approxParamsBillions > 0`, `role` truthy, `params` deep-equals `{}`.
 
-## Commit
-- `b8e21e1` feat(telemetry): crew.run span + crew ATTR keys
+## Regression fix (required, not optional)
 
-## Self-review
-- Additive-only confirmed: every existing `ATTR` key, exported function signature, and helper (`inSpan`, `withRunSpan`, `withDelegationSpan`, `withWorkflowSpan`, `withStepSpan`, `annotateStep`, etc.) is byte-for-byte untouched; only 3 new `ATTR` keys and one new function were appended.
-- `withCrewSpan` goes through the private `inSpan` helper exactly like `withWorkflowSpan` — same error-handling (`SpanStatusCode.ERROR` on throw), same `span.end()` in `finally`, same active-span propagation via `tracer().startActiveSpan`. No new tracer/exporter logic introduced.
-- Nesting assertion uses `parentSpanContext?.spanId` (this repo's installed OTel SDK convention, confirmed via the existing `tests/telemetry/spans.test.ts` and `tests/telemetry/workflow-spans.test.ts` patterns), not the `parentSpanId` shape that doesn't exist on this SDK's `ReadableSpan`.
-- Followed the "assert before shutdown" constraint: `exporter.getFinishedSpans()` is called immediately after `withCrewSpan(...)` resolves; `exporter.shutdown()` is never called in this test, so there's no risk of the documented `InMemorySpanExporter.shutdown()`-clears-spans pitfall from a prior slice.
-- No `console.log` added.
-- Test reuses the shared `registerTestProvider()` helper from `tests/helpers/otel-test-provider.ts` — no new test infrastructure needed.
+Adding `embed` to `RuntimeControl` is a breaking type change — every object typed as `RuntimeControl` needs the field. `bun run typecheck` caught 4 pre-existing test files building mock `RuntimeControl` fixtures without it:
+- `tests/resource/model-manager-kv.test.ts`
+- `tests/resource/model-manager.test.ts`
+- `tests/resource/select-degrade.test.ts`
+- `tests/resource/warm-reuse.test.ts`
 
-## Docs note (scope boundary, not an omission)
-Per `.superpowers/sdd/task-8-brief.md`, **Task 8** owns `docs/architecture.md` §13 ("Crews & roles") and the §2 module-map `src/crew/` node/edges for this slice — it's scheduled after the engine/CLI tasks land so the doc reflects the finished subsystem in one pass, not a half-built one. This task is telemetry-primitives-only (mirroring how Slice 10 split workflow-spans from the engine/CLI/doc tasks), so `docs/architecture.md` is intentionally untouched here. The repo's pre-commit hook (`docs:check` — living-doc presence/linkage) passed; the stricter pre-push hook (blocks `src/**` changes not paired with an `architecture.md` update in the same push) will be satisfied once Task 8 lands before this branch is pushed/merged.
+Added `embed: mock(async () => [])` to each fixture (alongside the existing `getModelKvArch` mock). These were included in the same commit since they're required for the codebase to compile — not scope creep, a direct consequence of the type change the task specifies.
 
-## Concerns
-- None functional. The brief's test snippet needed zero corrections this time (Slice 10's Task 4 already surfaced and fixed the `parentSpanId` vs `parentSpanContext?.spanId` SDK-version mismatch, and this brief already used the corrected convention).
-- `ATTR.CREW_TASK_MEMBER` is added per the brief's interface contract but not yet exercised by any helper in this task — it's for a later task (crew task-to-agent assignment, likely Task 5/6) to `setAttribute`/`annotateStep` with. Confirmed this is expected: the brief explicitly lists it under "Produces" for Tasks 6/7 to consume, not for Task 4 to use.
+## Verification run
+
+- `bun test tests/memory/embed.test.ts` → 2 pass
+- `bun run typecheck` → clean (`tsc --noEmit`, no errors)
+- `bun run lint:file` on all 9 touched files → clean after one `biome check --write` pass (import-order + one line-wrap auto-fix; no manual logic changes from lint)
+- **Full suite**: `bun test` → **229 pass, 16 skip, 0 fail** (245 tests across 81 files) — no regression vs. pre-task baseline (skips are pre-existing live-service-gated tests, unrelated to this change)
+- `bun run docs:check` → passes (`src/memory/` already documented in `docs/architecture.md`'s Slice 12 stub from an earlier task; no new subsystem directory introduced)
+
+## Self-review / concerns
+
+- **Provider accessor**: confirmed by reading the installed package's `.d.ts` directly rather than trusting the brief — `textEmbeddingModel` is correct and current (not the deprecated `textEmbedding`).
+- **`ModelDeclaration.params: {}`**: leaves `numCtx` unset for the embedder decl, so `ensureReady` defaults to `MIN_CTX`. This seems right for a weights-only model — no deliberate context cap is needed since `kvBytesPerToken: 0` makes the KV term contribute zero bytes to the budget regardless of chosen context. Flagging for review in case a later task (e.g. Task 12, wiring live embed calls) wants an explicit `numCtx` for embedding batch-size reasons.
+- **`role: 'embedder'`**: chosen as a plain descriptive string (matches the free-text `role: string` field pattern used elsewhere, e.g. `role: 'test'` / `role: 't'` in existing test fixtures). No enum exists for this since `role` is documented as a "human description," not a hard-filtered field.
+- **Test runner mismatch in the brief**: the brief's Step 1 sketch imports `describe/expect/test` from `'vitest'`; this repo's actual convention (per `tests/memory/define.test.ts`, `budget.test.ts`, `spans.test.ts`, and `package.json` test scripts) is `bun:test`. Used `bun:test` — flagging in case the discrepancy is a signal about a planned test-runner migration, though nothing else in the repo suggests one.
+- **`probeEmbedder` is untested** in this task, per explicit brief instruction (live-Ollama-gated; Task 12 covers it live). No unit test added for it here.
+- **Did not touch** `docs/architecture.md`, `README.md`, or `docs/ROADMAP.md` — this is a mid-slice task commit, not the slice-landing commit; the standing "all four surfaces" rule applies at slice completion, and `src/memory/` is already present in architecture.md from an earlier task's stub. Flagging so the slice's final review knows to verify the embeddings capability gets folded into the architecture.md Slice 12 section language once the full RAG pipeline lands.
+
+## Files touched
+
+- `/Users/inderjotsingh/ai/src/runtime/runtime.ts`
+- `/Users/inderjotsingh/ai/src/runtime/ollama.ts`
+- `/Users/inderjotsingh/ai/src/runtime/mlx-server.ts`
+- `/Users/inderjotsingh/ai/src/memory/embed.ts` (new)
+- `/Users/inderjotsingh/ai/tests/memory/embed.test.ts` (new)
+- `/Users/inderjotsingh/ai/tests/resource/model-manager-kv.test.ts`
+- `/Users/inderjotsingh/ai/tests/resource/model-manager.test.ts`
+- `/Users/inderjotsingh/ai/tests/resource/select-degrade.test.ts`
+- `/Users/inderjotsingh/ai/tests/resource/warm-reuse.test.ts`

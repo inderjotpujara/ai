@@ -1,9 +1,8 @@
 
-Nothing new to save. This session executed existing scope (Task 8 crews docs + whole-branch review) and applied existing governance (docs hard-line: when CREW_TASK_MEMBER was claimed in docs but unfired, emit it rather than weaken). All durable facts (crews design scope, docs governance, throw-behavior nuances, live-selection verification) were already captured in memory.
-Yes, one durable constraint surfaced:
+No new durable facts to save. 
 
-**Documentation hard-line expanded.** Previously it enforced `architecture.md` updates only; now it requires **all four living surfaces** (architecture.md + README.md + ROADMAP.md + the Artifact) to stay in sync when a slice lands, **enforced by a pre-push gate that blocks slice-landing pushes missing README+ROADMAP updates**.
+The session executed the plan already in memory: [[slice-12-memory-design-lock]] and [[slice-12-rerank-impl]] defined the rerank graceful-degradation pattern before this work began. Task 13's review and fix just implemented it. Task 14 updated docs to reflect shipped reality per [[docs-governance-enforcement]].
 
-This should update the existing memory `[[docs-governance-enforcement]]` (shown in your MEMORY.md).
+The gaps flagged (hybrid BM25+RRF not wired, flow/crew CLIs lacking memory store, 3 pre-existing chunk.ts warnings) are documented in-repo for future work, not persistent constraints.
 
-One loose thread: the conversation ended mid-check on whether `.remember/` and `.superpowers/` need updating or hard-line treatment. Should I also note that as a pending question, or will you resolve it separately?
+Session complete.

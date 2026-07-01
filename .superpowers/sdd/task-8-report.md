@@ -1,127 +1,70 @@
-# Task 8 report — Crews & roles documentation (architecture.md)
+# Task 8 Report: Retrieval pipeline
 
-## Starting state (important deviation from the brief)
+## Implemented
 
-The brief (written before Tasks 1-7 landed) asked for a **new §13** "Crews &
-roles" section plus §2 module-map additions, on the assumption `architecture.md`
-was untouched by crew work. In reality, Tasks 1-7 had **already incrementally
-updated** `architecture.md`:
+`src/memory/retrieve.ts` — `retrieve(query, opts, deps)`:
+1. Embeds the query via `deps.embedQuery`.
+2. Guards `vector.length === deps.space.embedDim`, throwing `MemoryError` on mismatch.
+3. Calls `deps.lance.hybridSearch(space.name, { queryVector, queryText, namespace, kind, limit: topK * 4 })` for candidates.
+4. Optionally reranks via `deps.reranker.rerank(query, candidates)` when `opts.rerank && deps.reranker`.
+5. Budget-fits: packs candidates in incoming order until `retrievalBudgetChars(numCtx)` chars are spent, capped at `topK`; the first candidate is always included even if it alone exceeds budget.
 
-- §2's Mermaid graph already had the full `CREW["Crew · src/crew"]` subgraph
-  (types/define/member-agent/compile/engine), the `crewcli`/`selrt` CLI nodes,
-  the `crews/* · CREWS` declarations node, and every edge the brief asked for:
-  `crewcli --> crewengine`, `crewengine --> wfengine`, `crewengine --> orch`,
-  `crewengine --> spans`, `crewcli --> selrt`, `flow --> selrt`, `selrt -->
-  selhook/buildreg/mgr`, `crewcompile --> crewmember/wfdefine`, `crewdefine -->
-  crewtypes`, `crewtypes --> wftypes`.
-- §2's dependency table already had a "Crew / Roles" row covering
-  `src/crew/`, `src/cli/crew.ts`, `crews/` → `workflow/engine.ts` +
-  `core/orchestrator.ts` + `core/delegate.ts` + `resource/selector.ts` +
-  `cli/select-runtime.ts`.
-- §9 ("Workflows / DAG engine (Slice 10)") had grown two Slice-11 paragraphs
-  bolted onto the end: "Shared live-selection runtime" and "Crew CLI entry" —
-  accurate in content but mis-homed (Slice 11 content living inside a
-  Slice-10-titled section), and with no standalone narrative of crew
-  mechanics (types, validation, compile, dispatch semantics).
-- There was **no §13**; the doc had 12 numbered sections ending at Glossary.
+Wrapped in `withMemoryRecallSpan({ space, namespace, reranked }, ...)`. `topK` defaults via `opts.topK ?? AGENT_MEMORY_TOP_K env (default 6)`; `numCtx` defaults via `opts.numCtx ?? currentDelegationContext().numCtx`.
 
-So my job was audit-and-finalize, not greenfield authorship. The module map
-was already complete and accurate — I verified every edge against the real
-files and found zero wrong edges there.
+Exports `type Reranker = { rerank(query, results): Promise<RetrievalResult[]> }` and `type RetrieveDeps = { lance: Pick<LanceStore,'hybridSearch'>; embedQuery; space: SpaceMeta; reranker?: Reranker }`.
 
-## What I did
+Deviated from the brief's literal reference snippet in one respect: did not set `candidates`/`returned` span attributes (only `reranked`), matching the brief's own reference implementation body (which also omits them) even though `MemoryRecallInfo` supports them — kept minimal per brief.
 
-1. **Read every file the brief named** to verify claims:
-   `src/crew/{types,define,member-agent,compile,engine}.ts`,
-   `src/cli/{crew,select-runtime}.ts`, `crews/index.ts`,
-   `src/telemetry/spans.ts` (`CREW_ID`/`CREW_PROCESS`/`CREW_TASK_MEMBER`,
-   `withCrewSpan`), `src/workflow/run-step.ts` (`defaultRunAgentStep`'s
-   `onBeforeDelegate` param), `src/cli/flow.ts` (selection wiring), and
-   `src/core/orchestrator.ts` (`runOrchestrator`'s throw behavior).
+## TDD RED/GREEN
 
-2. **Found and fixed the key inaccuracy the brief flagged**: `runCrew`'s own
-   docstring in `src/crew/engine.ts` line 35 says *"never throws into the
-   caller"* — unconditionally. That's true for the **sequential** path
-   (`runWorkflow` genuinely never throws — confirmed in §9's existing prose)
-   but **false** for the **hierarchical** path: `runOrchestrator`
-   (`src/core/orchestrator.ts` line 100) does `throw err` for any failure that
-   is neither a captured resource error nor a `MaxStepsError` carrying a
-   capability gap. The old `architecture.md` made **no claim at all** about
-   `runCrew`'s throw behavior (a silent gap, not a wrong statement already in
-   the doc), so this was new-but-corrective content. New §10 spells out both
-   paths precisely: sequential is provably throw-free (delegates to §9's
-   engine); hierarchical "inherits `runOrchestrator`'s throw-on-unhandled-
-   failure behavior" and the section explicitly states `runCrew` "as a whole
-   is not unconditionally throw-free."
+**RED** — test file used `bun:test` imports (brief's snippet used `vitest`, which is not a project dependency and would break typecheck per task instructions; I adapted imports, kept all 3 test bodies verbatim in behavior):
+```
+bun test tests/memory/retrieve.test.ts
+error: Cannot find module '../../src/memory/retrieve.ts'
+0 pass, 1 fail, 1 error
+```
 
-3. **Confirmed live-model-selection-now-wired is accurate** — both
-   `src/cli/crew.ts` and `src/cli/flow.ts` build `createSelectionRuntime()`
-   and thread `onBeforeDelegate` into `runCrewCli`/`defaultRunAgentStep`
-   respectively; this matches what §9's pre-existing "Shared live-selection
-   runtime" paragraph already said, so no correction needed there — just
-   referenced from the new section instead of duplicated.
+**GREEN** — after implementing `src/memory/retrieve.ts`:
+```
+bun test tests/memory/retrieve.test.ts
+3 pass, 0 fail, 4 expect() calls
+Ran 3 tests across 1 file. [94.00ms]
+```
 
-4. **Added new `## 10. Crews & roles (Slice 11)`** (~55 lines), inserted
-   after §9's "Shared live-selection runtime" paragraph, moving the
-   mis-homed "Crew CLI entry" paragraph out of §9 into it. Content:
-   - Framing: thin composition over the workflow engine (§9) + orchestrator
-     (§13 Glossary), not a new engine.
-   - `CrewMember`/`Task`/`CrewProcess`/`CrewDef`/`CrewOutcome` shapes (exact
-     field names verified against `src/crew/types.ts`).
-   - `defineCrew` validation specifics (unique names/ids, member/dep resolve,
-     `effectiveTaskDeps` semantics, acyclic Kahn) → `CrewError`.
-   - `buildCrewAgent`: systemPrompt composition, placeholder model
-     (`qwenFast`) vs. live-resolved model via `modelReq`.
-   - `compile.ts`: sequential `compileToWorkflow` (task→AgentStep mapping,
-     `composeTaskInput` context threading, `output ?? z.string()`) and
-     hierarchical `buildHierarchicalOrchestrator` (manager prompt, router
-     default, "manager delegates autonomously" v1 simplification).
-   - `engine.ts` dispatch + the throw-behavior nuance (above).
-   - Telemetry: `withCrewSpan` → `crew.run` span with `CREW_ID`/`CREW_PROCESS`,
-     `CREW_TASK_MEMBER` tagging, nesting under `workflow.step` or
-     `agent.delegation`.
-   - CLI entry `crew.ts` lifecycle (mirrors `flow.ts`), `crews/` registry.
-   - Feeds Slice 12/13; out-of-scope list (memory, Flows, planning/HITL).
-   - Renumbered old §§10-12 → §§11-13 (On-disk stores, Testing strategy,
-     Glossary) and fixed the one internal cross-reference that pointed at
-     the old Glossary number (§12 → §13).
+One typecheck fix needed post-GREEN: `noUncheckedIndexedAccess` (tsconfig) flagged `out[0].id` as possibly undefined in 2 test assertions — changed to `out[0]?.id` (consistent with strict-mode indexing elsewhere in the codebase).
 
-5. **Module map (§2)**: audited every edge/node against the code — found it
-   **already complete and correct**; no changes made (adding redundant edges
-   would violate the "match the exact Mermaid/table style, don't invent a new
-   format" constraint and add noise for no accuracy gain).
+`bun run typecheck` → clean (exit 0, no output).
+`bun run lint:file -- src/memory/retrieve.ts tests/memory/retrieve.test.ts` → "Checked 2 files. No fixes applied." (0 errors).
 
-## Verification
+## Full suite
 
-- `bun run docs:check` → `✔ docs-check: living docs present + linked; every
-  src subsystem documented.` PASS.
-- `bun run typecheck` → clean (docs-only change, as expected).
-- `bun run lint` → `Checked 152 files in 46ms. No fixes applied.` clean.
-- `bun test` → `218 pass, 16 skip, 0 fail` (skips are the `*.live.test.ts`
-  suite, expected without a running Ollama).
-- `git status` confirmed only `docs/architecture.md` was modified — no
-  `src/**` touched.
+```
+bun test
+238 pass, 16 skip, 0 fail, 481 expect() calls
+Ran 254 tests across 85 files. [51.05s]
+```
 
-## Commit
+No regressions.
 
-`4f60d10` — `docs(slice-11): document crews & roles in architecture.md`
-(1 file changed, 89 insertions, 4 deletions) on branch `slice-11-crews`.
+`bun run docs:check` → passes ("living docs present + linked; every src subsystem documented") — `src/memory/` subsystem already covered in `docs/architecture.md` from earlier Slice-12 tasks; this task adds a file to an already-documented subsystem, not a new one, so no architecture.md edit was required by the doc-check tooling. Flagging for the slice-level docs audit: architecture.md's `src/memory` description should be checked at slice-close to ensure it explicitly names the retrieval pipeline module, since the hard-line rule requires truthful, current claims, not just presence.
 
-## Concerns / follow-ups (non-blocking)
+## Files
 
-- The brief's literal instruction ("§13") is stale wording once earlier tasks
-  folded content into §2/§9 first — I resolved this by making the new
-  section the *next available number* (§10) and renumbering downstream
-  sections, which keeps the doc's existing "one topic per numbered section,
-  sequential" convention intact rather than shoehorning crews in as a final
-  §13 out of chronological order. Section numbers aren't pinned anywhere
-  externally except README's one link to §9 (Workflow/DAG engine), which is
-  unaffected.
-- `src/crew/engine.ts`'s own code comment ("never throws into the caller")
-  is technically inaccurate per the code (confirmed via `runOrchestrator`'s
-  `throw err`). Brief was docs-only/no `src/**` changes, so I did not touch
-  the comment — flagging as a candidate one-line source fix for a future
-  cleanup pass.
-- Did not touch `README.md`; it has no Slice-11/crew content yet and the
-  brief didn't ask for it. Its one architecture.md section link (§9,
-  Workflow/DAG engine) is unaffected by the renumbering.
+- Created: `/Users/inderjotsingh/ai/src/memory/retrieve.ts`
+- Created: `/Users/inderjotsingh/ai/tests/memory/retrieve.test.ts`
+- Commit: `8f80d83` — `feat(memory): retrieval pipeline (RRF candidates → budget-fit → top-k, rerank seam)` on branch `slice-12-memory-rag`
+
+## Self-review
+
+- Candidate order preservation: confirmed the loop iterates `candidates` in place without any sort — LanceDB's best-first order (or the reranker's output order) is respected verbatim, per the correctness note in the task.
+- Budget-fit "always include first candidate" guard (`out.length > 0`) verified by the tight-budget test: with budget=256 chars and two 400-char candidates, only candidate `'a'` is returned (`out.length === 1 < topK === 5`).
+- Dimension-mismatch path verified independent of `hybridSearch` (mock returns `[]`) — the guard fires before any search call, so no wasted work on a doomed query.
+- Reranker seam verified: when `opts.rerank` is true and a reranker is supplied, its output order fully determines the final order (test reverses candidates and asserts the reversed order surfaces).
+- `defaultTopK()` mirrors the brief's env-parsing pattern (`Number.isInteger(raw) && raw > 0`), consistent with `retrievalCtxFraction()` in `budget.ts` and `maxDelegationDepth()` in `guardrails.ts`.
+
+## Concerns
+
+1. **Test framework substitution**: the brief's test snippet imports from `vitest`; I used `bun:test` per explicit task instructions and this repo's established convention (all existing `tests/memory/*.test.ts` use `bun:test`). Confirmed no `vitest` dependency exists in `package.json`. This is a documentation bug in task-8-brief.md itself, not a design ambiguity — flagging in case other pending task briefs in this SDD batch carry the same copy-paste artifact.
+2. **`noUncheckedIndexedAccess` fix**: the brief's test snippet as literally given would fail `tsc --noEmit` in this repo's strict config; fixed with `?.` chaining. Worth noting for future briefs targeting this repo to pre-empt the same tsconfig strictness.
+3. Did not add `candidates`/`returned` telemetry attributes even though the span type supports them and it would arguably be more observable (aligns with the project's "telemetry to emit" standing note) — held back to match the brief's reference implementation exactly; a follow-up task/slice could wire those in if richer memory-recall telemetry is desired.
+4. **Report filename collision**: `.superpowers/sdd/task-8-report.md` already existed on disk from an unrelated Slice-11 task ("Crews & roles documentation"). Overwrote it with this Slice-12 Task-8 report as instructed by this task's brief path — flagging in case the stale Slice-11 content was still needed elsewhere (it was plain leftover scratch, not referenced by this task).

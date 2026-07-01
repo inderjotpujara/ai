@@ -1,111 +1,73 @@
-## Task 2: `buildCrewAgent` (role/goal/backstory → Agent)
+## Task 2: Retrieval injection budget (live fraction of num_ctx)
 
 **Files:**
-- Create: `src/crew/member-agent.ts`
-- Test: `tests/crew/member-agent.test.ts`
+- Create: `src/memory/budget.ts`
+- Test: `tests/memory/budget.test.ts`
 
 **Interfaces:**
-- Consumes: `CrewMember` (Task 1); `Agent` from `src/core/agent-def.ts` (`{ name; description; model; systemPrompt; tools; modelDecl?; modelReq? }`); `createOllamaModel` from `src/providers/ollama.ts`; `qwenFast` default export from `models/qwen-fast.ts`; `Capability`/`PreferPolicy`/`ModelRequirement` from `src/core/types.ts`.
-- Produces: `function buildCrewAgent(member: CrewMember, tools?: ToolSet): Agent`.
+- Produces: `retrievalCtxFraction(): number` (env `AGENT_MEMORY_CTX_FRACTION`, default `0.25`); `retrievalBudgetChars(callerNumCtx: number | undefined): number`.
+- Consumes: `currentDelegationContext` from `src/core/guardrails.ts` (read at call site in retrieve, not here).
 
-- [ ] **Step 1: Write the failing test `tests/crew/member-agent.test.ts`**
+- [ ] **Step 1: Write the failing test**
+```ts
+// tests/memory/budget.test.ts
+import { afterEach, describe, expect, test } from 'vitest';
+import { retrievalBudgetChars, retrievalCtxFraction } from '../../src/memory/budget.ts';
 
-```typescript
-import { describe, expect, it } from 'bun:test';
-import { Capability, PreferPolicy } from '../../src/core/types.ts';
-import { buildCrewAgent } from '../../src/crew/member-agent.ts';
-import type { CrewMember } from '../../src/crew/types.ts';
+afterEach(() => { delete process.env.AGENT_MEMORY_CTX_FRACTION; });
 
-const member: CrewMember = {
-  name: 'researcher',
-  role: 'Senior Research Analyst',
-  goal: 'Find accurate, current facts on the topic',
-  backstory: 'You have 10 years scouring primary sources.',
-  requires: [Capability.Tools],
-  prefer: PreferPolicy.LargestThatFits,
-};
-
-describe('buildCrewAgent', () => {
-  it('composes role/goal/backstory into the system prompt', () => {
-    const agent = buildCrewAgent(member, {});
-    expect(agent.name).toBe('researcher');
-    expect(agent.systemPrompt).toContain('Senior Research Analyst');
-    expect(agent.systemPrompt).toContain('Find accurate, current facts');
-    expect(agent.systemPrompt).toContain('10 years scouring');
-    // description drives hierarchical routing → carries role + goal
-    expect(agent.description).toContain('Senior Research Analyst');
+describe('retrieval budget', () => {
+  test('scales with num_ctx (fraction × ctx × 4 chars/token)', () => {
+    expect(retrievalBudgetChars(16384)).toBe(Math.floor(0.25 * 16384 * 4));
   });
-
-  it('sets modelReq for live selection, not a hardcoded model choice', () => {
-    const agent = buildCrewAgent(member, {});
-    expect(agent.modelReq).toEqual({
-      role: 'Senior Research Analyst',
-      requires: [Capability.Tools],
-      prefer: PreferPolicy.LargestThatFits,
-    });
-    // a default model is present (overridden live by the selector at delegation)
-    expect(agent.model).toBeDefined();
+  test('falls back to 4096 when ctx unknown', () => {
+    expect(retrievalBudgetChars(undefined)).toBe(Math.floor(0.25 * 4096 * 4));
   });
-
-  it('uses the member tools when provided', () => {
-    const tools = { probe: { description: 'x', inputSchema: undefined, execute: async () => ({}) } };
-    const agent = buildCrewAgent({ ...member, tools } as CrewMember);
-    expect(agent.tools).toBe(tools);
+  test('honors AGENT_MEMORY_CTX_FRACTION', () => {
+    process.env.AGENT_MEMORY_CTX_FRACTION = '0.5';
+    expect(retrievalCtxFraction()).toBe(0.5);
+    expect(retrievalBudgetChars(8192)).toBe(Math.floor(0.5 * 8192 * 4));
+  });
+  test('ignores out-of-range fraction', () => {
+    process.env.AGENT_MEMORY_CTX_FRACTION = '3';
+    expect(retrievalCtxFraction()).toBe(0.25);
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
+Run: `bun test tests/memory/budget.test.ts`
+Expected: FAIL (module not found).
 
-Run: `bun test tests/crew/member-agent.test.ts`
-Expected: FAIL — module not found.
+- [ ] **Step 3: Write `src/memory/budget.ts`** (mirrors `returnCapChars` in guardrails)
+```ts
+/** ~chars per token (English approximation). A unit conversion, not a tunable. */
+const CHARS_PER_TOKEN = 4;
+/** Context floor when a caller's num_ctx is unknown (mirrors guardrails FALLBACK_CTX). */
+const FALLBACK_CTX = 4096;
 
-- [ ] **Step 3: Write `src/crew/member-agent.ts`**
+/** Fraction of the caller's context that retrieved memory may occupy.
+ *  Env AGENT_MEMORY_CTX_FRACTION (fallback-only), default 0.25. */
+export function retrievalCtxFraction(): number {
+  const raw = Number(process.env.AGENT_MEMORY_CTX_FRACTION);
+  return raw > 0 && raw <= 1 ? raw : 0.25;
+}
 
-```typescript
-import type { ToolSet } from 'ai';
-import qwenFast from '../../models/qwen-fast.ts';
-import type { Agent } from '../core/agent-def.ts';
-import { createOllamaModel } from '../providers/ollama.ts';
-import type { CrewMember } from './types.ts';
-
-/** Compose a crew member's role/goal/backstory into an Agent. The model is a
- *  default placeholder; the real model is chosen LIVE by the selector at
- *  delegation (via modelReq + onBeforeDelegate), exactly like the preset agents. */
-export function buildCrewAgent(member: CrewMember, tools?: ToolSet): Agent {
-  const systemPrompt = [
-    `You are ${member.role}.`,
-    `Your goal: ${member.goal}`,
-    `Background: ${member.backstory}`,
-    'Do the task you are given. Use your tools when they help. Return only the result the task asks for — no preamble.',
-  ].join('\n');
-
-  return {
-    name: member.name,
-    description: `${member.role} — ${member.goal}`,
-    model: createOllamaModel(qwenFast),
-    systemPrompt,
-    tools: member.tools ?? tools ?? {},
-    modelDecl: qwenFast,
-    modelReq: {
-      role: member.role,
-      requires: member.requires,
-      prefer: member.prefer,
-    },
-  };
+/** LIVE char budget for memory injected into an agent with `callerNumCtx` tokens. */
+export function retrievalBudgetChars(callerNumCtx: number | undefined): number {
+  const ctx = callerNumCtx && callerNumCtx > 0 ? callerNumCtx : FALLBACK_CTX;
+  return Math.floor(retrievalCtxFraction() * ctx * CHARS_PER_TOKEN);
 }
 ```
 
-- [ ] **Step 4: Run tests + typecheck + lint**
-
-Run: `bun test tests/crew/member-agent.test.ts && bun run typecheck && bun run lint:file -- "src/crew/member-agent.ts"`
-Expected: PASS; clean.
+- [ ] **Step 4: Run tests to verify they pass**
+Run: `bun test tests/memory/budget.test.ts`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
-
 ```bash
-git add src/crew/member-agent.ts tests/crew/member-agent.test.ts
-git commit -m "feat(crew): buildCrewAgent composes role/goal/backstory"
+git add src/memory/budget.ts tests/memory/budget.test.ts
+git commit -m "feat(memory): live retrieval injection budget (fraction of num_ctx)"
 ```
 
 ---

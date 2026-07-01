@@ -1,94 +1,116 @@
-## Task 8: Architecture doc — Crews & roles section (docs hard line)
+## Task 8: Retrieval pipeline (hybrid → RRF → budget-fit; rerank seam)
 
 **Files:**
-- Modify: `docs/architecture.md` (add §13 + §2 module-map `src/crew/` node/edges)
+- Create: `src/memory/retrieve.ts`
+- Test: `tests/memory/retrieve.test.ts`
 
-**Interfaces:** none (docs). REQUIRED for `bun run docs:check` (the pre-commit gate blocks a new `src/<subsystem>` that isn't documented).
+**Interfaces:**
+- Produces: `type RetrieveDeps = { lance: Pick<LanceStore,'hybridSearch'>; embedQuery: (t: string) => Promise<number[]>; space: SpaceMeta; reranker?: Reranker }`; `retrieve(query: string, opts: RecallOptions, deps: RetrieveDeps): Promise<RetrievalResult[]>`. `type Reranker = { rerank(query: string, results: RetrievalResult[]): Promise<RetrievalResult[]> }`.
+- Consumes: `retrievalBudgetChars` (Task 2); `withMemoryRecallSpan` (Task 3); `currentDelegationContext` (guardrails); `MemoryError`.
 
-- [ ] **Step 1: Add a "§13 Crews & roles" section to `docs/architecture.md`**
+- [ ] **Step 1: Write the failing test**
+```ts
+// tests/memory/retrieve.test.ts
+import { describe, expect, test } from 'vitest';
+import { retrieve } from '../../src/memory/retrieve.ts';
+import { MemoryError } from '../../src/core/errors.ts';
+import { MemoryKind, type RetrievalResult, type SpaceMeta } from '../../src/memory/types.ts';
 
-Insert after the Workflow section, in the file's existing voice. Content must match the shipped code:
+const space: SpaceMeta = { name: 'default', embedModel: 'e', embedDim: 2, chunkCapTokens: 100, createdAt: 1 };
+const cand = (id: string, text: string, score: number): RetrievalResult => ({ id, text, source: 's', score, namespace: '' });
 
-```markdown
-## 13. Crews & roles (Slice 11)
-
-A CrewAI-style **role/task/process** layer — a thin composition over the workflow
-engine (§9/§12) and the orchestrator (Glossary), NOT a new engine.
-
-- **Types** (`src/crew/types.ts`): `CrewMember` (`role`/`goal`/`backstory` +
-  `requires`/`prefer` for **live** model selection + optional `tools`), `Task`
-  (`description` + `expectedOutput` prompt + `member` + `dependsOn` context edges
-  + optional zod `output`), `enum CrewProcess { Sequential, Hierarchical }`,
-  `CrewDef`, `CrewOutcome`.
-- **Member → agent** (`src/crew/member-agent.ts`): `buildCrewAgent` composes
-  role/goal/backstory into an `Agent.systemPrompt`, sets `description` (routing)
-  and `modelReq` (the model is chosen live by the selector — no hardcoded model).
-  This is the only genuinely new mechanism.
-- **Validation** (`src/crew/define.ts`): `defineCrew` — unique member names + task
-  ids, every `member`/`dependsOn` resolves, acyclic (Kahn) — throws `CrewError`.
-- **Compile** (`src/crew/compile.ts`): **sequential** `compileToWorkflow` maps each
-  task to an `AgentStep` (member = agent, `dependsOn` = context edges, output
-  `?? z.string()`) → a `WorkflowDef` run by the **existing** engine; **hierarchical**
-  `buildHierarchicalOrchestrator` reuses `createOrchestrator` + an auto manager
-  (model defaults to the router).
-- **Engine** (`src/crew/engine.ts`): `runCrew(def, input, deps)` dispatches by
-  process under a `crew.run` span; reuses `runGuardedAgent` (Slice-9 guardrails)
-  and the live selector. Never throws into the caller.
-- **Entry** (`src/cli/crew.ts`): `bun run crew <name> [input...]` over the `crews/`
-  registry; writes `runs/<id>/{spans.jsonl, result.txt|failed.txt}`; rendered by
-  `bun run runs`.
-- **Live model selection** (`src/cli/select-runtime.ts`): the crew CLI (and now the
-  workflow CLI) build a shared `createSelectionRuntime` — model manager + offline
-  registry + `createSelectHook` — so each member/role is resolved to the
-  largest-model-that-fits at delegation (threaded via `defaultRunAgentStep`'s
-  `onBeforeDelegate` for sequential, `createOrchestrator` for hierarchical).
-- **Telemetry** (`src/telemetry/spans.ts`): `crew.run` root span
-  (`ATTR.CREW_ID`, `CREW_PROCESS`) → nested `workflow.step` (sequential) or
-  `agent.delegation` (hierarchical).
-
-Feeds Slice 12 (Memory/RAG — members read from it) and Slice 13 (verification — a
-verifier is just another member/task). Out of scope (v1): memory, CrewAI "Flows"
-(our DAG already is that), planning / batch kickoff / human-in-the-loop tasks.
+describe('retrieve', () => {
+  test('budget-fit returns fewer than topK when ctx is tight', async () => {
+    const deps = {
+      space,
+      embedQuery: async () => [1, 0],
+      lance: { hybridSearch: async () => [cand('a', 'x'.repeat(400), 0.1), cand('b', 'y'.repeat(400), 0.2)] },
+    };
+    const out = await retrieve('q', { topK: 5, numCtx: 256 }, deps); // budget 0.25*256*4=256 chars
+    expect(out.length).toBe(1);
+    expect(out[0].id).toBe('a');
+  });
+  test('dimension mismatch throws MemoryError', async () => {
+    const deps = { space, embedQuery: async () => [1, 0, 0], lance: { hybridSearch: async () => [] } };
+    await expect(retrieve('q', {}, deps)).rejects.toBeInstanceOf(MemoryError);
+  });
+  test('applies reranker when provided', async () => {
+    const deps = {
+      space,
+      embedQuery: async () => [1, 0],
+      lance: { hybridSearch: async () => [cand('a', 'aa', 0.9), cand('b', 'bb', 0.1)] },
+      reranker: { rerank: async (_q: string, r: RetrievalResult[]) => [...r].reverse() },
+    };
+    const out = await retrieve('q', { topK: 2, numCtx: 8192, rerank: true }, deps);
+    expect(out[0].id).toBe('b');
+  });
+});
 ```
 
-- [ ] **Step 2: Update the §2 module map + dependency table**
+- [ ] **Step 2: Run test to verify it fails**
+Run: `bun test tests/memory/retrieve.test.ts`
+Expected: FAIL (module not found).
 
-Add a `CREW["Crews · src/crew"]` subgraph (types/define/member-agent/compile/engine) and edges: `crewcli(crew.ts) → crewengine`; `crewengine → wfengine` (sequential) and `crewengine → orch` (hierarchical); `crewengine → spans`; `crew → members build agents`; add a `crews/* · CREWS` node to the Declarations subgraph; a `Crews / roles` dependency-table row (`src/crew/` → `workflow/engine.ts` + `core/orchestrator.ts` + `core/delegate.ts (runGuardedAgent)` + `telemetry/spans.ts` + Zod). Also add a `select-runtime.ts` node under CLI with edges `crew.ts → select-runtime` and `flow.ts → select-runtime` (live model selection now shared by both CLIs), and note it depends on `resource/model-manager` + `discovery/build-registry` + `select-hook`. Match the existing Mermaid/table style exactly (read §2 first).
+- [ ] **Step 3: Write `src/memory/retrieve.ts`**
+```ts
+import { MemoryError } from '../core/errors.ts';
+import { currentDelegationContext } from '../core/guardrails.ts';
+import { withMemoryRecallSpan } from '../telemetry/spans.ts';
+import { retrievalBudgetChars } from './budget.ts';
+import type { LanceStore } from './lancedb-store.ts';
+import type { RecallOptions, RetrievalResult, SpaceMeta } from './types.ts';
 
-- [ ] **Step 3: Run docs-check + full gate**
+export type Reranker = { rerank(query: string, results: RetrievalResult[]): Promise<RetrievalResult[]> };
+export type RetrieveDeps = {
+  lance: Pick<LanceStore, 'hybridSearch'>;
+  embedQuery: (t: string) => Promise<number[]>;
+  space: SpaceMeta;
+  reranker?: Reranker;
+};
 
-Run: `bun run docs:check && bun run typecheck && bun run lint && bun test`
-Expected: docs-check PASS; typecheck + lint clean; full suite green (live tests skip if Ollama down).
+const DEFAULT_TOP_K = () => {
+  const raw = Number(process.env.AGENT_MEMORY_TOP_K);
+  return Number.isInteger(raw) && raw > 0 ? raw : 6;
+};
 
-- [ ] **Step 4: Commit**
+export async function retrieve(query: string, opts: RecallOptions, deps: RetrieveDeps): Promise<RetrievalResult[]> {
+  const topK = opts.topK ?? DEFAULT_TOP_K();
+  const numCtx = opts.numCtx ?? currentDelegationContext().numCtx;
+  return withMemoryRecallSpan(
+    { space: deps.space.name, namespace: opts.namespace, reranked: !!(opts.rerank && deps.reranker) },
+    async () => {
+      const vector = await deps.embedQuery(query);
+      if (vector.length !== deps.space.embedDim) {
+        throw new MemoryError(`query embedding dim ${vector.length} ≠ space '${deps.space.name}' dim ${deps.space.embedDim}`);
+      }
+      let candidates = await deps.lance.hybridSearch(deps.space.name, {
+        queryVector: vector, queryText: query, namespace: opts.namespace, kind: opts.kind, limit: topK * 4,
+      });
+      if (opts.rerank && deps.reranker) candidates = await deps.reranker.rerank(query, candidates);
+      // budget-fit: pack top-ranked results until the live char budget is spent, capped at topK.
+      const budget = retrievalBudgetChars(numCtx);
+      const out: RetrievalResult[] = [];
+      let used = 0;
+      for (const c of candidates) {
+        if (out.length >= topK) break;
+        if (used + c.text.length > budget && out.length > 0) break;
+        out.push(c); used += c.text.length;
+      }
+      return out;
+    },
+  );
+}
+```
 
+- [ ] **Step 4: Run tests to verify they pass**
+Run: `bun test tests/memory/retrieve.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
 ```bash
-git add docs/architecture.md
-git commit -m "docs(slice-11): document crews & roles in architecture.md"
+git add src/memory/retrieve.ts tests/memory/retrieve.test.ts
+git commit -m "feat(memory): retrieval pipeline (RRF candidates → budget-fit → top-k, rerank seam)"
 ```
 
 ---
 
-## Final verification (before PR)
-
-- [ ] `bun run check` (docs-check · typecheck · lint · test) GREEN.
-- [ ] `bun run serve` then `bun run crew research-crew "the example.com domain"` runs end-to-end; writes `runs/<id>/spans.jsonl` + `result.txt`.
-- [ ] `bun run runs <id>` shows `crew.run → workflow.step → agent.delegation`.
-- [ ] Existing workflow + orchestrator + delegate tests still pass (crews only *use* them; no engine change).
-- [ ] Refresh `resume-here.md` with the merge state.
-
----
-
-## Self-review notes (plan author)
-
-**Spec coverage:** §2.1 types → Task 1; §2.2 member-agent → Task 2; §2.3 define → Task 3; §2.7 telemetry → Task 4; §2.4 compile → Task 5; §2.5 engine → Task 6; §2.8 CLI + registry → Task 7; §8 docs → Task 8. §5 testing across Tasks 1-7 (unit) + Task 7 (live). §4 determinism = sequential-via-DAG + acyclic defineCrew + hierarchical-bounded-by-depth-guard. §7 acceptance = Final verification.
-
-**Latest-internet validation (standing rule [[prefers-latest-methodology]]):** the 2026 CrewAI model was validated during brainstorming — crews = role/goal/backstory (prompt scaffolding) + tasks-with-context + sequential|hierarchical process; we already own both processes + a stronger zod I/O, so the plan builds ONLY the thin role/task layer and reuses the engine/orchestrator. No Flows, no parallel structured-output system, no memory (Slice 12).
-
-**Type consistency:** `buildCrewAgent(member, tools?)` signature identical in Task 2 (def) and Tasks 5/6 (consumers). `effectiveTaskDeps` defined Task 3, used Task 5. `compileToWorkflow`/`buildHierarchicalOrchestrator` defined Task 5, used Task 6. `withCrewSpan`/`ATTR.CREW_*` defined Task 4, used Task 6. `runCrew`/`CrewDeps` defined Task 6, used Task 7. `CrewOutcome` (`{done,output}` | `{failed,failedTask?,message}`) consistent across Tasks 1/6/7.
-
-**Known v1 simplifications (documented):** hierarchical crew passes a composite task string to the orchestrator (manager delegates autonomously) rather than enforcing task order — matches CrewAI hierarchical semantics; sequential is the deterministic path. The CLI test injects `runAgentStep` to avoid a real model (mirrors the flow test seam).
-
-**Live model selection (wired in this slice — user-requested):** members carry `modelReq`, and the CLI now wires a real select-hook via `createSelectionRuntime` (Task 7), so each member/role is resolved to the largest-that-fits model at delegation. Threading: sequential path → `defaultRunAgentStep(agents, onBeforeDelegate)` → `runGuardedAgent(agent, task, onBeforeDelegate)` (Task 6 run-step change); hierarchical path → `onBeforeDelegate` passed to `createOrchestrator`. **Also upgrades the workflow CLI** (`flow.ts`) via the same shared helper. Unit tests bypass real models by injecting `runAgentStep`. `chat.ts` keeps its own inline setup (deduping it into `createSelectionRuntime` is an optional follow-up, out of scope here to avoid regressing the chat path).
-
-**Type consistency (selection):** `defaultRunAgentStep(agents, onBeforeDelegate?)` (Task 6) — `onBeforeDelegate` optional so existing callers (Slice-10 tests, current flow test) stay valid. `CrewDeps.onBeforeDelegate` (Task 6) → `CrewCliDeps.onBeforeDelegate` (Task 7) → `createSelectionRuntime().onBeforeDelegate` (Task 7), all typed `BeforeDelegate` from `src/core/delegate.ts`.

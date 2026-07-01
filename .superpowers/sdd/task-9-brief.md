@@ -1,220 +1,164 @@
-### Task 9: Manual spans at delegation / model-select / model-load·evict + live e2e
+## Task 9: `MemoryStore` facade
 
 **Files:**
-- Modify: `src/core/delegate.ts`, `src/cli/select-hook.ts`, `src/resource/model-manager.ts`
-- Test: `tests/core/delegate.test.ts` (add), `tests/integration/run-viewer.live.test.ts` (create)
+- Create: `src/memory/store.ts`
+- Test: `tests/memory/store.test.ts`
 
 **Interfaces:**
-- Consumes: `withDelegationSpan`, `recordModelSelect`, `withModelLoadSpan`, `recordEvict` (Task 3); `activeKvCacheType` (`src/resource/kv-cache.ts`), `kvCacheBytes` (`src/resource/footprint.ts`).
+- Produces: `class MemoryStore` with `remember(text, o): Promise<void>`, `ingest(path, o): Promise<{ chunks: number; skipped: boolean }>`, `recall(query, opts): Promise<RetrievalResult[]>`, `reindex(space, newEmbedModel): Promise<void>`, `stats(): Promise<Record<string, number>>`, `close(): void`. Constructed via `createMemoryStore(config, deps)` where `deps = { embedTexts, embedQuery, probe, ensureReady }` (injectable for tests).
+- Consumes: everything from Tasks 1–8.
 
-- [ ] **Step 1: Write the failing delegation test**
+- [ ] **Step 1: Write the failing test** (fully mocked deps — no Ollama)
+```ts
+// tests/memory/store.test.ts
+import { afterEach, describe, expect, test } from 'vitest';
+import { rmSync } from 'node:fs';
+import { createMemoryStore } from '../../src/memory/store.ts';
+import { MemoryKind } from '../../src/memory/types.ts';
 
-Create/extend `tests/core/delegate.test.ts` with:
-```typescript
-import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { context, trace } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
-import {
-  BasicTracerProvider,
-  InMemorySpanExporter,
-  SimpleSpanProcessor,
-} from '@opentelemetry/sdk-trace-base';
-import { MockLanguageModelV3 } from 'ai/test';
-import type { Agent } from '../../src/core/agent-def.ts';
-import { asDelegateTool } from '../../src/core/delegate.ts';
+const DIR = '/tmp/memstore-test';
+afterEach(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch {} });
 
-let exporter: InMemorySpanExporter;
-let provider: BasicTracerProvider;
-beforeEach(() => {
-  exporter = new InMemorySpanExporter();
-  provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
-  context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-  trace.setGlobalTracerProvider(provider);
-});
-afterEach(async () => {
-  await provider.shutdown();
-  exporter.reset();
-});
+function fakeDeps() {
+  // 2-d embeddings: map first char code to a vector so 'a' matches 'a'.
+  const vec = (t: string) => [t.charCodeAt(0) || 0, 1];
+  return {
+    embedTexts: async (ts: string[]) => ts.map(vec),
+    embedQuery: async (t: string) => vec(t),
+    probe: async () => ({ dim: 2, maxInput: 2048 }),
+  };
+}
 
-test('asDelegateTool opens an agent.delegation span tagged with the target', async () => {
-  const model = new MockLanguageModelV3({
-    doGenerate: async () => ({
-      content: [{ type: 'text', text: 'done' }],
-      finishReason: { unified: 'stop', raw: undefined },
-      usage: {
-        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
-        outputTokens: { total: 1, text: undefined, reasoning: undefined },
-      },
-      warnings: [],
-    }),
+describe('MemoryStore', () => {
+  test('remember then recall roundtrip (creates space, records embedder)', async () => {
+    const store = createMemoryStore({ path: DIR, embedModel: 'fake' }, fakeDeps());
+    await store.remember('apple pie recipe', { space: 'default', namespace: 'crew:x', kind: MemoryKind.RunMemory, source: 'crew:x:task1', at: 1 });
+    const hits = await store.recall('apple', { space: 'default', namespace: 'crew:x', numCtx: 8192 });
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+    store.close();
   });
-  const agent: Agent = { name: 'web_fetch', description: 'fetches', model, systemPrompt: 's', tools: {} };
-  const tool = asDelegateTool(agent);
-  await tool.execute?.({ task: 'go' }, { toolCallId: 't', messages: [] });
-  const del = exporter.getFinishedSpans().find((s) => s.name === 'agent.delegation');
-  expect(del).toBeDefined();
-  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
+  test('space embedder is authoritative (global default ignored for existing space)', async () => {
+    const store = createMemoryStore({ path: DIR, embedModel: 'fake' }, fakeDeps());
+    await store.remember('x', { space: 'default', at: 1 });
+    const stats = await store.stats();
+    expect(stats.default).toBe(1);
+    store.close();
+  });
 });
 ```
-> Verify the second arg shape `asDelegateTool(...).execute` expects in this AI-SDK build; if `execute` needs no second arg in tests, call `tool.execute?.({ task: 'go' })` and adjust.
 
 - [ ] **Step 2: Run test to verify it fails**
+Run: `bun test tests/memory/store.test.ts`
+Expected: FAIL (module not found).
 
-Run: `bun test tests/core/delegate.test.ts`
-Expected: FAIL — no `agent.delegation` span.
+- [ ] **Step 3: Write `src/memory/store.ts`**
+```ts
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { MemoryError } from '../core/errors.ts';
+import { withMemoryIngestSpan } from '../telemetry/spans.ts';
+import { chunk } from './chunk.ts';
+import { defineMemory, type ResolvedMemoryConfig } from './define.ts';
+import { LanceStore } from './lancedb-store.ts';
+import { retrieve, type Reranker } from './retrieve.ts';
+import { SqliteStore } from './sqlite-store.ts';
+import { MemoryKind, type MemoryConfig, type MemoryRecord, type RecallOptions, type RetrievalResult, type SpaceMeta } from './types.ts';
 
-- [ ] **Step 3: Wrap delegate execute in a delegation span**
+export type StoreDeps = {
+  embedTexts: (texts: string[]) => Promise<number[][]>;
+  embedQuery: (text: string) => Promise<number[]>;
+  probe: (model: string) => Promise<{ dim: number; maxInput: number }>;
+  reranker?: Reranker;
+};
 
-In `src/core/delegate.ts`, add `import { withDelegationSpan } from '../telemetry/spans.ts';` and wrap the `execute` body:
-```typescript
-    execute: async ({ task }) =>
-      withDelegationSpan(agent.name, async () => {
-        try {
-          const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
-          if (pre?.abort) {
-            return { error: pre.abort };
-          }
-          const { text } = await runDefinedAgent(agent, task, pre?.numCtx, pre?.model);
-          return { text };
-        } catch (cause) {
-          return { error: `Agent ${agent.name} failed: ${(cause as Error).message}` };
-        }
-      }),
+const DEFAULT_SPACE = 'default';
+
+export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
+  const cfg: ResolvedMemoryConfig = defineMemory(config);
+  const lance = new LanceStore(join(cfg.path, 'lance'));
+  const sql = new SqliteStore(join(cfg.path, 'memory.db'));
+
+  async function ensureSpace(space: string, at: number): Promise<SpaceMeta> {
+    const existing = sql.getSpace(space);
+    if (existing) return existing;
+    const { dim, maxInput } = await deps.probe(cfg.embedModel);
+    const meta: SpaceMeta = { name: space, embedModel: cfg.embedModel, embedDim: dim, chunkCapTokens: maxInput, createdAt: at };
+    sql.createSpace(meta);
+    await lance.openOrCreateTable(space, dim);
+    return meta;
+  }
+
+  async function writeChunks(meta: SpaceMeta, namespace: string, kind: MemoryKind, source: string, text: string, at: number): Promise<number> {
+    const chunks = await chunk(text, { capTokens: meta.chunkCapTokens, embed: deps.embedTexts });
+    if (chunks.length === 0) return 0;
+    const vectors = await deps.embedTexts(chunks.map((c) => c.text));
+    const records: MemoryRecord[] = chunks.map((c, i) => ({
+      id: `${source}#${c.ordinal}`, space: meta.name, namespace, kind, text: c.text, vector: vectors[i], source, createdAt: at,
+    }));
+    await lance.upsert(meta.name, records);
+    return records.length;
+  }
+
+  return {
+    async remember(text: string, o: { space?: string; namespace?: string; kind?: MemoryKind; source?: string; at: number }): Promise<void> {
+      const meta = await ensureSpace(o.space ?? DEFAULT_SPACE, o.at);
+      await writeChunks(meta, o.namespace ?? '', o.kind ?? MemoryKind.RunMemory, o.source ?? `mem:${o.at}`, text, o.at);
+    },
+
+    async ingest(path: string, o: { space?: string; namespace?: string; at: number }): Promise<{ chunks: number; skipped: boolean }> {
+      const space = o.space ?? DEFAULT_SPACE;
+      const text = readFileSync(path, 'utf8');
+      const hash = createHash('sha256').update(text).digest('hex');
+      if (sql.seenDoc(path, hash)) return { chunks: 0, skipped: true };
+      return withMemoryIngestSpan({ space, source: path }, async () => {
+        const meta = await ensureSpace(space, o.at);
+        const n = await writeChunks(meta, o.namespace ?? '', MemoryKind.Document, path, text, o.at);
+        sql.recordDoc(path, hash, n, o.at);
+        return { chunks: n, skipped: false };
+      });
+    },
+
+    async recall(query: string, opts: RecallOptions = {}): Promise<RetrievalResult[]> {
+      const space = sql.getSpace(opts.space ?? DEFAULT_SPACE);
+      if (!space) return []; // abstention: nothing stored yet
+      return retrieve(query, opts, {
+        lance, embedQuery: deps.embedQuery, space, reranker: opts.rerank ? deps.reranker : undefined,
+      });
+    },
+
+    async reindex(space: string, newEmbedModel: string): Promise<void> {
+      const meta = sql.getSpace(space);
+      if (!meta) throw new MemoryError(`unknown space '${space}'`);
+      // Explicit, destructive: drop + recreate under the new embedder. Re-ingest is the caller's job.
+      await lance.dropTable(space).catch(() => {});
+      const { dim, maxInput } = await deps.probe(newEmbedModel);
+      sql.createSpace({ ...meta, embedModel: newEmbedModel, embedDim: dim, chunkCapTokens: maxInput });
+      await lance.openOrCreateTable(space, dim);
+    },
+
+    async stats(): Promise<Record<string, number>> {
+      const out: Record<string, number> = {};
+      for (const s of sql.listSpaces()) out[s.name] = await lance.count(s.name).catch(() => 0);
+      return out;
+    },
+
+    close(): void { sql.close(); },
+  };
+}
+
+export type MemoryStore = ReturnType<typeof createMemoryStore>;
 ```
 
-- [ ] **Step 4: Run delegation test to verify it passes**
-
-Run: `bun test tests/core/delegate.test.ts`
+- [ ] **Step 4: Run tests + typecheck**
+Run: `bun test tests/memory/store.test.ts && bun run typecheck`
 Expected: PASS.
 
-- [ ] **Step 5: Emit `agent.model.select` in the select hook**
-
-In `src/cli/select-hook.ts`, add `import { recordModelSelect } from '../telemetry/spans.ts';`, and immediately after `resolveModel` returns `{ decl, numCtx }` (before `deps.notify`), add:
-```typescript
-      recordModelSelect({
-        modelId: decl.model,
-        provider: decl.provider,
-        numCtx,
-        paramsBillions: decl.footprint.approxParamsBillions,
-      });
-```
-
-- [ ] **Step 6: Wrap load + record eviction in the model manager**
-
-In `src/resource/model-manager.ts`:
-- Add imports: `import { recordEvict, withModelLoadSpan } from '../telemetry/spans.ts';` and `import { activeKvCacheType } from './kv-cache.ts';` (confirm `kvCacheBytes` is already imported; it is used at line ~129).
-- At the eviction call (current line 152 `await c.unload(evict.name);`), prepend:
-```typescript
-      const evictReason = pinned.has(evict.name)
-        ? 'budget-too-low-evicting-pinned'
-        : 'lru-fit';
-      recordEvict(evict.name, evict.sizeBytes, evictReason);
-```
-- Replace the load call (current line 171 `await c.warm(target, chosenCtx);`) with:
-```typescript
-    await withModelLoadSpan(
-      target,
-      {
-        weightsBytes: weights,
-        kvF16PerToken: f16Base,
-        kvEffectivePerToken: kvPerToken,
-        kvCacheType: activeKvCacheType(),
-        chosenCtx,
-        requestedCtx: desired,
-        footprintBytes: weights + kvCacheBytes(chosenCtx, kvPerToken),
-        budgetBytes: freeBudget,
-      },
-      () => c.warm(target, chosenCtx),
-    );
-```
-> Confirm the in-scope names (`weights`, `f16Base`, `kvPerToken`, `chosenCtx`, `desired`, `freeBudget`) and `kvCacheBytes` signature against the current file before saving.
-
-- [ ] **Step 7: Run the unit suite, typecheck, lint**
-
-Run: `bun run typecheck && bun run lint && bun test`
-Expected: green (live tests skip if Ollama down).
-
-- [ ] **Step 8: Create the live e2e test**
-
-Create `tests/integration/run-viewer.live.test.ts`:
-```typescript
-import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-// Reuse the project's existing live setup helpers (match orchestrator.live.test.ts):
-//   building a real orchestrator + manager, and the ollamaReady(...) gate + unloadModel cleanup.
-import { ollamaReady } from '../helpers/ollama-ready.ts'; // adjust path to the existing helper
-import { readSpans } from '../../src/run/run-trace.ts';
-import { renderRun } from '../../src/cli/runs.ts';
-
-const ready = await ollamaReady('qwen3.5:4b');
-
-describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
-  test(
-    'a real run writes spans.jsonl with delegation + model spans, and renders',
-    async () => {
-      const root = await mkdtemp(join(tmpdir(), 'rv-live-'));
-      try {
-        // Build the same orchestrator/manager wiring chat.ts uses, then:
-        //   await runChat({ orchestrator, task: 'Read <file> and summarize', runsRoot: root, runId: 'live-1', ... });
-        // (Construct via the existing live helpers; see orchestrator.live.test.ts for the exact setup.)
-        const { spans } = await readSpans(join(root, 'live-1'));
-        expect(spans.some((s) => s.name === 'agent.run')).toBe(true);
-        expect(spans.some((s) => s.name === 'agent.delegation')).toBe(true);
-        expect(
-          spans.some((s) => s.name.startsWith('ai.generateText')),
-        ).toBe(true);
-        const out = await renderRun(root, 'live-1');
-        expect(out).toContain('agent.run');
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    },
-    120_000,
-  );
-});
-```
-> Mirror the EXACT live-setup pattern from `tests/integration/orchestrator.live.test.ts` (gate import, orchestrator/manager construction, `afterAll` `unloadModel`). Fill the run-construction block from that file's helpers rather than re-inventing it.
-
-- [ ] **Step 9: Run the live test if Ollama is up**
-
-Run (only meaningful with `bun run serve` running + models pulled): `bun test tests/integration/run-viewer.live.test.ts`
-Expected: PASS, or cleanly SKIPPED when Ollama is down.
-
-- [ ] **Step 10: Final gate + commit**
-
-Run: `bun run typecheck && bun run lint && bun test`
-Expected: all green; live skips cleanly.
+- [ ] **Step 5: Commit**
 ```bash
-git add src/core/delegate.ts src/cli/select-hook.ts src/resource/model-manager.ts tests/core/delegate.test.ts tests/integration/run-viewer.live.test.ts
-git commit -m "feat: instrument delegation + model select/load/evict spans; live e2e
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+git add src/memory/store.ts tests/memory/store.test.ts
+git commit -m "feat(memory): MemoryStore facade (remember/ingest/recall/reindex/stats)"
 ```
 
 ---
 
-## Self-Review
-
-**1. Spec coverage:**
-- §1.1 OTel-native global provider → Tasks 2, 3, 7. ✓
-- §1.2 root + delegation + model lifecycle spans → Tasks 3 (helpers), 7 (root), 9 (delegation/model). ✓
-- §1.3 `spans.jsonl` canonical, retire `journal.jsonl`, keep `.txt` → Tasks 1, 7. ✓
-- §1.4 terminal viewer + `--follow` → Tasks 5, 6. ✓
-- §1.5 OTLP seam wired now → Task 2 (`buildProcessors` + dep). ✓
-- §1.6 best-effort / no-op safe → Task 1 (exporter), Task 3 (`getActiveSpan` guards), Task 8 (`isEnabled` w/ no-op fallback). ✓
-- §2.1–2.6 components → Tasks 1–6. ✓
-- §2.7 wiring (chat/run-chat/agent/delegate/select-hook/manager) → Tasks 7, 8, 9. (Refinement: telemetry lifecycle moved from `chat.ts` to `runChat` for testability — documented in Task 7.) ✓
-- §2.8 retirements → Task 7. ✓
-- §2.9 deps → Task 1. ✓
-- §3 span model → Tasks 3, 7, 8, 9. ✓
-- §4 error handling → Task 1 (FAILED), Task 6 (malformed/missing), Task 3 (guards). ✓
-- §5 testing (unit/ALS smoke/integration/live) → every task + Task 9 live. ✓
-- §7 acceptance → covered by Task 9 live + gates.
-
-**2. Placeholder scan:** No "TBD"/"add error handling"/"similar to". The two `>` verify-before-save notes (exact in-scope names in manager; AI-SDK `execute` arg shape) are explicit verification instructions with the expected values stated, not deferred work.
-
-**3. Type consistency:** `SpanRecord` (Task 1) used identically in Tasks 4/5/6 tests. `TraceNode`/`RunSummary` (Task 4) consumed by Task 5/6. `ATTR` keys defined once (Task 3) and referenced by string-equal literals in tests. `ModelLoadInfo` fields (Task 3) match the manager call (Task 9). `functionId` added in Task 8 to `RunAgentInput` and passed from `runDefinedAgent`. Consistent.
-
-**Note for executor:** `chat.ts` is intentionally NOT modified — `runChat` now owns telemetry init/shutdown (Task 7). Router pre-warm spans in `chat.ts` are out of trace scope by design.
