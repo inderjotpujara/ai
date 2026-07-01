@@ -61,20 +61,29 @@ export async function mapWithConcurrency<T, R>(
   return out;
 }
 
+function callTool(
+  tool: ToolSet[string],
+  args: unknown,
+  callId: string,
+): Promise<unknown> {
+  return (tool.execute as (a: unknown, o: unknown) => Promise<unknown>)(args, {
+    toolCallId: callId,
+    messages: [],
+  });
+}
+
 async function runLeaf(
   sub: MapSubStep,
   ctx: WorkflowContext,
   deps: WorkflowDeps,
+  callId: string,
 ): Promise<unknown> {
   if (sub.kind === StepKind.Agent) {
     return deps.runAgentStep(sub.agent, sub.input(ctx));
   }
   const tool = deps.tools[sub.tool];
   if (!tool?.execute) throw new WorkflowError(`unknown tool: ${sub.tool}`);
-  return (tool.execute as (a: unknown, o: unknown) => Promise<unknown>)(
-    sub.input(ctx),
-    { toolCallId: `map-leaf`, messages: [] },
-  );
+  return callTool(tool, sub.input(ctx), callId);
 }
 
 /** Dispatch a step to its kind runner. Returns the RAW result; the engine
@@ -92,10 +101,7 @@ export function runStepByKind(
       if (!tool?.execute) {
         return Promise.reject(new WorkflowError(`unknown tool: ${step.tool}`));
       }
-      return (tool.execute as (a: unknown, o: unknown) => Promise<unknown>)(
-        step.input(ctx),
-        { toolCallId: step.id, messages: [] },
-      );
+      return callTool(tool, step.input(ctx), step.id);
     }
     case StepKind.Branch: {
       const taken = step.predicate(ctx) ? 'whenTrue' : 'whenFalse';
@@ -109,7 +115,8 @@ export function runStepByKind(
         step.maxParallel ?? deps.maxParallel ?? DEFAULT_MAX_PARALLEL;
       return mapWithConcurrency(items, limit, async (item, index) => {
         const subCtx: WorkflowContext = { ...ctx, item, index };
-        const raw = await runLeaf(step.step, subCtx, deps);
+        const callId = `${step.id}[${index}]`;
+        const raw = await runLeaf(step.step, subCtx, deps, callId);
         const parsed = step.step.output.safeParse(raw);
         if (!parsed.success) {
           throw new WorkflowError(
