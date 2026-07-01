@@ -29,3 +29,6 @@ export class WorkflowError extends FrameworkError {}
 
 /** A crew definition or execution error. */
 export class CrewError extends FrameworkError {}
+
+/** A memory/RAG definition, storage, or retrieval error. */
+export class MemoryError extends FrameworkError {}

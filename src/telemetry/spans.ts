@@ -35,6 +35,12 @@ export const ATTR = {
   CREW_ID: 'crew.id',
   CREW_PROCESS: 'crew.process',
   CREW_TASK_MEMBER: 'crew.task.member',
+  MEMORY_SPACE: 'memory.space',
+  MEMORY_NAMESPACE: 'memory.namespace',
+  MEMORY_CANDIDATES: 'memory.candidates',
+  MEMORY_RETURNED: 'memory.returned',
+  MEMORY_RERANKED: 'memory.reranked',
+  MEMORY_EMBED_MODEL: 'memory.embed_model',
 } as const;
 
 export type ModelSelectInfo = {
@@ -223,6 +229,89 @@ export function withCrewSpan<T>(
   return inSpan('crew.run', async (span) => {
     span.setAttribute(ATTR.CREW_ID, crewId);
     span.setAttribute(ATTR.CREW_PROCESS, process);
+    return fn();
+  });
+}
+
+export type MemoryRecallInfo = {
+  space: string;
+  namespace?: string;
+  candidates?: number;
+  returned?: number;
+  reranked?: boolean;
+};
+
+/** Span for a memory recall (retrieval) call, tagged with space + candidate/return counts. */
+export function withMemoryRecallSpan<T>(
+  info: MemoryRecallInfo,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('memory.recall', async (span) => {
+    span.setAttribute(ATTR.MEMORY_SPACE, info.space);
+    if (info.namespace)
+      span.setAttribute(ATTR.MEMORY_NAMESPACE, info.namespace);
+    if (info.candidates != null) {
+      span.setAttribute(ATTR.MEMORY_CANDIDATES, info.candidates);
+    }
+    if (info.returned != null)
+      span.setAttribute(ATTR.MEMORY_RETURNED, info.returned);
+    if (info.reranked != null)
+      span.setAttribute(ATTR.MEMORY_RERANKED, info.reranked);
+    return fn();
+  });
+}
+
+/** Set the actual rerank outcome on the active memory.recall span, overriding
+ * whatever `withMemoryRecallSpan` was seeded with. Call after the rerank
+ * attempt (success or failure) so `reranked` reflects reality, not intent. */
+export function recordRerankOutcome(reranked: boolean): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.setAttribute(ATTR.MEMORY_RERANKED, reranked);
+}
+
+/** Record a rerank failure on the active span so recall degradation is
+ * observable without crashing the caller. */
+export function recordRerankFailure(err: unknown): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.addEvent('memory.rerank_failed', {
+    'error.message': err instanceof Error ? err.message : String(err),
+  });
+}
+
+export type MemoryIngestInfo = {
+  space: string;
+  source: string;
+  chunks?: number;
+};
+
+/** Span for a memory ingest (write) call, tagged with space, source, and chunk count. */
+export function withMemoryIngestSpan<T>(
+  info: MemoryIngestInfo,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('memory.ingest', async (span) => {
+    span.setAttribute(ATTR.MEMORY_SPACE, info.space);
+    span.setAttribute('memory.source', info.source);
+    if (info.chunks != null) span.setAttribute('memory.chunks', info.chunks);
+    return fn();
+  });
+}
+
+export type MemoryEmbedInfo = {
+  model: string;
+  count: number;
+};
+
+/** Span for an embedding call, tagged with model id and item count. */
+export function withMemoryEmbedSpan<T>(
+  info: MemoryEmbedInfo,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('memory.embed', async (span) => {
+    span.setAttribute(ATTR.MEMORY_EMBED_MODEL, info.model);
+    span.setAttribute('memory.count', info.count);
     return fn();
   });
 }

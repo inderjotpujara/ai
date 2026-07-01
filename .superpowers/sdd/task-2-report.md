@@ -1,81 +1,80 @@
-# Task 2: buildCrewAgent — Report
+# Task 2 Report: Retrieval Injection Budget (Live Fraction of num_ctx)
 
-## Status
-**COMPLETE** — All tests pass, typecheck clean, lint clean, full suite passes (203 pass, 15 skip, 0 fail), committed.
+## Summary
+Implemented `src/memory/budget.ts` — a 17-line module that computes the LIVE budget (in chars) for memory injection into agent prompts. Mirrors the `returnCapChars`/`returnCtxFraction` pattern from `src/core/guardrails.ts`. Follows TDD methodology: failing test → implement → all tests passing.
 
-## TDD Execution
+## Implementation
 
-### RED (Failing Test)
-```bash
-$ bun test tests/crew/member-agent.test.ts
-error: Cannot find module '../../src/crew/member-agent.ts'
-0 pass, 1 fail, 1 error
+**Files Created:**
+- `src/memory/budget.ts` — Budget calculation module (17 lines)
+- `tests/memory/budget.test.ts` — Test suite (4 tests, all passing)
+
+**Exports:**
+- `retrievalCtxFraction(): number` — Returns env `AGENT_MEMORY_CTX_FRACTION` (range 0–1, default 0.25)
+- `retrievalBudgetChars(callerNumCtx?: number): number` — Computes `Math.floor(fraction × ctx × 4)` where ctx falls back to 4096 if undefined
+
+## TDD Evidence
+
+### Step 1: Failing Test ✓
+Created test file with 4 test cases covering:
+- Scaling with num_ctx (16384 tokens)
+- Fallback to 4096 when ctx unknown
+- Environment variable honor (0.5 fraction)
+- Out-of-range fraction rejection (3 → 0.25)
+
+### Step 2: Verify Fail ✓
+```
+# Unhandled error between tests
+error: Cannot find module '../../src/memory/budget.ts'
 ```
 
-### GREEN (Implementation + Test Pass)
-```bash
-$ bun test tests/crew/member-agent.test.ts
- 3 pass, 0 fail
- 8 expect() calls
+### Step 3: Implementation ✓
+Wrote `src/memory/budget.ts` with:
+- Constants: `CHARS_PER_TOKEN = 4`, `FALLBACK_CTX = 4096`
+- `retrievalCtxFraction()`: env validation (0 < x ≤ 1) → default 0.25
+- `retrievalBudgetChars()`: computes live budget; mirrors guardrails pattern exactly
+
+### Step 4: Verify Pass ✓
+```
+bun test v1.3.11
+ 4 pass
+ 0 fail
+ 5 expect() calls
+Ran 4 tests across 1 file. [6.00ms]
 ```
 
-### Typecheck
-```bash
-$ bun run typecheck
-$ tsc --noEmit
-[clean]
+### Step 5: Commit ✓
+```
+[slice-12-memory-rag 9413fe3] feat(memory): live retrieval injection budget (fraction of num_ctx)
+ 2 files changed, 39 insertions(+)
 ```
 
-### Lint
-```bash
-$ bun run lint:file -- "src/crew/member-agent.ts"
-Checked 1 file in 28ms. No fixes applied.
-```
+**Pre-commit hook:** `docs-check` passed (no new src subsystems introduced; budget.ts is within existing memory subsystem).
 
-### Full Suite
-```bash
-$ bun test
- 203 pass, 15 skip, 0 fail
- Ran 218 tests across 70 files. [52.36s]
-```
+## Code Quality
 
-## Files Changed
+**Design Consistency:**
+- Mirrors `returnCapChars` signature, logic, and constants from guardrails
+- Uses same validation pattern for env fractions (0 < x ≤ 1)
+- Fallback-only env var (no hard-coded tuning)
+- Constants properly documented
 
-| File | Change | Lines |
-|------|---------|-------|
-| `src/crew/member-agent.ts` | Create | 28 |
-| `tests/crew/member-agent.test.ts` | Create | 51 |
-
-## Implementation Summary
-
-**`buildCrewAgent(member: CrewMember, tools?: ToolSet): Agent`** composes a crew member's role/goal/backstory into an Agent:
-- **systemPrompt**: Joins role, goal, backstory, and standard instruction line.
-- **description**: `${role} — ${goal}` for hierarchical routing.
-- **modelReq**: Captures role/requires/prefer for live model selection at delegation.
-- **model**: `createOllamaModel(qwenFast)` as a default placeholder.
-- **tools**: Routes member.tools → fallback tools → empty object.
-- **modelDecl**: Stores qwenFast for resource manager.
-
-## Commit
-```
-4539cd6 feat(crew): buildCrewAgent composes role/goal/backstory
-```
+**Test Coverage:**
+- Default fraction (0.25)
+- Env override (0.5)
+- Out-of-range rejection (3 → fallback)
+- Scaling arithmetic (16384, 8192 contexts)
+- Fallback ctx (undefined → 4096)
 
 ## Self-Review
 
-✓ **Implementation matches brief exactly** — all required fields populated, system prompt format correct.
-
-✓ **Model is a placeholder** — createOllamaModel(qwenFast) is default; live selector overrides via modelReq.
-
-✓ **TDD discipline** — wrote failing test first, verified RED state, implemented, confirmed GREEN.
-
-✓ **Type-safe** — typecheck clean; tools cast to `any` in test to bypass AI SDK's complex tool type (safe because logic is sound).
-
-✓ **Tests comprehensive** — covers prompt composition, modelReq structure, and tool routing fallback path (3 tests, all passing).
-
-✓ **No console.log, early returns, small focused file** — matches project style.
-
-✓ **No typos or logic errors** — code straightforward and correct.
+✓ No imports from other Slice-12 files (standalone module)
+✓ Test import uses `bun:test` (matches project convention)
+✓ No console.log statements
+✓ Types align (number | undefined handling)
+✓ Env var defaults to 0.25 (matches guardrails fraction default)
+✓ Math.floor applied (matches guardrails)
+✓ Comments align with guardrails style
 
 ## Concerns
-None. The implementation is straightforward, tests are comprehensive, and all quality gates pass.
+None. Module is minimal, well-tested, and follows established patterns.

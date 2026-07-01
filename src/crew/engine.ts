@@ -2,6 +2,8 @@ import type { ToolSet } from 'ai';
 import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { runOrchestrator } from '../core/orchestrator.ts';
+import { makeRecallTool } from '../memory/recall-tool.ts';
+import type { MemoryStore } from '../memory/store.ts';
 import { withCrewSpan } from '../telemetry/spans.ts';
 import {
   defaultRunAgentStep,
@@ -17,16 +19,30 @@ export type CrewDeps = {
   tools: ToolSet;
   maxParallel?: number;
   onBeforeDelegate?: BeforeDelegate;
+  /** Optional long-term memory store. When set: (1) each member gets a bound
+   *  `recall` tool namespaced to the crew id, and (2) each sequential task's
+   *  output is auto-persisted into that same namespace after it completes. */
+  memory?: MemoryStore;
+  /** Default memory auto-write policy when `memory` is set; a task's own
+   *  `persistMemory` overrides it. Default true. */
+  persistMemory?: boolean;
 };
 
-/** Build the crew's member agents keyed by name (for the sequential agent map). */
+/** Build the crew's member agents keyed by name (for the sequential agent map).
+ *  When `memory` is present, each member also gets a `recall` tool bound to
+ *  the crew's namespace (namespace = crew id), merged alongside its own tools. */
 export function crewAgentMap(
   crew: CrewDef,
   tools: ToolSet,
+  memory?: MemoryStore,
 ): Record<string, Agent> {
   const map: Record<string, Agent> = {};
+  const recallTools: ToolSet = memory
+    ? { recall: makeRecallTool(memory, { namespace: crew.id }) }
+    : {};
   for (const member of crew.members) {
-    map[member.name] = buildCrewAgent(member, member.tools ?? tools);
+    const memberTools = { ...(member.tools ?? tools), ...recallTools };
+    map[member.name] = buildCrewAgent(member, memberTools);
   }
   return map;
 }
@@ -47,13 +63,15 @@ export function runCrew(
       const runAgentStep =
         deps.runAgentStep ??
         defaultRunAgentStep(
-          crewAgentMap(def, deps.tools),
+          crewAgentMap(def, deps.tools, deps.memory),
           deps.onBeforeDelegate,
         );
       const outcome = await runWorkflow(wf, input, {
         runAgentStep,
         tools: deps.tools,
         maxParallel: deps.maxParallel,
+        memory: deps.memory,
+        persistMemory: deps.persistMemory ?? def.persistMemory,
       });
       if (outcome.kind === 'done')
         return { kind: 'done', output: outcome.output };

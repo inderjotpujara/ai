@@ -1,177 +1,96 @@
-## Task 6: `runCrew` engine (dispatch by process) + thread `onBeforeDelegate` through `defaultRunAgentStep`
+## Task 6: sqlite structured store (space registry + doc manifest)
 
 **Files:**
-- Create: `src/crew/engine.ts`
-- Modify: `src/workflow/run-step.ts` (add optional `onBeforeDelegate` param to `defaultRunAgentStep` — backward compatible; enables live model selection in workflow + crew agent steps)
-- Test: `tests/crew/engine.test.ts`, `tests/workflow/run-step.test.ts` (add one assertion that the hook is threaded)
+- Create: `src/memory/sqlite-store.ts`
+- Test: `tests/memory/sqlite-store.test.ts`
 
 **Interfaces:**
-- Consumes: `CrewDef`, `CrewProcess`, `CrewOutcome`, `CrewMember` (Task 1); `compileToWorkflow` + `buildHierarchicalOrchestrator` (Task 5); `buildCrewAgent` (Task 2); `withCrewSpan` (Task 4); `runWorkflow` + `WorkflowDeps` + `defaultRunAgentStep` from `src/workflow/engine.ts`; `runGuardedAgent` + `BeforeDelegate` from `src/core/delegate.ts`; `runOrchestrator` from `src/core/orchestrator.ts`; `Agent` from `src/core/agent-def.ts`; `ToolSet` from `ai`.
-- Produces (modified): `defaultRunAgentStep(agents: Record<string, Agent>, onBeforeDelegate?: BeforeDelegate): WorkflowDeps['runAgentStep']` — now passes `onBeforeDelegate` into `runGuardedAgent`.
-- Produces:
-  - `type CrewDeps = { runAgentStep?: WorkflowDeps['runAgentStep']; tools: ToolSet; maxParallel?: number; onBeforeDelegate?: import('../core/delegate.ts').BeforeDelegate }`
-  - `function crewAgentMap(crew: CrewDef, tools: ToolSet): Record<string, Agent>` (build member agents keyed by name)
-  - `function runCrew(def: CrewDef, input: unknown, deps: CrewDeps): Promise<CrewOutcome>`
+- Produces: `class SqliteStore` with `getSpace(name): SpaceMeta | undefined`, `createSpace(meta: SpaceMeta): void`, `listSpaces(): SpaceMeta[]`, `seenDoc(source: string, hash: string): boolean`, `recordDoc(source: string, hash: string, chunks: number, at: number): void`, `close(): void`. Constructor `new SqliteStore(dbPath: string)`.
+- Consumes: `SpaceMeta` from `types.ts`; `bun:sqlite`.
 
-- [ ] **Step 1: Write the failing test `tests/crew/engine.test.ts`**
+- [ ] **Step 1: Write the failing test**
+```ts
+// tests/memory/sqlite-store.test.ts
+import { afterEach, describe, expect, test } from 'vitest';
+import { rmSync } from 'node:fs';
+import { SqliteStore } from '../../src/memory/sqlite-store.ts';
 
-```typescript
-import { describe, expect, it } from 'bun:test';
-import { z } from 'zod';
-import { Capability, PreferPolicy } from '../../src/core/types.ts';
-import { runCrew } from '../../src/crew/engine.ts';
-import { CrewProcess, type CrewDef } from '../../src/crew/types.ts';
+const DB = '/tmp/mem-test.db';
+afterEach(() => { try { rmSync(DB); } catch {} });
 
-const seqCrew: CrewDef = {
-  id: 'c', process: CrewProcess.Sequential,
-  members: [
-    { name: 'a', role: 'A', goal: 'g', backstory: 'b', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
-    { name: 'b', role: 'B', goal: 'g', backstory: 'b', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
-  ],
-  tasks: [
-    { id: 't1', description: 'do first', expectedOutput: 'x', member: 'a', output: z.string() },
-    { id: 't2', description: 'do second', expectedOutput: 'y', member: 'b', output: z.string() },
-  ],
-};
-
-describe('runCrew (sequential)', () => {
-  it('threads task output as context to the next task', async () => {
-    const seen: string[] = [];
-    const outcome = await runCrew(seqCrew, 'topic', {
-      tools: {},
-      // stub the agent runner: echo which member + whether it saw upstream context
-      runAgentStep: async (member, task) => {
-        seen.push(member);
-        return `${member}:${task.includes('t1') ? 'saw-t1' : 'root'}`;
-      },
-    });
-    expect(outcome.kind).toBe('done');
-    if (outcome.kind === 'done') {
-      const out = outcome.output as Record<string, unknown>;
-      expect(out.t1).toBe('a:root');
-      expect(out.t2).toBe('b:saw-t1'); // t2's prompt embedded t1's output under "Context from \"t1\""
-    }
-    expect(seen).toEqual(['a', 'b']);
+describe('SqliteStore', () => {
+  test('space create/get is authoritative for embedder', () => {
+    const s = new SqliteStore(DB);
+    expect(s.getSpace('default')).toBeUndefined();
+    s.createSpace({ name: 'default', embedModel: 'qwen3-embedding:0.6b', embedDim: 768, chunkCapTokens: 512, createdAt: 1 });
+    expect(s.getSpace('default')?.embedModel).toBe('qwen3-embedding:0.6b');
+    expect(s.getSpace('default')?.embedDim).toBe(768);
+    s.close();
   });
-
-  it('reports a failed task via the outcome', async () => {
-    const outcome = await runCrew(seqCrew, 'topic', {
-      tools: {},
-      runAgentStep: async (member) => {
-        if (member === 'b') throw new Error('boom');
-        return 'ok';
-      },
-    });
-    expect(outcome).toMatchObject({ kind: 'failed', failedTask: 't2' });
+  test('doc dedupe by hash', () => {
+    const s = new SqliteStore(DB);
+    expect(s.seenDoc('a.md', 'h1')).toBe(false);
+    s.recordDoc('a.md', 'h1', 3, 1);
+    expect(s.seenDoc('a.md', 'h1')).toBe(true);
+    expect(s.seenDoc('a.md', 'h2')).toBe(false); // changed content
+    s.close();
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
+Run: `bun test tests/memory/sqlite-store.test.ts`
+Expected: FAIL (module not found).
 
-Run: `bun test tests/crew/engine.test.ts`
-Expected: FAIL — module not found.
+- [ ] **Step 3: Write `src/memory/sqlite-store.ts`**
+```ts
+import { Database } from 'bun:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import type { SpaceMeta } from './types.ts';
 
-- [ ] **Step 2b: Thread `onBeforeDelegate` through `defaultRunAgentStep` in `src/workflow/run-step.ts`**
-
-Change the signature to accept an optional hook and pass it into `runGuardedAgent` (backward compatible — existing callers pass nothing and behave exactly as before). Add `BeforeDelegate` to the existing `import type { ... } from '../core/delegate.ts'` line (which already imports `runGuardedAgent`):
-
-```typescript
-export function defaultRunAgentStep(
-  agents: Record<string, Agent>,
-  onBeforeDelegate?: BeforeDelegate,
-): WorkflowDeps['runAgentStep'] {
-  return async (agentName, task) => {
-    const agent = agents[agentName];
-    if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
-    const result = await runGuardedAgent(agent, task, onBeforeDelegate);
-    if ('error' in result) throw new WorkflowError(result.error);
-    return result.text;
-  };
-}
-```
-
-Add one assertion to `tests/workflow/run-step.test.ts` proving the hook is passed (e.g. a spy `onBeforeDelegate` that records the agent name it was called with when a real agent runs). Keep all existing run-step tests green (regression).
-
-- [ ] **Step 3: Write `src/crew/engine.ts`**
-
-```typescript
-import type { ToolSet } from 'ai';
-import type { Agent } from '../core/agent-def.ts';
-import type { BeforeDelegate } from '../core/delegate.ts';
-import { runOrchestrator } from '../core/orchestrator.ts';
-import { withCrewSpan } from '../telemetry/spans.ts';
-import {
-  type WorkflowDeps,
-  defaultRunAgentStep,
-  runWorkflow,
-} from '../workflow/engine.ts';
-import { buildHierarchicalOrchestrator, compileToWorkflow } from './compile.ts';
-import { buildCrewAgent } from './member-agent.ts';
-import { CrewProcess, type CrewDef, type CrewOutcome } from './types.ts';
-
-export type CrewDeps = {
-  runAgentStep?: WorkflowDeps['runAgentStep'];
-  tools: ToolSet;
-  maxParallel?: number;
-  onBeforeDelegate?: BeforeDelegate;
-};
-
-/** Build the crew's member agents keyed by name (for the sequential agent map). */
-export function crewAgentMap(crew: CrewDef, tools: ToolSet): Record<string, Agent> {
-  const map: Record<string, Agent> = {};
-  for (const member of crew.members) {
-    map[member.name] = buildCrewAgent(member, member.tools ?? tools);
+export class SqliteStore {
+  private db: Database;
+  constructor(dbPath: string) {
+    mkdirSync(dirname(dbPath), { recursive: true });
+    this.db = new Database(dbPath);
+    this.db.run(`CREATE TABLE IF NOT EXISTS spaces (
+      name TEXT PRIMARY KEY, embed_model TEXT NOT NULL, embed_dim INTEGER NOT NULL,
+      chunk_cap_tokens INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
+    this.db.run(`CREATE TABLE IF NOT EXISTS documents (
+      source TEXT PRIMARY KEY, hash TEXT NOT NULL, chunks INTEGER NOT NULL, at INTEGER NOT NULL)`);
   }
-  return map;
-}
-
-/** Run a crew: sequential -> the Slice-10 workflow engine; hierarchical -> the
- *  orchestrator. Wrapped in a crew.run span; never throws into the caller. */
-export function runCrew(
-  def: CrewDef,
-  input: unknown,
-  deps: CrewDeps,
-): Promise<CrewOutcome> {
-  return withCrewSpan(def.id, def.process, async () => {
-    if (def.process === CrewProcess.Sequential) {
-      const wf = compileToWorkflow(def);
-      const runAgentStep =
-        deps.runAgentStep ??
-        defaultRunAgentStep(crewAgentMap(def, deps.tools), deps.onBeforeDelegate);
-      const outcome = await runWorkflow(wf, input, {
-        runAgentStep,
-        tools: deps.tools,
-        maxParallel: deps.maxParallel,
-      });
-      if (outcome.kind === 'done') return { kind: 'done', output: outcome.output };
-      return {
-        kind: 'failed',
-        failedTask: outcome.failedStep,
-        message: outcome.message,
-      };
-    }
-
-    // Hierarchical: the orchestrator is the manager.
-    const orch = buildHierarchicalOrchestrator(def, deps.onBeforeDelegate);
-    const task = `${String(input)}\n\nComplete the crew's tasks by delegating to your members.`;
-    const result = await runOrchestrator(orch, task);
-    if (result.kind === 'answer') return { kind: 'done', output: result.text };
-    return { kind: 'failed', message: result.message };
-  });
+  getSpace(name: string): SpaceMeta | undefined {
+    const r = this.db.query('SELECT * FROM spaces WHERE name = ?').get(name) as any;
+    if (!r) return undefined;
+    return { name: r.name, embedModel: r.embed_model, embedDim: r.embed_dim, chunkCapTokens: r.chunk_cap_tokens, createdAt: r.created_at };
+  }
+  createSpace(m: SpaceMeta): void {
+    this.db.run('INSERT OR REPLACE INTO spaces VALUES (?,?,?,?,?)', [m.name, m.embedModel, m.embedDim, m.chunkCapTokens, m.createdAt]);
+  }
+  listSpaces(): SpaceMeta[] {
+    const rows = this.db.query('SELECT * FROM spaces').all() as any[];
+    return rows.map((r) => ({ name: r.name, embedModel: r.embed_model, embedDim: r.embed_dim, chunkCapTokens: r.chunk_cap_tokens, createdAt: r.created_at }));
+  }
+  seenDoc(source: string, hash: string): boolean {
+    const r = this.db.query('SELECT hash FROM documents WHERE source = ?').get(source) as any;
+    return !!r && r.hash === hash;
+  }
+  recordDoc(source: string, hash: string, chunks: number, at: number): void {
+    this.db.run('INSERT OR REPLACE INTO documents VALUES (?,?,?,?)', [source, hash, chunks, at]);
+  }
+  close(): void { this.db.close(); }
 }
 ```
 
-- [ ] **Step 4: Run tests + typecheck + lint**
-
-Run: `bun test tests/crew/engine.test.ts && bun run typecheck && bun run lint:file -- "src/crew/engine.ts"`
-Expected: PASS; clean.
+- [ ] **Step 4: Run tests to verify they pass**
+Run: `bun test tests/memory/sqlite-store.test.ts && bun run typecheck`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
-
 ```bash
-git add src/crew/engine.ts tests/crew/engine.test.ts
-git commit -m "feat(crew): runCrew dispatches sequential/hierarchical under crew.run"
+git add src/memory/sqlite-store.ts tests/memory/sqlite-store.test.ts
+git commit -m "feat(memory): bun:sqlite space registry + doc manifest"
 ```
 
 ---

@@ -1,4 +1,5 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { MemoryError } from '../core/errors.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { ProviderKind } from '../core/types.ts';
 import type { LoadedModel, Runtime } from './runtime.ts';
@@ -52,5 +53,10 @@ export const mlxServerRuntime: Runtime = {
       (await listIds()).map((name) => ({ name, sizeBytes: 0 })),
     getModelMax: async () => undefined,
     getModelKvArch: async () => undefined,
+    embed: async () => {
+      throw new MemoryError(
+        'embeddings are not supported on the MLX runtime yet',
+      );
+    },
   },
 };

@@ -92,6 +92,21 @@ graph TD
         crewcompile["compile.ts · compileToWorkflow/buildHierarchicalOrchestrator"]
         crewengine["engine.ts · runCrew"]
     end
+    subgraph MEM["Memory · src/memory"]
+        memtypes["types.ts · MemoryRecord/SpaceMeta"]
+        membudget["budget.ts · retrievalBudgetChars"]
+        memembed["embed.ts · makeEmbedder"]
+        memchunk["chunk.ts · semantic+fixed"]
+        memsql["sqlite-store.ts · spaces+documents"]
+        memlance["lancedb-store.ts · table-per-space"]
+        memretrieve["retrieve.ts · dense→rerank→budget-fit"]
+        memstore["store.ts · createMemoryStore"]
+        memtool["recall-tool.ts · makeRecallTool"]
+        memrerank["reranker.ts · cross-encoder"]
+    end
+    subgraph MEMCLI["CLI · src/cli/memory.ts"]
+        memcli["bun run memory ingest/recall/stats/reindex"]
+    end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
         images[("model-images/ + catalog.json")]
@@ -165,11 +180,27 @@ graph TD
     selrt --> buildreg
     selrt --> mgr
     runstore --> spansfile
+    crewengine --> memtool
+    wfrunstep --> memstore
+    memtool --> memstore
+    memstore --> memretrieve
+    memstore --> memsql
+    memstore --> memlance
+    memretrieve --> memlance
+    memretrieve --> memrerank
+    memretrieve --> membudget
+    memembed --> mgr
+    memembed --> spans
+    memstore --> memchunk
+    memcli --> memstore
+    memcli --> memembed
+    memcli --> memrerank
+    memcli --> mgr
 ```
 
 | Layer | Files | Responsibility | Knows about |
 |---|---|---|---|
-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`) | everything below |
+| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
 | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
@@ -181,6 +212,7 @@ graph TD
 | **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example) | nothing (pure data) |
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
+| **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -412,32 +444,196 @@ machinery Slices 9/10 already shipped.
   then prints the crew's final output (or failure) to stdout/stderr. Runs are
   rendered the same way as any other run: `bun run runs <id>`.
 
-Feeds **Slice 12** (memory/RAG — members will read from it) and **Slice 13**
-(verification — a verifier is just another member/task). Out of scope (v1):
-memory, CrewAI "Flows" (our DAG already is that), planning / batch kickoff /
-human-in-the-loop tasks.
+Optionally feeds **Slice 12** (memory/RAG, §11 below) via `runCrew`'s optional
+`memory: MemoryStore` dep — members read/write it through a bound `recall`
+tool + auto-persisted task output — and **Slice 13** (verification — a
+verifier is just another member/task). Out of scope (v1): CrewAI "Flows" (our
+DAG already is that), planning / batch kickoff / human-in-the-loop tasks.
 
 ---
 
-## 11. On-disk stores
+## 11. Memory/RAG (Slice 12)
+
+A persistent, semantic memory layer — **`src/memory/`** — so agents can recall
+facts across runs instead of starting cold each time. Composed on top of what
+already exists (Model Manager for the embedder, guardrails' delegation context
+for the injection budget, telemetry for spans) — **not a new resource-management
+mechanism**.
+
+### Two-tier store, space-scoped
+
+- **LanceDB** (`lancedb-store.ts`, `LanceStore`) — embedded on-disk vector
+  store, **one table per named *space*** (e.g. `default`, a per-project space).
+  `namespace` (e.g. a crew id) and `kind` (`MemoryKind.RunMemory | Document`)
+  are plain filterable **columns within a table**, not separate tables/spaces.
+- **`bun:sqlite`** (`sqlite-store.ts`, `SqliteStore`) — two tables:
+  - `spaces` — the **space registry**, one row per space:
+    `{name, embedModel, embedDim, chunkCapTokens, createdAt}`. This row is the
+    **authority** for a space's embedder — recall/write always defer to it, not
+    to whatever `MemoryConfig.embedModel` the caller passes, so a space can't
+    silently end up with mixed-dimension vectors.
+  - `documents` — an **ingestion manifest scoped to `(space, source)`** (composite
+    primary key `PRIMARY KEY (space, source)`), storing a content hash + chunk
+    count. Ingesting the same path into two different spaces is tracked
+    independently; ingesting an unchanged file a second time into the *same*
+    space is a no-op (`seenDoc` short-circuits before any embedding work).
+- **Embedder-bound-to-space rule:** `ensureSpace` probes the embed model's
+  dimension the *first* time a space is touched and freezes it into the
+  `spaces` row. `reindex(space, newEmbedModel)` is the **explicit, destructive**
+  escape hatch — it drops the LanceDB table, clears the document manifest for
+  that space, and re-probes/creates under the new embedder; re-ingesting
+  content afterward is the caller's job (not automatic).
+
+### Embedding (resource integration)
+
+- **`embed.ts`** — `embedderDecl(model)` builds a **weights-only**
+  `ModelDeclaration` (`kvBytesPerToken: 0` — an embedder has no KV cache to
+  budget, unlike a chat model). `probeEmbedder(model)` reads dim + max-input via
+  `POST /api/show` (mirrors `getModelMaxContext`), defaulting to `768`/`2048` if
+  the architecture fields are absent. `makeEmbedder(deps)` returns an
+  `embed(texts)` that calls `ensureReady(embedderDecl(model))` — so the
+  embedder **shares the live RAM budget and LRU eviction** with every chat
+  model the Model Manager already governs — then calls `RuntimeControl.embed`
+  under a `memory.embed` span.
+- **Default embedder:** `qwen3-embedding:0.6b` (`AGENT_MEMORY_EMBED_MODEL`
+  fallback-only).
+- **Chunking** (`chunk.ts`): semantic when an `embed` fn is supplied — splits on
+  sentence boundaries, merges adjacent sentences while cosine similarity stays
+  above a threshold (default 0.5) and the buffer is under the live char cap
+  (`chunkCapTokens × 4 chars/token`, from the space's frozen `maxInput`);
+  degrades to a fixed-size splitter when there's no embedder, only one
+  sentence, or a semantic chunk still overflows the cap.
+
+### Retrieval pipeline (`retrieve.ts`)
+
+`retrieve(query, opts, deps)`, run inside a `memory.recall` span:
+
+1. **Embed the query**, asserting its dimension matches the space's frozen
+   `embedDim` (`MemoryError` on mismatch — catches a caller passing the wrong
+   space/model).
+2. **Dense vector search** via `LanceStore.hybridSearch` — despite the method
+   name, search is **dense-only today**: `table.search(vector)` filtered by
+   `namespace`/`kind`, returning LanceDB's raw `_distance` (lower = better).
+   An FTS index (`Index.fts()` on the `text` column) is created best-effort at
+   table-creation time so a later task can switch to hybrid BM25+dense (RRF
+   fusion) without a migration, but that fusion is **not wired up yet** — this
+   is a known, deliberate gap, not an oversight.
+3. **Optional cross-encoder rerank** (`reranker.ts`) — **default-ON**
+   (`defaultRerank()` returns true unless `AGENT_MEMORY_RERANK=0`). The Task-13
+   spike validating `transformers.js` (`@huggingface/transformers`, ONNX
+   runtime) under Bun on Apple Silicon **passed**, using
+   `Xenova/bge-reranker-base` scored per `[query, doc]` pair, sorted descending
+   — a cross-encoder reads query+doc jointly so its ranking fully replaces the
+   incoming order (unlike RRF fusion). transformers.js manages its **own**
+   model-weights cache — it is **not** routed through the Ollama Model Manager
+   (only the embedder is). **Graceful degradation:** if the reranker throws
+   (model download failure, OOM, etc.), `retrieve()` catches it, keeps the
+   pre-rerank `_distance`-ascending order, records a `memory.rerank_failed`
+   span event + `reranked=false`, and returns normally — a reranker failure
+   never crashes recall.
+4. **Budget-fit pack**: candidates are appended until `retrievalBudgetChars`
+   (below) is spent, capped at `topK` (default 6, `AGENT_MEMORY_TOP_K`); the
+   first candidate is always kept even alone-over-budget, so a hit never comes
+   back empty due to budget alone.
+
+**Injection budget** (`budget.ts`): `retrievalBudgetChars(callerNumCtx)` =
+`floor(fraction × ctx × 4 chars/token)`, fraction default `0.25`
+(`AGENT_MEMORY_CTX_FRACTION`, fallback-only) — the same shape as guardrails'
+`returnCapChars` (§8), just a different fraction/purpose: this bounds how much
+*retrieved memory* an agent's prompt absorbs, live off the **consumer's**
+`num_ctx` (read from the active `DelegationContext` when the caller doesn't
+pass one explicitly).
+
+### Facade, tool, and anti-hallucination primitives
+
+- **`store.ts`** — `createMemoryStore(config, deps)` is the single facade:
+  `remember(text, opts)` (direct write, e.g. auto-persisted task output),
+  `ingest(path, opts)` (hash-gated file ingestion), `recall(query, opts)`
+  (space lookup → `retrieve()`; **returns `[]` — an explicit abstention, not an
+  error — when the space doesn't exist yet**), `reindex(space, newEmbedModel)`,
+  `stats()` (chunk counts per space), `close()`.
+- **`recall-tool.ts`** — `makeRecallTool(store, ctx)` exposes `recall` as an AI
+  SDK `tool()` an agent can call mid-run; `formatResults` renders each hit as
+  `[mem:<id>] (<source>) <text>` — **citation-tagged** so an agent's answer can
+  point at exactly which memory backs a claim. `injectRecall(store, ctx, task)`
+  is the opt-in alternative: prepends recalled context to a task prompt
+  up-front, fit to `retrievalBudgetChars`, returning the task **unchanged**
+  when nothing is found. Both paths render `NO_MEMORY_FOUND = 'No supporting
+  memory found.'` on an empty result — the same *abstain-over-fabricate*
+  posture as `report_capability_gap`/`{kind:'resource'}` (§4/§5), extended from
+  "no capability" to "no evidence." **Full faithfulness judging, Corrective
+  RAG, and a verifier layer are Slice 13** — this slice ships only the two
+  primitives (citation tags + abstention) that verification will build on.
+- **Crew/workflow wiring** (`src/crew/engine.ts`, `src/workflow/run-step.ts`):
+  both `runCrew`/`runWorkflow` accept an **optional** `memory: MemoryStore` dep.
+  When present: each crew member (or, for workflows, nothing automatic — the
+  auto-persist is workflow-engine-side) gets a `recall` tool bound to
+  `namespace = crew.id`, and each sequential task's / workflow step's
+  validated output is auto-persisted via `autoPersistStepOutput` (namespace =
+  crew/workflow id, `kind: MemoryKind.RunMemory`, opt-out per-task/-step via
+  `persistMemory: false`, default on). This wiring is exercised by unit tests
+  with an injected `MemoryStore`; **`flow.ts`/`crew.ts` do not yet construct
+  a real store or expose a `--space` flag**, so end-to-end memory is not live
+  on those CLIs yet — that's the natural follow-up once a slice needs it.
+
+### CLI (`src/cli/memory.ts`)
+
+`bun run memory ingest|recall|stats|reindex` — a standalone entry (mirrors
+`flow.ts`/`crew.ts`'s lifecycle shape) that builds a **real**, Model-Manager
+backed embedder + the default cross-encoder reranker (`makeRealStore`), then
+dispatches: `ingest <path>` embeds+stores a file, `recall <query>` prints
+retrieved chunks as JSON, `stats` prints per-space chunk counts, `reindex
+<space> <newEmbedModel>` rebuilds a space under a different embedder. Flags:
+`--space`, `--ns`, `--top`, `--embed`.
+
+### Telemetry
+
+`src/telemetry/spans.ts` extends per the standing rule (§7):
+`withMemoryRecallSpan` (`ATTR.MEMORY_SPACE`/`MEMORY_NAMESPACE`/
+`MEMORY_CANDIDATES`/`MEMORY_RETURNED`/`MEMORY_RERANKED`), `recordRerankOutcome`/
+`recordRerankFailure` (update the reranked flag + a `memory.rerank_failed`
+event after the fact), `withMemoryIngestSpan`, `withMemoryEmbedSpan`
+(`ATTR.MEMORY_EMBED_MODEL`) — so `bun run runs` and any OTLP backend get
+memory signal for free, same as every other subsystem.
+
+### Module map additions
+
+```
+memory/ (types, budget, embed, chunk, sqlite-store, lancedb-store, retrieve,
+         reranker, store, recall-tool, define)
+  ← crew/engine.ts, workflow/run-step.ts   (optional recall tool + auto-persist)
+  → resource/model-manager.ts               (ensureReady, weights-only embedder)
+  → runtime (RuntimeControl.embed)          (Ollama embeddings endpoint)
+  → telemetry/spans.ts                      (memory.recall/ingest/embed spans)
+cli/memory.ts → memory/store.ts, memory/embed.ts, memory/reranker.ts, resource/model-manager.ts
+```
+
+`@lancedb/lancedb` (embedded vector store) and `@huggingface/transformers`
+(cross-encoder rerank, ONNX runtime) are new dependencies; both are
+self-contained (no external service to run).
+
+---
+
+## 12. On-disk stores
 
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 
 ---
 
-## 12. Testing strategy
+## 13. Testing strategy
 
 - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
 - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
 - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
 - **MCP** — real stdio round-trip (subprocess server).
-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+- **Memory** (`tests/memory/`) — pure unit tests per module (`define`, `budget`, `chunk`, `embed`, `sqlite-store`, `retrieve`, `recall-tool`, `spans`) with injected/mock deps (no Ollama/LanceDB needed for most); `lancedb-smoke.test.ts` exercises the real embedded LanceDB against a temp dir (no network); `reranker.spike.test.ts` is the outcome-gating spike for the transformers.js cross-encoder (records whether it's viable, not a permanent live-skip test); `wiring.test.ts` covers the optional crew/workflow `memory` dep (recall tool binding + auto-persist); `tests/cli/memory.test.ts` drives `runMemoryCli` end-to-end against an injected store; `tests/integration/memory.live.test.ts` needs real Ollama + the embed model pulled.
+- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew`, `memory` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
 
 ---
 
-## 13. Glossary
+## 14. Glossary
 
 - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
 - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.

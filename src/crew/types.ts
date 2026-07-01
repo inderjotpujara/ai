@@ -27,6 +27,9 @@ export type Task<O = unknown> = {
   member: string; // CrewMember.name that runs this task
   dependsOn?: string[]; // upstream task ids whose outputs are context
   output?: z.ZodType<O>; // optional structured output; validated if present
+  /** Per-task override of the crew's memory auto-write policy. Only takes
+   *  effect when the crew is run with a `memory` store; default true. */
+  persistMemory?: boolean;
 };
 
 export enum CrewProcess {
@@ -40,6 +43,9 @@ export type CrewDef = {
   members: CrewMember[];
   tasks: Task[];
   process: CrewProcess;
+  /** Default memory auto-write policy for this crew's tasks (sequential only);
+   *  a task's own `persistMemory` overrides it. Default true. */
+  persistMemory?: boolean;
   managerModel?: ModelDeclaration; // hierarchical only; defaults to the router
 };
 

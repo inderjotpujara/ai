@@ -1,94 +1,96 @@
-### Task 12: Live verification + documentation
+## Task 12: Wire memory into crews + workflows (auto-write + recall tool) + live test
 
 **Files:**
-- Create: `tests/integration/discover.live.test.ts`, `tests/integration/mlx.live.test.ts`
-- Modify: `README.md`, `docs/architecture.md`, `docs/ROADMAP.md`
+- Modify: `src/workflow/run-step.ts` (or `engine.ts`) — optional `memory` in deps; auto-write after step success
+- Modify: `src/crew/engine.ts` — pass `memory` through; bind recall tool to members; namespace = crew id
+- Test: `tests/memory/wiring.test.ts`, `tests/integration/memory.live.test.ts`
 
 **Interfaces:**
-- Consumes: `runDiscovery`, `mlxServerRuntime`, `ollamaReady` helper pattern.
+- Consumes: `MemoryStore` (Task 9), `makeRecallTool`/`injectRecall` (Task 10), the existing `WorkflowDeps`/`CrewDeps`.
+- Produces: `WorkflowDeps.memory?: MemoryStore`, per-crew/per-task `persistMemory?: boolean` (default true), `CrewDeps.memory?: MemoryStore`.
 
-- [ ] **Step 1: Live discovery test** — `tests/integration/discover.live.test.ts`
+- [ ] **Step 1: Write the failing wiring test** (mock store records writes; no Ollama)
 ```ts
-import { describe, expect, test } from 'bun:test';
+// tests/memory/wiring.test.ts
+import { describe, expect, test } from 'vitest';
+import { autoPersistStepOutput } from '../../src/workflow/run-step.ts';
 
-async function online(): Promise<boolean> {
-  try { return (await fetch('https://huggingface.co/api/models?filter=gguf&limit=1', { signal: AbortSignal.timeout(3000) })).ok; }
-  catch { return false; }
+describe('auto-write wiring', () => {
+  test('persists a completed step output to namespaced memory unless opted out', async () => {
+    const writes: any[] = [];
+    const store = { remember: async (t: string, o: any) => { writes.push({ t, o }); } } as any;
+    await autoPersistStepOutput(store, { workflowId: 'wf1', stepId: 's1', output: 'result text', persist: true, at: 1 });
+    expect(writes).toHaveLength(1);
+    expect(writes[0].o.namespace).toBe('wf1');
+  });
+  test('opt-out skips the write', async () => {
+    const writes: any[] = [];
+    const store = { remember: async () => { writes.push(1); } } as any;
+    await autoPersistStepOutput(store, { workflowId: 'wf1', stepId: 's1', output: 'x', persist: false, at: 1 });
+    expect(writes).toHaveLength(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `bun test tests/memory/wiring.test.ts`
+Expected: FAIL (`autoPersistStepOutput` undefined).
+
+- [ ] **Step 3: Add `autoPersistStepOutput`** to `src/workflow/run-step.ts` and call it from the engine after a step completes+validates (only when `deps.memory` is set):
+```ts
+import type { MemoryStore } from '../memory/store.ts';
+import { MemoryKind } from '../memory/types.ts';
+
+export async function autoPersistStepOutput(
+  store: MemoryStore | undefined,
+  info: { workflowId: string; stepId: string; output: unknown; persist: boolean; at: number },
+): Promise<void> {
+  if (!store || !info.persist) return;
+  const text = typeof info.output === 'string' ? info.output : JSON.stringify(info.output);
+  if (!text.trim()) return;
+  await store.remember(text, {
+    space: 'default', namespace: info.workflowId, kind: MemoryKind.RunMemory,
+    source: `${info.workflowId}:${info.stepId}`, at: info.at,
+  });
 }
-const ready = await online();
-
-describe.skipIf(!ready)('live HF discovery', () => {
-  test('returns ≥1 tool-capable GGUF candidate that fits', async () => {
-    const { runDiscovery } = await import('../../src/discovery/discover.ts');
-    let written = 0;
-    const r = await runDiscovery({
-      host: { totalRamBytes: 24e9, liveBudgetBytes: 12e9, runtimes: [] as never[] },
-      writeCatalog: (c) => { written = c.length; },
-      pullTop: async () => {}, // don't actually pull multi-GB in a test
-      prePullCount: 0,
-    });
-    expect(r.fits).toBeGreaterThan(0);
-    expect(written).toBeGreaterThan(0);
-  }, 60_000);
-});
 ```
 
-- [ ] **Step 2: MLX live test** — `tests/integration/mlx.live.test.ts`
+- [ ] **Step 4: Thread `memory` through `WorkflowDeps`/`CrewDeps`** and, in `src/crew/engine.ts`, when `memory` is present, bind `makeRecallTool(memory, { namespace: crew.id })` into each member's tools (namespace = crew id) and pass `memory` into the workflow deps so auto-write fires. Respect a `persistMemory` flag on the crew/task (default true).
+> Read `src/crew/engine.ts` + `src/workflow/engine.ts` to find the exact deps object + step-completion point; keep changes additive (memory optional → no behavior change when absent, so existing crew/workflow tests stay green).
+
+- [ ] **Step 5: Write the live test** (skips if Ollama down or embedder not pulled — mirror `tests/integration/crew.live.test.ts` skip guard)
 ```ts
-import { describe, expect, test } from 'bun:test';
-import { mlxServerRuntime } from '../../src/runtime/mlx-server.ts';
+// tests/integration/memory.live.test.ts
+import { describe, expect, test } from 'vitest';
+import { rmSync } from 'node:fs';
+import { ollamaReady } from './ollama-available.ts'; // reuse existing helper name/shape
+// Build the real embedder + store via the same wiring the CLI uses.
 
-const ready = await mlxServerRuntime.isAvailable();
+const ready = await ollamaReady('qwen3-embedding:0.6b');
+const DIR = '/tmp/mem-live';
 
-describe.skipIf(!ready)('live MLX server', () => {
-  test('lists at least one loaded model', async () => {
-    const loaded = await mlxServerRuntime.control.listLoaded();
-    expect(Array.isArray(loaded)).toBe(true);
-  }, 30_000);
+describe.skipIf(!ready)('memory.live', () => {
+  test('ingest text then recall a relevant chunk', async () => {
+    try { rmSync(DIR, { recursive: true, force: true }); } catch {}
+    // construct store with real embedTexts/embedQuery/probe (Task 4 makeEmbedder + probeEmbedder + Model Manager)
+    // await store.remember('The Raft consensus algorithm elects a leader via randomized timeouts.', { space:'default', at: Date.now() });
+    // const hits = await store.recall('how does raft choose a leader', { space:'default', numCtx: 8192 });
+    // expect(hits.join through formatResults).toMatch(/leader/i);
+    expect(true).toBe(true); // replace with the real roundtrip once wiring names are confirmed
+  }, 180_000);
 });
 ```
+> Flesh out the commented lines using the real `makeEmbedder`/`probeEmbedder` + `createMemoryStore`. The assertion must prove a relevant chunk is recalled (e.g. contains "leader"). Keep the 180s timeout + skip guard.
 
-- [ ] **Step 3: Run live tests (best-effort)** — `bun test tests/integration/` → discover.live PASS if online (else skip); mlx.live skips unless an MLX server is up; existing Ollama live tests still green.
+- [ ] **Step 6: Run the unit test + full suite + typecheck**
+Run: `bun test tests/memory/wiring.test.ts && bun run typecheck && bun test`
+Expected: wiring test PASS; existing crew/workflow suites still PASS; live test skips when Ollama is down.
 
-- [ ] **Step 4: Update README** — add a "Model discovery (Slice 6)" paragraph:
-> **Model discovery (Slice 6).** `bun run discover` fetches the latest tool-capable GGUF models from Hugging Face (trusted publishers, sized to your live RAM budget), writes a per-machine `model-images/catalog.json`, and pre-pulls the top fitting model. Normal `chat` runs read an **offline** merge of the bootstrap rungs + locally-installed models + the cached catalog — no network needed. A local MLX server (LM Studio / vllm-mlx at `MLX_BASE_URL`) is discovered + used automatically when running. Vision/audio/video and an uncensored mode are typed-in seams shipped in later slices.
-
-Update the README roadmap table: Slice 6 → Done; show Slice 7 (KV-cache quant) as next.
-
-- [ ] **Step 5: Update architecture.md** — add a "Discovery & runtimes (Slice 6)" section describing the `Runtime` port (Ollama + MLX-server), the `CatalogSource` port (hf-gguf + hf-mlx), the host detector, the offline `buildRegistry` merge, and the `discover` pipeline + pre-pull. Note the four axes (capability/modality, runtime, source, content-policy).
-
-- [ ] **Step 6: Update ROADMAP.md** — move Slice 6 into Shipped; list the committed follow-ons: **Slice 7 KV-cache quant** (q8_0 default, q4_0 opt-in w/ high-GQA guard, global `OLLAMA_KV_CACHE_TYPE`+`OLLAMA_FLASH_ATTENTION`), **Slice 8 Vision**, **Slice 9 Audio**, **Slice 10 Video**, **Slice 11 Uncensored mode**, plus Ollama-native-MLX-on-Mac-Mini and BFCL offline ranking. Reference spec §11.
-
-- [ ] **Step 7: Typecheck + full suite** — `bun run typecheck && bun run lint && bun test` → clean / exit 0 / green (live pass-or-skip).
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 ```bash
-git add tests/integration/discover.live.test.ts tests/integration/mlx.live.test.ts README.md docs/architecture.md docs/ROADMAP.md
-git commit -m "test(discovery): live discover + MLX verify + Slice 6 docs"
+git add src/workflow/run-step.ts src/workflow/engine.ts src/crew/engine.ts tests/memory/wiring.test.ts tests/integration/memory.live.test.ts
+git commit -m "feat(memory): wire recall + namespaced auto-write into crews and workflows"
 ```
 
 ---
 
-## Final review (whole-branch)
-
-- [ ] `bun run typecheck` · `bun run lint` · `bun test` (note pass/skip counts).
-- [ ] Dispatch code-review subagents across dimensions (correctness, types, silent-failures, offline-safety, tests). Pay special attention to: the manager runtime-routing refactor (no Ollama regression), offline degradation never throwing on the chat path, and the HF parsing robustness.
-- [ ] Apply verified Critical/Important findings; triage Minors.
-
----
-
-## Self-review (plan vs spec)
-
-**Spec coverage:**
-- §2 four-axis taxonomy → Task 1 (capability/runtime/content-policy enums + filter). ✓
-- §3 runtime registry (Ollama + MLX) + manager refactor → Tasks 2, 3, 4. ✓
-- §4 catalog sources (GGUF + MLX) + quant + hf-client → Tasks 5, 6, 7, 8. ✓
-- §5 host detector + cache + discover pipeline + build-registry + CLI → Tasks 9, 10, 11. ✓
-- §6 data flow (discover online; chat offline merge) → Tasks 10, 11. ✓
-- §7 offline error handling → Tasks 6 (hf-client wraps), 10/11 (degrade), build-registry offline test (Task 10). ✓
-- §9 testing (unit + live discover + live mlx) → every task + Task 12. ✓
-- §11 future work → ROADMAP at Task 12 Step 6. ✓
-
-**Placeholder scan:** every code step has complete code; commands have expected output; no TBD/TODO. (Task 8's fetch-stub note offers a concrete simplification, not a placeholder.) ✓
-
-**Type consistency:** `Runtime`/`RuntimeControl`/`runtimeFor`/`availableRuntimes`, `Candidate`/`CatalogSource`/`DiscoveryQuery`/`HostCapabilities`, `hfGet`, `bytesPerWeightForQuant`/`pickBestQuantThatFits`/`QuantFile`, `buildRegistry`/`runDiscovery`/`SOURCES`, `BOOTSTRAP` — names consistent across tasks. Manager `ManagerDeps` new shape (`controlFor`) used consistently in Task 4. `BOOTSTRAP` rename consumers all listed in Task 11. ✓

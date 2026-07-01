@@ -1,73 +1,71 @@
-### Task 11: `discover` CLI + chat wiring + registry rename
+## Task 11: CLI (`bun run memory …`)
 
 **Files:**
-- Create: `src/cli/discover.ts`
-- Modify: `models/registry.ts` (rename `REGISTRY` → `BOOTSTRAP`)
-- Modify: `src/discovery/build-registry.ts` (import `BOOTSTRAP`)
-- Modify: `src/cli/chat.ts` (use `await buildRegistry()`)
-- Modify: `tests/models/registry.test.ts`, `tests/cli/select-hook.test.ts`, `tests/resource/select-degrade.test.ts`, `tests/integration/selection.live.test.ts` (rename import)
-- Modify: `package.json` (add `discover` script)
+- Create: `src/cli/memory.ts`
+- Modify: `package.json` (`"memory": "bun run src/cli/memory.ts"`)
+- Test: `tests/cli/memory.test.ts`
 
 **Interfaces:**
-- Consumes: `runDiscovery`, `buildRegistry`, `createSelectHook`.
-- Produces: `bun run discover`; `BOOTSTRAP` export; chat reads the merged registry.
+- Consumes: `createMemoryStore` (Task 9); the real embedder wiring from `src/memory/embed.ts` (Task 4) + Model Manager; mirror `src/cli/flow.ts` for lifecycle (telemetry init, args parse, `finally` close).
+- Produces: a `runMemoryCli(argv: string[], deps): Promise<number>` (exit code) that is unit-testable with injected store deps.
 
-- [ ] **Step 1: Rename the bootstrap export** — `models/registry.ts`
+- [ ] **Step 1: Write the failing test** (inject a fake store; assert command routing)
 ```ts
-export const BOOTSTRAP: ModelDeclaration[] = [qwenRouter, qwenFast];
-```
-Update consumers (replace `REGISTRY` → `BOOTSTRAP` in the import + usages):
-- `tests/models/registry.test.ts` (rename import + the two assertions' variable)
-- `tests/cli/select-hook.test.ts`, `tests/resource/select-degrade.test.ts`, `tests/integration/selection.live.test.ts`
-- `src/discovery/build-registry.ts` (`import { BOOTSTRAP } from '../../models/registry.ts'` and use it)
+// tests/cli/memory.test.ts
+import { describe, expect, test } from 'vitest';
+import { runMemoryCli } from '../../src/cli/memory.ts';
 
-- [ ] **Step 2: Wire chat to the merged registry** — `src/cli/chat.ts`
-
-Replace the `REGISTRY` import with the builder, and build the registry once at startup:
-```ts
-import { buildRegistry } from '../discovery/build-registry.ts';
-```
-Replace `registry: REGISTRY,` in the `createSelectHook` call with a value computed just above it:
-```ts
-  const registry = await buildRegistry();
-  const onBeforeDelegate = createSelectHook({
-    registry,
-    ensureReady: (decl, opts) => manager.ensureReady(decl, opts),
-    listLoaded: () => listLoadedModels(),
-    pinned: [qwenRouter.model],
-    capture,
-    onAttempt: notify,
-  });
-```
-(Keep everything else in `chat.ts` unchanged.)
-
-- [ ] **Step 3: Create the `discover` command** — `src/cli/discover.ts`
-```ts
-import { runDiscovery } from '../discovery/discover.ts';
-
-async function main(): Promise<void> {
-  console.error('Discovering models from Hugging Face (this needs internet)...');
-  try {
-    const r = await runDiscovery();
-    console.error(
-      `Found ${r.found} candidate(s), ${r.fits} fit the budget. ` +
-      `Pre-pulled: ${r.pulled.length ? r.pulled.join(', ') : 'none'}. Catalog: ${r.path}`,
-    );
-  } catch (err) {
-    console.error(`Discovery failed (using any existing catalog): ${(err as Error).message}`);
-    process.exitCode = 1;
-  }
+function fakeStore() {
+  const calls: string[] = [];
+  return {
+    calls,
+    store: {
+      remember: async () => { calls.push('remember'); },
+      ingest: async () => { calls.push('ingest'); return { chunks: 2, skipped: false }; },
+      recall: async () => { calls.push('recall'); return [{ id: 'a#0', text: 'hi', source: 'a', score: 0, namespace: '' }]; },
+      reindex: async () => { calls.push('reindex'); },
+      stats: async () => { calls.push('stats'); return { default: 3 }; },
+      close: () => {},
+    },
+  };
 }
-main();
+
+describe('runMemoryCli', () => {
+  test('recall routes to store.recall and returns 0', async () => {
+    const f = fakeStore();
+    const code = await runMemoryCli(['recall', 'apple'], { makeStore: () => f.store as any });
+    expect(code).toBe(0);
+    expect(f.calls).toContain('recall');
+  });
+  test('stats routes to store.stats', async () => {
+    const f = fakeStore();
+    await runMemoryCli(['stats'], { makeStore: () => f.store as any });
+    expect(f.calls).toContain('stats');
+  });
+  test('unknown command returns non-zero', async () => {
+    const f = fakeStore();
+    expect(await runMemoryCli(['frobnicate'], { makeStore: () => f.store as any })).not.toBe(0);
+  });
+});
 ```
-Add to `package.json` scripts: `"discover": "bun run src/cli/discover.ts"`.
 
-- [ ] **Step 4: Run the full suite** — `bun test` → all unit tests PASS (live auto-skip). `bun run typecheck` → clean. `bun run lint` → exit 0.
+- [ ] **Step 2: Run test to verify it fails**
+Run: `bun test tests/cli/memory.test.ts`
+Expected: FAIL (module not found).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Write `src/cli/memory.ts`** — parse subcommand + flags (`--space`, `--ns`, `--top`, `--embed`), call the store, print results. Provide `runMemoryCli(argv, deps)` with `deps.makeStore` defaulting to the real wiring (build embedder via Task 4 `makeEmbedder` + Model Manager, then `createMemoryStore`). Use `Date.now()` for the `at` timestamp at the CLI boundary (not in engine core). Mirror `src/cli/flow.ts` telemetry lifecycle + `finally { store.close() }`.
+> Keep the real store construction behind `deps.makeStore` so the unit test injects a fake. The default `makeStore` reads timestamps + wires the Model Manager (see `src/cli/crew.ts`/`flow.ts` for how they build runtime deps).
+
+- [ ] **Step 4: Add the npm script** to `package.json`: `"memory": "bun run src/cli/memory.ts"`.
+
+- [ ] **Step 5: Run tests + typecheck**
+Run: `bun test tests/cli/memory.test.ts && bun run typecheck`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
 ```bash
-git add models/registry.ts src/discovery/build-registry.ts src/cli/chat.ts src/cli/discover.ts package.json tests/
-git commit -m "feat(cli): discover command + chat reads merged registry (REGISTRY->BOOTSTRAP)"
+git add src/cli/memory.ts package.json tests/cli/memory.test.ts
+git commit -m "feat(memory): bun run memory CLI (ingest/recall/stats/reindex)"
 ```
 
 ---

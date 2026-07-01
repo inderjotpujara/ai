@@ -46,6 +46,7 @@ export function compileToWorkflow(crew: CrewDef): WorkflowDef {
         return composeTaskInput(task, ctx, deps);
       },
       output: task.output ?? z.string(),
+      persistMemory: task.persistMemory,
     };
   });
   // Reuse the workflow validator as a second gate (unique ids / acyclic).

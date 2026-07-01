@@ -2,6 +2,8 @@ import type { ToolSet } from 'ai';
 import type { Agent } from '../core/agent-def.ts';
 import { type BeforeDelegate, runGuardedAgent } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
+import type { MemoryStore } from '../memory/store.ts';
+import { MemoryKind } from '../memory/types.ts';
 import { ATTR, annotateStep } from '../telemetry/spans.ts';
 import {
   type MapSubStep,
@@ -24,7 +26,39 @@ export type WorkflowDeps = {
   tools: ToolSet;
   /** Engine-wide concurrency cap; defaults to DEFAULT_MAX_PARALLEL. */
   maxParallel?: number;
+  /** Optional long-term memory store. When set, each completed+validated step's
+   *  output is auto-persisted (namespace = workflow id) unless the step opts out. */
+  memory?: MemoryStore;
+  /** Default persist-on-completion policy when `memory` is set; a step may
+   *  override via its own `persistMemory` flag. Default true. */
+  persistMemory?: boolean;
 };
+
+/** Auto-write a completed step's output to memory, namespaced by workflow id.
+ *  No-op when `store` is absent or `persist` is false; skips empty output;
+ *  stringifies non-string output. */
+export async function autoPersistStepOutput(
+  store: MemoryStore | undefined,
+  info: {
+    workflowId: string;
+    stepId: string;
+    output: unknown;
+    persist: boolean;
+    at: number;
+  },
+): Promise<void> {
+  if (!store || !info.persist) return;
+  const text =
+    typeof info.output === 'string' ? info.output : JSON.stringify(info.output);
+  if (!text.trim()) return;
+  await store.remember(text, {
+    space: 'default',
+    namespace: info.workflowId,
+    kind: MemoryKind.RunMemory,
+    source: `${info.workflowId}:${info.stepId}`,
+    at: info.at,
+  });
+}
 
 /** Default runAgentStep: resolve the agent by name, run it through the shared
  *  guarded path; a guard/agent error becomes a thrown WorkflowError (the engine
