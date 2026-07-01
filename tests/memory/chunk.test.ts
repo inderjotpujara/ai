@@ -15,10 +15,14 @@ describe('chunk', () => {
     expect(chunks.map((c) => c.text).join('')).toContain('one');
   });
   test('semantic split calls embed and keeps chunks under cap', async () => {
-    const embed = async (ts: string[]) =>
-      ts.map((_, i) => [i % 2, 1 - (i % 2)]); // alternating vectors
+    let embedCalled = false;
+    const embed = async (ts: string[]) => {
+      embedCalled = true;
+      return ts.map((_, i) => [i % 2, 1 - (i % 2)]); // alternating vectors
+    };
     const text = 'Sentence one. Sentence two. Sentence three. Sentence four.';
     const chunks = await chunk(text, { capTokens: 100, embed });
+    expect(embedCalled).toBe(true);
     expect(chunks.length).toBeGreaterThanOrEqual(1);
     for (const c of chunks) expect(c.text.length).toBeLessThanOrEqual(100 * 4);
   });

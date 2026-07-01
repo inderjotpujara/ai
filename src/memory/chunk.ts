@@ -49,16 +49,18 @@ export async function chunk(
   }
 
   const vecs = await opts.embed(sentences);
+  if (vecs.length !== sentences.length) {
+    throw new Error('chunk: embed returned ' + vecs.length + ' vectors for ' + sentences.length + ' sentences');
+  }
   const threshold = opts.threshold ?? 0.5;
   const chunks: Chunk[] = [];
   const firstSentence = sentences[0];
   if (firstSentence === undefined) return [];
   let buf = firstSentence;
   for (let i = 1; i < sentences.length; i++) {
-    const prevVec = vecs[i - 1];
-    const currVec = vecs[i];
-    const sentence = sentences[i];
-    if (!prevVec || !currVec || !sentence) continue;
+    const prevVec = vecs[i - 1]!;
+    const currVec = vecs[i]!;
+    const sentence = sentences[i]!;
     const sim = cosine(prevVec, currVec);
     const next = `${buf} ${sentence}`;
     if (sim < threshold || next.length > capChars) {
