@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 import { ATTR, withCrewSpan, withStepSpan } from '../../src/telemetry/spans.ts';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 describe('crew spans', () => {
   it('opens crew.run with id + process and nests child spans under it', async () => {

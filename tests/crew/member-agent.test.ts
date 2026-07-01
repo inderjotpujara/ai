@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { z } from 'zod';
 import { Capability, PreferPolicy } from '../../src/core/types.ts';
 import { buildCrewAgent } from '../../src/crew/member-agent.ts';
 import type { CrewMember } from '../../src/crew/types.ts';
@@ -38,10 +39,10 @@ describe('buildCrewAgent', () => {
     const tools = {
       probe: {
         description: 'x',
-        inputSchema: { type: 'object', properties: {} },
-        execute: async () => ({})
-      }
-    } as any;
+        inputSchema: z.object({}),
+        execute: async () => ({}),
+      },
+    };
     const agent = buildCrewAgent({ ...member, tools } as CrewMember);
     expect(agent.tools).toBe(tools);
   });
