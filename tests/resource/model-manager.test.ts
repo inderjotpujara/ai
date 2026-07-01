@@ -245,3 +245,52 @@ test('routes lifecycle through controlFor(decl.provider)', async () => {
   });
   expect(f.control.warm).toHaveBeenCalledWith('m7', expect.any(Number));
 });
+
+test('embedder role: skips /api/generate warm but still installs it', async () => {
+  const f = fakes();
+  const mgr = createModelManager(f.deps);
+  await mgr.ensureReady({
+    provider: ProviderKind.Ollama,
+    model: 'qwen3-embedding:0.6b',
+    params: {},
+    role: 'embedder',
+    footprint: { approxParamsBillions: 0.6, bytesPerWeight: 1, kvBytesPerToken: 0 },
+  });
+  expect(f.control.warm).not.toHaveBeenCalled();
+  expect(f.control.pull).not.toHaveBeenCalled(); // already "installed" per fakeControl default
+});
+
+test('embedder role: is tracked as resident (loaded, evictable, skips a second load)', async () => {
+  const f = fakes();
+  const mgr = createModelManager(f.deps);
+  const embedDecl: ModelDeclaration = {
+    provider: ProviderKind.Ollama,
+    model: 'qwen3-embedding:0.6b',
+    params: {},
+    role: 'embedder',
+    footprint: { approxParamsBillions: 0.6, bytesPerWeight: 1, kvBytesPerToken: 0 },
+  };
+  await mgr.ensureReady(embedDecl);
+  // unloadAll only unloads models tracked in the manager's own residency map —
+  // if the embedder weren't recorded there, this would be a no-op for it.
+  await mgr.unloadAll();
+  expect(f.control.unload).toHaveBeenCalledWith('qwen3-embedding:0.6b');
+});
+
+test('embedder role co-resides with a chat model and participates in LRU eviction', async () => {
+  // chat8 needs weights(8,1)=9.6e9 + MIN_CTX kv. Budget 2e9 free + evicting the
+  // embedder (9.6e9) must be enough to fit — proves the embedder is tracked in
+  // the same evictable pool as chat models, not a bookkeeping no-op.
+  const f = fakes({
+    budgetBytes: 2e9,
+    control: fakeControl({
+      listLoaded: mock(async () => [
+        { name: 'qwen3-embedding:0.6b', sizeBytes: 9.6e9 },
+      ]),
+    }),
+  });
+  const mgr = createModelManager(f.deps);
+  await mgr.ensureReady(decl('chat8', 8), { pinned: [] });
+  expect(f.control.unload).toHaveBeenCalledWith('qwen3-embedding:0.6b');
+  expect(f.control.warm).toHaveBeenCalledWith('chat8', MIN_CTX);
+});

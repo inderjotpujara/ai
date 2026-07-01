@@ -173,6 +173,11 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
     chosenCtx -= chosenCtx % CTX_ROUNDING;
     chosenCtx = Math.max(MIN_CTX, chosenCtx);
 
+    // Embedders have no /api/generate endpoint — /api/embed loads them lazily on
+    // first call, so a generate-warm here would 400. Everything else (pull,
+    // budget/eviction accounting, and the residency bookkeeping below) still
+    // applies: the embedder is tracked/evictable exactly like a chat model.
+    const isEmbedder = decl.role === 'embedder';
     await withModelLoadSpan(
       target,
       {
@@ -185,7 +190,7 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
         footprintBytes: weights + kvCacheBytes(chosenCtx, kvPerToken),
         budgetBytes: freeBudget,
       },
-      () => c.warm(target, chosenCtx),
+      () => (isEmbedder ? Promise.resolve() : c.warm(target, chosenCtx)),
     );
     lastUsed.set(target, ++tick);
     chosenCtxByModel.set(target, chosenCtx);
