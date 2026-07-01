@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'bun:test';
-import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 import {
   ATTR,
   annotateStep,
   withStepSpan,
   withWorkflowSpan,
 } from '../../src/telemetry/spans.ts';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 describe('workflow spans', () => {
   it('nests workflow.step under workflow.run with id/kind attrs', async () => {

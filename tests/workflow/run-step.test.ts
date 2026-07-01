@@ -2,8 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import {
   DEFAULT_MAX_PARALLEL,
-  type WorkflowDeps,
   runStepByKind,
+  type WorkflowDeps,
 } from '../../src/workflow/run-step.ts';
 import { StepKind } from '../../src/workflow/types.ts';
 
