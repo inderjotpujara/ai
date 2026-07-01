@@ -5,7 +5,13 @@ import type { RetrievalResult } from '../../src/memory/types.ts';
 describe('formatResults', () => {
   test('tags each chunk with [mem:<id>] citation', () => {
     const r: RetrievalResult[] = [
-      { id: 'doc#0', text: 'the sky is blue', source: 'doc', score: 0.1, namespace: '' },
+      {
+        id: 'doc#0',
+        text: 'the sky is blue',
+        source: 'doc',
+        score: 0.1,
+        namespace: '',
+      },
     ];
     const out = formatResults(r);
     expect(out).toContain('[mem:doc#0]');

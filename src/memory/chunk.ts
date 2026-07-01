@@ -50,7 +50,13 @@ export async function chunk(
 
   const vecs = await opts.embed(sentences);
   if (vecs.length !== sentences.length) {
-    throw new Error('chunk: embed returned ' + vecs.length + ' vectors for ' + sentences.length + ' sentences');
+    throw new Error(
+      'chunk: embed returned ' +
+        vecs.length +
+        ' vectors for ' +
+        sentences.length +
+        ' sentences',
+    );
   }
   const threshold = opts.threshold ?? 0.5;
   const chunks: Chunk[] = [];

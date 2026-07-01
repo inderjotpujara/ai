@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { defineMemory } from '../../src/memory/define.ts';
 import { MemoryError } from '../../src/core/errors.ts';
+import { defineMemory } from '../../src/memory/define.ts';
 
 describe('defineMemory', () => {
   test('applies fallback defaults', () => {

@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { retrievalBudgetChars, retrievalCtxFraction } from '../../src/memory/budget.ts';
+import {
+  retrievalBudgetChars,
+  retrievalCtxFraction,
+} from '../../src/memory/budget.ts';
 
-afterEach(() => { delete process.env.AGENT_MEMORY_CTX_FRACTION; });
+afterEach(() => {
+  delete process.env.AGENT_MEMORY_CTX_FRACTION;
+});
 
 describe('retrieval budget', () => {
   test('scales with num_ctx (fraction × ctx × 4 chars/token)', () => {
