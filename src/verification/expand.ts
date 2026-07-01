@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { RetrievalResult } from '../memory/types.ts';
-import { recordVerdict, withVerificationSpan } from '../telemetry/spans.ts';
+import { withVerificationSpan } from '../telemetry/spans.ts';
 import type { Step, WorkflowContext } from '../workflow/types.ts';
 import { StepKind } from '../workflow/types.ts';
 import { verifyMaxRetries } from './config.ts';
@@ -110,7 +110,6 @@ export function expandVerification(opts: ExpandVerificationOpts): Step[] {
         { query: query(ctx), space, threshold },
         verifyDeps,
       );
-      recordVerdict(verdict.unsupportedClaims.length);
       return verdict;
     },
   });

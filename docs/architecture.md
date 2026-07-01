@@ -715,11 +715,14 @@ dedicated checker.
 `gradeRetrieval(query, chunks, deps)` asks the general model to grade the
 retrieved context `CORRECT | AMBIGUOUS | INCORRECT` (`CragGrade` enum).
 `correctiveRetrieve(query, recall, deps)` rewrites the query
-(`rewriteQuery`) and re-runs `recall` once. **This is one bounded, unrolled
-corrective step, not a loop** — the workflow/DAG engine (§9) has no native
-looping construct, so CRAG here is expressed as a fixed number of extra
-verify→corrective→verify steps spliced into the graph at construction time
-(see `expand.ts` below), not a runtime `while` over the grade.
+(`rewriteQuery`) and re-runs `recall` once **when a `recall` dependency is
+wired**; otherwise, the rewrite happens but re-retrieval is skipped. **This is
+one bounded, unrolled corrective step, not a loop** — the workflow/DAG engine
+(§9) has no native looping construct, so CRAG here is expressed as a fixed
+number of extra verify→corrective→verify steps spliced into the graph at
+construction time (see `expand.ts` below), not a runtime `while` over the grade.
+The current `--verify` CLI path re-answers without fresh retrieval (a documented
+follow-up, mirroring the memory-store CLI gap).
 
 ### Verify→branch→corrective→abstain sub-graph (`expand.ts`)
 
@@ -732,7 +735,7 @@ T                        (the existing answer step; caller keeps it)
 T__verify    Verify      verify(ctx[T])                  → Verdict
 T__branch    Branch      supported? → T__pass | T__corrective
 T__pass      Verify(pass)  no-op terminal (accept)
-T__corrective Verify(corrective)  CRAG rewrite → re-recall → re-answer → string
+T__corrective Verify(corrective)  CRAG rewrite + re-answer (re-recall if recall wired) → string
 T__verify2   Verify      verify(ctx[T__corrective])      → Verdict
 T__branch2   Branch      supported? → T__pass2 | T__abstain
 ...
