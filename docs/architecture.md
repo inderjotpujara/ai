@@ -419,14 +419,29 @@ human-in-the-loop tasks.
 
 ---
 
-## 11. On-disk stores
+## 11. Memory/RAG (Slice 12 — in progress)
+
+> **Stub — filled in as the slice lands (Task 14).** The persistent memory layer
+> lives in **`src/memory/`**: a two-tier store — **LanceDB** (embedded vector,
+> one table per named *space*) + **`bun:sqlite`** (space registry + document
+> manifest) — with embeddings via the runtime port (`RuntimeControl.embed`,
+> default `qwen3-embedding:0.6b`, loaded weights-only through the Model Manager),
+> a hybrid → RRF → budget-fit retrieval pipeline, and `memory.recall`/`ingest`/
+> `embed` spans. A *space* records its embedder+dim (authoritative); the
+> retrieval injection budget is a live fraction of the delegation's `num_ctx`.
+> Crews/workflows read via a `recall` tool and auto-write task outputs
+> (namespaced per crew). Full section + module-map node/edges land in Task 14.
+
+---
+
+## 12. On-disk stores
 
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 
 ---
 
-## 12. Testing strategy
+## 13. Testing strategy
 
 - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
@@ -437,7 +452,7 @@ human-in-the-loop tasks.
 
 ---
 
-## 13. Glossary
+## 14. Glossary
 
 - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
 - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
