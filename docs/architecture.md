@@ -107,6 +107,10 @@ graph TD
     subgraph MEMCLI["CLI · src/cli/memory.ts"]
         memcli["bun run memory ingest/recall/stats/reindex"]
     end
+    subgraph VERIFY["Verification · src/verification"]
+        verifyconf["config.ts · verifyModel/Threshold/MaxRetries/autoPullPolicy"]
+        verifytypes["types.ts · VerifyDeps/Verdict/Claim"]
+    end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
         images[("model-images/ + catalog.json")]
@@ -213,6 +217,7 @@ graph TD
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
+| **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13 — in progress): grounded verification of agent outputs against retrieved context — CRAG-style claim decomposition, citation checking, and fallback judging (§12 below, full section landing in Task 14) | `resource/model-manager.ts` (ensureJudge) + `memory/types.ts` (RetrievalResult) + `telemetry/spans.ts` |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 

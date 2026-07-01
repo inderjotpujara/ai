@@ -32,3 +32,6 @@ export class CrewError extends FrameworkError {}
 
 /** A memory/RAG definition, storage, or retrieval error. */
 export class MemoryError extends FrameworkError {}
+
+/** Misuse of the verification layer (e.g. verify called without a memory store). */
+export class VerificationError extends FrameworkError {}
