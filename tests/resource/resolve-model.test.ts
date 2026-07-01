@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'bun:test';
-import { ResourceError } from '../../src/core/errors.ts';
+import { ProviderError, ResourceError } from '../../src/core/errors.ts';
 import {
   Capability,
   type ModelDeclaration,
@@ -60,6 +60,26 @@ test('non-resource errors propagate immediately', async () => {
   await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(
     TypeError,
   );
+});
+
+test('falls back to the next candidate when the largest fails to pull/warm (ProviderError)', async () => {
+  const ensureReady = mock(async (d: ModelDeclaration) => {
+    if (d.model === 'big') throw new ProviderError('pull failed');
+    return 4096;
+  });
+  const { decl } = await resolveModel(req, reg, { ensureReady });
+  expect(decl.model).toBe('small');
+  expect(ensureReady).toHaveBeenCalledTimes(2);
+});
+
+test('throws when every candidate fails to pull/warm (ProviderError), no crash', async () => {
+  const ensureReady = mock(async () => {
+    throw new ProviderError('pull failed');
+  });
+  await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(
+    ResourceError,
+  );
+  expect(ensureReady).toHaveBeenCalledTimes(2);
 });
 
 test('passes the resident set to the ranker and calls onAttempt', async () => {

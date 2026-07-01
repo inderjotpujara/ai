@@ -1,4 +1,4 @@
-import { ResourceError } from '../core/errors.ts';
+import { ProviderError, ResourceError } from '../core/errors.ts';
 import {
   type Capability,
   ContentPolicy,
@@ -58,8 +58,10 @@ export type ResolveDeps = {
 
 /**
  * LIVE. Walk candidates best-first; the first the manager can ready wins. On a
- * genuine ResourceError, drop to the next candidate; if none fit, rethrow a real
- * ResourceError. The manager remains the single fit-authority (real /api/ps sizes).
+ * genuine ResourceError (doesn't fit) or ProviderError (pull/warm failed, e.g. the
+ * runtime can't fetch the model), drop to the next candidate; if none fit, rethrow a
+ * real ResourceError. The manager remains the single fit-authority (real /api/ps
+ * sizes).
  */
 export async function resolveModel(
   req: ModelRequirement,
@@ -83,7 +85,7 @@ export async function resolveModel(
       const numCtx = await deps.ensureReady(decl, opts);
       return { decl, numCtx };
     } catch (err) {
-      if (err instanceof ResourceError) {
+      if (err instanceof ResourceError || err instanceof ProviderError) {
         lastErr = err;
         continue;
       }

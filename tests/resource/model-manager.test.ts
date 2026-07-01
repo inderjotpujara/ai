@@ -10,7 +10,7 @@ afterAll(() => {
   else process.env.AGENT_KV_CACHE_TYPE = __prevKv;
 });
 
-import { ResourceError } from '../../src/core/errors.ts';
+import { ProviderError, ResourceError } from '../../src/core/errors.ts';
 import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
 import {
   createModelManager,
@@ -186,6 +186,58 @@ test('ample headroom: chosenCtx is the desired value, warmed at it', async () =>
   const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
   expect(ctx).toBe(16384);
   expect(f.control.warm).toHaveBeenCalledWith('m1', 16384);
+});
+
+test('pull failure: surfaces as ProviderError', async () => {
+  const f = fakes({
+    control: fakeControl({
+      isInstalled: mock(async () => false),
+      pull: mock(async () => {
+        throw new ProviderError('Ollama request to /api/pull failed');
+      }),
+    }),
+  });
+  const mgr = createModelManager(f.deps);
+  await expect(mgr.ensureReady(decl('flaky', 4))).rejects.toBeInstanceOf(
+    ProviderError,
+  );
+});
+
+test('per-run failed-pull guard: a model whose pull already failed is not re-pulled — throws ProviderError immediately', async () => {
+  const pull = mock(async () => {
+    throw new ProviderError('Ollama request to /api/pull failed');
+  });
+  const f = fakes({
+    control: fakeControl({
+      isInstalled: mock(async () => false),
+      pull,
+    }),
+  });
+  const mgr = createModelManager(f.deps);
+
+  await expect(mgr.ensureReady(decl('flaky', 4))).rejects.toBeInstanceOf(
+    ProviderError,
+  );
+  expect(pull).toHaveBeenCalledTimes(1);
+
+  await expect(mgr.ensureReady(decl('flaky', 4))).rejects.toBeInstanceOf(
+    ProviderError,
+  );
+  // second call must NOT re-attempt the slow pull
+  expect(pull).toHaveBeenCalledTimes(1);
+});
+
+test('per-run failed-pull guard: a successfully pulled model is unaffected on later calls', async () => {
+  const pull = mock(async () => {});
+  const f = fakes({
+    control: fakeControl({
+      isInstalled: mock(async () => false),
+      pull,
+    }),
+  });
+  const mgr = createModelManager(f.deps);
+  await mgr.ensureReady(decl('good', 4));
+  expect(pull).toHaveBeenCalledTimes(1);
 });
 
 test('tight headroom: chosenCtx shrinks to fit, floored & rounded to 1024', async () => {

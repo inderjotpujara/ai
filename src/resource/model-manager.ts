@@ -1,4 +1,4 @@
-import { ResourceError } from '../core/errors.ts';
+import { ProviderError, ResourceError } from '../core/errors.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
@@ -52,6 +52,13 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
   const runtimeByModel = new Map<string, ModelDeclaration>(); // remember how to unload
   const kvF16ByModel = new Map<string, number>();
   const kvRiskWarned = new Set<string>();
+  // Models whose pull failed this process. A pull failure (e.g. a 500 from
+  // /api/pull) can take minutes to surface; without this guard every delegation
+  // in a run would re-attempt and re-fail the same pull. Only failures are
+  // cached here (not successes) — there's nothing to invalidate on success, so
+  // the simplest correct thing is to just never add a model to this set unless
+  // its pull actually failed.
+  const failedPulls = new Set<string>();
   let tick = 0;
 
   async function modelMaxFor(
@@ -113,7 +120,19 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
     const target = decl.model;
     const desired = decl.params.numCtx ?? MIN_CTX;
 
-    if (!(await c.isInstalled(target))) await c.pull(target);
+    if (!(await c.isInstalled(target))) {
+      if (failedPulls.has(target)) {
+        throw new ProviderError(
+          `${target}: skipping re-pull after a prior failure this run.`,
+        );
+      }
+      try {
+        await c.pull(target);
+      } catch (err) {
+        failedPulls.add(target);
+        throw err;
+      }
+    }
 
     let loaded = await c.listLoaded();
     if (loaded.some((m) => m.name === target)) {
