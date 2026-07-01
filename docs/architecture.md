@@ -131,6 +131,7 @@ graph TD
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
 | **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
+| **Workflow / DAG** | `src/workflow/` | Pure types + error class for deterministic multi-step workflows (Slice 10) — step model, context-threading, failure policies, DAG validation | Zod (I/O schemas) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -251,14 +252,33 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 
 ---
 
-## 9. On-disk stores
+## 9. Workflows / DAG engine (Slice 10)
+
+**Pure types + execution model for deterministic multi-step workflows.** While the agent loop is *agentic* (an LLM autonomously chooses actions), workflows are *choreographed* — steps run in a defined DAG order, each produces validated output, and branches/maps are explicit.
+
+- **Types** (`src/workflow/types.ts`): 
+  - `enum StepKind { Agent, Tool, Branch, Map }` — the four step kinds
+  - `WorkflowContext` — thread of `{stepId: output}` through a run; maps + branches thread `item`/`index`
+  - Step variants: `AgentStep` (run an agent, input is a prompt), `ToolStep` (call a tool, input is args), `BranchStep` (if-then-else on a predicate), `MapStep` (fan-out per item in a list, run sub-step once per item)
+  - `StepError` — per-step failure policy: `'fail'` (fast), `'continue'` (skip on error), `{ fallback }` (use a fallback value)
+  - `WorkflowDef` — a named list of steps + metadata
+  - `WorkflowOutcome` — `{ kind: 'done', output }` or `{ kind: 'failed', failedStep, message }`
+  - `effectiveDeps(step, index, steps)` — helper: explicit `dependsOn` or implicit previous-step deps
+
+- **Error class** (`src/core/errors.ts`): `WorkflowError extends FrameworkError` for workflow-specific failures (bad definition, step failure, context mismatch)
+
+Execution engine (`src/workflow/engine.ts` — later tasks) will traverse the DAG, thread context, validate outputs, and handle failures per policy. Every step emission will produce `agent.workflow.*` spans (one per step, one per branch taken, one per map iteration).
+
+---
+
+## 10. On-disk stores
 
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 
 ---
 
-## 10. Testing strategy
+## 11. Testing strategy
 
 - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
@@ -269,7 +289,7 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 
 ---
 
-## 11. Glossary
+## 12. Glossary
 
 - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
 - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.

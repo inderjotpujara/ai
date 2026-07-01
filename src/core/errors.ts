@@ -23,3 +23,6 @@ export class MaxStepsError extends FrameworkError {
 
 /** A model cannot fit the machine's memory budget. */
 export class ResourceError extends FrameworkError {}
+
+/** A workflow definition or execution error. */
+export class WorkflowError extends FrameworkError {}
