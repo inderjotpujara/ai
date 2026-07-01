@@ -130,6 +130,18 @@ export function runCrew(
         }
         return { kind: 'done', output: outcome.output };
       }
+      if (outcome.kind === 'unverified') {
+        // runWorkflow's own scan already found the marker (raw-workflow verify
+        // wiring, Task 9); the crew path's compile-time splice + findUnverified
+        // above is the primary route, but this keeps the mapping total.
+        return {
+          kind: 'unverified',
+          failedTaskId: outcome.failedStepId,
+          unsupportedClaims: outcome.unsupportedClaims,
+          faithfulness: outcome.faithfulness,
+          draft: outcome.draft,
+        };
+      }
       return {
         kind: 'failed',
         failedTask: outcome.failedStep,

@@ -52,6 +52,12 @@ export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
           'result.txt',
           lastStepOutputText(deps.def, outcome.output),
         );
+      } else if (outcome.kind === 'unverified') {
+        await writeArtifact(
+          run,
+          'unverified.txt',
+          `step ${outcome.failedStepId ?? '?'} abstained (faithfulness ${outcome.faithfulness}); unsupported claims:\n${outcome.unsupportedClaims.join('\n')}\n\ndraft:\n${outcome.draft}`,
+        );
       } else {
         await writeArtifact(
           run,
@@ -102,6 +108,11 @@ async function main(): Promise<void> {
         });
         if (outcome.kind === 'done') {
           console.log(lastStepOutputText(def, outcome.output));
+        } else if (outcome.kind === 'unverified') {
+          console.error(
+            `Workflow abstained at ${outcome.failedStepId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
+          );
+          process.exitCode = 1;
         } else {
           console.error(
             `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,

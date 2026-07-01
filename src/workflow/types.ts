@@ -35,6 +35,11 @@ export type AgentStep<O = unknown> = StepBase<O> & {
   kind: StepKind.Agent;
   agent: string; // agent name resolved from the agent map at run time
   input: (ctx: WorkflowContext) => string; // the task prompt for the agent
+  /** Opt-in grounded verification: when true (and the run is given `verifyDeps`),
+   *  `defineWorkflow` splices a verify → branch(supported?) → bounded-CRAG
+   *  corrective → abstain sub-graph after this step (mirrors the crew compiler's
+   *  `task.verify`). Additive; a step without it compiles as before. */
+  verify?: boolean;
 };
 
 export type ToolStep<O = unknown> = StepBase<O> & {
@@ -94,7 +99,17 @@ export type WorkflowDef = {
 
 export type WorkflowOutcome =
   | { kind: 'done'; output: WorkflowContext }
-  | { kind: 'failed'; failedStep: string; message: string };
+  | { kind: 'failed'; failedStep: string; message: string }
+  /** A verified step's answer stayed unsupported after the bounded corrective
+   *  retries — the workflow abstains rather than emit a hallucination. Mirrors
+   *  the crew engine's `CrewOutcome` `unverified` variant (src/crew/types.ts). */
+  | {
+      kind: 'unverified';
+      failedStepId?: string;
+      unsupportedClaims: string[];
+      faithfulness: number;
+      draft: string;
+    };
 
 /** The effective dependencies of a step: explicit `dependsOn`, else the previous
  *  step in declaration order (first step => no deps). Shared by define + engine. */
