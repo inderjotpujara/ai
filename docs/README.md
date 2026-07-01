@@ -8,11 +8,16 @@ the `docs-check` guard fails otherwise.
 
 **Documentation stays current with the code. A stale doc is a defect, not debt.**
 
-- **Every slice updates [`architecture.md`](architecture.md)** to reflect what it changed (new module, new data-flow edge, new mechanism) — and updates this map + the root README if it adds/renames a living doc. Each spec/plan carries an **"architecture-doc update"** note next to its **"telemetry to emit"** note.
-- **The slice's final review audits the doc against the diff for accuracy** — presence is enforced by tooling, but *truth* is a human/review check (this is how the Slice-9 audit caught 6 wrong edges). Don't just touch the file; verify its claims still match the code.
+- **Every slice updates ALL FOUR living surfaces** (not just architecture.md):
+  1. **[`architecture.md`](architecture.md)** — the module/data-flow/mechanism it changed (+ this map & root README if it adds/renames a living doc).
+  2. **Root [`../README.md`](../README.md)** — the Status line, the slice status table (new row, ✅ Done), and the "Next" line.
+  3. **[`ROADMAP.md`](ROADMAP.md)** — flip the shipped capability's status marker (🟡/❌ → ✅ shipped, Slice N) in the gap table, phase table, and recommended sequence.
+  4. **The interactive architecture Artifact** (docs snapshot) — regenerated from `architecture.md` (subsystem node/edges + footer slice/test counts). Not a repo file, so the hook only *reminds*.
+  Each spec/plan carries an **"architecture-doc update"** note next to its **"telemetry to emit"** note.
+- **The slice's final review audits the docs against the diff for accuracy** — presence is enforced by tooling, but *truth* is a human/review check (this is how the Slice-9 audit caught 6 wrong edges). Don't just touch the files; verify their claims still match the code.
 - Enforced automatically (run `bun run setup` once per clone to activate the git hooks):
   - **pre-commit** → `bun run docs:check`: blocks if a living doc is missing/orphaned or a `src/<subsystem>` is undocumented in `architecture.md`. No false positives.
-  - **pre-push** → blocks a push whose commits change `src/**` but not `docs/architecture.md`. Deliberate bypass only: `DOCS_OK=1 git push` (for a genuinely doc-neutral change).
+  - **pre-push** → (a) blocks a push whose commits change `src/**` but not `docs/architecture.md`; (b) **slice-landing gate**: a push **to main** that changes `docs/architecture.md` must also update `README.md` **and** `ROADMAP.md` (and reminds to regenerate the Artifact). Deliberate bypass only: `DOCS_OK=1 git push` (genuinely not a slice).
   - Pre-PR gate: `bun run check` (docs-check + typecheck + lint + tests).
 
 ## Living docs — kept current
