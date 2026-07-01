@@ -32,7 +32,10 @@ export function crewAgentMap(
 }
 
 /** Run a crew: sequential -> the Slice-10 workflow engine; hierarchical -> the
- *  orchestrator. Wrapped in a crew.run span; never throws into the caller. */
+ *  orchestrator. Wrapped in a crew.run span. The sequential path never throws
+ *  (runWorkflow converts every step failure into a `failed` outcome); the
+ *  hierarchical path inherits runOrchestrator's behavior, which rethrows on an
+ *  unhandled (non-gap/non-resource) failure. */
 export function runCrew(
   def: CrewDef,
   input: unknown,
