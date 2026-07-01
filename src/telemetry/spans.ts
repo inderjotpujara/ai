@@ -26,6 +26,12 @@ export const ATTR = {
   GUARDRAIL_TYPE: 'agent.guardrail.type',
   DELEGATION_DEPTH: 'agent.delegation.depth',
   DELEGATION_ANCESTORS: 'agent.delegation.ancestors',
+  WORKFLOW_ID: 'workflow.id',
+  WORKFLOW_OUTCOME: 'workflow.outcome',
+  STEP_ID: 'workflow.step.id',
+  STEP_KIND: 'workflow.step.kind',
+  STEP_BRANCH_TAKEN: 'workflow.step.branch.taken',
+  STEP_MAP_COUNT: 'workflow.step.map.count',
 } as const;
 
 export type ModelSelectInfo = {
@@ -171,4 +177,35 @@ export function recordGuardrailViolation(
     [ATTR.GUARDRAIL_TYPE]: type,
     'agent.guardrail.detail': detail,
   });
+}
+
+/** Root span for a workflow run. Mirrors withRunSpan but for the DAG engine. */
+export function withWorkflowSpan<T>(
+  workflowId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('workflow.run', async (span) => {
+    span.setAttribute(ATTR.WORKFLOW_ID, workflowId);
+    return fn();
+  });
+}
+
+/** Span for a single workflow step, tagged with its id + kind. */
+export function withStepSpan<T>(
+  stepId: string,
+  kind: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('workflow.step', async (span) => {
+    span.setAttribute(ATTR.STEP_ID, stepId);
+    span.setAttribute(ATTR.STEP_KIND, kind);
+    return fn();
+  });
+}
+
+/** Set extra attributes on the active step span (branch decision, map count). */
+export function annotateStep(attrs: Record<string, string | number>): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
 }

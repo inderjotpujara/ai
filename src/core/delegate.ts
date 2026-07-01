@@ -28,6 +28,40 @@ export type BeforeDelegate = (
   // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing.
 ) => Promise<{ numCtx?: number; model?: LanguageModel; abort?: string } | void>;
 
+/** Run an agent through the full Slice-9 guarded delegation path:
+ *  delegation span · depth guard · before-delegate hook · context wrap · return cap.
+ *  Shared by the orchestrator's delegate tool and the workflow engine's agent step. */
+export function runGuardedAgent(
+  agent: Agent,
+  task: string,
+  onBeforeDelegate?: BeforeDelegate,
+): Promise<{ text: string } | { error: string }> {
+  return withDelegationSpan(agent.name, async () => {
+    const check = checkDelegation(agent.name);
+    if (!check.ok) {
+      recordGuardrailViolation(check.kind, check.reason);
+      return { error: check.reason };
+    }
+    const callerNumCtx = currentDelegationContext().numCtx;
+    try {
+      const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
+      if (pre?.abort) {
+        return { error: pre.abort };
+      }
+      const { text } = await runInDelegationContext(
+        agent.name,
+        pre?.numCtx,
+        () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
+      );
+      return { text: concise(text, callerNumCtx) };
+    } catch (cause) {
+      return {
+        error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+      };
+    }
+  });
+}
+
 /**
  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
  * structured error (so the orchestrator model can react) rather than throwing.
@@ -41,32 +75,6 @@ export function asDelegateTool(
     inputSchema: z.object({
       task: z.string().describe('The task for this agent'),
     }),
-    execute: async ({ task }) =>
-      withDelegationSpan(agent.name, async () => {
-        const check = checkDelegation(agent.name);
-        if (!check.ok) {
-          recordGuardrailViolation(check.kind, check.reason);
-          return { error: check.reason };
-        }
-        const callerNumCtx = currentDelegationContext().numCtx;
-        try {
-          const pre = onBeforeDelegate
-            ? await onBeforeDelegate(agent)
-            : undefined;
-          if (pre?.abort) {
-            return { error: pre.abort };
-          }
-          const { text } = await runInDelegationContext(
-            agent.name,
-            pre?.numCtx,
-            () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
-          );
-          return { text: concise(text, callerNumCtx) };
-        } catch (cause) {
-          return {
-            error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
-          };
-        }
-      }),
+    execute: async ({ task }) => runGuardedAgent(agent, task, onBeforeDelegate),
   });
 }

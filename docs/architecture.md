@@ -39,6 +39,7 @@ graph TD
         runchat["run-chat.ts"]
         selhook["select-hook.ts"]
         runscli["runs.ts · bun run runs"]
+        flow["flow.ts · bun run flow"]
     end
     subgraph CORE["Core · src/core"]
         orch["orchestrator.ts"]
@@ -73,7 +74,14 @@ graph TD
         exporter["jsonl-exporter.ts"]
     end
     subgraph RUN["Run store · src/run"]
+        runstore["run-store.ts"]
         runtrace["run-trace.ts"]
+    end
+    subgraph WF["Workflow · src/workflow"]
+        wftypes["types.ts · StepKind"]
+        wfdefine["define.ts · defineWorkflow"]
+        wfengine["engine.ts · runWorkflow"]
+        wfrunstep["run-step.ts · runStepByKind"]
     end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
@@ -82,6 +90,7 @@ graph TD
     subgraph DECL["Declarations (pure data)"]
         agents["agents/*"]
         models["models/* · BOOTSTRAP"]
+        workflows["workflows/* · WORKFLOWS"]
     end
 
     chat --> runchat
@@ -117,11 +126,22 @@ graph TD
     octl --> images
     runscli --> runtrace
     runtrace --> spansfile
+    flow --> wfengine
+    flow --> runstore
+    flow -. mounts .-> mcpclient
+    flow --> agents
+    flow --> workflows
+    wfengine --> wfrunstep
+    wfrunstep --> delegate
+    wfengine --> spans
+    wfrunstep --> spans
+    wfdefine --> wftypes
+    runstore --> spansfile
 ```
 
 | Layer | Files | Responsibility | Knows about |
 |---|---|---|---|
-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer | everything below |
+| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
 | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
@@ -130,7 +150,8 @@ graph TD
 | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
-| **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
+| **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
+| **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -232,7 +253,7 @@ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewa
 
 - **`provider.ts`** — `initRunTelemetry(runDir)` registers a per-run, Bun-safe `BasicTracerProvider` + `AsyncLocalStorageContextManager` (no Node auto-instrumentation), and processors via `buildProcessors`: a `JsonlFileExporter` always, **plus** an OTLP/HTTP exporter when `AGENT_OTLP_ENDPOINT` is set (the swappable-backend seam → Jaeger/Tempo/Phoenix). `recordIoEnabled()` gates prompt/response capture (`AGENT_TELEMETRY_RECORD_IO`).
 - **`jsonl-exporter.ts`** — a `SpanExporter` serializing each span to one JSON line (`SpanRecord`); writes are serialized through a promise chain and **flushed on `shutdown()`** so `spans.jsonl` is never truncated.
-- **`spans.ts`** — the API: the **`ATTR`** key registry + helpers `withRunSpan` / `setRunOutcome` / `withDelegationSpan` / `recordModelSelect` / `withModelLoadSpan` / `recordEvict` / `recordGuardrailViolation`. **AI-SDK** `experimental_telemetry` (enabled per `generateText` with `functionId = agent.name`) contributes `ai.generateText` / `ai.toolCall` / token spans for free, nested under our manual spans via the active context.
+- **`spans.ts`** — the API: the **`ATTR`** key registry + helpers `withRunSpan` / `setRunOutcome` / `withDelegationSpan` / `recordModelSelect` / `withModelLoadSpan` / `recordEvict` / `recordGuardrailViolation` / `withWorkflowSpan` / `withStepSpan` / `annotateStep` (the last three back the workflow/DAG engine, §9). **AI-SDK** `experimental_telemetry` (enabled per `generateText` with `functionId = agent.name`) contributes `ai.generateText` / `ai.toolCall` / token spans for free, nested under our manual spans via the active context.
 
 **Run-viewer** (`bun run runs`, `src/cli/runs.ts`): `runs` lists runs (newest-first); `runs <id>` renders the span tree as an indented timeline (model · duration · tokens · outcome); `--follow` tails the live run. Reader/renderer are pure (`src/run/run-trace.ts` `readSpans`/`buildTree`/`summarizeRun`; `src/cli/render-trace.ts`). `journal.jsonl` is retired — `spans.jsonl` is canonical; `answer/gap/resource.txt` artifacts remain.
 
@@ -251,25 +272,54 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 
 ---
 
-## 9. On-disk stores
+## 9. Workflows / DAG engine (Slice 10)
+
+**Pure types + execution model for deterministic multi-step workflows.** While the agent loop is *agentic* (an LLM autonomously chooses actions), workflows are *choreographed* — steps run in a defined DAG order, each produces validated output, and branches/maps are explicit.
+
+- **Types** (`src/workflow/types.ts`): 
+  - `enum StepKind { Agent, Tool, Branch, Map }` — the four step kinds
+  - `WorkflowContext` — thread of `{stepId: output}` through a run; maps + branches thread `item`/`index`
+  - Step variants: `AgentStep` (run an agent, input is a prompt), `ToolStep` (call a tool, input is args), `BranchStep` (if-then-else on a predicate), `MapStep` (fan-out per item in a list, run sub-step once per item)
+  - `StepError` — per-step failure policy: `'fail'` (fast), `'continue'` (skip on error), `{ fallback }` (use a fallback value)
+  - `WorkflowDef` — a named list of steps + metadata
+  - `WorkflowOutcome` — `{ kind: 'done', output }` or `{ kind: 'failed', failedStep, message }`
+  - `effectiveDeps(step, index, steps)` — helper: explicit `dependsOn` or implicit previous-step deps
+
+- **Error class** (`src/core/errors.ts`): `WorkflowError extends FrameworkError` for workflow-specific failures (bad definition, step failure, context mismatch)
+
+- **Telemetry** (`src/telemetry/spans.ts`) — extended per the standing rule (§7): `withWorkflowSpan(workflowId, fn)` opens the root `workflow.run` span (`ATTR.WORKFLOW_ID`); `withStepSpan(stepId, kind, fn)` opens a nested `workflow.step` span per step (`ATTR.STEP_ID` / `ATTR.STEP_KIND`); `annotateStep(attrs)` tags the active step span with extra attributes (`ATTR.STEP_BRANCH_TAKEN` for the branch taken, `ATTR.STEP_MAP_COUNT` for map fan-out size); `ATTR.WORKFLOW_OUTCOME` records the terminal `WorkflowOutcome`. These are the spans/attrs the execution engine (Task 6) and CLI (Task 7) emit into — transport untouched, so the run-viewer and any OTLP backend get workflow signal for free.
+
+- **Step runner** (`src/workflow/run-step.ts`): `runStepByKind(step, ctx, deps)` dispatches a step to its kind (agent/tool/branch/map) and returns the *raw*, unvalidated result; `WorkflowDeps` (`runAgentStep`, `tools`, `maxParallel`) is the injected boundary the engine and CLI provide; `mapWithConcurrency` bounds fan-out concurrency for `MapStep` (default cap `DEFAULT_MAX_PARALLEL`, overridable via `AGENT_WORKFLOW_MAX_PARALLEL` or per-map `maxParallel`).
+
+- **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready.
+
+- **Definition + validation** (`src/workflow/define.ts`): `defineWorkflow(def)` validates a `WorkflowDef` at construction time — unique step ids, every `dependsOn`/branch target resolves to a real step, and the dependency graph is acyclic (Kahn's algorithm) — throwing `WorkflowError` on any violation, so a malformed workflow fails fast at import time rather than mid-run.
+
+- **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
+
+- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, and prints the last step's output (or the failure) to stdout/stderr — closing the fetch then file server in `finally`, mirroring `chat.ts`'s mount/close order.
+
+---
+
+## 10. On-disk stores
 
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 
 ---
 
-## 10. Testing strategy
+## 11. Testing strategy
 
 - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
 - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
 - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
 - **MCP** — real stdio round-trip (subprocess server).
-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
 
 ---
 
-## 11. Glossary
+## 12. Glossary
 
 - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
 - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
