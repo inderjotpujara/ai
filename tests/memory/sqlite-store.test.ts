@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { rmSync } from 'node:fs';
 import { SqliteStore } from '../../src/memory/sqlite-store.ts';
 
