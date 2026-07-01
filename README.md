@@ -10,16 +10,19 @@ Mini.
 > workflows, trigger them, watch them run, and let the system extend itself with
 > new agents on demand. Slices 1–7 built the hardware-aware **engine**; the
 > product line is now underway — Phase A's run-viewer (Slice 8) and Phase B's
-> composition guardrails (Slice 9) and workflow/DAG engine (Slice 10) have
-> landed. Remaining Phase B work (crews, memory/RAG, grounded verification) →
-> integration library → agent-builder → triggers is next. See
+> composition guardrails (Slice 9), workflow/DAG engine (Slice 10), and crews &
+> roles (Slice 11) have landed. Remaining Phase B work (memory/RAG, grounded
+> verification) → integration library → agent-builder → triggers is next. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 10 complete — **workflow/DAG engine**. `defineWorkflow()` +
-> `bun run flow <name>` run deterministic, code-first, typed step graphs
-> (agent/tool/branch/map) beside the existing LLM router. Also shipped: Slice 8
-> (OTel run-viewer, `bun run runs`) and Slice 9 (composition guardrails —
-> delegation depth limit + return-size cap). See [Roadmap](#roadmap).
+> **Status:** Slice 11 complete — **crews & roles**. `defineCrew()` +
+> `bun run crew <name>` compose role/goal/backstory members and dependent tasks
+> into a **sequential** (compiled to a Slice-10 workflow DAG) or **hierarchical**
+> (orchestrator + auto manager) process, with live largest-that-fits model
+> selection now wired into both the `flow` and `crew` CLIs. Also shipped: Slice 8
+> (OTel run-viewer, `bun run runs`), Slice 9 (composition guardrails —
+> delegation depth limit + return-size cap), and Slice 10 (workflow/DAG engine,
+> `bun run flow <name>`). See [Roadmap](#roadmap).
 
 ---
 
@@ -58,6 +61,8 @@ No manual steps. No API keys. Everything runs locally.
 
 **Workflow / DAG engine (Slice 10).** A second, deterministic orchestration mode alongside the LLM router: `defineWorkflow({id, steps})` builds a code-first, typed, JSON-serializable DAG out of `agent` / `tool` / `branch` / `map` (bounded fan-out) steps, with Zod-validated structured I/O flowing between them. Execution is fail-fast by default, with a per-step `onError: 'continue' | {fallback}` escape hatch. Run one with `bun run flow <name>`; workflows live in the `workflows/` registry and are executed by `runWorkflow()`. Agent steps reuse the Slice 9 guardrails via a shared `runGuardedAgent`, and the engine emits `workflow.run` / `workflow.step` spans into the same telemetry layer. See [`docs/architecture.md`](docs/architecture.md) §9.
 
+**Crews & roles (Slice 11).** A CrewAI-style role/task/process layer composed on top of the existing workflow engine and orchestrator — not a new engine. `defineCrew({id, members, tasks, process})` is validated at construction (unique names/ids, member/dependency resolution, acyclic task graph). **Members** are `{role, goal, backstory, requires, prefer, tools?}` — role/goal/backstory compose into the system prompt, and the model is resolved live by the selector (largest-that-fits), same as any other agent. **Tasks** are `{description, expectedOutput, member, dependsOn?, output?}` with optional Zod-typed output; `dependsOn` forms context edges between tasks. Two **processes**: `sequential` compiles the crew to a Slice-10 workflow DAG and runs it on the existing engine, and `hierarchical` reuses the orchestrator with an auto manager (model defaults to the router). Crew runs reuse the Slice 9 guardrails via `runGuardedAgent` and emit `crew.run` / `crew.step` (`crew.task.member`) telemetry. Run one with `bun run crew <name> [input...]`; crews live in the `crews/` registry (ships a `research-crew` example: researcher → writer, sequential). Live model selection — largest-that-fits, computed at run time — is now wired into both the `flow` and `crew` CLIs via a shared `src/cli/select-runtime.ts`. See [`docs/architecture.md`](docs/architecture.md) §10.
+
 ---
 
 ## Quick start
@@ -93,10 +98,12 @@ bun run src/cli/chat.ts "What animal is in /tmp/sample.txt?"
 ```
 
 Run a deterministic workflow (fixed steps, not LLM-routed) with `bun run flow`,
-and inspect any run's OTel trace with `bun run runs`:
+run a role-based crew with `bun run crew`, and inspect any run's OTel trace with
+`bun run runs`:
 
 ```sh
 bun run flow fetch-then-summarize "https://example.com"   # run a registered workflow
+bun run crew research-crew "local vector databases"       # run a registered crew
 bun run runs                                              # list recent runs
 bun run runs <run-id>                                     # render its trace as a timeline
 ```
@@ -200,7 +207,8 @@ interface — no agent code changes. See
 | **8** | **Run-viewer / OTel telemetry** (Phase A) — every run is an OpenTelemetry trace (`runs/<id>/spans.jsonl`); `bun run runs` (list / `<id>` timeline / `--follow`); swappable OTLP backend via `AGENT_OTLP_ENDPOINT` | ✅ Done |
 | **9** | **Composition guardrails** (Phase B prerequisite) — `AsyncLocalStorage` delegation context; depth limit (default 5, `AGENT_MAX_DELEGATION_DEPTH`); live return-size cap (¼ × caller `num_ctx`, `AGENT_RETURN_CTX_FRACTION`); soft-error surfacing + `agent.guardrail.violation` span event | ✅ Done |
 | **10** | **Workflow / DAG engine** (Phase B) — `defineWorkflow({id, steps})`, code-first typed DAG; step kinds `agent`/`tool`/`branch`/`map`; Zod-validated step I/O; fail-fast + per-step `onError`; `bun run flow <name>` + `workflows/` registry + `runWorkflow()`; reuses Slice 9 guardrails | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**, continuing Phase B: **crews & roles** → **memory/RAG** → **grounded verification** → **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **11** | **Crews & roles** (Phase B) — `defineCrew({id, members, tasks, process})`; members with role/goal/backstory (live model selection) + tasks with `dependsOn`; `sequential` (compiles to a Slice-10 workflow) and `hierarchical` (orchestrator + auto manager) processes; `bun run crew <name>` + `crews/` registry; reuses Slice 9 guardrails; live model selection also wired into the `flow` CLI via shared `src/cli/select-runtime.ts` | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**, continuing Phase B: **memory/RAG** → **grounded verification** → **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:
