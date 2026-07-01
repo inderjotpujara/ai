@@ -1,0 +1,1704 @@
+# Review package: d4ef079..a11e7e3
+
+## Commits
+a11e7e3 feat(cli): discover command + chat reads merged registry (REGISTRY->BOOTSTRAP)
+
+## Files changed
+ models/registry.ts                       |  2 +-
+ package.json                             |  3 +-
+ src/cli/chat.ts                          |  5 ++-
+ src/cli/discover.ts                      | 20 +++++++++
+ src/core/types.ts                        |  8 ++--
+ src/discovery/build-registry.ts          | 27 ++++++++---
+ src/discovery/catalog-cache.ts           | 30 ++++++++++---
+ src/discovery/catalog-source.ts          |  6 ++-
+ src/discovery/discover.ts                | 61 ++++++++++++++++++++-----
+ src/discovery/hf-client.ts               |  8 +++-
+ src/discovery/host.ts                    |  8 +++-
+ src/discovery/huggingface-gguf.ts        | 77 ++++++++++++++++++++++++++------
+ src/discovery/huggingface-mlx.ts         | 74 ++++++++++++++++++++++++------
+ src/discovery/quant.ts                   | 22 +++++++--
+ src/resource/model-manager.ts            |  5 ++-
+ src/resource/selector.ts                 |  8 +++-
+ src/runtime/mlx-server.ts                | 14 ++++--
+ src/runtime/ollama.ts                    | 12 +++--
+ tests/cli/select-hook.test.ts            |  8 ++--
+ tests/discovery/build-registry.test.ts   | 44 +++++++++++++-----
+ tests/discovery/catalog-cache.test.ts    | 29 +++++++++---
+ tests/discovery/discover.test.ts         | 33 +++++++++++---
+ tests/discovery/hf-client.test.ts        | 16 +++++--
+ tests/discovery/huggingface-gguf.test.ts | 31 +++++++++----
+ tests/discovery/huggingface-mlx.test.ts  | 28 +++++++++---
+ tests/discovery/quant.test.ts            |  5 ++-
+ tests/integration/selection.live.test.ts |  4 +-
+ tests/models/registry.test.ts            | 10 ++---
+ tests/resource/model-manager.test.ts     | 11 ++++-
+ tests/resource/select-degrade.test.ts    |  6 +--
+ tests/resource/selector-policy.test.ts   | 40 +++++++++++++----
+ tests/runtime/mlx-server.test.ts         | 21 ++++++---
+ 32 files changed, 527 insertions(+), 149 deletions(-)
+
+## Diff
+diff --git a/models/registry.ts b/models/registry.ts
+index 1f064a1..c07dff8 100644
+--- a/models/registry.ts
++++ b/models/registry.ts
+@@ -1,11 +1,11 @@
+ import type { ModelDeclaration } from '../src/core/types.ts';
+ import qwenFast from './qwen-fast.ts';
+ import qwenRouter from './qwen-router.ts';
+ 
+ /**
+  * Bootstrap content of a machine-adaptive capability LADDER. The selector is
+  * N-rung capable; the live-budget fits-filter makes any rung inert where it does
+  * not fit. Only rungs verified on this hardware ship here; Slice 6 discovery will
+  * replace this static array with a per-machine runtime fetch.
+  */
+-export const REGISTRY: ModelDeclaration[] = [qwenRouter, qwenFast];
++export const BOOTSTRAP: ModelDeclaration[] = [qwenRouter, qwenFast];
+diff --git a/package.json b/package.json
+index e1e7b27..3bf6b88 100644
+--- a/package.json
++++ b/package.json
+@@ -2,21 +2,22 @@
+   "name": "local-agents",
+   "version": "0.1.0",
+   "private": true,
+   "type": "module",
+   "scripts": {
+     "serve": "bash scripts/serve.sh",
+     "typecheck": "tsc --noEmit",
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+-    "lint:file": "biome check"
++    "lint:file": "biome check",
++    "discover": "bun run src/cli/discover.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/mcp": "^1.0.55",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
+     "ai": "^6.0.214",
+     "ollama-ai-provider-v2": "^3.6.0",
+     "zod": "^4.4.3"
+   },
+   "devDependencies": {
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 69fe32a..965f870 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,15 +1,15 @@
+ import { createSuperAgent } from '../../agents/super.ts';
+ import qwenRouter from '../../models/qwen-router.ts';
+-import { REGISTRY } from '../../models/registry.ts';
+ import type { ResourceCapture } from '../core/resource-capture.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
++import { buildRegistry } from '../discovery/build-registry.ts';
+ import { createFetchTools, createFileTools } from '../mcp/client.ts';
+ import { liveBudgetBytes } from '../resource/hardware.ts';
+ import { createModelManager, MIN_CTX } from '../resource/model-manager.ts';
+ import { isProjectStoreActive } from '../resource/model-store.ts';
+ import {
+   isModelInstalled,
+   listLoadedModels,
+ } from '../resource/ollama-control.ts';
+ import { runChat } from './run-chat.ts';
+ import { createSelectHook } from './select-hook.ts';
+@@ -50,22 +50,23 @@ async function main(): Promise<void> {
+     console.error(
+       formatSelectionNotice({
+         decl,
+         numCtx: decl.params.numCtx ?? MIN_CTX,
+         budgetBytes: budget,
+         installed,
+       }),
+     );
+   };
+ 
++  const registry = await buildRegistry();
+   const onBeforeDelegate = createSelectHook({
+-    registry: REGISTRY,
++    registry,
+     ensureReady: (decl, opts) => manager.ensureReady(decl, opts),
+     listLoaded: () => listLoadedModels(),
+     pinned: [qwenRouter.model],
+     capture,
+     onAttempt: notify,
+   });
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+diff --git a/src/cli/discover.ts b/src/cli/discover.ts
+new file mode 100644
+index 0000000..3405b40
+--- /dev/null
++++ b/src/cli/discover.ts
+@@ -0,0 +1,20 @@
++import { runDiscovery } from '../discovery/discover.ts';
++
++async function main(): Promise<void> {
++  console.error(
++    'Discovering models from Hugging Face (this needs internet)...',
++  );
++  try {
++    const r = await runDiscovery();
++    console.error(
++      `Found ${r.found} candidate(s), ${r.fits} fit the budget. ` +
++        `Pre-pulled: ${r.pulled.length ? r.pulled.join(', ') : 'none'}. Catalog: ${r.path}`,
++    );
++  } catch (err) {
++    console.error(
++      `Discovery failed (using any existing catalog): ${(err as Error).message}`,
++    );
++    process.exitCode = 1;
++  }
++}
++main();
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 1adb2b1..523a4dc 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -1,22 +1,22 @@
+ /** Which local runtime backs a model. String enum per project style. */
+ export enum ProviderKind {
+-  Ollama = 'Ollama',         // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
+-  MlxServer = 'MlxServer',   // MLX via a local OpenAI-compatible server (LM Studio / vllm-mlx)
++  Ollama = 'Ollama', // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
++  MlxServer = 'MlxServer', // MLX via a local OpenAI-compatible server (LM Studio / vllm-mlx)
+ }
+ 
+ /** A capability a model advertises and an agent can require. Selector hard-filters on these. */
+ export enum Capability {
+   Tools = 'tools',
+   Vision = 'vision', // image input (Slice 8)
+-  Audio = 'audio',   // speech in/out (Slice 9)
+-  Video = 'video',   // frames/clips (Slice 10)
++  Audio = 'audio', // speech in/out (Slice 9)
++  Video = 'video', // frames/clips (Slice 10)
+ }
+ 
+ /** Content moderation posture. Uncensored is gated behind a future mode (Slice 11). */
+ export enum ContentPolicy {
+   Default = 'default',
+   Uncensored = 'uncensored',
+ }
+ 
+ /** How the selector ranks the candidates that survive the hard filter. */
+ export enum PreferPolicy {
+diff --git a/src/discovery/build-registry.ts b/src/discovery/build-registry.ts
+index 5e73d48..295f5e0 100644
+--- a/src/discovery/build-registry.ts
++++ b/src/discovery/build-registry.ts
+@@ -1,39 +1,52 @@
++import { BOOTSTRAP } from '../../models/registry.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
+-import { REGISTRY } from '../../models/registry.ts'; // becomes BOOTSTRAP in Task 11
+ import { availableRuntimes } from '../runtime/registry.ts';
+ import { readCatalog } from './catalog-cache.ts';
+ import type { Candidate } from './catalog-source.ts';
+ 
+ export type BuildRegistryDeps = {
+   bootstrap?: ModelDeclaration[];
+   installed?: () => Promise<ModelDeclaration[]>;
+   readCatalog?: () => Candidate[] | undefined;
+ };
+ 
+ async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
+   const out: ModelDeclaration[] = [];
+   for (const rt of await availableRuntimes()) {
+     try {
+       for (const m of await rt.control.listLoaded()) {
+-        out.push({ provider: rt.kind, model: m.name, params: {}, role: 'installed',
+-          footprint: { approxParamsBillions: 0, bytesPerWeight: 0 } });
++        out.push({
++          provider: rt.kind,
++          model: m.name,
++          params: {},
++          role: 'installed',
++          footprint: { approxParamsBillions: 0, bytesPerWeight: 0 },
++        });
+       }
+-    } catch { /* runtime down → contributes nothing */ }
++    } catch {
++      /* runtime down → contributes nothing */
++    }
+   }
+   return out;
+ }
+ 
+ /** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ cached catalog, deduped by (provider,model). */
+-export async function buildRegistry(deps: BuildRegistryDeps = {}): Promise<ModelDeclaration[]> {
+-  const bootstrap = deps.bootstrap ?? REGISTRY;
++export async function buildRegistry(
++  deps: BuildRegistryDeps = {},
++): Promise<ModelDeclaration[]> {
++  const bootstrap = deps.bootstrap ?? BOOTSTRAP;
+   let installed: ModelDeclaration[] = [];
+-  try { installed = await (deps.installed ?? installedFromRuntimes)(); } catch { installed = []; }
++  try {
++    installed = await (deps.installed ?? installedFromRuntimes)();
++  } catch {
++    installed = [];
++  }
+   const catalog = (deps.readCatalog ?? (() => readCatalog()))() ?? [];
+ 
+   const byKey = new Map<string, ModelDeclaration>();
+   for (const d of [...bootstrap, ...installed, ...catalog]) {
+     const key = `${d.provider}::${d.model}`;
+     if (!byKey.has(key)) byKey.set(key, d); // first wins: bootstrap > installed > catalog
+   }
+   return [...byKey.values()];
+ }
+diff --git a/src/discovery/catalog-cache.ts b/src/discovery/catalog-cache.ts
+index 55fa297..badc4b0 100644
+--- a/src/discovery/catalog-cache.ts
++++ b/src/discovery/catalog-cache.ts
+@@ -1,33 +1,53 @@
+-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
++import {
++  existsSync,
++  readFileSync,
++  renameSync,
++  statSync,
++  writeFileSync,
++} from 'node:fs';
+ import { join } from 'node:path';
+ import type { Candidate } from './catalog-source.ts';
+ 
+ /** Per-machine, git-ignored cache co-located with the model store. */
+ export function catalogPath(): string {
+   return join(process.cwd(), 'model-images', 'catalog.json');
+ }
+ 
+-export function readCatalog(path: string = catalogPath()): Candidate[] | undefined {
++export function readCatalog(
++  path: string = catalogPath(),
++): Candidate[] | undefined {
+   try {
+     if (!existsSync(path)) return undefined;
+-    const data = JSON.parse(readFileSync(path, 'utf8')) as { candidates?: Candidate[] };
++    const data = JSON.parse(readFileSync(path, 'utf8')) as {
++      candidates?: Candidate[];
++    };
+     return data.candidates;
+   } catch {
+     return undefined; // corrupt cache → treat as absent
+   }
+ }
+ 
+ /** Atomic write (temp + rename) so a failure never corrupts an existing catalog. */
+-export function writeCatalog(candidates: Candidate[], path: string = catalogPath()): void {
++export function writeCatalog(
++  candidates: Candidate[],
++  path: string = catalogPath(),
++): void {
+   const tmp = `${path}.tmp`;
+-  writeFileSync(tmp, JSON.stringify({ writtenAt: new Date().toISOString(), candidates }, null, 2));
++  writeFileSync(
++    tmp,
++    JSON.stringify(
++      { writtenAt: new Date().toISOString(), candidates },
++      null,
++      2,
++    ),
++  );
+   renameSync(tmp, path);
+ }
+ 
+ export function isStale(ttlMs: number, path: string = catalogPath()): boolean {
+   try {
+     if (!existsSync(path)) return true;
+     return Date.now() - statSync(path).mtimeMs > ttlMs;
+   } catch {
+     return true;
+   }
+diff --git a/src/discovery/catalog-source.ts b/src/discovery/catalog-source.ts
+index 9b5aef5..460e98f 100644
+--- a/src/discovery/catalog-source.ts
++++ b/src/discovery/catalog-source.ts
+@@ -1,11 +1,15 @@
+-import type { Capability, ModelDeclaration, ProviderKind } from '../core/types.ts';
++import type {
++  Capability,
++  ModelDeclaration,
++  ProviderKind,
++} from '../core/types.ts';
+ 
+ export class DiscoveryError extends Error {}
+ 
+ export type HostCapabilities = {
+   totalRamBytes: number;
+   liveBudgetBytes: number;
+   runtimes: ProviderKind[];
+ };
+ export type DiscoveryQuery = {
+   budgetBytes: number;
+diff --git a/src/discovery/discover.ts b/src/discovery/discover.ts
+index 5d5238b..69fcc85 100644
+--- a/src/discovery/discover.ts
++++ b/src/discovery/discover.ts
+@@ -1,50 +1,89 @@
+ import type { Capability } from '../core/types.ts';
++import { Capability as Cap } from '../core/types.ts';
+ import { runtimeFor } from '../runtime/registry.ts';
+-import { catalogPath, writeCatalog as writeCatalogFile } from './catalog-cache.ts';
+-import type { Candidate, CatalogSource, HostCapabilities } from './catalog-source.ts';
++import {
++  catalogPath,
++  writeCatalog as writeCatalogFile,
++} from './catalog-cache.ts';
++import type {
++  Candidate,
++  CatalogSource,
++  HostCapabilities,
++} from './catalog-source.ts';
+ import { detectHost } from './host.ts';
+ import { SOURCES } from './sources.ts';
+-import { Capability as Cap } from '../core/types.ts';
+ 
+ export type DiscoverDeps = {
+   host?: HostCapabilities;
+   sources?: CatalogSource[];
+   writeCatalog?: (c: Candidate[]) => void;
+   pullTop?: (model: string, provider: Candidate['provider']) => Promise<void>;
+   catalogPathStr?: string;
+   prePullCount?: number;
+ };
+ 
+-export type DiscoverResult = { found: number; fits: number; pulled: string[]; path: string };
++export type DiscoverResult = {
++  found: number;
++  fits: number;
++  pulled: string[];
++  path: string;
++};
+ 
+-export async function runDiscovery(deps: DiscoverDeps = {}): Promise<DiscoverResult> {
++export async function runDiscovery(
++  deps: DiscoverDeps = {},
++): Promise<DiscoverResult> {
+   const host = deps.host ?? (await detectHost());
+   const sources = (deps.sources ?? SOURCES).filter((s) => s.appliesTo(host));
+   const requires: Capability[] = [Cap.Tools];
+ 
+   const all: Candidate[] = [];
+   for (const s of sources) {
+-    try { all.push(...await s.listCandidates({ budgetBytes: host.liveBudgetBytes, requires, hostTotalRamBytes: host.totalRamBytes })); }
+-    catch { /* degrade: skip a failing source */ }
++    try {
++      all.push(
++        ...(await s.listCandidates({
++          budgetBytes: host.liveBudgetBytes,
++          requires,
++          hostTotalRamBytes: host.totalRamBytes,
++        })),
++      );
++    } catch {
++      /* degrade: skip a failing source */
++    }
+   }
+   // dedupe by (provider, base repo), keep highest downloads
+   const byRepo = new Map<string, Candidate>();
+   for (const c of all) {
+     const key = `${c.provider}::${c.repo}`;
+     const prev = byRepo.get(key);
+     if (!prev || c.downloads > prev.downloads) byRepo.set(key, c);
+   }
+   const ranked = [...byRepo.values()].sort(
+-    (a, b) => b.downloads - a.downloads || b.footprint.approxParamsBillions - a.footprint.approxParamsBillions,
++    (a, b) =>
++      b.downloads - a.downloads ||
++      b.footprint.approxParamsBillions - a.footprint.approxParamsBillions,
+   );
+ 
+   (deps.writeCatalog ?? ((c) => writeCatalogFile(c)))(ranked);
+ 
+   const pulled: string[] = [];
+   const n = deps.prePullCount ?? 1;
+-  const pull = deps.pullTop ?? (async (model, provider) => { await runtimeFor(provider).control.pull(model); });
++  const pull =
++    deps.pullTop ??
++    (async (model, provider) => {
++      await runtimeFor(provider).control.pull(model);
++    });
+   for (const c of ranked.slice(0, n)) {
+-    try { await pull(c.model, c.provider); pulled.push(c.model); } catch { /* report, don't fail */ }
++    try {
++      await pull(c.model, c.provider);
++      pulled.push(c.model);
++    } catch {
++      /* report, don't fail */
++    }
+   }
+-  return { found: all.length, fits: ranked.length, pulled, path: deps.catalogPathStr ?? catalogPath() };
++  return {
++    found: all.length,
++    fits: ranked.length,
++    pulled,
++    path: deps.catalogPathStr ?? catalogPath(),
++  };
+ }
+diff --git a/src/discovery/hf-client.ts b/src/discovery/hf-client.ts
+index 3fdbd97..045353c 100644
+--- a/src/discovery/hf-client.ts
++++ b/src/discovery/hf-client.ts
+@@ -2,17 +2,21 @@ import { DiscoveryError } from './catalog-source.ts';
+ 
+ const HF = 'https://huggingface.co';
+ 
+ /** Anonymous HF GET (adds bearer auth if HF_TOKEN is set). Throws DiscoveryError on failure. */
+ export async function hfGet(path: string): Promise<unknown> {
+   const headers: Record<string, string> = {};
+   const token = process.env.HF_TOKEN;
+   if (token) headers.authorization = `Bearer ${token}`;
+   let res: Response;
+   try {
+-    res = await fetch(`${HF}${path}`, { headers, signal: AbortSignal.timeout(8000) });
++    res = await fetch(`${HF}${path}`, {
++      headers,
++      signal: AbortSignal.timeout(8000),
++    });
+   } catch (cause) {
+     throw new DiscoveryError(`HF GET ${path} failed`, { cause });
+   }
+-  if (!res.ok) throw new DiscoveryError(`HF GET ${path} returned ${res.status}`);
++  if (!res.ok)
++    throw new DiscoveryError(`HF GET ${path} returned ${res.status}`);
+   return res.json();
+ }
+diff --git a/src/discovery/host.ts b/src/discovery/host.ts
+index 9264245..3e3d42b 100644
+--- a/src/discovery/host.ts
++++ b/src/discovery/host.ts
+@@ -1,10 +1,14 @@
+ import { totalmem } from 'node:os';
+-import type { HostCapabilities } from './catalog-source.ts';
+ import { liveBudgetBytes } from '../resource/hardware.ts';
+ import { availableRuntimes } from '../runtime/registry.ts';
++import type { HostCapabilities } from './catalog-source.ts';
+ 
+ /** Detect what this machine can run right now: RAM, live budget, reachable runtimes. */
+ export async function detectHost(): Promise<HostCapabilities> {
+   const runtimes = (await availableRuntimes()).map((r) => r.kind);
+-  return { totalRamBytes: totalmem(), liveBudgetBytes: await liveBudgetBytes(), runtimes };
++  return {
++    totalRamBytes: totalmem(),
++    liveBudgetBytes: await liveBudgetBytes(),
++    runtimes,
++  };
+ }
+diff --git a/src/discovery/huggingface-gguf.ts b/src/discovery/huggingface-gguf.ts
+index 439546a..a2b8bca 100644
+--- a/src/discovery/huggingface-gguf.ts
++++ b/src/discovery/huggingface-gguf.ts
+@@ -1,80 +1,129 @@
+-import { Capability, ContentPolicy, type ModelDeclaration, ProviderKind } from '../core/types.ts';
+-import type { Candidate, CatalogSource, DiscoveryQuery, HostCapabilities } from './catalog-source.ts';
++import {
++  Capability,
++  ContentPolicy,
++  type ModelDeclaration,
++  ProviderKind,
++} from '../core/types.ts';
++import type {
++  Candidate,
++  CatalogSource,
++  DiscoveryQuery,
++  HostCapabilities,
++} from './catalog-source.ts';
+ import { hfGet } from './hf-client.ts';
+-import { bytesPerWeightForQuant, pickBestQuantThatFits, type QuantFile } from './quant.ts';
++import {
++  bytesPerWeightForQuant,
++  pickBestQuantThatFits,
++  type QuantFile,
++} from './quant.ts';
+ 
+-export const TRUSTED_PUBLISHERS = ['bartowski', 'unsloth', 'MaziyarPanahi', 'Qwen', 'lmstudio-community'];
++export const TRUSTED_PUBLISHERS = [
++  'bartowski',
++  'unsloth',
++  'MaziyarPanahi',
++  'Qwen',
++  'lmstudio-community',
++];
+ const PER_AUTHOR_LIMIT = 20;
+ const UNCENSORED_RE = /(abliterated|uncensored|dolphin)/i;
+ const QUANT_RE = /-(IQ?\d[\w_]*|Q\d[\w_]*|F16|FP16)\.gguf$/i;
+ 
+ /** True if a chat template exposes tool/function calling. */
+ export function detectTools(chatTemplate: string): boolean {
+   return /tool_call|tools|function/i.test(chatTemplate);
+ }
+ 
+ type ListItem = { id: string; downloads?: number };
+-type GgufInfo = { gguf?: { total?: number; context_length?: number; chat_template?: string } };
++type GgufInfo = {
++  gguf?: { total?: number; context_length?: number; chat_template?: string };
++};
+ type TreeEntry = { path: string; size?: number; lfs?: { size?: number } };
+ 
+ function quantOf(path: string): string | undefined {
+   const m = path.match(QUANT_RE);
+   return m?.[1]?.toUpperCase();
+ }
+ 
+-async function candidateFor(item: ListItem, q: DiscoveryQuery): Promise<Candidate | undefined> {
++async function candidateFor(
++  item: ListItem,
++  q: DiscoveryQuery,
++): Promise<Candidate | undefined> {
+   const repo = item.id;
+   let info: GgufInfo;
+-  try { info = (await hfGet(`/api/models/${repo}`)) as GgufInfo; } catch { return undefined; }
++  try {
++    info = (await hfGet(`/api/models/${repo}`)) as GgufInfo;
++  } catch {
++    return undefined;
++  }
+   const tmpl = info.gguf?.chat_template ?? '';
+-  if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl)) return undefined;
++  if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl))
++    return undefined;
+ 
+   let tree: TreeEntry[];
+-  try { tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[]; } catch { return undefined; }
++  try {
++    tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[];
++  } catch {
++    return undefined;
++  }
+   const files: QuantFile[] = [];
+   for (const e of tree) {
+     const quant = quantOf(e.path);
+     const sizeBytes = e.lfs?.size ?? e.size;
+-    if (quant && typeof sizeBytes === 'number') files.push({ quant, sizeBytes });
++    if (quant && typeof sizeBytes === 'number')
++      files.push({ quant, sizeBytes });
+   }
+   const best = pickBestQuantThatFits(files, q.budgetBytes);
+   if (!best) return undefined;
+ 
+   const params = (info.gguf?.total ?? 0) / 1e9;
+   const decl: ModelDeclaration = {
+     provider: ProviderKind.Ollama,
+     model: `hf.co/${repo}:${best.quant}`,
+     params: {},
+     role: 'discovered general reasoning + tool use',
+     capabilities: detectTools(tmpl) ? [Capability.Tools] : [],
+-    contentPolicy: UNCENSORED_RE.test(repo) ? ContentPolicy.Uncensored : ContentPolicy.Default,
++    contentPolicy: UNCENSORED_RE.test(repo)
++      ? ContentPolicy.Uncensored
++      : ContentPolicy.Default,
+     footprint: {
+-      approxParamsBillions: params > 0 ? params : best.sizeBytes / 1e9 / bytesPerWeightForQuant(best.quant),
++      approxParamsBillions:
++        params > 0
++          ? params
++          : best.sizeBytes / 1e9 / bytesPerWeightForQuant(best.quant),
+       bytesPerWeight: bytesPerWeightForQuant(best.quant),
+     },
+     maxContext: info.gguf?.context_length,
+   };
+-  return { ...decl, repo, quant: best.quant, fileSizeBytes: best.sizeBytes, downloads: item.downloads ?? 0, installed: false };
++  return {
++    ...decl,
++    repo,
++    quant: best.quant,
++    fileSizeBytes: best.sizeBytes,
++    downloads: item.downloads ?? 0,
++    installed: false,
++  };
+ }
+ 
+ export const hfGgufSource: CatalogSource = {
+   name: 'hf-gguf',
+   appliesTo: (_host: HostCapabilities) => true, // Ollama runs GGUF on every host
+   async listCandidates(q: DiscoveryQuery): Promise<Candidate[]> {
+     const items: ListItem[] = [];
+     for (const author of TRUSTED_PUBLISHERS) {
+       try {
+         const page = (await hfGet(
+           `/api/models?filter=gguf&author=${author}&sort=downloads&direction=-1&limit=${PER_AUTHOR_LIMIT}`,
+         )) as ListItem[];
+         items.push(...page);
+-      } catch { /* skip this author on failure; degrade gracefully */ }
++      } catch {
++        /* skip this author on failure; degrade gracefully */
++      }
+     }
+     const out: Candidate[] = [];
+     for (const item of items) {
+       const c = await candidateFor(item, q);
+       if (c) out.push(c);
+     }
+     return out;
+   },
+ };
+diff --git a/src/discovery/huggingface-mlx.ts b/src/discovery/huggingface-mlx.ts
+index 0e95845..d761c3f 100644
+--- a/src/discovery/huggingface-mlx.ts
++++ b/src/discovery/huggingface-mlx.ts
+@@ -1,63 +1,109 @@
+-import { Capability, ContentPolicy, type ModelDeclaration, ProviderKind } from '../core/types.ts';
+-import type { Candidate, CatalogSource, DiscoveryQuery, HostCapabilities } from './catalog-source.ts';
+-import { detectTools } from './huggingface-gguf.ts';
++import {
++  Capability,
++  ContentPolicy,
++  type ModelDeclaration,
++  ProviderKind,
++} from '../core/types.ts';
++import type {
++  Candidate,
++  CatalogSource,
++  DiscoveryQuery,
++  HostCapabilities,
++} from './catalog-source.ts';
+ import { hfGet } from './hf-client.ts';
++import { detectTools } from './huggingface-gguf.ts';
+ 
+ const TRUSTED = ['mlx-community'];
+ const LIMIT = 20;
+ const UNCENSORED_RE = /(abliterated|uncensored|dolphin)/i;
+ 
+ type ListItem = { id: string; downloads?: number };
+ type TreeEntry = { path: string; size?: number; lfs?: { size?: number } };
+ type TokCfg = { chat_template?: string };
+ type Cfg = { num_parameters?: number };
+ 
+-async function candidateFor(item: ListItem, q: DiscoveryQuery): Promise<Candidate | undefined> {
++async function candidateFor(
++  item: ListItem,
++  q: DiscoveryQuery,
++): Promise<Candidate | undefined> {
+   const repo = item.id;
+   let tok: TokCfg;
+-  try { tok = (await hfGet(`/${repo}/resolve/main/tokenizer_config.json`)) as TokCfg; } catch { return undefined; }
++  try {
++    tok = (await hfGet(
++      `/${repo}/resolve/main/tokenizer_config.json`,
++    )) as TokCfg;
++  } catch {
++    return undefined;
++  }
+   const tmpl = tok.chat_template ?? '';
+-  if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl)) return undefined;
++  if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl))
++    return undefined;
+ 
+   let cfg: Cfg = {};
+-  try { cfg = (await hfGet(`/${repo}/resolve/main/config.json`)) as Cfg; } catch { /* params optional */ }
++  try {
++    cfg = (await hfGet(`/${repo}/resolve/main/config.json`)) as Cfg;
++  } catch {
++    /* params optional */
++  }
+ 
+   let tree: TreeEntry[];
+-  try { tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[]; } catch { return undefined; }
++  try {
++    tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[];
++  } catch {
++    return undefined;
++  }
+   const total = tree
+     .filter((e) => e.path.endsWith('.safetensors'))
+     .reduce((s, e) => s + (e.lfs?.size ?? e.size ?? 0), 0);
+   if (total === 0 || total > q.budgetBytes) return undefined;
+ 
+   const params = (cfg.num_parameters ?? 0) / 1e9;
+   const bpw = params > 0 ? total / 1e9 / params : 0.55;
+   const decl: ModelDeclaration = {
+     provider: ProviderKind.MlxServer,
+     model: repo,
+     params: {},
+     role: 'discovered MLX general reasoning + tool use',
+     capabilities: [Capability.Tools],
+-    contentPolicy: UNCENSORED_RE.test(repo) ? ContentPolicy.Uncensored : ContentPolicy.Default,
+-    footprint: { approxParamsBillions: params > 0 ? params : total / 1e9 / 0.55, bytesPerWeight: bpw },
++    contentPolicy: UNCENSORED_RE.test(repo)
++      ? ContentPolicy.Uncensored
++      : ContentPolicy.Default,
++    footprint: {
++      approxParamsBillions: params > 0 ? params : total / 1e9 / 0.55,
++      bytesPerWeight: bpw,
++    },
++  };
++  return {
++    ...decl,
++    repo,
++    quant: '4bit',
++    fileSizeBytes: total,
++    downloads: item.downloads ?? 0,
++    installed: false,
+   };
+-  return { ...decl, repo, quant: '4bit', fileSizeBytes: total, downloads: item.downloads ?? 0, installed: false };
+ }
+ 
+ export const hfMlxSource: CatalogSource = {
+   name: 'hf-mlx',
+-  appliesTo: (host: HostCapabilities) => host.runtimes.includes(ProviderKind.MlxServer),
++  appliesTo: (host: HostCapabilities) =>
++    host.runtimes.includes(ProviderKind.MlxServer),
+   async listCandidates(q: DiscoveryQuery): Promise<Candidate[]> {
+     const items: ListItem[] = [];
+     for (const author of TRUSTED) {
+       try {
+         const page = (await hfGet(
+           `/api/models?filter=mlx&author=${author}&sort=downloads&direction=-1&limit=${LIMIT}`,
+         )) as ListItem[];
+         items.push(...page);
+-      } catch { /* degrade */ }
++      } catch {
++        /* degrade */
++      }
+     }
+     const out: Candidate[] = [];
+-    for (const item of items) { const c = await candidateFor(item, q); if (c) out.push(c); }
++    for (const item of items) {
++      const c = await candidateFor(item, q);
++      if (c) out.push(c);
++    }
+     return out;
+   },
+ };
+diff --git a/src/discovery/quant.ts b/src/discovery/quant.ts
+index 665fdea..c6c91b3 100644
+--- a/src/discovery/quant.ts
++++ b/src/discovery/quant.ts
+@@ -1,20 +1,34 @@
+ export type QuantFile = { quant: string; sizeBytes: number };
+ 
+ /** Approximate bytes-per-weight for common GGUF/MLX quant labels. */
+ const BPW: Record<string, number> = {
+-  Q2_K: 0.34, Q3_K_M: 0.43, Q4_0: 0.56, Q4_K_M: 0.56, Q4_K_S: 0.52,
+-  Q5_K_M: 0.70, Q5_0: 0.68, Q6_K: 0.82, Q8_0: 1.06,
+-  IQ4_XS: 0.5, '4BIT': 0.55, '8BIT': 1.06, FP16: 2.0, F16: 2.0,
++  Q2_K: 0.34,
++  Q3_K_M: 0.43,
++  Q4_0: 0.56,
++  Q4_K_M: 0.56,
++  Q4_K_S: 0.52,
++  Q5_K_M: 0.7,
++  Q5_0: 0.68,
++  Q6_K: 0.82,
++  Q8_0: 1.06,
++  IQ4_XS: 0.5,
++  '4BIT': 0.55,
++  '8BIT': 1.06,
++  FP16: 2.0,
++  F16: 2.0,
+ };
+ 
+ /** Bytes/weight for a quant label (case-insensitive); falls back to Q4_K_M-ish. */
+ export function bytesPerWeightForQuant(quant: string): number {
+   return BPW[quant.toUpperCase()] ?? 0.6;
+ }
+ 
+ /** Largest quant file that fits the budget (file size ≈ weights footprint). */
+-export function pickBestQuantThatFits(files: QuantFile[], budgetBytes: number): QuantFile | undefined {
++export function pickBestQuantThatFits(
++  files: QuantFile[],
++  budgetBytes: number,
++): QuantFile | undefined {
+   return [...files]
+     .filter((f) => f.sizeBytes <= budgetBytes)
+     .sort((a, b) => b.sizeBytes - a.sizeBytes)[0];
+ }
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+index 7180f7d..a7c1f17 100644
+--- a/src/resource/model-manager.ts
++++ b/src/resource/model-manager.ts
+@@ -37,21 +37,24 @@ async function resolveBudget(source: BudgetSource): Promise<number> {
+ 
+ /** Loads/unloads models to keep the active + pinned set within the GPU budget. */
+ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
+   const d: ManagerDeps = { ...defaultDeps(), ...deps };
+   const lastUsed = new Map<string, number>();
+   const chosenCtxByModel = new Map<string, number>();
+   const maxCtxByModel = new Map<string, number>();
+   const runtimeByModel = new Map<string, ModelDeclaration>(); // remember how to unload
+   let tick = 0;
+ 
+-  async function modelMaxFor(c: RuntimeControl, model: string): Promise<number | undefined> {
++  async function modelMaxFor(
++    c: RuntimeControl,
++    model: string,
++  ): Promise<number | undefined> {
+     const cached = maxCtxByModel.get(model);
+     if (cached !== undefined) return cached;
+     let probed: number | undefined;
+     try {
+       probed = await c.getModelMax(model);
+     } catch {
+       probed = undefined;
+     }
+     if (probed !== undefined) maxCtxByModel.set(model, probed);
+     return probed;
+diff --git a/src/resource/selector.ts b/src/resource/selector.ts
+index 4f2807f..184f779 100644
+--- a/src/resource/selector.ts
++++ b/src/resource/selector.ts
+@@ -1,13 +1,16 @@
+ import { ResourceError } from '../core/errors.ts';
+ import {
+-  type Capability, ContentPolicy, type ModelDeclaration, type ModelRequirement,
++  type Capability,
++  ContentPolicy,
++  type ModelDeclaration,
++  type ModelRequirement,
+ } from '../core/types.ts';
+ import { weightsBytes } from './footprint.ts';
+ import type { EnsureOpts } from './model-manager.ts';
+ import type { LoadedModel } from './ollama-control.ts';
+ 
+ function hasAll(decl: ModelDeclaration, requires: Capability[]): boolean {
+   const caps = new Set(decl.capabilities ?? []);
+   return requires.every((c) => caps.has(c));
+ }
+ 
+@@ -18,21 +21,22 @@ function hasAll(decl: ModelDeclaration, requires: Capability[]): boolean {
+  * needless reload churn. The fits check itself is the manager's job, not here.
+  */
+ export function selectCandidates(
+   req: ModelRequirement,
+   registry: ModelDeclaration[],
+   loaded?: ReadonlySet<string>,
+ ): ModelDeclaration[] {
+   const capable = registry.filter(
+     (d) =>
+       hasAll(d, req.requires) &&
+-      (req.allowUncensored === true || d.contentPolicy !== ContentPolicy.Uncensored),
++      (req.allowUncensored === true ||
++        d.contentPolicy !== ContentPolicy.Uncensored),
+   );
+   return [...capable].sort((a, b) => {
+     const pa = a.footprint.approxParamsBillions;
+     const pb = b.footprint.approxParamsBillions;
+     if (pb !== pa) return pb - pa; // largest params first
+     const fa = weightsBytes(pa, a.footprint.bytesPerWeight);
+     const fb = weightsBytes(pb, b.footprint.bytesPerWeight);
+     if (fa !== fb) return fa - fb; // smaller footprint first
+     if (loaded) {
+       const la = loaded.has(a.model) ? 0 : 1;
+diff --git a/src/runtime/mlx-server.ts b/src/runtime/mlx-server.ts
+index 152224c..0460da1 100644
+--- a/src/runtime/mlx-server.ts
++++ b/src/runtime/mlx-server.ts
+@@ -1,49 +1,55 @@
+ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+-import { ProviderKind } from '../core/types.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
++import { ProviderKind } from '../core/types.ts';
+ import type { LoadedModel, Runtime } from './runtime.ts';
+ 
+ const BASE = process.env.MLX_BASE_URL ?? 'http://localhost:1234/v1';
+ 
+ const provider = createOpenAICompatible({ name: 'mlx-server', baseURL: BASE });
+ 
+ async function listIds(): Promise<string[]> {
+   try {
+-    const res = await fetch(`${BASE}/models`, { signal: AbortSignal.timeout(1500) });
++    const res = await fetch(`${BASE}/models`, {
++      signal: AbortSignal.timeout(1500),
++    });
+     if (!res.ok) return [];
+     const data = (await res.json()) as { data?: Array<{ id: string }> };
+     return (data.data ?? []).map((m) => m.id);
+   } catch {
+     return [];
+   }
+ }
+ 
+ /**
+  * MLX models run via a local OpenAI-compatible server (LM Studio / vllm-mlx).
+  * The server owns model download/load, so `pull`/`warm`/`unload` are best-effort:
+  * a model must be loaded in the server; we surface a clear message if it is not.
+  */
+ export const mlxServerRuntime: Runtime = {
+   kind: ProviderKind.MlxServer,
+   async isAvailable() {
+     try {
+-      const res = await fetch(`${BASE}/models`, { signal: AbortSignal.timeout(1500) });
++      const res = await fetch(`${BASE}/models`, {
++        signal: AbortSignal.timeout(1500),
++      });
+       return res.ok;
+     } catch {
+       return false;
+     }
+   },
+   createModel: (decl: ModelDeclaration) => provider(decl.model),
+   control: {
+     isInstalled: async (m) => (await listIds()).includes(m),
+     pull: async (m) => {
+       if ((await listIds()).includes(m)) return;
+-      throw new Error(`MLX model "${m}" is not loaded in the MLX server at ${BASE}. Load it there (e.g. in LM Studio), then retry.`);
++      throw new Error(
++        `MLX model "${m}" is not loaded in the MLX server at ${BASE}. Load it there (e.g. in LM Studio), then retry.`,
++      );
+     },
+     warm: async () => {},
+     unload: async () => {},
+     listLoaded: async (): Promise<LoadedModel[]> =>
+       (await listIds()).map((name) => ({ name, sizeBytes: 0 })),
+     getModelMax: async () => undefined,
+   },
+ };
+diff --git a/src/runtime/ollama.ts b/src/runtime/ollama.ts
+index c11c9dc..c846e66 100644
+--- a/src/runtime/ollama.ts
++++ b/src/runtime/ollama.ts
+@@ -1,25 +1,31 @@
+ import { ProviderKind } from '../core/types.ts';
+ import { createOllamaModel } from '../providers/ollama.ts';
+ import {
+-  getModelMaxContext, isModelInstalled, listLoadedModels,
+-  pullModel, unloadModel, warmModel,
++  getModelMaxContext,
++  isModelInstalled,
++  listLoadedModels,
++  pullModel,
++  unloadModel,
++  warmModel,
+ } from '../resource/ollama-control.ts';
+ import type { Runtime } from './runtime.ts';
+ 
+ const BASE = 'http://localhost:11434';
+ 
+ export const ollamaRuntime: Runtime = {
+   kind: ProviderKind.Ollama,
+   async isAvailable() {
+     try {
+-      const res = await fetch(`${BASE}/api/version`, { signal: AbortSignal.timeout(1500) });
++      const res = await fetch(`${BASE}/api/version`, {
++        signal: AbortSignal.timeout(1500),
++      });
+       return res.ok;
+     } catch {
+       return false;
+     }
+   },
+   createModel: (decl) => createOllamaModel(decl),
+   control: {
+     isInstalled: (m) => isModelInstalled(m),
+     pull: (m) => pullModel(m),
+     warm: (m, n) => warmModel(m, n),
+diff --git a/tests/cli/select-hook.test.ts b/tests/cli/select-hook.test.ts
+index 5efa9df..840ed13 100644
+--- a/tests/cli/select-hook.test.ts
++++ b/tests/cli/select-hook.test.ts
+@@ -1,12 +1,12 @@
+ import { expect, mock, test } from 'bun:test';
+-import { REGISTRY } from '../../models/registry.ts';
++import { BOOTSTRAP } from '../../models/registry.ts';
+ import { createSelectHook } from '../../src/cli/select-hook.ts';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { ResourceError } from '../../src/core/errors.ts';
+ import { Capability, PreferPolicy } from '../../src/core/types.ts';
+ 
+ function specialist(): Agent {
+   return {
+     name: 'file_qa',
+     description: 'd',
+     systemPrompt: 'sp',
+@@ -17,50 +17,50 @@ function specialist(): Agent {
+       requires: [Capability.Tools],
+       prefer: PreferPolicy.LargestThatFits,
+     },
+   };
+ }
+ 
+ test('hook resolves a model + numCtx and returns a bound model', async () => {
+   const ensureReady = mock(async () => 16384);
+   const capture = {};
+   const hook = createSelectHook({
+-    registry: REGISTRY,
++    registry: BOOTSTRAP,
+     ensureReady,
+     pinned: ['qwen3.5:4b'],
+     capture,
+   });
+   const pre = await hook(specialist());
+   expect(pre && 'model' in pre && pre.model).toBeTruthy();
+   expect(pre && 'numCtx' in pre && pre.numCtx).toBe(16384);
+ });
+ 
+ test('hook records ResourceError into capture and returns abort', async () => {
+   const ensureReady = mock(async () => {
+     throw new ResourceError('no fit');
+   });
+   const capture: { error?: ResourceError } = {};
+   const hook = createSelectHook({
+-    registry: REGISTRY,
++    registry: BOOTSTRAP,
+     ensureReady,
+     pinned: ['qwen3.5:4b'],
+     capture,
+   });
+   const pre = await hook(specialist());
+   expect(capture.error).toBeInstanceOf(ResourceError);
+   expect(pre && 'abort' in pre && pre.abort).toBeTruthy();
+ });
+ 
+ test('agent without modelReq is a no-op', async () => {
+   const ensureReady = mock(async () => 0);
+   const hook = createSelectHook({
+-    registry: REGISTRY,
++    registry: BOOTSTRAP,
+     ensureReady,
+     pinned: [],
+     capture: {},
+   });
+   const pre = await hook({
+     name: 'x',
+     description: 'd',
+     systemPrompt: 's',
+     tools: {},
+     model: undefined as never,
+diff --git a/tests/discovery/build-registry.test.ts b/tests/discovery/build-registry.test.ts
+index 1364fea..aeda48c 100644
+--- a/tests/discovery/build-registry.test.ts
++++ b/tests/discovery/build-registry.test.ts
+@@ -1,29 +1,53 @@
+ import { expect, test } from 'bun:test';
+ import { ProviderKind } from '../../src/core/types.ts';
+ import { buildRegistry } from '../../src/discovery/build-registry.ts';
+ 
+-const bootstrap = [{
+-  provider: ProviderKind.Ollama, model: 'qwen3.5:4b', params: {}, role: 'r',
+-  footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+-}];
++const bootstrap = [
++  {
++    provider: ProviderKind.Ollama,
++    model: 'qwen3.5:4b',
++    params: {},
++    role: 'r',
++    footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
++  },
++];
+ 
+ test('merges bootstrap + installed + catalog, deduped by (provider,model)', async () => {
+   const reg = await buildRegistry({
+     bootstrap,
+-    installed: async () => [{ provider: ProviderKind.Ollama, model: 'qwen3.5:9b', params: {}, role: 'i',
+-      footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 } }],
+-    readCatalog: () => [{ provider: ProviderKind.Ollama, model: 'qwen3.5:4b', params: {}, role: 'c',
+-      footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+-      repo: 'x', fileSizeBytes: 1, downloads: 1, installed: true }],
++    installed: async () => [
++      {
++        provider: ProviderKind.Ollama,
++        model: 'qwen3.5:9b',
++        params: {},
++        role: 'i',
++        footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
++      },
++    ],
++    readCatalog: () => [
++      {
++        provider: ProviderKind.Ollama,
++        model: 'qwen3.5:4b',
++        params: {},
++        role: 'c',
++        footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
++        repo: 'x',
++        fileSizeBytes: 1,
++        downloads: 1,
++        installed: true,
++      },
++    ],
+   });
+   expect(reg.map((d) => d.model).sort()).toEqual(['qwen3.5:4b', 'qwen3.5:9b']); // 4b deduped
+ });
+ 
+ test('offline: installed throws and catalog missing → still returns bootstrap (no throw)', async () => {
+   const reg = await buildRegistry({
+     bootstrap,
+-    installed: async () => { throw new Error('offline'); },
++    installed: async () => {
++      throw new Error('offline');
++    },
+     readCatalog: () => undefined,
+   });
+   expect(reg.map((d) => d.model)).toEqual(['qwen3.5:4b']);
+ });
+diff --git a/tests/discovery/catalog-cache.test.ts b/tests/discovery/catalog-cache.test.ts
+index 3ecf246..b079eb5 100644
+--- a/tests/discovery/catalog-cache.test.ts
++++ b/tests/discovery/catalog-cache.test.ts
+@@ -1,27 +1,42 @@
+ import { afterEach, expect, test } from 'bun:test';
+ import { mkdtempSync, rmSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+-import { isStale, readCatalog, writeCatalog } from '../../src/discovery/catalog-cache.ts';
+ import { ProviderKind } from '../../src/core/types.ts';
++import {
++  isStale,
++  readCatalog,
++  writeCatalog,
++} from '../../src/discovery/catalog-cache.ts';
+ 
+ let dir: string;
+-afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
++afterEach(() => {
++  if (dir) rmSync(dir, { recursive: true, force: true });
++});
+ 
+ test('write then read round-trips candidates', () => {
+   dir = mkdtempSync(join(tmpdir(), 'cat-'));
+   const p = join(dir, 'catalog.json');
+-  const cands = [{
+-    provider: ProviderKind.Ollama, model: 'hf.co/x:Q4_K_M', params: {}, role: 'r',
+-    footprint: { approxParamsBillions: 7, bytesPerWeight: 0.56 },
+-    repo: 'x', quant: 'Q4_K_M', fileSizeBytes: 5e9, downloads: 1, installed: false,
+-  }];
++  const cands = [
++    {
++      provider: ProviderKind.Ollama,
++      model: 'hf.co/x:Q4_K_M',
++      params: {},
++      role: 'r',
++      footprint: { approxParamsBillions: 7, bytesPerWeight: 0.56 },
++      repo: 'x',
++      quant: 'Q4_K_M',
++      fileSizeBytes: 5e9,
++      downloads: 1,
++      installed: false,
++    },
++  ];
+   writeCatalog(cands, p);
+   expect(readCatalog(p)?.[0]?.model).toBe('hf.co/x:Q4_K_M');
+ });
+ test('missing file → undefined and stale', () => {
+   dir = mkdtempSync(join(tmpdir(), 'cat-'));
+   const p = join(dir, 'none.json');
+   expect(readCatalog(p)).toBeUndefined();
+   expect(isStale(1000, p)).toBe(true);
+ });
+diff --git a/tests/discovery/discover.test.ts b/tests/discovery/discover.test.ts
+index f21fd31..cefd137 100644
+--- a/tests/discovery/discover.test.ts
++++ b/tests/discovery/discover.test.ts
+@@ -1,21 +1,44 @@
+ import { expect, test } from 'bun:test';
+ import { Capability, ProviderKind } from '../../src/core/types.ts';
+ import { runDiscovery } from '../../src/discovery/discover.ts';
+ 
+ test('fetches from applicable sources, filters/ranks, writes, pre-pulls top-1', async () => {
+   const c = (model: string, dl: number, params: number) => ({
+-    provider: ProviderKind.Ollama, model, params: {}, role: 'r', capabilities: [Capability.Tools],
++    provider: ProviderKind.Ollama,
++    model,
++    params: {},
++    role: 'r',
++    capabilities: [Capability.Tools],
+     footprint: { approxParamsBillions: params, bytesPerWeight: 0.56 },
+-    repo: model, quant: 'Q4_K_M', fileSizeBytes: params * 0.56e9 * 1.2, downloads: dl, installed: false,
++    repo: model,
++    quant: 'Q4_K_M',
++    fileSizeBytes: params * 0.56e9 * 1.2,
++    downloads: dl,
++    installed: false,
+   });
+   const pulled: string[] = [];
+   const out = await runDiscovery({
+-    host: { totalRamBytes: 24e9, liveBudgetBytes: 12e9, runtimes: [ProviderKind.Ollama] },
+-    sources: [{ name: 's', appliesTo: () => true, listCandidates: async () => [c('hf.co/a:Q4_K_M', 10, 7), c('hf.co/b:Q4_K_M', 99, 9)] }],
++    host: {
++      totalRamBytes: 24e9,
++      liveBudgetBytes: 12e9,
++      runtimes: [ProviderKind.Ollama],
++    },
++    sources: [
++      {
++        name: 's',
++        appliesTo: () => true,
++        listCandidates: async () => [
++          c('hf.co/a:Q4_K_M', 10, 7),
++          c('hf.co/b:Q4_K_M', 99, 9),
++        ],
++      },
++    ],
+     writeCatalog: () => {},
+-    pullTop: async (m) => { pulled.push(m); },
++    pullTop: async (m) => {
++      pulled.push(m);
++    },
+     catalogPathStr: '/tmp/catalog.json',
+   });
+   expect(out.found).toBe(2);
+   expect(pulled).toEqual(['hf.co/b:Q4_K_M']); // highest downloads, pre-pulled
+ });
+diff --git a/tests/discovery/hf-client.test.ts b/tests/discovery/hf-client.test.ts
+index 9f37db9..f166eed 100644
+--- a/tests/discovery/hf-client.test.ts
++++ b/tests/discovery/hf-client.test.ts
+@@ -1,23 +1,31 @@
+ import { afterEach, expect, test } from 'bun:test';
+ import { hfGet } from '../../src/discovery/hf-client.ts';
+ 
+ const orig = globalThis.fetch;
+-afterEach(() => { globalThis.fetch = orig; delete process.env.HF_TOKEN; });
++afterEach(() => {
++  globalThis.fetch = orig;
++  delete process.env.HF_TOKEN;
++});
+ 
+ test('parses JSON from a successful response', async () => {
+-  globalThis.fetch = (async () => new Response(JSON.stringify({ ok: 1 }), { status: 200 })) as unknown as typeof fetch;
++  globalThis.fetch = (async () =>
++    new Response(JSON.stringify({ ok: 1 }), {
++      status: 200,
++    })) as unknown as typeof fetch;
+   expect(await hfGet('/api/models?filter=gguf')).toEqual({ ok: 1 });
+ });
+ test('adds bearer auth when HF_TOKEN is set', async () => {
+   process.env.HF_TOKEN = 'tok';
+   let seen: Headers | undefined;
+   globalThis.fetch = (async (_u: string, init: RequestInit) => {
+-    seen = new Headers(init?.headers); return new Response('{}', { status: 200 });
++    seen = new Headers(init?.headers);
++    return new Response('{}', { status: 200 });
+   }) as unknown as typeof fetch;
+   await hfGet('/api/models');
+   expect(seen?.get('authorization')).toBe('Bearer tok');
+ });
+ test('throws DiscoveryError on non-ok', async () => {
+-  globalThis.fetch = (async () => new Response('nope', { status: 429 })) as unknown as typeof fetch;
++  globalThis.fetch = (async () =>
++    new Response('nope', { status: 429 })) as unknown as typeof fetch;
+   await expect(hfGet('/api/models')).rejects.toThrow();
+ });
+diff --git a/tests/discovery/huggingface-gguf.test.ts b/tests/discovery/huggingface-gguf.test.ts
+index 65c30f0..a9ca943 100644
+--- a/tests/discovery/huggingface-gguf.test.ts
++++ b/tests/discovery/huggingface-gguf.test.ts
+@@ -1,37 +1,52 @@
+ import { afterEach, expect, test } from 'bun:test';
+ import { Capability, ProviderKind } from '../../src/core/types.ts';
+-import { detectTools, hfGgufSource } from '../../src/discovery/huggingface-gguf.ts';
++import {
++  detectTools,
++  hfGgufSource,
++} from '../../src/discovery/huggingface-gguf.ts';
+ 
+ test('detectTools reads tool markers from a chat template', () => {
+   expect(detectTools('{%- if tools %}...tool_call...')).toBe(true);
+   expect(detectTools('plain chat template')).toBe(false);
+ });
+ 
+ const orig = globalThis.fetch;
+-afterEach(() => { globalThis.fetch = orig; });
++afterEach(() => {
++  globalThis.fetch = orig;
++});
+ 
+ test('builds a fitting tool-capable GGUF candidate', async () => {
+   const routes: Record<string, unknown> = {
+     '/api/models?filter=gguf&author=bartowski&sort=downloads&direction=-1&limit=20':
+       [{ id: 'bartowski/Qwen2.5-7B-Instruct-GGUF', downloads: 9999 }],
+-    '/api/models/bartowski/Qwen2.5-7B-Instruct-GGUF':
+-      { gguf: { total: 7_600_000_000, context_length: 32768, chat_template: '{%- if tools %} tool_call' } },
+-    '/api/models/bartowski/Qwen2.5-7B-Instruct-GGUF/tree/main':
+-      [{ path: 'Qwen2.5-7B-Instruct-Q4_K_M.gguf', size: 4_700_000_000 }],
++    '/api/models/bartowski/Qwen2.5-7B-Instruct-GGUF': {
++      gguf: {
++        total: 7_600_000_000,
++        context_length: 32768,
++        chat_template: '{%- if tools %} tool_call',
++      },
++    },
++    '/api/models/bartowski/Qwen2.5-7B-Instruct-GGUF/tree/main': [
++      { path: 'Qwen2.5-7B-Instruct-Q4_K_M.gguf', size: 4_700_000_000 },
++    ],
+   };
+   globalThis.fetch = (async (u: string) => {
+     const path = u.replace('https://huggingface.co', '');
+     const body = routes[path] ?? routes[decodeURIComponent(path)];
+-    return new Response(JSON.stringify(body ?? null), { status: body ? 200 : 404 });
++    return new Response(JSON.stringify(body ?? null), {
++      status: body ? 200 : 404,
++    });
+   }) as unknown as typeof fetch;
+ 
+   const cands = await hfGgufSource.listCandidates({
+-    budgetBytes: 12e9, requires: [Capability.Tools], hostTotalRamBytes: 24e9,
++    budgetBytes: 12e9,
++    requires: [Capability.Tools],
++    hostTotalRamBytes: 24e9,
+   });
+   expect(cands.length).toBe(1);
+   const cand = cands[0]!;
+   expect(cand.provider).toBe(ProviderKind.Ollama);
+   expect(cand.model).toBe('hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M');
+   expect(cand.capabilities).toContain(Capability.Tools);
+   expect(cand.quant).toBe('Q4_K_M');
+ });
+diff --git a/tests/discovery/huggingface-mlx.test.ts b/tests/discovery/huggingface-mlx.test.ts
+index 6faf495..e54c430 100644
+--- a/tests/discovery/huggingface-mlx.test.ts
++++ b/tests/discovery/huggingface-mlx.test.ts
+@@ -1,36 +1,50 @@
+ import { afterEach, expect, test } from 'bun:test';
+ import { Capability, ProviderKind } from '../../src/core/types.ts';
+ import { hfMlxSource } from '../../src/discovery/huggingface-mlx.ts';
+ 
+ test('applies only when an MLX runtime is present on the host', () => {
+   const base = { totalRamBytes: 24e9, liveBudgetBytes: 12e9 };
+-  expect(hfMlxSource.appliesTo({ ...base, runtimes: [ProviderKind.Ollama] })).toBe(false);
+-  expect(hfMlxSource.appliesTo({ ...base, runtimes: [ProviderKind.Ollama, ProviderKind.MlxServer] })).toBe(true);
++  expect(
++    hfMlxSource.appliesTo({ ...base, runtimes: [ProviderKind.Ollama] }),
++  ).toBe(false);
++  expect(
++    hfMlxSource.appliesTo({
++      ...base,
++      runtimes: [ProviderKind.Ollama, ProviderKind.MlxServer],
++    }),
++  ).toBe(true);
+ });
+ 
+ const orig = globalThis.fetch;
+-afterEach(() => { globalThis.fetch = orig; });
++afterEach(() => {
++  globalThis.fetch = orig;
++});
+ 
+ test('builds an MLX candidate from config.json + chat_template + tree', async () => {
+   const routes: Record<string, unknown> = {
+     '/api/models?filter=mlx&author=mlx-community&sort=downloads&direction=-1&limit=20':
+       [{ id: 'mlx-community/Qwen2.5-7B-Instruct-4bit', downloads: 500 }],
+     '/resolve/main/config.json': { num_parameters: 7_600_000_000 },
+-    '/resolve/main/tokenizer_config.json': { chat_template: '{%- if tools %} tool_call' },
+-    '/api/models/mlx-community/Qwen2.5-7B-Instruct-4bit/tree/main':
+-      [{ path: 'model.safetensors', size: 4_300_000_000 }],
++    '/resolve/main/tokenizer_config.json': {
++      chat_template: '{%- if tools %} tool_call',
++    },
++    '/api/models/mlx-community/Qwen2.5-7B-Instruct-4bit/tree/main': [
++      { path: 'model.safetensors', size: 4_300_000_000 },
++    ],
+   };
+   globalThis.fetch = (async (u: string) => {
+     const key = Object.keys(routes).find((k) => u.includes(k));
+     const body = key ? routes[key] : null;
+     return new Response(JSON.stringify(body), { status: body ? 200 : 404 });
+   }) as unknown as typeof fetch;
+ 
+   const cands = await hfMlxSource.listCandidates({
+-    budgetBytes: 12e9, requires: [Capability.Tools], hostTotalRamBytes: 24e9,
++    budgetBytes: 12e9,
++    requires: [Capability.Tools],
++    hostTotalRamBytes: 24e9,
+   });
+   expect(cands.length).toBe(1);
+   expect(cands[0]!.provider).toBe(ProviderKind.MlxServer);
+   expect(cands[0]!.model).toBe('mlx-community/Qwen2.5-7B-Instruct-4bit');
+   expect(cands[0]!.capabilities).toContain(Capability.Tools);
+ });
+diff --git a/tests/discovery/quant.test.ts b/tests/discovery/quant.test.ts
+index 290dee0..8bd4dc0 100644
+--- a/tests/discovery/quant.test.ts
++++ b/tests/discovery/quant.test.ts
+@@ -1,12 +1,15 @@
+ import { expect, test } from 'bun:test';
+-import { bytesPerWeightForQuant, pickBestQuantThatFits } from '../../src/discovery/quant.ts';
++import {
++  bytesPerWeightForQuant,
++  pickBestQuantThatFits,
++} from '../../src/discovery/quant.ts';
+ 
+ test('maps common GGUF quants to bytes/weight', () => {
+   expect(bytesPerWeightForQuant('Q4_K_M')).toBeCloseTo(0.56, 2);
+   expect(bytesPerWeightForQuant('Q8_0')).toBeGreaterThan(1.0);
+   expect(bytesPerWeightForQuant('unknown')).toBeGreaterThan(0); // safe default
+ });
+ test('picks the largest quant whose file fits the budget', () => {
+   const files = [
+     { quant: 'Q4_K_M', sizeBytes: 5e9 },
+     { quant: 'Q6_K', sizeBytes: 7e9 },
+diff --git a/tests/integration/selection.live.test.ts b/tests/integration/selection.live.test.ts
+index df741b0..621bc42 100644
+--- a/tests/integration/selection.live.test.ts
++++ b/tests/integration/selection.live.test.ts
+@@ -1,13 +1,13 @@
+ import { afterAll, describe, expect, test } from 'bun:test';
+ import qwenFast from '../../models/qwen-fast.ts';
+-import { REGISTRY } from '../../models/registry.ts';
++import { BOOTSTRAP } from '../../models/registry.ts';
+ import { Capability, PreferPolicy } from '../../src/core/types.ts';
+ import { createModelManager } from '../../src/resource/model-manager.ts';
+ import { unloadModel } from '../../src/resource/ollama-control.ts';
+ import { resolveModel } from '../../src/resource/selector.ts';
+ import { ollamaReady } from './ollama-available.ts';
+ 
+ const ready = await ollamaReady(qwenFast.model);
+ 
+ describe.skipIf(!ready)('live dynamic model selection (real Ollama)', () => {
+   afterAll(async () => {
+@@ -15,17 +15,17 @@ describe.skipIf(!ready)('live dynamic model selection (real Ollama)', () => {
+   });
+ 
+   test('with plentiful RAM, largest-that-fits resolves to the 9b specialist', async () => {
+     const manager = createModelManager();
+     const { decl, numCtx } = await resolveModel(
+       {
+         role: 'general reasoning + tool use',
+         requires: [Capability.Tools],
+         prefer: PreferPolicy.LargestThatFits,
+       },
+-      REGISTRY,
++      BOOTSTRAP,
+       { ensureReady: (d, o) => manager.ensureReady(d, o) },
+     );
+     expect(decl.model).toBe('qwen3.5:9b');
+     expect(numCtx).toBeGreaterThanOrEqual(4096);
+   }, 180_000);
+ });
+diff --git a/tests/models/registry.test.ts b/tests/models/registry.test.ts
+index 1947787..54df1e0 100644
+--- a/tests/models/registry.test.ts
++++ b/tests/models/registry.test.ts
+@@ -1,16 +1,16 @@
+ import { expect, test } from 'bun:test';
+-import { REGISTRY } from '../../models/registry.ts';
++import { BOOTSTRAP } from '../../models/registry.ts';
+ import { Capability } from '../../src/core/types.ts';
+ 
+ test('registry contains the two verified rungs, both tool-capable', () => {
+-  const names = REGISTRY.map((d) => d.model).sort();
++  const names = BOOTSTRAP.map((d) => d.model).sort();
+   expect(names).toEqual(['qwen3.5:4b', 'qwen3.5:9b']);
+-  for (const d of REGISTRY) {
++  for (const d of BOOTSTRAP) {
+     expect(d.capabilities ?? []).toContain(Capability.Tools);
+   }
+ });
+ 
+ test('registry has a real capability ladder (distinct sizes)', () => {
+-  const sizes = REGISTRY.map((d) => d.footprint.approxParamsBillions);
+-  expect(new Set(sizes).size).toBe(REGISTRY.length);
++  const sizes = BOOTSTRAP.map((d) => d.footprint.approxParamsBillions);
++  expect(new Set(sizes).size).toBe(BOOTSTRAP.length);
+ });
+diff --git a/tests/resource/model-manager.test.ts b/tests/resource/model-manager.test.ts
+index 25dbdf5..c51bcc3 100644
+--- a/tests/resource/model-manager.test.ts
++++ b/tests/resource/model-manager.test.ts
+@@ -24,21 +24,25 @@ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
+     pull: mock(async () => {}),
+     warm: mock(async () => {}),
+     unload: mock(async () => {}),
+     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
+     getModelMax: mock(async () => 262144),
+     ...over,
+   };
+ }
+ 
+ function fakes(
+-  overrides: { control?: RuntimeControl; budgetBytes?: number; warn?: (m: string) => void } = {},
++  overrides: {
++    control?: RuntimeControl;
++    budgetBytes?: number;
++    warn?: (m: string) => void;
++  } = {},
+ ) {
+   const control = overrides.control ?? fakeControl();
+   return {
+     control,
+     deps: {
+       budgetBytes: overrides.budgetBytes ?? 100e9,
+       warn: overrides.warn ?? mock(() => {}),
+       controlFor: () => control,
+     },
+   };
+@@ -213,15 +217,18 @@ test('cannot fit even the MIN_CTX floor: throws, warms nothing', async () => {
+   await expect(
+     mgr.ensureReady(declCtx('big', 1, 16384)),
+   ).rejects.toBeInstanceOf(ResourceError);
+   expect(f.control.warm).not.toHaveBeenCalled();
+ });
+ 
+ test('routes lifecycle through controlFor(decl.provider)', async () => {
+   const f = fakes();
+   const mgr = createModelManager(f.deps);
+   await mgr.ensureReady({
+-    provider: ProviderKind.Ollama, model: 'm7', params: { numCtx: 0 }, role: 't',
++    provider: ProviderKind.Ollama,
++    model: 'm7',
++    params: { numCtx: 0 },
++    role: 't',
+     footprint: { approxParamsBillions: 7, bytesPerWeight: 1 },
+   });
+   expect(f.control.warm).toHaveBeenCalledWith('m7', expect.any(Number));
+ });
+diff --git a/tests/resource/select-degrade.test.ts b/tests/resource/select-degrade.test.ts
+index f50c315..d2bb241 100644
+--- a/tests/resource/select-degrade.test.ts
++++ b/tests/resource/select-degrade.test.ts
+@@ -1,12 +1,12 @@
+ import { expect, mock, test } from 'bun:test';
+-import { REGISTRY } from '../../models/registry.ts';
++import { BOOTSTRAP } from '../../models/registry.ts';
+ import { Capability, PreferPolicy } from '../../src/core/types.ts';
+ import { createModelManager } from '../../src/resource/model-manager.ts';
+ import { resolveModel } from '../../src/resource/selector.ts';
+ import type { RuntimeControl } from '../../src/runtime/runtime.ts';
+ 
+ /**
+  * Budget math (bpw=0.56, MIN_CTX=4096, kvBytesPerToken=131072):
+  *   weightsBytes(9, 0.56) = 9e9 * 0.56 * 1.2 = 6.048e9
+  *   kvCacheBytes(4096, 131072)              = 536_870_912
+  *   9b minNeed ≈ 6.585e9  →  does NOT fit in 4e9
+@@ -23,32 +23,32 @@ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
+     isInstalled: mock(async () => true),
+     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
+     pull: mock(async () => {}),
+     warm: mock(async () => {}),
+     unload: mock(async () => {}),
+     getModelMax: mock(async () => 262144),
+     ...over,
+   };
+ }
+ 
+-test('degrade-to-4b: resolveModel over real REGISTRY falls back to qwen3.5:4b under 4 GB budget', async () => {
++test('degrade-to-4b: resolveModel over real BOOTSTRAP falls back to qwen3.5:4b under 4 GB budget', async () => {
+   const control = fakeControl();
+   const mgr = createModelManager({
+     budgetBytes: BUDGET_BYTES,
+     warn: mock(() => {}),
+     controlFor: () => control,
+   });
+ 
+   const req = {
+     role: 'test-tools',
+     requires: [Capability.Tools],
+     prefer: PreferPolicy.LargestThatFits,
+   };
+ 
+-  const { decl, numCtx } = await resolveModel(req, REGISTRY, {
++  const { decl, numCtx } = await resolveModel(req, BOOTSTRAP, {
+     ensureReady: mgr.ensureReady,
+     listLoaded: control.listLoaded,
+   });
+ 
+   expect(decl.model).toBe('qwen3.5:4b');
+   expect(numCtx).toBeGreaterThanOrEqual(4096);
+ });
+diff --git a/tests/resource/selector-policy.test.ts b/tests/resource/selector-policy.test.ts
+index 52676d2..8031dc9 100644
+--- a/tests/resource/selector-policy.test.ts
++++ b/tests/resource/selector-policy.test.ts
+@@ -1,28 +1,52 @@
+ import { expect, test } from 'bun:test';
+ import {
+-  Capability, ContentPolicy, type ModelDeclaration, PreferPolicy, ProviderKind,
++  Capability,
++  ContentPolicy,
++  type ModelDeclaration,
++  PreferPolicy,
++  ProviderKind,
+ } from '../../src/core/types.ts';
+ import { selectCandidates } from '../../src/resource/selector.ts';
+ 
+-function m(model: string, caps: Capability[], policy?: ContentPolicy): ModelDeclaration {
++function m(
++  model: string,
++  caps: Capability[],
++  policy?: ContentPolicy,
++): ModelDeclaration {
+   return {
+-    provider: ProviderKind.Ollama, model, params: {}, role: 'r',
+-    capabilities: caps, contentPolicy: policy,
++    provider: ProviderKind.Ollama,
++    model,
++    params: {},
++    role: 'r',
++    capabilities: caps,
++    contentPolicy: policy,
+     footprint: { approxParamsBillions: 7, bytesPerWeight: 0.56 },
+   };
+ }
+-const tools = { role: 'r', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits };
++const tools = {
++  role: 'r',
++  requires: [Capability.Tools],
++  prefer: PreferPolicy.LargestThatFits,
++};
+ 
+ test('uncensored models excluded by default', () => {
+-  const reg = [m('safe', [Capability.Tools]), m('unc', [Capability.Tools], ContentPolicy.Uncensored)];
++  const reg = [
++    m('safe', [Capability.Tools]),
++    m('unc', [Capability.Tools], ContentPolicy.Uncensored),
++  ];
+   expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual(['safe']);
+ });
+ test('uncensored included when allowUncensored', () => {
+-  const reg = [m('safe', [Capability.Tools]), m('unc', [Capability.Tools], ContentPolicy.Uncensored)];
+-  const out = selectCandidates({ ...tools, allowUncensored: true }, reg).map((d) => d.model);
++  const reg = [
++    m('safe', [Capability.Tools]),
++    m('unc', [Capability.Tools], ContentPolicy.Uncensored),
++  ];
++  const out = selectCandidates({ ...tools, allowUncensored: true }, reg).map(
++    (d) => d.model,
++  );
+   expect(out.sort()).toEqual(['safe', 'unc']);
+ });
+ test('vision-only model excluded for a tools requirement', () => {
+   const reg = [m('vis', [Capability.Vision]), m('tool', [Capability.Tools])];
+   expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual(['tool']);
+ });
+diff --git a/tests/runtime/mlx-server.test.ts b/tests/runtime/mlx-server.test.ts
+index 57fa987..ce7f657 100644
+--- a/tests/runtime/mlx-server.test.ts
++++ b/tests/runtime/mlx-server.test.ts
+@@ -1,25 +1,36 @@
+ import { expect, test } from 'bun:test';
+ import { ProviderKind } from '../../src/core/types.ts';
+ import { mlxServerRuntime } from '../../src/runtime/mlx-server.ts';
+ 
+ test('mlx runtime has the right kind and builds a model', () => {
+   expect(mlxServerRuntime.kind).toBe(ProviderKind.MlxServer);
+   const model = mlxServerRuntime.createModel({
+-    provider: ProviderKind.MlxServer, model: 'mlx-community/Qwen2.5-7B-Instruct-4bit',
+-    params: {}, role: 'r', footprint: { approxParamsBillions: 7, bytesPerWeight: 0.55 },
++    provider: ProviderKind.MlxServer,
++    model: 'mlx-community/Qwen2.5-7B-Instruct-4bit',
++    params: {},
++    role: 'r',
++    footprint: { approxParamsBillions: 7, bytesPerWeight: 0.55 },
+   });
+   expect(model).toBeDefined();
+ });
+ 
+ test('isInstalled reads /v1/models', async () => {
+   const origFetch = globalThis.fetch;
+   globalThis.fetch = (async () =>
+-    new Response(JSON.stringify({ data: [{ id: 'mlx-community/Qwen2.5-7B-Instruct-4bit' }] }),
+-      { status: 200 })) as unknown as typeof fetch;
++    new Response(
++      JSON.stringify({
++        data: [{ id: 'mlx-community/Qwen2.5-7B-Instruct-4bit' }],
++      }),
++      { status: 200 },
++    )) as unknown as typeof fetch;
+   try {
+-    expect(await mlxServerRuntime.control.isInstalled('mlx-community/Qwen2.5-7B-Instruct-4bit')).toBe(true);
++    expect(
++      await mlxServerRuntime.control.isInstalled(
++        'mlx-community/Qwen2.5-7B-Instruct-4bit',
++      ),
++    ).toBe(true);
+     expect(await mlxServerRuntime.control.isInstalled('absent')).toBe(false);
+   } finally {
+     globalThis.fetch = origFetch;
+   }
+ });

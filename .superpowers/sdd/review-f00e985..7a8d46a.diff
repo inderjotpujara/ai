@@ -1,0 +1,3298 @@
+# Review package: f00e98579fafc4d53b2a0f622e1184f639ec1426..7a8d46a
+
+## Commits
+7a8d46a docs(crew): correct runCrew throw-behavior comment (hierarchical can rethrow)
+4f60d10 docs(slice-11): document crews & roles in architecture.md
+aedded6 style(crew): fix lint in crew test files (non-null assertions, explicit any, import order)
+04cbb65 feat(crew): crew CLI + registry + example; live model selection for flow+crew CLIs
+6cff656 feat(crew): runCrew dispatches sequential/hierarchical under crew.run
+81eb124 feat(crew): compile sequential->workflow, hierarchical->orchestrator
+b8e21e1 feat(telemetry): crew.run span + crew ATTR keys
+f20351f feat(crew): defineCrew static validation
+4539cd6 feat(crew): buildCrewAgent composes role/goal/backstory
+91a44d8 feat(crew): typed crew model + CrewError
+c900d03 docs(slice-11): crews implementation plan (9-step, live model selection wired)
+42cd86d docs(slice-11): crews & roles design
+
+## Files changed
+ crews/index.ts                                     |   11 +
+ crews/research-crew.ts                             |   48 +
+ docs/architecture.md                               |  132 +-
+ .../superpowers/plans/2026-07-01-slice-11-crews.md | 1393 ++++++++++++++++++++
+ .../specs/2026-07-01-slice-11-crews-design.md      |  145 ++
+ package.json                                       |    1 +
+ src/cli/crew.ts                                    |  104 ++
+ src/cli/flow.ts                                    |   53 +-
+ src/cli/select-runtime.ts                          |   71 +
+ src/core/errors.ts                                 |    3 +
+ src/crew/compile.ts                                |   77 ++
+ src/crew/define.ts                                 |   78 ++
+ src/crew/engine.ts                                 |   74 ++
+ src/crew/member-agent.ts                           |   31 +
+ src/crew/types.ts                                  |   48 +
+ src/telemetry/spans.ts                             |   17 +
+ src/workflow/run-step.ts                           |    5 +-
+ tests/cli/crew.test.ts                             |   53 +
+ tests/cli/select-runtime.test.ts                   |   11 +
+ tests/crew/compile.test.ts                         |   88 ++
+ tests/crew/define.test.ts                          |   98 ++
+ tests/crew/engine.test.ts                          |   76 ++
+ tests/crew/errors.test.ts                          |   11 +
+ tests/crew/member-agent.test.ts                    |   49 +
+ tests/integration/crew.live.test.ts                |   37 +
+ tests/telemetry/crew-spans.test.ts                 |   18 +
+ tests/workflow/run-step.test.ts                    |   38 +
+ 27 files changed, 2739 insertions(+), 31 deletions(-)
+
+## Diff
+diff --git a/crews/index.ts b/crews/index.ts
+new file mode 100644
+index 0000000..c1cb16e
+--- /dev/null
++++ b/crews/index.ts
+@@ -0,0 +1,11 @@
++import type { CrewDef } from '../src/crew/types.ts';
++import researchCrew from './research-crew.ts';
++
++/** name -> crew definition (mirrors workflows/index.ts). */
++export const CREWS: Record<string, CrewDef> = {
++  [researchCrew.id]: researchCrew,
++};
++
++export function getCrew(name: string): CrewDef | undefined {
++  return CREWS[name];
++}
+diff --git a/crews/research-crew.ts b/crews/research-crew.ts
+new file mode 100644
+index 0000000..65b1e00
+--- /dev/null
++++ b/crews/research-crew.ts
+@@ -0,0 +1,48 @@
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../src/core/types.ts';
++import { defineCrew } from '../src/crew/define.ts';
++import { CrewProcess } from '../src/crew/types.ts';
++
++/** A sequential research crew: researcher gathers, writer summarizes.
++ *  Crew input is the topic/URL. */
++export default defineCrew({
++  id: 'research-crew',
++  description: 'Research a topic and produce a short brief.',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'researcher',
++      role: 'Research Analyst',
++      goal: 'Gather accurate, relevant facts on the given topic',
++      backstory: 'You are meticulous and cite what you find.',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++    {
++      name: 'writer',
++      role: 'Technical Writer',
++      goal: 'Turn research notes into a clear 3-bullet brief',
++      backstory: 'You write tight, plain summaries.',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 'gather',
++      description:
++        'Research the topic given as input and produce concise notes.',
++      expectedOutput: 'A short list of key facts.',
++      member: 'researcher',
++      output: z.string(),
++    },
++    {
++      id: 'brief',
++      description: 'Using the research notes, write a 3-bullet brief.',
++      expectedOutput: 'Exactly 3 bullet points.',
++      member: 'writer',
++      dependsOn: ['gather'],
++      output: z.string(),
++    },
++  ],
++});
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 8b1e155..7420f1b 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -31,22 +31,24 @@ see the [README](../README.md); for the long-range plan see
+ The engine is **Vercel AI SDK 6** (runtime-agnostic `LanguageModel`, the
+ tool-calling loop, MCP client, mock model, and `experimental_telemetry`). We
+ write only the thin layers on top.
+ 
+ ```mermaid
+ graph TD
+     subgraph CLI["CLI · src/cli"]
+         chat["chat.ts (entry)"]
+         runchat["run-chat.ts"]
+         selhook["select-hook.ts"]
++        selrt["select-runtime.ts · createSelectionRuntime"]
+         runscli["runs.ts · bun run runs"]
+         flow["flow.ts · bun run flow"]
++        crewcli["crew.ts · bun run crew"]
+     end
+     subgraph CORE["Core · src/core"]
+         orch["orchestrator.ts"]
+         delegate["delegate.ts"]
+         agent["agent.ts · runAgent loop"]
+         guard["guardrails.ts · ALS depth+budget"]
+         types["types.ts · 4-axis taxonomy"]
+     end
+     subgraph RES["Resource · src/resource"]
+         mgr["model-manager.ts"]
+@@ -76,28 +78,36 @@ graph TD
+     subgraph RUN["Run store · src/run"]
+         runstore["run-store.ts"]
+         runtrace["run-trace.ts"]
+     end
+     subgraph WF["Workflow · src/workflow"]
+         wftypes["types.ts · StepKind"]
+         wfdefine["define.ts · defineWorkflow"]
+         wfengine["engine.ts · runWorkflow"]
+         wfrunstep["run-step.ts · runStepByKind"]
+     end
++    subgraph CREW["Crew · src/crew"]
++        crewtypes["types.ts · CrewMember/Task/CrewProcess"]
++        crewdefine["define.ts · defineCrew"]
++        crewmember["member-agent.ts · buildCrewAgent"]
++        crewcompile["compile.ts · compileToWorkflow/buildHierarchicalOrchestrator"]
++        crewengine["engine.ts · runCrew"]
++    end
+     subgraph DATA["On-disk · git-ignored"]
+         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
+         images[("model-images/ + catalog.json")]
+     end
+     subgraph DECL["Declarations (pure data)"]
+         agents["agents/*"]
+         models["models/* · BOOTSTRAP"]
+         workflows["workflows/* · WORKFLOWS"]
++        crews["crews/* · CREWS"]
+     end
+ 
+     chat --> runchat
+     chat --> selhook
+     chat --> buildreg
+     chat --> agents
+     chat -. mounts .-> mcpclient
+     runchat --> orch
+     runchat --> provider
+     orch --> delegate
+@@ -124,41 +134,60 @@ graph TD
+     provider --> exporter
+     exporter --> spansfile
+     octl --> images
+     runscli --> runtrace
+     runtrace --> spansfile
+     flow --> wfengine
+     flow --> runstore
+     flow -. mounts .-> mcpclient
+     flow --> agents
+     flow --> workflows
++    flow --> selrt
+     wfengine --> wfrunstep
+     wfrunstep --> delegate
+     wfengine --> spans
+     wfrunstep --> spans
+     wfdefine --> wftypes
++    crewengine --> crewcompile
++    crewcompile --> crewmember
++    crewcompile --> wfdefine
++    crewmember --> sel
++    crewengine --> wfengine
++    crewengine --> orch
++    crewengine --> spans
++    crewdefine --> crewtypes
++    crewtypes --> wftypes
++    crewcli --> crewengine
++    crewcli --> runstore
++    crewcli -. mounts .-> mcpclient
++    crewcli --> crews
++    crewcli --> selrt
++    selrt --> selhook
++    selrt --> buildreg
++    selrt --> mgr
+     runstore --> spansfile
+ ```
+ 
+ | Layer | Files | Responsibility | Knows about |
+ |---|---|---|---|
+-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
++| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`) | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
+ | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+-| **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
++| **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example) | nothing (pure data) |
+ | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
++| **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+ ## 3. Runtime data flow (one `chat` run, current)
+ 
+ ```mermaid
+ sequenceDiagram
+     actor User
+@@ -290,43 +319,132 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
+ - **Telemetry** (`src/telemetry/spans.ts`) — extended per the standing rule (§7): `withWorkflowSpan(workflowId, fn)` opens the root `workflow.run` span (`ATTR.WORKFLOW_ID`); `withStepSpan(stepId, kind, fn)` opens a nested `workflow.step` span per step (`ATTR.STEP_ID` / `ATTR.STEP_KIND`); `annotateStep(attrs)` tags the active step span with extra attributes (`ATTR.STEP_BRANCH_TAKEN` for the branch taken, `ATTR.STEP_MAP_COUNT` for map fan-out size); `ATTR.WORKFLOW_OUTCOME` records the terminal `WorkflowOutcome`. These are the spans/attrs the execution engine (Task 6) and CLI (Task 7) emit into — transport untouched, so the run-viewer and any OTLP backend get workflow signal for free.
+ 
+ - **Step runner** (`src/workflow/run-step.ts`): `runStepByKind(step, ctx, deps)` dispatches a step to its kind (agent/tool/branch/map) and returns the *raw*, unvalidated result; `WorkflowDeps` (`runAgentStep`, `tools`, `maxParallel`) is the injected boundary the engine and CLI provide; `mapWithConcurrency` bounds fan-out concurrency for `MapStep` (default cap `DEFAULT_MAX_PARALLEL`, overridable via `AGENT_WORKFLOW_MAX_PARALLEL` or per-map `maxParallel`).
+ 
+ - **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready.
+ 
+ - **Definition + validation** (`src/workflow/define.ts`): `defineWorkflow(def)` validates a `WorkflowDef` at construction time — unique step ids, every `dependsOn`/branch target resolves to a real step, and the dependency graph is acyclic (Kahn's algorithm) — throwing `WorkflowError` on any violation, so a malformed workflow fails fast at import time rather than mid-run.
+ 
+ - **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
+ 
+-- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, and prints the last step's output (or the failure) to stdout/stderr — closing the fetch then file server in `finally`, mirroring `chat.ts`'s mount/close order.
++- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, builds the shared live-selection runtime (below) and prints the last step's output (or the failure) to stdout/stderr — closing the selection runtime, then the fetch server, then the file server in `finally`, mirroring `chat.ts`'s mount/close order.
++
++- **Shared live-selection runtime** (`src/cli/select-runtime.ts`, Slice 11 Task 7): `createSelectionRuntime(opts?)` extracts `chat.ts`'s inline manager + offline `buildRegistry()` + `createSelectHook` + one-line selection `notify` into a single reusable async factory, returning `{ onBeforeDelegate, capture, close }`. `close()` calls `manager.unloadAll()`. Both `flow.ts`'s and `crew.ts`'s `main()` build one runtime per CLI invocation (nested inside the mounted file/fetch MCP servers, closed in `finally`) and thread `onBeforeDelegate` into `defaultRunAgentStep`/`runCrew` respectively — so a workflow agent step or a crew member is resolved to the largest model that fits the *live* RAM budget at delegation time, the same guarantee `chat.ts` gives its orchestrator. `chat.ts` itself is left with its original inline wiring in this slice; deduping it against `select-runtime.ts` is a follow-up.
++
++---
++
++## 10. Crews & roles (Slice 11)
++
++A CrewAI-style **role/task/process** layer — a **thin composition** over the
++workflow engine (§9, sequential) and the orchestrator (§13 Glossary,
++hierarchical), **not a new engine**: both processes ultimately run on
++machinery Slices 9/10 already shipped.
++
++- **Types** (`src/crew/types.ts`): `CrewMember{name, role, goal, backstory,
++  requires, prefer, tools?}` — `role`/`goal`/`backstory` are prompt scaffolding;
++  `requires`/`prefer` are the same `Capability[]`/`PreferPolicy` axes the core
++  selector already uses, so a member's model is a live selection, not a
++  hardcoded one. `Task{id, description, expectedOutput, member, dependsOn?,
++  output?}` — `description`+`expectedOutput` are prompt text, `member` is the
++  `CrewMember.name` that runs it, `dependsOn` are upstream task ids whose
++  outputs become context, `output` is an optional zod schema for typed
++  hand-offs (defaults to `z.string()` when compiled). `enum CrewProcess {
++  Sequential, Hierarchical }`. `CrewDef{id, description?, members, tasks,
++  process, managerModel?}`. `CrewOutcome` — `{kind:'done', output}` or
++  `{kind:'failed', failedTask?, message}`.
++- **Validation** (`src/crew/define.ts`): `defineCrew(def)` checks at
++  construction time — unique member names, unique task ids, every
++  `task.member` resolves to a real member, every effective dependency
++  (`effectiveTaskDeps`: explicit `dependsOn`, else the previous task, else `[]`
++  for the first task — the CrewAI sequential default) resolves to a real task,
++  and the task graph is acyclic (Kahn's algorithm, same technique as
++  `workflow/define.ts`) — throwing `CrewError` on any violation.
++- **Member → agent** (`src/crew/member-agent.ts`): `buildCrewAgent(member,
++  tools?)` composes role/goal/backstory into an `Agent.systemPrompt`, sets
++  `description` (routing) and `modelReq: {role, requires, prefer}`. The model
++  bound at construction (`qwenFast`) is a placeholder — the real model is
++  resolved **live** by the selector at delegation via `modelReq` +
++  `onBeforeDelegate`, exactly like the preset agents (this is the only
++  genuinely new mechanism the layer adds).
++- **Compile** (`src/crew/compile.ts`): **sequential** — `compileToWorkflow`
++  maps each task to an `AgentStep` (`agent = task.member`, `dependsOn` = the
++  effective deps, `input` = `composeTaskInput` which renders the task's
++  description/expected-output plus either the crew's raw input (root task) or
++  its dependencies' outputs as context, `output = task.output ?? z.string()`),
++  then runs `defineWorkflow` as a second validation gate and executes on the
++  **existing** Slice-10 engine unmodified. **Hierarchical** —
++  `buildHierarchicalOrchestrator` builds one `Agent` per member via
++  `buildCrewAgent`, writes a manager system prompt listing every task
++  (`member: description -> expectedOutput`), and hands the member agents +
++  that prompt to `createOrchestrator` (model defaults to `qwenRouter`, or
++  `crew.managerModel`) — the manager delegates autonomously rather than the
++  crew enforcing task order (a documented v1 simplification; sequential is the
++  deterministic path).
++- **Engine** (`src/crew/engine.ts`): `runCrew(def, input, deps)` dispatches by
++  `def.process` inside a `withCrewSpan` (`crew.run` root span). Sequential:
++  builds a member-name → `Agent` map (`crewAgentMap`), resolves `runAgentStep`
++  to `deps.runAgentStep` (test seam) or `defaultRunAgentStep(agents,
++  onBeforeDelegate)`, and calls `runWorkflow` — since `runWorkflow` itself
++  never throws (§9), **the sequential path never throws into the caller**.
++  Hierarchical: builds the orchestrator and calls `runOrchestrator`, which
++  *can* `throw` for an unhandled failure that is neither a captured resource
++  error nor a `MaxStepsError` carrying a capability gap (§4/§8) — so **the
++  hierarchical path inherits `runOrchestrator`'s throw-on-unhandled-failure
++  behavior**; `runCrew` as a whole is not unconditionally throw-free. Both
++  paths reuse `runGuardedAgent` (`core/delegate.ts`, Slice-9 guardrails: depth
++  limit + live return cap) and the same live selector via `onBeforeDelegate`.
++- **Telemetry** (`src/telemetry/spans.ts`): `withCrewSpan(crewId, process, fn)`
++  opens the root `crew.run` span (`ATTR.CREW_ID`, `ATTR.CREW_PROCESS`);
++  `ATTR.CREW_TASK_MEMBER` tags which member ran a given task. Nested beneath
++  it: `workflow.run`/`workflow.step` spans (sequential, §9) or
++  `agent.delegation` spans (hierarchical, §3/§8) — so `bun run runs` renders
++  `crew.run → workflow.step → …` or `crew.run → agent.delegation → …`
++  depending on `process`, with no crew-specific viewer changes needed.
++- **CLI entry** (`src/cli/crew.ts`, mirrors `flow.ts`): `bun run crew <name>
++  [input...]` over the `crews/` registry (`crews/index.ts` `CREWS` + `getCrew`,
++  mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential
++  example). `runCrewCli(deps)` follows `runFlow`'s lifecycle: `createRun` →
++  `initRunTelemetry` → `runCrew(def, input, {tools, onBeforeDelegate,
++  runAgentStep})` → on `done`, `writeArtifact('result.txt', <output as text or
++  pretty JSON>)`; on `failed`, `writeArtifact('failed.txt', "task <id>:
++  <message>")` → `shutdown()` in `finally`. `main()` resolves the crew via
++  `getCrew`, mounts file+fetch MCP tools, builds a `createSelectionRuntime()`
++  (§9, shared with `flow.ts`) and passes `onBeforeDelegate` into `runCrewCli`,
++  then prints the crew's final output (or failure) to stdout/stderr. Runs are
++  rendered the same way as any other run: `bun run runs <id>`.
++
++Feeds **Slice 12** (memory/RAG — members will read from it) and **Slice 13**
++(verification — a verifier is just another member/task). Out of scope (v1):
++memory, CrewAI "Flows" (our DAG already is that), planning / batch kickoff /
++human-in-the-loop tasks.
+ 
+ ---
+ 
+-## 10. On-disk stores
++## 11. On-disk stores
+ 
+ - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
+ - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
+ 
+ ---
+ 
+-## 11. Testing strategy
++## 12. Testing strategy
+ 
+ - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
+ - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
+ - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
+ - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
+ - **MCP** — real stdio round-trip (subprocess server).
+-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
++- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+ 
+ ---
+ 
+-## 12. Glossary
++## 13. Glossary
+ 
+ - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
+ - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
+ - **Span / trace** — OpenTelemetry units. A run = a root `agent.run` span; delegations, model loads, and AI-SDK `generateText`/tool calls nest beneath it via the active async context. `bun run runs` renders the tree.
+ - **Delegation context** — the `AsyncLocalStorage` `{depth, ancestors, numCtx}` threaded through every hop; basis for the depth guard, the live return cap (off the parent's `numCtx`), and the `delegation.depth`/`ancestors` span attrs.
+ - **Live budget** — `min(0.75 × total RAM, 0.8 × availableRamBytes())` (first term = the Metal cap), recomputed per delegation; `availableRamBytes()` parses `vm_stat`.
+ - **Dynamic num_ctx** — `min(desired, modelMax, maxCtxByFit)`, floor 4096, rounded 1024; `modelMax` probed live via `/api/show`; same value for warm + inference.
+ - **Model Manager** — `src/resource/model-manager.ts`; `ensureReady` drives the lifecycle within live budget and returns the chosen context. State keyed by model string ⇒ shared-model agents = one resident copy.
+ - **Mounting an MCP server** — `mountMcpServer({command,args})` connects to any stdio MCP server and returns `{tools, close}`. Capability = pointing at a server, not writing tool code. `createFileTools` (native `read_file`) + `createFetchTools` (`uvx mcp-server-fetch`) are presets.
+ - **Declaration** — a data file describing a model (provider + name + params + footprint) or an agent. Not weights, not logic.
+diff --git a/docs/superpowers/plans/2026-07-01-slice-11-crews.md b/docs/superpowers/plans/2026-07-01-slice-11-crews.md
+new file mode 100644
+index 0000000..dacb154
+--- /dev/null
++++ b/docs/superpowers/plans/2026-07-01-slice-11-crews.md
+@@ -0,0 +1,1393 @@
++# Slice 11 — Crews & roles — Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Add a CrewAI-style role/task/process layer — define-your-own role/goal/backstory members, a task list with optional typed output + dependency context, and two processes (sequential, hierarchical) — as a thin layer that *compiles onto* the existing Slice-10 workflow engine and the agents-as-tools orchestrator.
++
++**Architecture:** A crew is a plain TS object (`defineCrew({ id, members, tasks, process })`). Members become role-bearing `Agent`s (role/goal/backstory composed into the system prompt; model resolved live by the existing selector). A **sequential** crew compiles to a `WorkflowDef` and runs on the Slice-10 engine unchanged; a **hierarchical** crew reuses `createOrchestrator` + an auto-built manager. `runCrew` dispatches by process under a `crew.run` telemetry span; `bun run crew <name>` is the CLI over a `crews/` registry. No new execution engine, no parallel structured-output system, no memory (deferred to Slice 12).
++
++**Tech Stack:** TypeScript + Bun · Vercel AI SDK `ai@^6.0.217` (`ToolSet`, `LanguageModel`) · `zod@^4.4.3` (optional per-task output schema) · existing `src/workflow/*` (engine), `src/core/orchestrator.ts` + `delegate.ts` (`runGuardedAgent`), `src/telemetry/spans.ts`, `src/run/run-store.ts` · `bun test` + `MockLanguageModelV3` + `registerTestProvider`.
++
++## Global Constraints
++
++- **Always `bun`, never `npm`.** `bun run typecheck`, `bun test`, `bun run lint` (biome, `preset: "recommended"`).
++- **Prefer `enum` over string-literal unions** for finite named sets (string enums only, e.g. `enum CrewProcess { Sequential = 'sequential' }`). Prefer `type` over `interface`. Early returns; small focused files; descriptive names.
++- **Don't hardcode model choices/budgets/limits** — members declare `requires`/`prefer`; the model is resolved LIVE by the existing selector via `onBeforeDelegate`. Env vars are fallback-only. Reuse `runGuardedAgent` (Slice-9 depth + return cap) — do NOT add new guardrail code.
++- **No new execution engine.** Sequential MUST compile to a `WorkflowDef` and run via the existing `runWorkflow`; hierarchical MUST reuse `createOrchestrator`/`runOrchestrator`. Reuse zod I/O (Slice-10 `safeParse`), not a new structured-output system.
++- **Documentation hard line:** this slice MUST add a "Crews & roles" section to `docs/architecture.md` or `bun run docs:check` (pre-commit) fails. `bun run setup` activates hooks once.
++- **No `console.log`** except the CLI's intentional user-facing output in `crew.ts` `main()`. No commit without clean `bun run typecheck`.
++- **Telemetry-by-default:** a `crew.run` root span; the existing `workflow.run/workflow.step` (sequential) and `agent.delegation` (hierarchical) spans nest beneath it.
++- New error type extends `FrameworkError` (`src/core/errors.ts`); `name` is set automatically via `new.target.name` — do not set it manually.
++- **Memory is out of scope** (Slice 12). Do not add any vector store / persistence.
++
++## File structure
++
++| File | Responsibility |
++|------|----------------|
++| `src/crew/types.ts` (new) | `CrewMember`, `Task`, `enum CrewProcess`, `CrewDef`, `CrewOutcome` |
++| `src/core/errors.ts` (modify) | Add `CrewError extends FrameworkError` |
++| `src/crew/member-agent.ts` (new) | `buildCrewAgent(member, tools?)` — compose role/goal/backstory → `Agent` (the one real new mechanism) |
++| `src/crew/define.ts` (new) | `defineCrew(def)` — static validation (unique names/ids, member/dep resolve, acyclic) → `CrewError` |
++| `src/telemetry/spans.ts` (modify) | Add `ATTR.CREW_ID/CREW_PROCESS/CREW_TASK_MEMBER`; `withCrewSpan(crewId, process, fn)` |
++| `src/crew/compile.ts` (new) | `compileToWorkflow(crew): WorkflowDef` (sequential) + `buildHierarchicalOrchestrator(crew, onBeforeDelegate?): Agent` |
++| `src/crew/engine.ts` (new) | `runCrew(def, input, deps): Promise<CrewOutcome>` — dispatch by process under `withCrewSpan`; `CrewDeps` type + default member-agent wiring |
++| `src/workflow/run-step.ts` (modify) | `defaultRunAgentStep(agents, onBeforeDelegate?)` — thread the select-hook into `runGuardedAgent` (backward compatible) |
++| `src/cli/select-runtime.ts` (new) | `createSelectionRuntime({pinned?})` — shared manager + offline registry + `createSelectHook` (live largest-that-fits); used by the flow + crew CLIs |
++| `src/cli/flow.ts` (modify) | Wire `onBeforeDelegate` into `runFlow` so workflow agent steps are live-selected too |
++| `src/cli/crew.ts` (new) | `bun run crew <name> [input...]` — mount tools + selection runtime, run, write `runs/<id>/{spans.jsonl,result.txt|failed.txt}` |
++| `crews/index.ts` + `crews/research-crew.ts` (new) | Registry array + ≥1 real sequential example (researcher → writer) |
++| `package.json` (modify) | Add `"crew": "bun run src/cli/crew.ts"` |
++| `docs/architecture.md` (modify) | New "§13 Crews & roles" section + module-map edges |
++| `tests/crew/{define,member-agent,compile,engine}.test.ts`, `tests/cli/crew.test.ts`, `tests/integration/crew.live.test.ts` (new) | TDD coverage |
++
++---
++
++## Task 1: Crew types + `CrewError`
++
++**Files:**
++- Create: `src/crew/types.ts`
++- Modify: `src/core/errors.ts` (add `CrewError` after `WorkflowError`)
++- Test: `tests/crew/errors.test.ts`
++
++**Interfaces:**
++- Produces: `type CrewMember`, `type Task<O>`, `enum CrewProcess`, `type CrewDef`, `type CrewOutcome`; `class CrewError extends FrameworkError`.
++
++- [ ] **Step 1: Add `CrewError` to `src/core/errors.ts`**
++
++Match the existing subclass pattern (e.g. `WorkflowError`); the base sets `name` via `new.target.name`, so no constructor is needed:
++
++```typescript
++export class CrewError extends FrameworkError {}
++```
++
++- [ ] **Step 2: Write `src/crew/types.ts`**
++
++```typescript
++import type { ToolSet } from 'ai';
++import type { z } from 'zod';
++import type {
++  Capability,
++  ModelDeclaration,
++  PreferPolicy,
++} from '../core/types.ts';
++
++/** A role-bearing team member. role/goal/backstory are prompt scaffolding;
++ *  the concrete model is resolved live by the selector from requires/prefer. */
++export type CrewMember = {
++  name: string; // stable id; used as the agent name + delegate tool name
++  role: string; // e.g. "Senior Research Analyst"
++  goal: string; // the member's individual objective
++  backstory: string; // persona/context that enriches its prompt
++  requires: Capability[]; // capability hard-filter for live model selection
++  prefer: PreferPolicy; // soft rank over survivors
++  tools?: ToolSet; // optional tools this member can call
++};
++
++/** A unit of work assigned to a member. expectedOutput is prompt guidance;
++ *  output (optional) is the enforced zod schema for typed hand-offs. */
++export type Task<O = unknown> = {
++  id: string;
++  description: string; // what to do (prompt)
++  expectedOutput: string; // what good output looks like (prompt guidance)
++  member: string; // CrewMember.name that runs this task
++  dependsOn?: string[]; // upstream task ids whose outputs are context
++  output?: z.ZodType<O>; // optional structured output; validated if present
++};
++
++export enum CrewProcess {
++  Sequential = 'sequential',
++  Hierarchical = 'hierarchical',
++}
++
++export type CrewDef = {
++  id: string;
++  description?: string;
++  members: CrewMember[];
++  tasks: Task[];
++  process: CrewProcess;
++  managerModel?: ModelDeclaration; // hierarchical only; defaults to the router
++};
++
++export type CrewOutcome =
++  | { kind: 'done'; output: unknown }
++  | { kind: 'failed'; failedTask?: string; message: string };
++```
++
++- [ ] **Step 3: Write the failing test `tests/crew/errors.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { CrewError } from '../../src/core/errors.ts';
++
++describe('CrewError', () => {
++  it('is an Error with the right name', () => {
++    const e = new CrewError('bad crew');
++    expect(e).toBeInstanceOf(Error);
++    expect(e.name).toBe('CrewError');
++    expect(e.message).toBe('bad crew');
++  });
++});
++```
++
++- [ ] **Step 4: Run tests + typecheck**
++
++Run: `bun test tests/crew/errors.test.ts && bun run typecheck`
++Expected: PASS; typecheck clean.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/crew/types.ts src/core/errors.ts tests/crew/errors.test.ts
++git commit -m "feat(crew): typed crew model + CrewError"
++```
++
++---
++
++## Task 2: `buildCrewAgent` (role/goal/backstory → Agent)
++
++**Files:**
++- Create: `src/crew/member-agent.ts`
++- Test: `tests/crew/member-agent.test.ts`
++
++**Interfaces:**
++- Consumes: `CrewMember` (Task 1); `Agent` from `src/core/agent-def.ts` (`{ name; description; model; systemPrompt; tools; modelDecl?; modelReq? }`); `createOllamaModel` from `src/providers/ollama.ts`; `qwenFast` default export from `models/qwen-fast.ts`; `Capability`/`PreferPolicy`/`ModelRequirement` from `src/core/types.ts`.
++- Produces: `function buildCrewAgent(member: CrewMember, tools?: ToolSet): Agent`.
++
++- [ ] **Step 1: Write the failing test `tests/crew/member-agent.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { buildCrewAgent } from '../../src/crew/member-agent.ts';
++import type { CrewMember } from '../../src/crew/types.ts';
++
++const member: CrewMember = {
++  name: 'researcher',
++  role: 'Senior Research Analyst',
++  goal: 'Find accurate, current facts on the topic',
++  backstory: 'You have 10 years scouring primary sources.',
++  requires: [Capability.Tools],
++  prefer: PreferPolicy.LargestThatFits,
++};
++
++describe('buildCrewAgent', () => {
++  it('composes role/goal/backstory into the system prompt', () => {
++    const agent = buildCrewAgent(member, {});
++    expect(agent.name).toBe('researcher');
++    expect(agent.systemPrompt).toContain('Senior Research Analyst');
++    expect(agent.systemPrompt).toContain('Find accurate, current facts');
++    expect(agent.systemPrompt).toContain('10 years scouring');
++    // description drives hierarchical routing → carries role + goal
++    expect(agent.description).toContain('Senior Research Analyst');
++  });
++
++  it('sets modelReq for live selection, not a hardcoded model choice', () => {
++    const agent = buildCrewAgent(member, {});
++    expect(agent.modelReq).toEqual({
++      role: 'Senior Research Analyst',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    });
++    // a default model is present (overridden live by the selector at delegation)
++    expect(agent.model).toBeDefined();
++  });
++
++  it('uses the member tools when provided', () => {
++    const tools = { probe: { description: 'x', inputSchema: undefined, execute: async () => ({}) } };
++    const agent = buildCrewAgent({ ...member, tools } as CrewMember);
++    expect(agent.tools).toBe(tools);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/crew/member-agent.test.ts`
++Expected: FAIL — module not found.
++
++- [ ] **Step 3: Write `src/crew/member-agent.ts`**
++
++```typescript
++import type { ToolSet } from 'ai';
++import qwenFast from '../../models/qwen-fast.ts';
++import type { Agent } from '../core/agent-def.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import type { CrewMember } from './types.ts';
++
++/** Compose a crew member's role/goal/backstory into an Agent. The model is a
++ *  default placeholder; the real model is chosen LIVE by the selector at
++ *  delegation (via modelReq + onBeforeDelegate), exactly like the preset agents. */
++export function buildCrewAgent(member: CrewMember, tools?: ToolSet): Agent {
++  const systemPrompt = [
++    `You are ${member.role}.`,
++    `Your goal: ${member.goal}`,
++    `Background: ${member.backstory}`,
++    'Do the task you are given. Use your tools when they help. Return only the result the task asks for — no preamble.',
++  ].join('\n');
++
++  return {
++    name: member.name,
++    description: `${member.role} — ${member.goal}`,
++    model: createOllamaModel(qwenFast),
++    systemPrompt,
++    tools: member.tools ?? tools ?? {},
++    modelDecl: qwenFast,
++    modelReq: {
++      role: member.role,
++      requires: member.requires,
++      prefer: member.prefer,
++    },
++  };
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck + lint**
++
++Run: `bun test tests/crew/member-agent.test.ts && bun run typecheck && bun run lint:file -- "src/crew/member-agent.ts"`
++Expected: PASS; clean.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/crew/member-agent.ts tests/crew/member-agent.test.ts
++git commit -m "feat(crew): buildCrewAgent composes role/goal/backstory"
++```
++
++---
++
++## Task 3: `defineCrew` static validation
++
++**Files:**
++- Create: `src/crew/define.ts`
++- Test: `tests/crew/define.test.ts`
++
++**Interfaces:**
++- Consumes: `CrewDef`, `CrewProcess`, `Task` (Task 1); `CrewError` (Task 1).
++- Produces: `function defineCrew(def: CrewDef): CrewDef` (returns unchanged if valid; throws `CrewError`). `function effectiveTaskDeps(task: Task, index: number, tasks: Task[]): string[]` (explicit `dependsOn`, else previous task, else `[]`) — exported for reuse by `compile.ts`.
++
++- [ ] **Step 1: Write the failing test `tests/crew/define.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { defineCrew, effectiveTaskDeps } from '../../src/crew/define.ts';
++import { CrewProcess, type CrewMember, type Task } from '../../src/crew/types.ts';
++
++const m = (name: string): CrewMember => ({
++  name, role: `${name} role`, goal: 'g', backstory: 'b',
++  requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits,
++});
++const t = (id: string, member: string, dependsOn?: string[]): Task => ({
++  id, description: 'd', expectedOutput: 'e', member, output: z.string(),
++  ...(dependsOn ? { dependsOn } : {}),
++});
++
++describe('defineCrew', () => {
++  it('accepts a valid sequential crew', () => {
++    const def = defineCrew({
++      id: 'c', process: CrewProcess.Sequential,
++      members: [m('a'), m('b')], tasks: [t('t1', 'a'), t('t2', 'b')],
++    });
++    expect(def.tasks).toHaveLength(2);
++  });
++
++  it('rejects a task assigned to an unknown member', () => {
++    expect(() => defineCrew({
++      id: 'c', process: CrewProcess.Sequential,
++      members: [m('a')], tasks: [t('t1', 'ghost')],
++    })).toThrow(/unknown member.*ghost/i);
++  });
++
++  it('rejects an unknown dependsOn target', () => {
++    expect(() => defineCrew({
++      id: 'c', process: CrewProcess.Sequential,
++      members: [m('a')], tasks: [t('t1', 'a'), t('t2', 'a', ['nope'])],
++    })).toThrow(/unknown.*nope/i);
++  });
++
++  it('rejects duplicate member names and task ids', () => {
++    expect(() => defineCrew({
++      id: 'c', process: CrewProcess.Sequential,
++      members: [m('a'), m('a')], tasks: [t('t1', 'a')],
++    })).toThrow(/duplicate member/i);
++    expect(() => defineCrew({
++      id: 'c', process: CrewProcess.Sequential,
++      members: [m('a')], tasks: [t('t1', 'a'), t('t1', 'a')],
++    })).toThrow(/duplicate task/i);
++  });
++
++  it('rejects a task dependency cycle', () => {
++    expect(() => defineCrew({
++      id: 'c', process: CrewProcess.Sequential,
++      members: [m('a')], tasks: [t('t1', 'a', ['t2']), t('t2', 'a', ['t1'])],
++    })).toThrow(/cycle/i);
++  });
++
++  it('effectiveTaskDeps defaults to the previous task', () => {
++    const tasks = [t('t1', 'a'), t('t2', 'a')];
++    expect(effectiveTaskDeps(tasks[0], 0, tasks)).toEqual([]);
++    expect(effectiveTaskDeps(tasks[1], 1, tasks)).toEqual(['t1']);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/crew/define.test.ts`
++Expected: FAIL — module not found.
++
++- [ ] **Step 3: Write `src/crew/define.ts`**
++
++```typescript
++import { CrewError } from '../core/errors.ts';
++import type { CrewDef, Task } from './types.ts';
++
++/** A task's effective dependencies: explicit dependsOn, else the previous task
++ *  (CrewAI sequential default), else [] for the first task. Shared with compile. */
++export function effectiveTaskDeps(
++  task: Task,
++  index: number,
++  tasks: Task[],
++): string[] {
++  if (task.dependsOn) return task.dependsOn;
++  return index === 0 ? [] : [tasks[index - 1].id];
++}
++
++/** Validate a crew at construction: unique member names + task ids, every
++ *  task.member and dependsOn resolves, and the task graph is acyclic. */
++export function defineCrew(def: CrewDef): CrewDef {
++  const memberNames = new Set<string>();
++  for (const member of def.members) {
++    if (memberNames.has(member.name)) {
++      throw new CrewError(`duplicate member name: ${member.name}`);
++    }
++    memberNames.add(member.name);
++  }
++
++  const taskIds = new Set<string>();
++  for (const task of def.tasks) {
++    if (taskIds.has(task.id)) {
++      throw new CrewError(`duplicate task id: ${task.id}`);
++    }
++    taskIds.add(task.id);
++  }
++
++  def.tasks.forEach((task, i) => {
++    if (!memberNames.has(task.member)) {
++      throw new CrewError(
++        `task ${task.id}: unknown member "${task.member}"`,
++      );
++    }
++    for (const dep of effectiveTaskDeps(task, i, def.tasks)) {
++      if (!taskIds.has(dep)) {
++        throw new CrewError(`task ${task.id}: unknown dependsOn "${dep}"`);
++      }
++    }
++  });
++
++  // Acyclic check via Kahn's topological sort over effective task deps.
++  const indeg = new Map<string, number>();
++  const dependents = new Map<string, string[]>();
++  def.tasks.forEach((t) => {
++    indeg.set(t.id, 0);
++    dependents.set(t.id, []);
++  });
++  def.tasks.forEach((task, i) => {
++    for (const dep of effectiveTaskDeps(task, i, def.tasks)) {
++      indeg.set(task.id, (indeg.get(task.id) ?? 0) + 1);
++      dependents.get(dep)?.push(task.id);
++    }
++  });
++  const queue = [...indeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
++  let visited = 0;
++  while (queue.length > 0) {
++    const id = queue.shift() as string;
++    visited++;
++    for (const next of dependents.get(id) ?? []) {
++      const d = (indeg.get(next) ?? 0) - 1;
++      indeg.set(next, d);
++      if (d === 0) queue.push(next);
++    }
++  }
++  if (visited !== def.tasks.length) {
++    throw new CrewError(`crew ${def.id} has a task dependency cycle`);
++  }
++
++  return def;
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck + lint**
++
++Run: `bun test tests/crew/define.test.ts && bun run typecheck && bun run lint:file -- "src/crew/define.ts"`
++Expected: PASS; clean.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/crew/define.ts tests/crew/define.test.ts
++git commit -m "feat(crew): defineCrew static validation"
++```
++
++---
++
++## Task 4: Crew telemetry span
++
++**Files:**
++- Modify: `src/telemetry/spans.ts` (extend `ATTR`; add `withCrewSpan`)
++- Test: `tests/telemetry/crew-spans.test.ts`
++
++**Interfaces:**
++- Consumes: the existing private `inSpan` helper + `ATTR` object in `spans.ts` (mirror `withWorkflowSpan`).
++- Produces: `ATTR.CREW_ID/CREW_PROCESS/CREW_TASK_MEMBER`; `withCrewSpan(crewId: string, process: string, fn: () => Promise<T>): Promise<T>`.
++
++- [ ] **Step 1: Write the failing test `tests/telemetry/crew-spans.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++import { ATTR, withCrewSpan, withStepSpan } from '../../src/telemetry/spans.ts';
++
++describe('crew spans', () => {
++  it('opens crew.run with id + process and nests child spans under it', async () => {
++    const { exporter } = registerTestProvider();
++    await withCrewSpan('research-crew', 'sequential', async () => {
++      await withStepSpan('t1', 'agent', async () => {});
++    });
++    const spans = exporter.getFinishedSpans();
++    const crew = spans.find((s) => s.name === 'crew.run');
++    const step = spans.find((s) => s.name === 'workflow.step');
++    expect(crew?.attributes[ATTR.CREW_ID]).toBe('research-crew');
++    expect(crew?.attributes[ATTR.CREW_PROCESS]).toBe('sequential');
++    expect(step?.parentSpanContext?.spanId).toBe(crew?.spanContext().spanId);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/telemetry/crew-spans.test.ts`
++Expected: FAIL — `withCrewSpan` not exported.
++
++- [ ] **Step 3: Extend `src/telemetry/spans.ts`**
++
++Add these keys to the `ATTR` object (before the closing `} as const;`):
++
++```typescript
++  CREW_ID: 'crew.id',
++  CREW_PROCESS: 'crew.process',
++  CREW_TASK_MEMBER: 'crew.task.member',
++```
++
++Add the helper (mirror the existing `withWorkflowSpan`, which wraps the private `inSpan`):
++
++```typescript
++/** Root span for a crew run. The nested workflow.run/workflow.step (sequential)
++ *  or agent.delegation (hierarchical) spans attach beneath it via active context. */
++export function withCrewSpan<T>(
++  crewId: string,
++  process: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('crew.run', async (span) => {
++    span.setAttribute(ATTR.CREW_ID, crewId);
++    span.setAttribute(ATTR.CREW_PROCESS, process);
++    return fn();
++  });
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck**
++
++Run: `bun test tests/telemetry/crew-spans.test.ts && bun run typecheck`
++Expected: PASS.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/telemetry/spans.ts tests/telemetry/crew-spans.test.ts
++git commit -m "feat(telemetry): crew.run span + crew ATTR keys"
++```
++
++---
++
++## Task 5: `compile.ts` — sequential → workflow, hierarchical → orchestrator
++
++**Files:**
++- Create: `src/crew/compile.ts`
++- Test: `tests/crew/compile.test.ts`
++
++**Interfaces:**
++- Consumes: `CrewDef`, `Task`, `CrewMember` (Task 1); `effectiveTaskDeps` (Task 3); `buildCrewAgent` (Task 2); `WorkflowDef` + `StepKind` + `AgentStep` from `src/workflow/types.ts`; `defineWorkflow` from `src/workflow/define.ts`; `createOrchestrator` + `BeforeDelegate` from `src/core/orchestrator.ts` / `src/core/delegate.ts`; `createOllamaModel` from `src/providers/ollama.ts`; `qwenRouter` default export from `models/qwen-router.ts`; `Agent` from `src/core/agent-def.ts`.
++- Produces:
++  - `function compileToWorkflow(crew: CrewDef): WorkflowDef`
++  - `function buildHierarchicalOrchestrator(crew: CrewDef, onBeforeDelegate?: BeforeDelegate): Agent`
++  - `function composeTaskInput(task: Task, ctx: Record<string, unknown>, deps: string[]): string` (exported for test/reuse)
++
++- [ ] **Step 1: Write the failing test `tests/crew/compile.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { buildHierarchicalOrchestrator, compileToWorkflow } from '../../src/crew/compile.ts';
++import { CrewProcess, type CrewDef } from '../../src/crew/types.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const crew: CrewDef = {
++  id: 'research', process: CrewProcess.Sequential,
++  members: [
++    { name: 'researcher', role: 'Analyst', goal: 'gather', backstory: 'b', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
++    { name: 'writer', role: 'Writer', goal: 'summarize', backstory: 'b', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
++  ],
++  tasks: [
++    { id: 'gather', description: 'Research the topic', expectedOutput: 'notes', member: 'researcher', output: z.string() },
++    { id: 'write', description: 'Write a summary', expectedOutput: '3 bullets', member: 'writer' },
++  ],
++};
++
++describe('compileToWorkflow', () => {
++  it('maps each task to an AgentStep with member as agent + resolved deps', () => {
++    const wf = compileToWorkflow(crew);
++    expect(wf.id).toBe('research');
++    expect(wf.steps).toHaveLength(2);
++    const [s0, s1] = wf.steps;
++    expect(s0.kind).toBe(StepKind.Agent);
++    expect((s0 as { agent: string }).agent).toBe('researcher');
++    expect((s1 as { agent: string }).agent).toBe('writer');
++    // second task defaults to depending on the first (CrewAI sequential)
++    expect(s1.dependsOn).toEqual(['gather']);
++    // task output default -> the step still validates (z.string() when omitted)
++    expect(s1.output).toBeDefined();
++  });
++
++  it('step input composes the task description + expected output', () => {
++    const wf = compileToWorkflow(crew);
++    const input = (wf.steps[0] as { input: (c: Record<string, unknown>) => string }).input({ input: 'AI safety' });
++    expect(input).toContain('Research the topic');
++    expect(input).toContain('notes');
++    expect(input).toContain('AI safety'); // root task sees the crew input
++  });
++});
++
++describe('buildHierarchicalOrchestrator', () => {
++  it('builds a manager Agent whose tools delegate to each member', () => {
++    const orch = buildHierarchicalOrchestrator({ ...crew, process: CrewProcess.Hierarchical });
++    // createOrchestrator returns an Agent with delegate_to_<member> tools
++    expect(orch.name).toBe('research');
++    expect(Object.keys(orch.tools)).toEqual(
++      expect.arrayContaining(['delegate_to_researcher', 'delegate_to_writer']),
++    );
++  });
++});
++```
++
++(If `delegateToolName` prefixes differently, assert the actual prefix produced by `src/core/delegate.ts` — check `delegateToolName` and match it.)
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/crew/compile.test.ts`
++Expected: FAIL — module not found.
++
++- [ ] **Step 3: Write `src/crew/compile.ts`**
++
++```typescript
++import { z } from 'zod';
++import qwenRouter from '../../models/qwen-router.ts';
++import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import { createOrchestrator } from '../core/orchestrator.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import {
++  type WorkflowDef,
++  StepKind,
++} from '../workflow/types.ts';
++import { defineWorkflow } from '../workflow/define.ts';
++import { buildCrewAgent } from './member-agent.ts';
++import { effectiveTaskDeps } from './define.ts';
++import type { CrewDef, Task } from './types.ts';
++
++/** Build the task-specific prompt: description + expected output + the outputs of
++ *  its dependency tasks (or the crew input for a root task). */
++export function composeTaskInput(
++  task: Task,
++  ctx: Record<string, unknown>,
++  deps: string[],
++): string {
++  const parts = [task.description, `Expected output: ${task.expectedOutput}`];
++  if (deps.length === 0) {
++    parts.push(`\nInput:\n${String(ctx.input ?? '')}`);
++  } else {
++    for (const dep of deps) {
++      const v = ctx[dep];
++      parts.push(
++        `\nContext from "${dep}":\n${typeof v === 'string' ? v : JSON.stringify(v)}`,
++      );
++    }
++  }
++  return parts.join('\n');
++}
++
++/** Sequential crew -> a WorkflowDef of agent steps (runs on the Slice-10 engine). */
++export function compileToWorkflow(crew: CrewDef): WorkflowDef {
++  const steps = crew.tasks.map((task, i) => {
++    const deps = effectiveTaskDeps(task, i, crew.tasks);
++    return {
++      id: task.id,
++      kind: StepKind.Agent as const,
++      agent: task.member,
++      dependsOn: deps,
++      input: (ctx: Record<string, unknown>) => composeTaskInput(task, ctx, deps),
++      output: task.output ?? z.string(),
++    };
++  });
++  // Reuse the workflow validator as a second gate (unique ids / acyclic).
++  return defineWorkflow({ id: crew.id, description: crew.description, steps });
++}
++
++/** Hierarchical crew -> the existing orchestrator with member agents as the team
++ *  and an auto manager (model defaults to the router). */
++export function buildHierarchicalOrchestrator(
++  crew: CrewDef,
++  onBeforeDelegate?: BeforeDelegate,
++): Agent {
++  const agents = crew.members.map((m) => buildCrewAgent(m, m.tools));
++  const taskList = crew.tasks
++    .map((t) => `- (${t.member}) ${t.description} -> ${t.expectedOutput}`)
++    .join('\n');
++  const systemPrompt = [
++    'You are the manager of a crew. You do not do the work yourself; you delegate each task to the best-suited member and combine their results.',
++    crew.description ? `Crew goal: ${crew.description}` : '',
++    `Tasks to complete:\n${taskList}`,
++  ]
++    .filter(Boolean)
++    .join('\n\n');
++
++  return createOrchestrator({
++    name: crew.id,
++    model: createOllamaModel(crew.managerModel ?? qwenRouter),
++    systemPrompt,
++    agents,
++    onBeforeDelegate,
++  });
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck + lint**
++
++Run: `bun test tests/crew/compile.test.ts && bun run typecheck && bun run lint:file -- "src/crew/compile.ts"`
++Expected: PASS; clean.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/crew/compile.ts tests/crew/compile.test.ts
++git commit -m "feat(crew): compile sequential->workflow, hierarchical->orchestrator"
++```
++
++---
++
++## Task 6: `runCrew` engine (dispatch by process) + thread `onBeforeDelegate` through `defaultRunAgentStep`
++
++**Files:**
++- Create: `src/crew/engine.ts`
++- Modify: `src/workflow/run-step.ts` (add optional `onBeforeDelegate` param to `defaultRunAgentStep` — backward compatible; enables live model selection in workflow + crew agent steps)
++- Test: `tests/crew/engine.test.ts`, `tests/workflow/run-step.test.ts` (add one assertion that the hook is threaded)
++
++**Interfaces:**
++- Consumes: `CrewDef`, `CrewProcess`, `CrewOutcome`, `CrewMember` (Task 1); `compileToWorkflow` + `buildHierarchicalOrchestrator` (Task 5); `buildCrewAgent` (Task 2); `withCrewSpan` (Task 4); `runWorkflow` + `WorkflowDeps` + `defaultRunAgentStep` from `src/workflow/engine.ts`; `runGuardedAgent` + `BeforeDelegate` from `src/core/delegate.ts`; `runOrchestrator` from `src/core/orchestrator.ts`; `Agent` from `src/core/agent-def.ts`; `ToolSet` from `ai`.
++- Produces (modified): `defaultRunAgentStep(agents: Record<string, Agent>, onBeforeDelegate?: BeforeDelegate): WorkflowDeps['runAgentStep']` — now passes `onBeforeDelegate` into `runGuardedAgent`.
++- Produces:
++  - `type CrewDeps = { runAgentStep?: WorkflowDeps['runAgentStep']; tools: ToolSet; maxParallel?: number; onBeforeDelegate?: import('../core/delegate.ts').BeforeDelegate }`
++  - `function crewAgentMap(crew: CrewDef, tools: ToolSet): Record<string, Agent>` (build member agents keyed by name)
++  - `function runCrew(def: CrewDef, input: unknown, deps: CrewDeps): Promise<CrewOutcome>`
++
++- [ ] **Step 1: Write the failing test `tests/crew/engine.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { runCrew } from '../../src/crew/engine.ts';
++import { CrewProcess, type CrewDef } from '../../src/crew/types.ts';
++
++const seqCrew: CrewDef = {
++  id: 'c', process: CrewProcess.Sequential,
++  members: [
++    { name: 'a', role: 'A', goal: 'g', backstory: 'b', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
++    { name: 'b', role: 'B', goal: 'g', backstory: 'b', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
++  ],
++  tasks: [
++    { id: 't1', description: 'do first', expectedOutput: 'x', member: 'a', output: z.string() },
++    { id: 't2', description: 'do second', expectedOutput: 'y', member: 'b', output: z.string() },
++  ],
++};
++
++describe('runCrew (sequential)', () => {
++  it('threads task output as context to the next task', async () => {
++    const seen: string[] = [];
++    const outcome = await runCrew(seqCrew, 'topic', {
++      tools: {},
++      // stub the agent runner: echo which member + whether it saw upstream context
++      runAgentStep: async (member, task) => {
++        seen.push(member);
++        return `${member}:${task.includes('t1') ? 'saw-t1' : 'root'}`;
++      },
++    });
++    expect(outcome.kind).toBe('done');
++    if (outcome.kind === 'done') {
++      const out = outcome.output as Record<string, unknown>;
++      expect(out.t1).toBe('a:root');
++      expect(out.t2).toBe('b:saw-t1'); // t2's prompt embedded t1's output under "Context from \"t1\""
++    }
++    expect(seen).toEqual(['a', 'b']);
++  });
++
++  it('reports a failed task via the outcome', async () => {
++    const outcome = await runCrew(seqCrew, 'topic', {
++      tools: {},
++      runAgentStep: async (member) => {
++        if (member === 'b') throw new Error('boom');
++        return 'ok';
++      },
++    });
++    expect(outcome).toMatchObject({ kind: 'failed', failedTask: 't2' });
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/crew/engine.test.ts`
++Expected: FAIL — module not found.
++
++- [ ] **Step 2b: Thread `onBeforeDelegate` through `defaultRunAgentStep` in `src/workflow/run-step.ts`**
++
++Change the signature to accept an optional hook and pass it into `runGuardedAgent` (backward compatible — existing callers pass nothing and behave exactly as before). Add `BeforeDelegate` to the existing `import type { ... } from '../core/delegate.ts'` line (which already imports `runGuardedAgent`):
++
++```typescript
++export function defaultRunAgentStep(
++  agents: Record<string, Agent>,
++  onBeforeDelegate?: BeforeDelegate,
++): WorkflowDeps['runAgentStep'] {
++  return async (agentName, task) => {
++    const agent = agents[agentName];
++    if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
++    const result = await runGuardedAgent(agent, task, onBeforeDelegate);
++    if ('error' in result) throw new WorkflowError(result.error);
++    return result.text;
++  };
++}
++```
++
++Add one assertion to `tests/workflow/run-step.test.ts` proving the hook is passed (e.g. a spy `onBeforeDelegate` that records the agent name it was called with when a real agent runs). Keep all existing run-step tests green (regression).
++
++- [ ] **Step 3: Write `src/crew/engine.ts`**
++
++```typescript
++import type { ToolSet } from 'ai';
++import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import { runOrchestrator } from '../core/orchestrator.ts';
++import { withCrewSpan } from '../telemetry/spans.ts';
++import {
++  type WorkflowDeps,
++  defaultRunAgentStep,
++  runWorkflow,
++} from '../workflow/engine.ts';
++import { buildHierarchicalOrchestrator, compileToWorkflow } from './compile.ts';
++import { buildCrewAgent } from './member-agent.ts';
++import { CrewProcess, type CrewDef, type CrewOutcome } from './types.ts';
++
++export type CrewDeps = {
++  runAgentStep?: WorkflowDeps['runAgentStep'];
++  tools: ToolSet;
++  maxParallel?: number;
++  onBeforeDelegate?: BeforeDelegate;
++};
++
++/** Build the crew's member agents keyed by name (for the sequential agent map). */
++export function crewAgentMap(crew: CrewDef, tools: ToolSet): Record<string, Agent> {
++  const map: Record<string, Agent> = {};
++  for (const member of crew.members) {
++    map[member.name] = buildCrewAgent(member, member.tools ?? tools);
++  }
++  return map;
++}
++
++/** Run a crew: sequential -> the Slice-10 workflow engine; hierarchical -> the
++ *  orchestrator. Wrapped in a crew.run span; never throws into the caller. */
++export function runCrew(
++  def: CrewDef,
++  input: unknown,
++  deps: CrewDeps,
++): Promise<CrewOutcome> {
++  return withCrewSpan(def.id, def.process, async () => {
++    if (def.process === CrewProcess.Sequential) {
++      const wf = compileToWorkflow(def);
++      const runAgentStep =
++        deps.runAgentStep ??
++        defaultRunAgentStep(crewAgentMap(def, deps.tools), deps.onBeforeDelegate);
++      const outcome = await runWorkflow(wf, input, {
++        runAgentStep,
++        tools: deps.tools,
++        maxParallel: deps.maxParallel,
++      });
++      if (outcome.kind === 'done') return { kind: 'done', output: outcome.output };
++      return {
++        kind: 'failed',
++        failedTask: outcome.failedStep,
++        message: outcome.message,
++      };
++    }
++
++    // Hierarchical: the orchestrator is the manager.
++    const orch = buildHierarchicalOrchestrator(def, deps.onBeforeDelegate);
++    const task = `${String(input)}\n\nComplete the crew's tasks by delegating to your members.`;
++    const result = await runOrchestrator(orch, task);
++    if (result.kind === 'answer') return { kind: 'done', output: result.text };
++    return { kind: 'failed', message: result.message };
++  });
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck + lint**
++
++Run: `bun test tests/crew/engine.test.ts && bun run typecheck && bun run lint:file -- "src/crew/engine.ts"`
++Expected: PASS; clean.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/crew/engine.ts tests/crew/engine.test.ts
++git commit -m "feat(crew): runCrew dispatches sequential/hierarchical under crew.run"
++```
++
++---
++
++## Task 7: Shared live-selection runtime + crew CLI + registry + `flow.ts` upgrade
++
++This task delivers the crew CLI **and** wires live, hardware-aware model selection into both the crew and workflow CLIs via one shared helper — so a member/role (or a workflow agent step) is resolved to the largest-model-that-fits at delegation, per the project's live-selection principle.
++
++**Files:**
++- Create: `src/cli/select-runtime.ts` (shared select-hook builder for the flow/crew CLIs), `src/cli/crew.ts`, `crews/index.ts`, `crews/research-crew.ts`
++- Modify: `src/cli/flow.ts` (build the selection runtime; thread `onBeforeDelegate` into `runFlow`'s agent steps), `package.json` (add `crew` script)
++- Test: `tests/cli/crew.test.ts`, `tests/cli/select-runtime.test.ts`, `tests/integration/crew.live.test.ts`
++
++**Interfaces:**
++- Consumes: `runCrew` + `CrewDeps` (Task 6); `defineCrew` (Task 3); `CrewDef`/`CrewProcess`/`CrewOutcome` (Task 1); `createRun`/`writeArtifact` (`src/run/run-store.ts`); `initRunTelemetry` (`src/telemetry/provider.ts`); `createFileTools`/`createFetchTools` (`src/mcp/client.ts`); `createModelManager` (`src/resource/model-manager.ts`); `buildRegistry` (`src/discovery/build-registry.ts`); `createSelectHook` (`src/cli/select-hook.ts`); `isModelInstalled`/`listLoadedModels`/`getModelKvArch` (`src/resource/ollama-control.ts`); `ResourceCapture` (`src/core/resource-capture.ts`); `BeforeDelegate` (`src/core/delegate.ts`). **Study `src/cli/chat.ts` lines 30–99 first — it contains the exact manager + registry + `createSelectHook` + `notify` wiring to extract.**
++- Produces:
++  - `src/cli/select-runtime.ts`: `export async function createSelectionRuntime(opts?: { pinned?: string[] }): Promise<{ onBeforeDelegate: BeforeDelegate; capture: ResourceCapture; close: () => Promise<void> }>` — builds a model manager + offline registry + a `createSelectHook` (largest-that-fits, live budget) + the one-line selection `notify`; `close()` calls `manager.unloadAll()`. This is the reusable version of `chat.ts`'s inline setup (chat.ts is left as-is in this slice; deduping it is an optional follow-up).
++  - `crews/index.ts`: `export const CREWS: Record<string, CrewDef>` + `export function getCrew(name: string): CrewDef | undefined`.
++  - `src/cli/crew.ts`: `export async function runCrewCli(deps: { def: CrewDef; input: unknown; runsRoot: string; runId: string; tools: ToolSet; onBeforeDelegate?: BeforeDelegate; runAgentStep?: CrewDeps['runAgentStep'] }): Promise<CrewOutcome>` + a `main()` that builds the selection runtime and passes `onBeforeDelegate` in.
++
++- [ ] **Step 0: Write the shared `src/cli/select-runtime.ts`** (extract chat.ts's selection wiring)
++
++```typescript
++import qwenRouter from '../../models/qwen-router.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { buildRegistry } from '../discovery/build-registry.ts';
++import { liveBudgetBytes } from '../resource/hardware.ts';
++import {
++  effectiveKvBytesPerToken,
++  f16KvBytesPerToken,
++} from '../resource/kv-cache.ts';
++import { createModelManager } from '../resource/model-manager.ts';
++import {
++  getModelKvArch,
++  isModelInstalled,
++  listLoadedModels,
++} from '../resource/ollama-control.ts';
++import { createSelectHook } from './select-hook.ts';
++import { formatSelectionNotice } from './selection-notice.ts';
++
++/** Live model-selection runtime (manager + offline registry + select-hook)
++ *  shared by the flow and crew CLIs. Agent steps / crew members are resolved to
++ *  the largest model that fits the live RAM budget at delegation. Mirrors the
++ *  inline setup in chat.ts (kept as-is; deduping chat.ts is a follow-up). */
++export async function createSelectionRuntime(opts?: {
++  pinned?: string[];
++}): Promise<{
++  onBeforeDelegate: BeforeDelegate;
++  capture: ResourceCapture;
++  close: () => Promise<void>;
++}> {
++  const manager = createModelManager();
++  const capture: ResourceCapture = {};
++  const announced = new Set<string>();
++
++  const notify = async (
++    decl: ModelDeclaration,
++    numCtx: number,
++  ): Promise<void> => {
++    if (announced.has(decl.model)) return;
++    announced.add(decl.model);
++    const [installed, budget, arch] = await Promise.all([
++      isModelInstalled(decl.model),
++      liveBudgetBytes(),
++      getModelKvArch(decl.model).catch(() => undefined),
++    ]);
++    const f16 = arch
++      ? f16KvBytesPerToken(arch)
++      : (decl.footprint.kvBytesPerToken ?? 131072);
++    const kvBytesPerToken = effectiveKvBytesPerToken(f16);
++    console.error(
++      formatSelectionNotice({
++        decl,
++        numCtx,
++        kvBytesPerToken,
++        budgetBytes: budget,
++        installed,
++      }),
++    );
++  };
++
++  const registry = await buildRegistry();
++  const onBeforeDelegate = createSelectHook({
++    registry,
++    ensureReady: (decl, o) => manager.ensureReady(decl, o),
++    listLoaded: () => listLoadedModels(),
++    pinned: opts?.pinned ?? [],
++    capture,
++    notify,
++  });
++
++  return { onBeforeDelegate, capture, close: () => manager.unloadAll() };
++}
++```
++
++Test `tests/cli/select-runtime.test.ts` (buildRegistry is offline-safe, so this runs without Ollama):
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { createSelectionRuntime } from '../../src/cli/select-runtime.ts';
++
++describe('createSelectionRuntime', () => {
++  it('returns a select hook + capture + close', async () => {
++    const rt = await createSelectionRuntime();
++    expect(typeof rt.onBeforeDelegate).toBe('function');
++    expect(rt.capture).toBeDefined();
++    await rt.close();
++  });
++});
++```
++
++Run: `bun test tests/cli/select-runtime.test.ts && bun run typecheck` → PASS. (Verify the `createSelectHook` argument names against `src/cli/select-hook.ts` — match them exactly; the block above mirrors `chat.ts` lines 74–82.)
++
++- [ ] **Step 1: Write the example `crews/research-crew.ts`**
++
++```typescript
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../src/core/types.ts';
++import { defineCrew } from '../src/crew/define.ts';
++import { CrewProcess } from '../src/crew/types.ts';
++
++/** A sequential research crew: researcher gathers, writer summarizes.
++ *  Crew input is the topic/URL. */
++export default defineCrew({
++  id: 'research-crew',
++  description: 'Research a topic and produce a short brief.',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'researcher',
++      role: 'Research Analyst',
++      goal: 'Gather accurate, relevant facts on the given topic',
++      backstory: 'You are meticulous and cite what you find.',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++    {
++      name: 'writer',
++      role: 'Technical Writer',
++      goal: 'Turn research notes into a clear 3-bullet brief',
++      backstory: 'You write tight, plain summaries.',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 'gather',
++      description: 'Research the topic given as input and produce concise notes.',
++      expectedOutput: 'A short list of key facts.',
++      member: 'researcher',
++      output: z.string(),
++    },
++    {
++      id: 'brief',
++      description: 'Using the research notes, write a 3-bullet brief.',
++      expectedOutput: 'Exactly 3 bullet points.',
++      member: 'writer',
++      dependsOn: ['gather'],
++      output: z.string(),
++    },
++  ],
++});
++```
++
++- [ ] **Step 2: Write the registry `crews/index.ts`**
++
++```typescript
++import type { CrewDef } from '../src/crew/types.ts';
++import researchCrew from './research-crew.ts';
++
++/** name -> crew definition (mirrors workflows/index.ts). */
++export const CREWS: Record<string, CrewDef> = {
++  [researchCrew.id]: researchCrew,
++};
++
++export function getCrew(name: string): CrewDef | undefined {
++  return CREWS[name];
++}
++```
++
++- [ ] **Step 3: Write the failing test `tests/cli/crew.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { mkdtemp, readFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { MockLanguageModelV3 } from 'ai/test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { runCrewCli } from '../../src/cli/crew.ts';
++import { defineCrew } from '../../src/crew/define.ts';
++import { CrewProcess, type CrewDef } from '../../src/crew/types.ts';
++
++// A crew whose members' default model is a mock (buildCrewAgent sets a real
++// default model; for the CLI test we inject a stubbed runAgentStep path by
++// using a sequential crew + MockLanguageModelV3-backed agents is heavy, so we
++// assert the run wiring via a crew that runs with the default agent map but a
++// mock model). Simplest: use a crew and a fake tools set; the mock model
++// returns a fixed string.
++const mockModel = new MockLanguageModelV3({
++  doGenerate: async () => ({
++    content: [{ type: 'text', text: 'result text' }],
++    finishReason: { unified: 'stop', raw: undefined },
++    usage: {
++      inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++      outputTokens: { total: 1, text: undefined, reasoning: undefined },
++    },
++    warnings: [],
++  }),
++});
++
++const crew: CrewDef = defineCrew({
++  id: 'demo-crew', process: CrewProcess.Sequential,
++  members: [{ name: 'a', role: 'A', goal: 'g', backstory: 'b', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits }],
++  tasks: [{ id: 't1', description: 'do', expectedOutput: 'x', member: 'a', output: z.string() }],
++});
++
++describe('runCrewCli', () => {
++  it('writes spans.jsonl with crew.run + result.txt on success', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'crew-'));
++    const outcome = await runCrewCli({
++      def: crew, input: 'hello', runsRoot, runId: 'r1', tools: {},
++      // deps hook: override the agent runner so no real model is needed
++      // (runCrewCli accepts an optional runAgentStep for tests)
++      runAgentStep: async () => 'result text',
++    } as never);
++    expect(outcome.kind).toBe('done');
++    const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
++    expect(spans).toContain('crew.run');
++    const result = await readFile(join(runsRoot, 'r1', 'result.txt'), 'utf8');
++    expect(result).toContain('result text');
++  });
++});
++```
++
++(Implementation note for Step 5: give `runCrewCli` an optional `runAgentStep?` field on its deps so this unit test can bypass a real model, mirroring how `runFlow`/`runWorkflow` accept injected deps. `mockModel` above is imported for parity with the flow test; if unused in the final wiring, drop the import to keep lint clean.)
++
++- [ ] **Step 4: Run test to verify it fails**
++
++Run: `bun test tests/cli/crew.test.ts`
++Expected: FAIL — `runCrewCli` not defined.
++
++- [ ] **Step 5: Write `src/cli/crew.ts`**
++
++```typescript
++import type { ToolSet } from 'ai';
++import { getCrew } from '../../crews/index.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { runCrew, type CrewDeps } from '../crew/engine.ts';
++import type { CrewDef, CrewOutcome } from '../crew/types.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { createSelectionRuntime } from './select-runtime.ts';
++
++export type CrewCliDeps = {
++  def: CrewDef;
++  input: unknown;
++  runsRoot: string;
++  runId: string;
++  tools: ToolSet;
++  onBeforeDelegate?: CrewDeps['onBeforeDelegate']; // live model selection
++  runAgentStep?: CrewDeps['runAgentStep']; // test seam
++};
++
++/** Run a crew with telemetry + artifact persistence (mirrors runFlow). */
++export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  const tel = initRunTelemetry(run.dir);
++  try {
++    const outcome = await runCrew(deps.def, deps.input, {
++      tools: deps.tools,
++      onBeforeDelegate: deps.onBeforeDelegate,
++      runAgentStep: deps.runAgentStep,
++    });
++    if (outcome.kind === 'done') {
++      const text =
++        typeof outcome.output === 'string'
++          ? outcome.output
++          : JSON.stringify(outcome.output, null, 2);
++      await writeArtifact(run, 'result.txt', text);
++    } else {
++      await writeArtifact(
++        run,
++        'failed.txt',
++        `task ${outcome.failedTask ?? '?'}: ${outcome.message}`,
++      );
++    }
++    return outcome;
++  } finally {
++    await tel.shutdown();
++  }
++}
++
++async function main(): Promise<void> {
++  const [name, ...rest] = process.argv.slice(2);
++  if (!name) {
++    console.error('Usage: bun run crew <name> [input...]');
++    process.exit(1);
++  }
++  const def = getCrew(name);
++  if (!def) {
++    console.error(`Unknown crew: ${name}`);
++    process.exit(1);
++  }
++
++  const fileServer = await createFileTools();
++  try {
++    const fetchServer = await createFetchTools();
++    try {
++      const selection = await createSelectionRuntime();
++      try {
++        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++        const outcome = await runCrewCli({
++          def,
++          input: rest.join(' ').trim(),
++          runsRoot: 'runs',
++          runId: `crew-${process.pid}`,
++          tools,
++          onBeforeDelegate: selection.onBeforeDelegate,
++        });
++        if (outcome.kind === 'done') {
++          console.log(
++            typeof outcome.output === 'string'
++              ? outcome.output
++              : JSON.stringify(outcome.output, null, 2),
++          );
++        } else {
++          console.error(
++            `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
++          );
++          process.exitCode = 1;
++        }
++      } finally {
++        await selection.close();
++      }
++    } finally {
++      await fetchServer.close();
++    }
++  } finally {
++    await fileServer.close();
++  }
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
++```
++
++- [ ] **Step 6: Add the `crew` script to `package.json`**
++
++In `scripts`, after `"flow"`:
++
++```json
++    "crew": "bun run src/cli/crew.ts",
++```
++
++- [ ] **Step 6b: Wire live selection into `src/cli/flow.ts`** (so workflows get it too)
++
++Add `onBeforeDelegate?: BeforeDelegate` to `FlowDeps` (import `BeforeDelegate` from `../core/delegate.ts`); thread it into the agent steps by changing `runFlow`'s `runWorkflow` call from `defaultRunAgentStep(deps.agents)` to `defaultRunAgentStep(deps.agents, deps.onBeforeDelegate)`. In `main()`, build the runtime and pass + close it, mirroring `crew.ts`:
++
++```typescript
++// inside main(), after mounting file+fetch servers, wrapping the runFlow call:
++const selection = await createSelectionRuntime();
++try {
++  // ...existing agent-map build + runFlow(...), adding:
++  //   onBeforeDelegate: selection.onBeforeDelegate,
++} finally {
++  await selection.close();
++}
++```
++
++Add `import { createSelectionRuntime } from './select-runtime.ts';` to `flow.ts`. Keep the existing `tests/cli/flow.test.ts` green (it calls `runFlow` directly without `onBeforeDelegate` — still valid since the field is optional). Run `bun test tests/cli/flow.test.ts && bun run typecheck` → PASS (regression: flow still works).
++
++- [ ] **Step 7: Write the live integration test `tests/integration/crew.live.test.ts`**
++
++Mirror the live-skip guard used by `tests/integration/workflow.live.test.ts` (copy its exact predicate — e.g. `ollamaReady()` + `describe.skipIf`). Body:
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++// Reuse the SAME skip mechanism workflow.live.test.ts uses (check that file
++// and copy its guard verbatim; the helper name/import must match the repo).
++import { ollamaReady } from '../helpers/ollama-ready.ts'; // <- match the real path used by workflow.live
++
++const live = await ollamaReady();
++const maybe = live ? it : it.skip;
++
++describe('crew.live', () => {
++  maybe('runs the sequential research crew end-to-end', async () => {
++    const { runCrewCli } = await import('../../src/cli/crew.ts');
++    const { getCrew } = await import('../../crews/index.ts');
++    const { createFetchTools, createFileTools } = await import('../../src/mcp/client.ts');
++    const { mkdtemp } = await import('node:fs/promises');
++    const { tmpdir } = await import('node:os');
++    const { join } = await import('node:path');
++
++    const def = getCrew('research-crew');
++    expect(def).toBeDefined();
++    const fileServer = await createFileTools();
++    const fetchServer = await createFetchTools();
++    try {
++      const runsRoot = await mkdtemp(join(tmpdir(), 'crewlive-'));
++      const outcome = await runCrewCli({
++        def: def!, input: 'the example.com domain', runsRoot, runId: 'live',
++        tools: { ...fileServer.tools, ...fetchServer.tools },
++      });
++      expect(outcome.kind).toBe('done');
++    } finally {
++      await fetchServer.close();
++      await fileServer.close();
++    }
++  }, 180_000);
++});
++```
++
++- [ ] **Step 8: Run tests + full gate**
++
++Run: `bun test tests/cli/select-runtime.test.ts tests/cli/crew.test.ts tests/cli/flow.test.ts && bun run typecheck && bun run lint:file -- "src/cli/select-runtime.ts" "src/cli/crew.ts" "src/cli/flow.ts" "crews/*.ts" && bun test`
++Expected: unit tests PASS; flow regression green; live test skips when Ollama down; typecheck + lint clean; full suite green.
++
++- [ ] **Step 9: Commit**
++
++```bash
++git add src/cli/select-runtime.ts src/cli/crew.ts src/cli/flow.ts crews/ package.json tests/cli/select-runtime.test.ts tests/cli/crew.test.ts tests/integration/crew.live.test.ts
++git commit -m "feat(crew): crew CLI + registry + example; live model selection for flow+crew CLIs"
++```
++
++---
++
++## Task 8: Architecture doc — Crews & roles section (docs hard line)
++
++**Files:**
++- Modify: `docs/architecture.md` (add §13 + §2 module-map `src/crew/` node/edges)
++
++**Interfaces:** none (docs). REQUIRED for `bun run docs:check` (the pre-commit gate blocks a new `src/<subsystem>` that isn't documented).
++
++- [ ] **Step 1: Add a "§13 Crews & roles" section to `docs/architecture.md`**
++
++Insert after the Workflow section, in the file's existing voice. Content must match the shipped code:
++
++```markdown
++## 13. Crews & roles (Slice 11)
++
++A CrewAI-style **role/task/process** layer — a thin composition over the workflow
++engine (§9/§12) and the orchestrator (Glossary), NOT a new engine.
++
++- **Types** (`src/crew/types.ts`): `CrewMember` (`role`/`goal`/`backstory` +
++  `requires`/`prefer` for **live** model selection + optional `tools`), `Task`
++  (`description` + `expectedOutput` prompt + `member` + `dependsOn` context edges
++  + optional zod `output`), `enum CrewProcess { Sequential, Hierarchical }`,
++  `CrewDef`, `CrewOutcome`.
++- **Member → agent** (`src/crew/member-agent.ts`): `buildCrewAgent` composes
++  role/goal/backstory into an `Agent.systemPrompt`, sets `description` (routing)
++  and `modelReq` (the model is chosen live by the selector — no hardcoded model).
++  This is the only genuinely new mechanism.
++- **Validation** (`src/crew/define.ts`): `defineCrew` — unique member names + task
++  ids, every `member`/`dependsOn` resolves, acyclic (Kahn) — throws `CrewError`.
++- **Compile** (`src/crew/compile.ts`): **sequential** `compileToWorkflow` maps each
++  task to an `AgentStep` (member = agent, `dependsOn` = context edges, output
++  `?? z.string()`) → a `WorkflowDef` run by the **existing** engine; **hierarchical**
++  `buildHierarchicalOrchestrator` reuses `createOrchestrator` + an auto manager
++  (model defaults to the router).
++- **Engine** (`src/crew/engine.ts`): `runCrew(def, input, deps)` dispatches by
++  process under a `crew.run` span; reuses `runGuardedAgent` (Slice-9 guardrails)
++  and the live selector. Never throws into the caller.
++- **Entry** (`src/cli/crew.ts`): `bun run crew <name> [input...]` over the `crews/`
++  registry; writes `runs/<id>/{spans.jsonl, result.txt|failed.txt}`; rendered by
++  `bun run runs`.
++- **Live model selection** (`src/cli/select-runtime.ts`): the crew CLI (and now the
++  workflow CLI) build a shared `createSelectionRuntime` — model manager + offline
++  registry + `createSelectHook` — so each member/role is resolved to the
++  largest-model-that-fits at delegation (threaded via `defaultRunAgentStep`'s
++  `onBeforeDelegate` for sequential, `createOrchestrator` for hierarchical).
++- **Telemetry** (`src/telemetry/spans.ts`): `crew.run` root span
++  (`ATTR.CREW_ID`, `CREW_PROCESS`) → nested `workflow.step` (sequential) or
++  `agent.delegation` (hierarchical).
++
++Feeds Slice 12 (Memory/RAG — members read from it) and Slice 13 (verification — a
++verifier is just another member/task). Out of scope (v1): memory, CrewAI "Flows"
++(our DAG already is that), planning / batch kickoff / human-in-the-loop tasks.
++```
++
++- [ ] **Step 2: Update the §2 module map + dependency table**
++
++Add a `CREW["Crews · src/crew"]` subgraph (types/define/member-agent/compile/engine) and edges: `crewcli(crew.ts) → crewengine`; `crewengine → wfengine` (sequential) and `crewengine → orch` (hierarchical); `crewengine → spans`; `crew → members build agents`; add a `crews/* · CREWS` node to the Declarations subgraph; a `Crews / roles` dependency-table row (`src/crew/` → `workflow/engine.ts` + `core/orchestrator.ts` + `core/delegate.ts (runGuardedAgent)` + `telemetry/spans.ts` + Zod). Also add a `select-runtime.ts` node under CLI with edges `crew.ts → select-runtime` and `flow.ts → select-runtime` (live model selection now shared by both CLIs), and note it depends on `resource/model-manager` + `discovery/build-registry` + `select-hook`. Match the existing Mermaid/table style exactly (read §2 first).
++
++- [ ] **Step 3: Run docs-check + full gate**
++
++Run: `bun run docs:check && bun run typecheck && bun run lint && bun test`
++Expected: docs-check PASS; typecheck + lint clean; full suite green (live tests skip if Ollama down).
++
++- [ ] **Step 4: Commit**
++
++```bash
++git add docs/architecture.md
++git commit -m "docs(slice-11): document crews & roles in architecture.md"
++```
++
++---
++
++## Final verification (before PR)
++
++- [ ] `bun run check` (docs-check · typecheck · lint · test) GREEN.
++- [ ] `bun run serve` then `bun run crew research-crew "the example.com domain"` runs end-to-end; writes `runs/<id>/spans.jsonl` + `result.txt`.
++- [ ] `bun run runs <id>` shows `crew.run → workflow.step → agent.delegation`.
++- [ ] Existing workflow + orchestrator + delegate tests still pass (crews only *use* them; no engine change).
++- [ ] Refresh `resume-here.md` with the merge state.
++
++---
++
++## Self-review notes (plan author)
++
++**Spec coverage:** §2.1 types → Task 1; §2.2 member-agent → Task 2; §2.3 define → Task 3; §2.7 telemetry → Task 4; §2.4 compile → Task 5; §2.5 engine → Task 6; §2.8 CLI + registry → Task 7; §8 docs → Task 8. §5 testing across Tasks 1-7 (unit) + Task 7 (live). §4 determinism = sequential-via-DAG + acyclic defineCrew + hierarchical-bounded-by-depth-guard. §7 acceptance = Final verification.
++
++**Latest-internet validation (standing rule [[prefers-latest-methodology]]):** the 2026 CrewAI model was validated during brainstorming — crews = role/goal/backstory (prompt scaffolding) + tasks-with-context + sequential|hierarchical process; we already own both processes + a stronger zod I/O, so the plan builds ONLY the thin role/task layer and reuses the engine/orchestrator. No Flows, no parallel structured-output system, no memory (Slice 12).
++
++**Type consistency:** `buildCrewAgent(member, tools?)` signature identical in Task 2 (def) and Tasks 5/6 (consumers). `effectiveTaskDeps` defined Task 3, used Task 5. `compileToWorkflow`/`buildHierarchicalOrchestrator` defined Task 5, used Task 6. `withCrewSpan`/`ATTR.CREW_*` defined Task 4, used Task 6. `runCrew`/`CrewDeps` defined Task 6, used Task 7. `CrewOutcome` (`{done,output}` | `{failed,failedTask?,message}`) consistent across Tasks 1/6/7.
++
++**Known v1 simplifications (documented):** hierarchical crew passes a composite task string to the orchestrator (manager delegates autonomously) rather than enforcing task order — matches CrewAI hierarchical semantics; sequential is the deterministic path. The CLI test injects `runAgentStep` to avoid a real model (mirrors the flow test seam).
++
++**Live model selection (wired in this slice — user-requested):** members carry `modelReq`, and the CLI now wires a real select-hook via `createSelectionRuntime` (Task 7), so each member/role is resolved to the largest-that-fits model at delegation. Threading: sequential path → `defaultRunAgentStep(agents, onBeforeDelegate)` → `runGuardedAgent(agent, task, onBeforeDelegate)` (Task 6 run-step change); hierarchical path → `onBeforeDelegate` passed to `createOrchestrator`. **Also upgrades the workflow CLI** (`flow.ts`) via the same shared helper. Unit tests bypass real models by injecting `runAgentStep`. `chat.ts` keeps its own inline setup (deduping it into `createSelectionRuntime` is an optional follow-up, out of scope here to avoid regressing the chat path).
++
++**Type consistency (selection):** `defaultRunAgentStep(agents, onBeforeDelegate?)` (Task 6) — `onBeforeDelegate` optional so existing callers (Slice-10 tests, current flow test) stay valid. `CrewDeps.onBeforeDelegate` (Task 6) → `CrewCliDeps.onBeforeDelegate` (Task 7) → `createSelectionRuntime().onBeforeDelegate` (Task 7), all typed `BeforeDelegate` from `src/core/delegate.ts`.
+diff --git a/docs/superpowers/specs/2026-07-01-slice-11-crews-design.md b/docs/superpowers/specs/2026-07-01-slice-11-crews-design.md
+new file mode 100644
+index 0000000..b3dab5f
+--- /dev/null
++++ b/docs/superpowers/specs/2026-07-01-slice-11-crews-design.md
+@@ -0,0 +1,145 @@
++# Slice 11 — Crews & roles — design
++
++**Date:** 2026-07-01
++**Status:** approved (brainstorm complete) → ready for implementation plan
++**Depends on:** Slice 2 (agents/orchestrator/delegate), Slice 5 (live model selection via `modelReq`), Slice 9 (guardrails — depth + return cap), Slice 10 (workflow/DAG engine + telemetry).
++**Feeds:** Slice 12 (Memory/RAG — crew members will *read* from it), Slice 13 (grounded verification — a verifier is just another member/task).
++
++---
++
++## 1. Problem & goal
++
++We have two orchestration primitives: the **LLM router** (agents-as-tools, non-deterministic) and the **deterministic workflow DAG** (Slice 10). We lack the **CrewAI layer**: agents with an explicit **role + goal**, a **task list**, and a **process** (sequential or hierarchical) that assembles a *team working toward a goal*. This slice adds that as a thin composition layer.
++
++### Validated framing (latest CrewAI, 2026)
++A crew reduces to three things: **(1)** `role`/`goal`/`backstory` on an agent — *pure prompt scaffolding* (three strings composed into the system prompt; no structural machinery); **(2)** `Task`s = description + expected-output + dependency `context`; **(3)** a **process** — `sequential` or `hierarchical` (a manager delegating to capability-matched workers). Modern CrewAI also splits **Flows** (deterministic orchestration) from **Crews** (autonomous collaboration).
++
++**We already own the substrate**, so most of "crews" is naming + two compile functions, not a new engine:
++- **Sequential process** ≈ a linear **workflow of agent steps** → the Slice-10 DAG (our zod I/O is *stronger* than CrewAI's `output_pydantic`).
++- **Hierarchical process** ≈ a **manager delegating to workers** → the **agents-as-tools orchestrator already is this**.
++- **"Flows"** ≈ what our workflow DAG already is — not built.
++- **Memory** — deferred to Slice 12; NOT part of the crews layer.
++
++### Locked decisions (from brainstorm)
++1. **Both processes** ship: `sequential` compiles to a `WorkflowDef` (runs on the Slice-10 engine unchanged); `hierarchical` reuses `createOrchestrator` + a manager.
++2. **Define-your-own members.** A crew declares its own members (`{name, role, goal, backstory, requires, prefer, tools?}`); the model is resolved **live by the existing selector** (largest-that-fits) via `onBeforeDelegate`, exactly like today's agents. Not limited to the 3 preset agents.
++3. **Optional per-task zod output.** A `Task` may declare a zod `output` schema (validated via the Slice-10 `safeParse` path, passed typed to downstream tasks); if omitted, the task returns free text (default).
++4. **Auto-built hierarchical manager** — reuse `createOrchestrator`; manager model defaults to the router (`managerModel` overridable). Zero hand-written manager code.
++5. **No new engine / no parallel structured-output system / no Flows / no memory** — reuse or defer.
++6. **Entry = `bun run crew <name>` + a `crews/` registry**, plus a `runCrew(def, input, deps)` core API. A crew run writes the same `runs/<id>/spans.jsonl` + artifact the run-viewer renders.
++7. **Telemetry-to-emit (mandated):** a `crew.run` root span (`ATTR.CREW_ID`, `CREW_PROCESS`) under which the existing `workflow.run/workflow.step` (sequential) or `agent.delegation` (hierarchical) spans nest, annotated with the member (`ATTR.CREW_TASK_MEMBER`).
++8. **Architecture-doc update (mandated):** add a "Crews & roles" section (§13) + module-map `src/crew/` node/edges to `docs/architecture.md`.
++
++---
++
++## 2. Components (new dir `src/crew/`)
++
++### 2.1 `src/crew/types.ts` (the typed model)
++```ts
++import type { ToolSet } from 'ai';
++import type { z } from 'zod';
++import type { Capability, PreferPolicy } from '../core/types.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++
++/** A role-bearing team member. role/goal/backstory are prompt scaffolding;
++ *  the concrete model is resolved live by the selector from requires/prefer. */
++export type CrewMember = {
++  name: string;                 // stable id; used as the agent name + delegate tool name
++  role: string;                 // e.g. "Senior Research Analyst"
++  goal: string;                 // the member's individual objective
++  backstory: string;            // persona/context that enriches its prompt
++  requires: Capability[];       // capability hard-filter for model selection
++  prefer: PreferPolicy;         // e.g. LargestThatFits
++  tools?: ToolSet;              // optional tools this member can call
++};
++
++/** A unit of work assigned to a member. expectedOutput is prompt guidance;
++ *  output (optional) is the enforced zod schema for typed hand-offs. */
++export type Task<O = unknown> = {
++  id: string;
++  description: string;          // what to do (prompt)
++  expectedOutput: string;       // what good output looks like (prompt guidance)
++  member: string;               // CrewMember.name that runs this task
++  dependsOn?: string[];         // upstream task ids whose outputs are context (CrewAI `context`)
++  output?: z.ZodType<O>;        // optional structured output; validated if present
++};
++
++export enum CrewProcess { Sequential = 'sequential', Hierarchical = 'hierarchical' }
++
++export type CrewDef = {
++  id: string;
++  description?: string;
++  members: CrewMember[];
++  tasks: Task[];
++  process: CrewProcess;
++  managerModel?: ModelDeclaration; // hierarchical only; defaults to the router
++};
++
++export type CrewOutcome =
++  | { kind: 'done'; output: unknown }        // sequential: the WorkflowContext; hierarchical: the manager's answer
++  | { kind: 'failed'; failedTask?: string; message: string };
++```
++
++### 2.2 `src/crew/member-agent.ts` (the one real new mechanism)
++`buildCrewAgent(member: CrewMember, tools?: ToolSet): Agent` — composes `role`/`goal`/`backstory` (+ a standard crew preamble) into an `Agent.systemPrompt`; sets `Agent.description` from role+goal (used for hierarchical routing); sets `Agent.modelReq = { role: member.role, requires: member.requires, prefer: member.prefer }` so the live selector picks the model; merges `member.tools ?? tools`. No model is bound here — selection stays live (same path as preset agents).
++
++### 2.3 `src/crew/define.ts` (builder + static validation)
++`defineCrew(def: CrewDef): CrewDef` — validates at construction: unique member names; unique task ids; every `task.member` resolves to a member; every `dependsOn` resolves to a task; and (sequential) the task graph is acyclic. Throws `CrewError` (new in `src/core/errors.ts`, extends `FrameworkError`) on any violation.
++
++### 2.4 `src/crew/compile.ts` (the two constructors)
++- **Sequential → `compileToWorkflow(crew): WorkflowDef`** — each `Task` → an `AgentStep`: `agent = task.member`; `dependsOn = task.dependsOn` (the CrewAI `context` edges). The member's persona already lives in its agent `systemPrompt` (via `buildCrewAgent`), so the step's `input(ctx)` composes only the *task-specific* prompt = `task.description` + `task.expectedOutput` + the referenced upstream outputs (`ctx[depId]` for each dep). `output = task.output ?? z.string()`. Returns a `WorkflowDef` run by the **existing** Slice-10 engine (no engine change). `defineWorkflow` is applied to the compiled def as a second validation.
++- **Hierarchical → `buildHierarchicalOrchestrator(crew): Agent`** — build member `Agent`s via `buildCrewAgent`; `createOrchestrator({ name: crew.id, model: createOllamaModel(crew.managerModel ?? qwenRouter), systemPrompt: <manager prompt from crew.description + goal + the task list>, agents: members, onBeforeDelegate })`. The existing orchestrator IS the manager.
++
++### 2.5 `src/crew/engine.ts` (dispatcher)
++`runCrew(def, input, deps): Promise<CrewOutcome>` — `withCrewSpan(def.id, def.process, …)` wrapping:
++- **sequential:** `compileToWorkflow(def)` → `runWorkflow(wf, input, { runAgentStep, tools })` where `runAgentStep` resolves member agents (built via `buildCrewAgent`) through `runGuardedAgent`. Map `WorkflowOutcome` → `CrewOutcome`.
++- **hierarchical:** `buildHierarchicalOrchestrator(def)` → `runOrchestrator(orch, <composite task from input + tasks>)`. Map `OrchestratorResult` → `CrewOutcome`.
++`deps` (injectable for tests): `{ runAgentStep?, tools, maxParallel? }`; defaults wire member agents + mounted tools.
++
++### 2.6 `src/core/errors.ts` (extend)
++`export class CrewError extends FrameworkError {}` — matches the existing subclass pattern (`name` set by the base via `new.target.name`).
++
++### 2.7 `src/telemetry/spans.ts` (extend — additive)
++`ATTR` gains `CREW_ID: 'crew.id'`, `CREW_PROCESS: 'crew.process'`, `CREW_TASK_MEMBER: 'crew.task.member'`. New `withCrewSpan(crewId, process, fn)` (root `crew.run`). The existing `workflow.run/workflow.step` (sequential) and `agent.delegation` (hierarchical) spans nest beneath it unchanged; `annotateStep`/an annotate helper tags the running member. Transport/OTLP seam untouched.
++
++### 2.8 `src/cli/crew.ts` (entry) + `crews/` (registry)
++- `bun run crew <name> [input...]` (package.json: `"crew": "bun run src/cli/crew.ts"`). Mirrors `flow.ts`: mount the same MCP tools, `getCrew(name)`, build member agents, `runCrew`, write `runs/<id>/{spans.jsonl, result.txt|failed.txt}`, print result / non-zero exit on `failed`.
++- `crews/index.ts` (`CREWS: Record<string, CrewDef>` + `getCrew`) + ≥1 real example: a **sequential research crew** — member `researcher` (fetch tools) runs a "gather" task → member `writer` runs a "summarize" task consuming the researcher's output.
++
++---
++
++## 3. Data flow
++```
++crew <name>  (or runCrew(def, input))
++  → withCrewSpan(def.id, def.process)                     root: crew.run
++    sequential:  compileToWorkflow(def) → runWorkflow(...)   → workflow.run → workflow.step (per task) → agent.delegation
++    hierarchical: buildHierarchicalOrchestrator(def) → runOrchestrator(composite task)  → agent.delegation (manager routes to members)
++  → CrewOutcome {done|failed} → writeArtifact(result.txt|failed.txt) + flush spans
++  → `bun run runs <id>` renders crew.run → (workflow.step | agent.delegation) tree
++```
++Member model selection, depth/return guardrails, and typed step I/O are all inherited from Slices 5/9/10 unchanged.
++
++## 4. Error handling & determinism
++- **Sequential = deterministic** (DAG; fail-fast + per-task `onError` via the engine; acyclic enforced at `defineCrew` + `defineWorkflow`).
++- **Hierarchical = autonomous** (manager decides allocation; bounded by the Slice-9 depth guard so it always terminates).
++- `defineCrew` rejects malformed crews at construction. `runCrew` never throws into the caller (engine + orchestrator both already uphold this).
++
++## 5. Testing (TDD)
++- `tests/crew/define.test.ts` — unique-name/id, unknown-member, unknown-dep, cycle rejection; valid crew passes.
++- `tests/crew/member-agent.test.ts` — `buildCrewAgent` composes role/goal/backstory into systemPrompt + sets description + modelReq; no model bound.
++- `tests/crew/compile.test.ts` — sequential crew → a `WorkflowDef` with one `AgentStep` per task, deps preserved, `output` defaulting to `z.string()`.
++- `tests/crew/engine.test.ts` — sequential threads typed context between tasks (stub `runAgentStep`); hierarchical routes via a mock manager/orchestrator (no model). Uses injected deps.
++- `tests/cli/crew.test.ts` — `runCrew` over a temp `runsRoot` with `MockLanguageModelV3` members writes `spans.jsonl` (`crew.run` + nested spans) + the artifact; failed crew → `failed` outcome.
++- `tests/integration/crew.live.test.ts` (skips if Ollama down) — a real 2-member sequential research crew produces a coherent span tree.
++- Regression: existing workflow + orchestrator tests still pass (crews only *use* them).
++
++## 6. Out of scope (later)
++Memory/RAG (Slice 12 — members read from it, not part of crews) · grounded verification (Slice 13 — a verifier is another member/task) · CrewAI "Flows" (our DAG already is that) · planning / `kickoff_for_each` batch · human-in-the-loop tasks · async task execution beyond the engine's existing bounded concurrency.
++
++## 7. Acceptance
++- `bun run check` green (docs-check · typecheck · lint · test); live tests skip cleanly when Ollama is down.
++- `defineCrew` rejects malformed crews; a sequential crew compiles to and runs on the Slice-10 engine with typed context between tasks; a hierarchical crew delegates via the existing orchestrator + manager.
++- Members enforce the Slice-9 guardrails and use the live model selector (no hardcoded models).
++- `bun run crew <name> <input>` runs end-to-end (live), writes `runs/<id>/spans.jsonl`; `bun run runs <id>` shows `crew.run → (workflow.step | agent.delegation)`.
++- No regression to the workflow engine or the orchestrator.
++- `docs/architecture.md` gains a Crews section (passes `docs:check`).
+diff --git a/package.json b/package.json
+index ba0cbf3..29cfcf5 100644
+--- a/package.json
++++ b/package.json
+@@ -9,20 +9,21 @@
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+     "lint:file": "biome check",
+     "lint:claude": "bun run lint",
+     "docs:check": "bun run scripts/docs-check.ts",
+     "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
+     "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
+     "discover": "bun run src/cli/discover.ts",
+     "flow": "bun run src/cli/flow.ts",
++    "crew": "bun run src/cli/crew.ts",
+     "runs": "bun run src/cli/runs.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/mcp": "^1.0.56",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/context-async-hooks": "^2.8.0",
+     "@opentelemetry/core": "^2.8.0",
+     "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
+diff --git a/src/cli/crew.ts b/src/cli/crew.ts
+new file mode 100644
+index 0000000..5e37acb
+--- /dev/null
++++ b/src/cli/crew.ts
+@@ -0,0 +1,104 @@
++import type { ToolSet } from 'ai';
++import { getCrew } from '../../crews/index.ts';
++import { type CrewDeps, runCrew } from '../crew/engine.ts';
++import type { CrewDef, CrewOutcome } from '../crew/types.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { createSelectionRuntime } from './select-runtime.ts';
++
++export type CrewCliDeps = {
++  def: CrewDef;
++  input: unknown;
++  runsRoot: string;
++  runId: string;
++  tools: ToolSet;
++  onBeforeDelegate?: CrewDeps['onBeforeDelegate']; // live model selection
++  runAgentStep?: CrewDeps['runAgentStep']; // test seam
++};
++
++/** Run a crew with telemetry + artifact persistence (mirrors runFlow). */
++export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  const tel = initRunTelemetry(run.dir);
++  try {
++    const outcome = await runCrew(deps.def, deps.input, {
++      tools: deps.tools,
++      onBeforeDelegate: deps.onBeforeDelegate,
++      runAgentStep: deps.runAgentStep,
++    });
++    if (outcome.kind === 'done') {
++      const text =
++        typeof outcome.output === 'string'
++          ? outcome.output
++          : JSON.stringify(outcome.output, null, 2);
++      await writeArtifact(run, 'result.txt', text);
++    } else {
++      await writeArtifact(
++        run,
++        'failed.txt',
++        `task ${outcome.failedTask ?? '?'}: ${outcome.message}`,
++      );
++    }
++    return outcome;
++  } finally {
++    await tel.shutdown();
++  }
++}
++
++async function main(): Promise<void> {
++  const [name, ...rest] = process.argv.slice(2);
++  if (!name) {
++    console.error('Usage: bun run crew <name> [input...]');
++    process.exit(1);
++  }
++  const def = getCrew(name);
++  if (!def) {
++    console.error(`Unknown crew: ${name}`);
++    process.exit(1);
++  }
++
++  const fileServer = await createFileTools();
++  try {
++    const fetchServer = await createFetchTools();
++    try {
++      const selection = await createSelectionRuntime();
++      try {
++        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++        const outcome = await runCrewCli({
++          def,
++          input: rest.join(' ').trim(),
++          runsRoot: 'runs',
++          runId: `crew-${process.pid}`,
++          tools,
++          onBeforeDelegate: selection.onBeforeDelegate,
++        });
++        if (outcome.kind === 'done') {
++          console.log(
++            typeof outcome.output === 'string'
++              ? outcome.output
++              : JSON.stringify(outcome.output, null, 2),
++          );
++        } else {
++          console.error(
++            `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
++          );
++          process.exitCode = 1;
++        }
++      } finally {
++        await selection.close();
++      }
++    } finally {
++      await fetchServer.close();
++    }
++  } finally {
++    await fileServer.close();
++  }
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
+diff --git a/src/cli/flow.ts b/src/cli/flow.ts
+index 38a69fa..19852e1 100644
+--- a/src/cli/flow.ts
++++ b/src/cli/flow.ts
+@@ -1,52 +1,55 @@
+ import type { ToolSet } from 'ai';
+ import { createFileQaAgent } from '../../agents/file-qa.ts';
+ import { createWebFetchAgent } from '../../agents/web-fetch.ts';
+ import { getWorkflow } from '../../workflows/index.ts';
+ import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
+ import { WorkflowError } from '../core/errors.ts';
+ import { createFetchTools, createFileTools } from '../mcp/client.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
+ import { initRunTelemetry } from '../telemetry/provider.ts';
+ import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
+ import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
+ import type {
+   WorkflowContext,
+   WorkflowDef,
+   WorkflowOutcome,
+ } from '../workflow/types.ts';
++import { createSelectionRuntime } from './select-runtime.ts';
+ 
+ export type FlowDeps = {
+   def: WorkflowDef;
+   input: unknown;
+   runsRoot: string;
+   runId: string;
+   agents: Record<string, Agent>;
+   tools: ToolSet;
++  onBeforeDelegate?: BeforeDelegate; // live model selection
+ };
+ 
+ /** The last step's validated output, rendered as text (as-is if string, else pretty JSON). */
+ function lastStepOutputText(def: WorkflowDef, output: WorkflowContext): string {
+   const last = def.steps.at(-1);
+   if (!last) throw new WorkflowError(`workflow ${def.id} has no steps`);
+   const value = output[last.id];
+   return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+ }
+ 
+ /** Run a workflow with telemetry + artifact persistence (mirrors runChat). */
+ export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+   const tel = initRunTelemetry(run.dir);
+   try {
+     return await withWorkflowSpan(deps.def.id, async () => {
+       const outcome = await runWorkflow(deps.def, deps.input, {
+-        runAgentStep: defaultRunAgentStep(deps.agents),
++        runAgentStep: defaultRunAgentStep(deps.agents, deps.onBeforeDelegate),
+         tools: deps.tools,
+       });
+       annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
+       if (outcome.kind === 'done') {
+         await writeArtifact(
+           run,
+           'result.txt',
+           lastStepOutputText(deps.def, outcome.output),
+         );
+       } else {
+@@ -72,42 +75,48 @@ async function main(): Promise<void> {
+   const def = getWorkflow(name);
+   if (!def) {
+     console.error(`Unknown workflow: ${name}`);
+     process.exit(1);
+   }
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+-      const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
+-      const agents: Record<string, Agent> = {};
+-      const fileQa = createFileQaAgent(fileServer.tools);
+-      const webFetch = createWebFetchAgent(fetchServer.tools);
+-      agents[fileQa.name] = fileQa;
+-      agents[webFetch.name] = webFetch;
++      const selection = await createSelectionRuntime();
++      try {
++        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++        const agents: Record<string, Agent> = {};
++        const fileQa = createFileQaAgent(fileServer.tools);
++        const webFetch = createWebFetchAgent(fetchServer.tools);
++        agents[fileQa.name] = fileQa;
++        agents[webFetch.name] = webFetch;
+ 
+-      const outcome = await runFlow({
+-        def,
+-        input: rest.join(' ').trim(),
+-        runsRoot: 'runs',
+-        runId: `flow-${process.pid}`,
+-        agents,
+-        tools,
+-      });
+-      if (outcome.kind === 'done') {
+-        console.log(lastStepOutputText(def, outcome.output));
+-      } else {
+-        console.error(
+-          `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
+-        );
+-        process.exitCode = 1;
++        const outcome = await runFlow({
++          def,
++          input: rest.join(' ').trim(),
++          runsRoot: 'runs',
++          runId: `flow-${process.pid}`,
++          agents,
++          tools,
++          onBeforeDelegate: selection.onBeforeDelegate,
++        });
++        if (outcome.kind === 'done') {
++          console.log(lastStepOutputText(def, outcome.output));
++        } else {
++          console.error(
++            `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
++          );
++          process.exitCode = 1;
++        }
++      } finally {
++        await selection.close();
+       }
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+   }
+ }
+ 
+ if (import.meta.main) {
+diff --git a/src/cli/select-runtime.ts b/src/cli/select-runtime.ts
+new file mode 100644
+index 0000000..81b5742
+--- /dev/null
++++ b/src/cli/select-runtime.ts
+@@ -0,0 +1,71 @@
++import type { BeforeDelegate } from '../core/delegate.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { buildRegistry } from '../discovery/build-registry.ts';
++import { liveBudgetBytes } from '../resource/hardware.ts';
++import {
++  effectiveKvBytesPerToken,
++  f16KvBytesPerToken,
++} from '../resource/kv-cache.ts';
++import { createModelManager } from '../resource/model-manager.ts';
++import {
++  getModelKvArch,
++  isModelInstalled,
++  listLoadedModels,
++} from '../resource/ollama-control.ts';
++import { createSelectHook } from './select-hook.ts';
++import { formatSelectionNotice } from './selection-notice.ts';
++
++/** Live model-selection runtime (manager + offline registry + select-hook)
++ *  shared by the flow and crew CLIs. Agent steps / crew members are resolved to
++ *  the largest model that fits the live RAM budget at delegation. Mirrors the
++ *  inline setup in chat.ts (kept as-is; deduping chat.ts is a follow-up). */
++export async function createSelectionRuntime(opts?: {
++  pinned?: string[];
++}): Promise<{
++  onBeforeDelegate: BeforeDelegate;
++  capture: ResourceCapture;
++  close: () => Promise<void>;
++}> {
++  const manager = createModelManager();
++  const capture: ResourceCapture = {};
++  const announced = new Set<string>();
++
++  const notify = async (
++    decl: ModelDeclaration,
++    numCtx: number,
++  ): Promise<void> => {
++    if (announced.has(decl.model)) return;
++    announced.add(decl.model);
++    const [installed, budget, arch] = await Promise.all([
++      isModelInstalled(decl.model),
++      liveBudgetBytes(),
++      getModelKvArch(decl.model).catch(() => undefined),
++    ]);
++    const f16 = arch
++      ? f16KvBytesPerToken(arch)
++      : (decl.footprint.kvBytesPerToken ?? 131072);
++    const kvBytesPerToken = effectiveKvBytesPerToken(f16);
++    console.error(
++      formatSelectionNotice({
++        decl,
++        numCtx,
++        kvBytesPerToken,
++        budgetBytes: budget,
++        installed,
++      }),
++    );
++  };
++
++  const registry = await buildRegistry();
++  const onBeforeDelegate = createSelectHook({
++    registry,
++    ensureReady: (decl, o) => manager.ensureReady(decl, o),
++    listLoaded: () => listLoadedModels(),
++    pinned: opts?.pinned ?? [],
++    capture,
++    notify,
++  });
++
++  return { onBeforeDelegate, capture, close: () => manager.unloadAll() };
++}
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+index cd8de67..71ae338 100644
+--- a/src/core/errors.ts
++++ b/src/core/errors.ts
+@@ -19,10 +19,13 @@ export class MaxStepsError extends FrameworkError {
+     super(message);
+     this.steps = steps;
+   }
+ }
+ 
+ /** A model cannot fit the machine's memory budget. */
+ export class ResourceError extends FrameworkError {}
+ 
+ /** A workflow definition or execution error. */
+ export class WorkflowError extends FrameworkError {}
++
++/** A crew definition or execution error. */
++export class CrewError extends FrameworkError {}
+diff --git a/src/crew/compile.ts b/src/crew/compile.ts
+new file mode 100644
+index 0000000..f620dd0
+--- /dev/null
++++ b/src/crew/compile.ts
+@@ -0,0 +1,77 @@
++import { z } from 'zod';
++import qwenRouter from '../../models/qwen-router.ts';
++import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import { createOrchestrator } from '../core/orchestrator.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import { defineWorkflow } from '../workflow/define.ts';
++import { StepKind, type WorkflowDef } from '../workflow/types.ts';
++import { effectiveTaskDeps } from './define.ts';
++import { buildCrewAgent } from './member-agent.ts';
++import type { CrewDef, Task } from './types.ts';
++
++/** Build the task-specific prompt: description + expected output + the outputs of
++ *  its dependency tasks (or the crew input for a root task). */
++export function composeTaskInput(
++  task: Task,
++  ctx: Record<string, unknown>,
++  deps: string[],
++): string {
++  const parts = [task.description, `Expected output: ${task.expectedOutput}`];
++  if (deps.length === 0) {
++    parts.push(`\nInput:\n${String(ctx.input ?? '')}`);
++  } else {
++    for (const dep of deps) {
++      const v = ctx[dep];
++      parts.push(
++        `\nContext from "${dep}":\n${typeof v === 'string' ? v : JSON.stringify(v)}`,
++      );
++    }
++  }
++  return parts.join('\n');
++}
++
++/** Sequential crew -> a WorkflowDef of agent steps (runs on the Slice-10 engine). */
++export function compileToWorkflow(crew: CrewDef): WorkflowDef {
++  const steps = crew.tasks.map((task, i) => {
++    const deps = effectiveTaskDeps(task, i, crew.tasks);
++    return {
++      id: task.id,
++      kind: StepKind.Agent as const,
++      agent: task.member,
++      dependsOn: deps,
++      input: (ctx: Record<string, unknown>) =>
++        composeTaskInput(task, ctx, deps),
++      output: task.output ?? z.string(),
++    };
++  });
++  // Reuse the workflow validator as a second gate (unique ids / acyclic).
++  return defineWorkflow({ id: crew.id, description: crew.description, steps });
++}
++
++/** Hierarchical crew -> the existing orchestrator with member agents as the team
++ *  and an auto manager (model defaults to the router). */
++export function buildHierarchicalOrchestrator(
++  crew: CrewDef,
++  onBeforeDelegate?: BeforeDelegate,
++): Agent {
++  const agents = crew.members.map((m) => buildCrewAgent(m, m.tools));
++  const taskList = crew.tasks
++    .map((t) => `- (${t.member}) ${t.description} -> ${t.expectedOutput}`)
++    .join('\n');
++  const systemPrompt = [
++    'You are the manager of a crew. You do not do the work yourself; you delegate each task to the best-suited member and combine their results.',
++    crew.description ? `Crew goal: ${crew.description}` : '',
++    `Tasks to complete:\n${taskList}`,
++  ]
++    .filter(Boolean)
++    .join('\n\n');
++
++  return createOrchestrator({
++    name: crew.id,
++    model: createOllamaModel(crew.managerModel ?? qwenRouter),
++    systemPrompt,
++    agents,
++    onBeforeDelegate,
++  });
++}
+diff --git a/src/crew/define.ts b/src/crew/define.ts
+new file mode 100644
+index 0000000..2703ecb
+--- /dev/null
++++ b/src/crew/define.ts
+@@ -0,0 +1,78 @@
++import { CrewError } from '../core/errors.ts';
++import type { CrewDef, Task } from './types.ts';
++
++/** A task's effective dependencies: explicit dependsOn, else the previous task
++ *  (CrewAI sequential default), else [] for the first task. Shared with compile. */
++export function effectiveTaskDeps(
++  task: Task,
++  index: number,
++  tasks: Task[],
++): string[] {
++  if (task.dependsOn) return task.dependsOn;
++  if (index === 0) return [];
++  const prevTask = tasks[index - 1];
++  return prevTask ? [prevTask.id] : [];
++}
++
++/** Validate a crew at construction: unique member names + task ids, every
++ *  task.member and dependsOn resolves, and the task graph is acyclic. */
++export function defineCrew(def: CrewDef): CrewDef {
++  const memberNames = new Set<string>();
++  for (const member of def.members) {
++    if (memberNames.has(member.name)) {
++      throw new CrewError(`duplicate member name: ${member.name}`);
++    }
++    memberNames.add(member.name);
++  }
++
++  const taskIds = new Set<string>();
++  for (const task of def.tasks) {
++    if (taskIds.has(task.id)) {
++      throw new CrewError(`duplicate task id: ${task.id}`);
++    }
++    taskIds.add(task.id);
++  }
++
++  def.tasks.forEach((task, i) => {
++    if (!memberNames.has(task.member)) {
++      throw new CrewError(`task ${task.id}: unknown member "${task.member}"`);
++    }
++    for (const dep of effectiveTaskDeps(task, i, def.tasks)) {
++      if (!taskIds.has(dep)) {
++        throw new CrewError(`task ${task.id}: unknown dependsOn "${dep}"`);
++      }
++    }
++  });
++
++  // Acyclic check via Kahn's topological sort over effective task deps.
++  const indeg = new Map<string, number>();
++  const dependents = new Map<string, string[]>();
++  def.tasks.forEach((t) => {
++    indeg.set(t.id, 0);
++    dependents.set(t.id, []);
++  });
++  def.tasks.forEach((task, i) => {
++    for (const dep of effectiveTaskDeps(task, i, def.tasks)) {
++      indeg.set(task.id, (indeg.get(task.id) ?? 0) + 1);
++      dependents.get(dep)?.push(task.id);
++    }
++  });
++  const queue = [...indeg.entries()]
++    .filter(([, d]) => d === 0)
++    .map(([id]) => id);
++  let visited = 0;
++  while (queue.length > 0) {
++    const id = queue.shift() as string;
++    visited++;
++    for (const next of dependents.get(id) ?? []) {
++      const d = (indeg.get(next) ?? 0) - 1;
++      indeg.set(next, d);
++      if (d === 0) queue.push(next);
++    }
++  }
++  if (visited !== def.tasks.length) {
++    throw new CrewError(`crew ${def.id} has a task dependency cycle`);
++  }
++
++  return def;
++}
+diff --git a/src/crew/engine.ts b/src/crew/engine.ts
+new file mode 100644
+index 0000000..9faca3b
+--- /dev/null
++++ b/src/crew/engine.ts
+@@ -0,0 +1,74 @@
++import type { ToolSet } from 'ai';
++import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import { runOrchestrator } from '../core/orchestrator.ts';
++import { withCrewSpan } from '../telemetry/spans.ts';
++import {
++  defaultRunAgentStep,
++  runWorkflow,
++  type WorkflowDeps,
++} from '../workflow/engine.ts';
++import { buildHierarchicalOrchestrator, compileToWorkflow } from './compile.ts';
++import { buildCrewAgent } from './member-agent.ts';
++import { type CrewDef, type CrewOutcome, CrewProcess } from './types.ts';
++
++export type CrewDeps = {
++  runAgentStep?: WorkflowDeps['runAgentStep'];
++  tools: ToolSet;
++  maxParallel?: number;
++  onBeforeDelegate?: BeforeDelegate;
++};
++
++/** Build the crew's member agents keyed by name (for the sequential agent map). */
++export function crewAgentMap(
++  crew: CrewDef,
++  tools: ToolSet,
++): Record<string, Agent> {
++  const map: Record<string, Agent> = {};
++  for (const member of crew.members) {
++    map[member.name] = buildCrewAgent(member, member.tools ?? tools);
++  }
++  return map;
++}
++
++/** Run a crew: sequential -> the Slice-10 workflow engine; hierarchical -> the
++ *  orchestrator. Wrapped in a crew.run span. The sequential path never throws
++ *  (runWorkflow converts every step failure into a `failed` outcome); the
++ *  hierarchical path inherits runOrchestrator's behavior, which rethrows on an
++ *  unhandled (non-gap/non-resource) failure. */
++export function runCrew(
++  def: CrewDef,
++  input: unknown,
++  deps: CrewDeps,
++): Promise<CrewOutcome> {
++  return withCrewSpan(def.id, def.process, async () => {
++    if (def.process === CrewProcess.Sequential) {
++      const wf = compileToWorkflow(def);
++      const runAgentStep =
++        deps.runAgentStep ??
++        defaultRunAgentStep(
++          crewAgentMap(def, deps.tools),
++          deps.onBeforeDelegate,
++        );
++      const outcome = await runWorkflow(wf, input, {
++        runAgentStep,
++        tools: deps.tools,
++        maxParallel: deps.maxParallel,
++      });
++      if (outcome.kind === 'done')
++        return { kind: 'done', output: outcome.output };
++      return {
++        kind: 'failed',
++        failedTask: outcome.failedStep,
++        message: outcome.message,
++      };
++    }
++
++    // Hierarchical: the orchestrator is the manager.
++    const orch = buildHierarchicalOrchestrator(def, deps.onBeforeDelegate);
++    const task = `${String(input)}\n\nComplete the crew's tasks by delegating to your members.`;
++    const result = await runOrchestrator(orch, task);
++    if (result.kind === 'answer') return { kind: 'done', output: result.text };
++    return { kind: 'failed', message: result.message };
++  });
++}
+diff --git a/src/crew/member-agent.ts b/src/crew/member-agent.ts
+new file mode 100644
+index 0000000..0aa0d70
+--- /dev/null
++++ b/src/crew/member-agent.ts
+@@ -0,0 +1,31 @@
++import type { ToolSet } from 'ai';
++import qwenFast from '../../models/qwen-fast.ts';
++import type { Agent } from '../core/agent-def.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import type { CrewMember } from './types.ts';
++
++/** Compose a crew member's role/goal/backstory into an Agent. The model is a
++ *  default placeholder; the real model is chosen LIVE by the selector at
++ *  delegation (via modelReq + onBeforeDelegate), exactly like the preset agents. */
++export function buildCrewAgent(member: CrewMember, tools?: ToolSet): Agent {
++  const systemPrompt = [
++    `You are ${member.role}.`,
++    `Your goal: ${member.goal}`,
++    `Background: ${member.backstory}`,
++    'Do the task you are given. Use your tools when they help. Return only the result the task asks for — no preamble.',
++  ].join('\n');
++
++  return {
++    name: member.name,
++    description: `${member.role} — ${member.goal}`,
++    model: createOllamaModel(qwenFast),
++    systemPrompt,
++    tools: member.tools ?? tools ?? {},
++    modelDecl: qwenFast,
++    modelReq: {
++      role: member.role,
++      requires: member.requires,
++      prefer: member.prefer,
++    },
++  };
++}
+diff --git a/src/crew/types.ts b/src/crew/types.ts
+new file mode 100644
+index 0000000..e611f9c
+--- /dev/null
++++ b/src/crew/types.ts
+@@ -0,0 +1,48 @@
++import type { ToolSet } from 'ai';
++import type { z } from 'zod';
++import type {
++  Capability,
++  ModelDeclaration,
++  PreferPolicy,
++} from '../core/types.ts';
++
++/** A role-bearing team member. role/goal/backstory are prompt scaffolding;
++ *  the concrete model is resolved live by the selector from requires/prefer. */
++export type CrewMember = {
++  name: string; // stable id; used as the agent name + delegate tool name
++  role: string; // e.g. "Senior Research Analyst"
++  goal: string; // the member's individual objective
++  backstory: string; // persona/context that enriches its prompt
++  requires: Capability[]; // capability hard-filter for live model selection
++  prefer: PreferPolicy; // soft rank over survivors
++  tools?: ToolSet; // optional tools this member can call
++};
++
++/** A unit of work assigned to a member. expectedOutput is prompt guidance;
++ *  output (optional) is the enforced zod schema for typed hand-offs. */
++export type Task<O = unknown> = {
++  id: string;
++  description: string; // what to do (prompt)
++  expectedOutput: string; // what good output looks like (prompt guidance)
++  member: string; // CrewMember.name that runs this task
++  dependsOn?: string[]; // upstream task ids whose outputs are context
++  output?: z.ZodType<O>; // optional structured output; validated if present
++};
++
++export enum CrewProcess {
++  Sequential = 'sequential',
++  Hierarchical = 'hierarchical',
++}
++
++export type CrewDef = {
++  id: string;
++  description?: string;
++  members: CrewMember[];
++  tasks: Task[];
++  process: CrewProcess;
++  managerModel?: ModelDeclaration; // hierarchical only; defaults to the router
++};
++
++export type CrewOutcome =
++  | { kind: 'done'; output: unknown }
++  | { kind: 'failed'; failedTask?: string; message: string };
+diff --git a/src/telemetry/spans.ts b/src/telemetry/spans.ts
+index 75b8403..fd39257 100644
+--- a/src/telemetry/spans.ts
++++ b/src/telemetry/spans.ts
+@@ -25,20 +25,23 @@ export const ATTR = {
+   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
+   GUARDRAIL_TYPE: 'agent.guardrail.type',
+   DELEGATION_DEPTH: 'agent.delegation.depth',
+   DELEGATION_ANCESTORS: 'agent.delegation.ancestors',
+   WORKFLOW_ID: 'workflow.id',
+   WORKFLOW_OUTCOME: 'workflow.outcome',
+   STEP_ID: 'workflow.step.id',
+   STEP_KIND: 'workflow.step.kind',
+   STEP_BRANCH_TAKEN: 'workflow.step.branch.taken',
+   STEP_MAP_COUNT: 'workflow.step.map.count',
++  CREW_ID: 'crew.id',
++  CREW_PROCESS: 'crew.process',
++  CREW_TASK_MEMBER: 'crew.task.member',
+ } as const;
+ 
+ export type ModelSelectInfo = {
+   modelId: string;
+   provider: string;
+   numCtx: number;
+   paramsBillions?: number;
+ };
+ 
+ export type ModelLoadInfo = {
+@@ -202,10 +205,24 @@ export function withStepSpan<T>(
+     return fn();
+   });
+ }
+ 
+ /** Set extra attributes on the active step span (branch decision, map count). */
+ export function annotateStep(attrs: Record<string, string | number>): void {
+   const span = trace.getActiveSpan();
+   if (!span) return;
+   for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
+ }
++
++/** Root span for a crew run. The nested workflow.run/workflow.step (sequential)
++ *  or agent.delegation (hierarchical) spans attach beneath it via active context. */
++export function withCrewSpan<T>(
++  crewId: string,
++  process: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('crew.run', async (span) => {
++    span.setAttribute(ATTR.CREW_ID, crewId);
++    span.setAttribute(ATTR.CREW_PROCESS, process);
++    return fn();
++  });
++}
+diff --git a/src/workflow/run-step.ts b/src/workflow/run-step.ts
+index 0794108..41092f1 100644
+--- a/src/workflow/run-step.ts
++++ b/src/workflow/run-step.ts
+@@ -1,13 +1,13 @@
+ import type { ToolSet } from 'ai';
+ import type { Agent } from '../core/agent-def.ts';
+-import { runGuardedAgent } from '../core/delegate.ts';
++import { type BeforeDelegate, runGuardedAgent } from '../core/delegate.ts';
+ import { WorkflowError } from '../core/errors.ts';
+ import { ATTR, annotateStep } from '../telemetry/spans.ts';
+ import {
+   type MapSubStep,
+   type Step,
+   StepKind,
+   type WorkflowContext,
+ } from './types.ts';
+ 
+ /** Conservative thrash-avoidance hint; the model manager's live-RAM budget is the
+@@ -24,25 +24,26 @@ export type WorkflowDeps = {
+   tools: ToolSet;
+   /** Engine-wide concurrency cap; defaults to DEFAULT_MAX_PARALLEL. */
+   maxParallel?: number;
+ };
+ 
+ /** Default runAgentStep: resolve the agent by name, run it through the shared
+  *  guarded path; a guard/agent error becomes a thrown WorkflowError (the engine
+  *  then applies the step's onError policy). */
+ export function defaultRunAgentStep(
+   agents: Record<string, Agent>,
++  onBeforeDelegate?: BeforeDelegate,
+ ): WorkflowDeps['runAgentStep'] {
+   return async (agentName, task) => {
+     const agent = agents[agentName];
+     if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
+-    const result = await runGuardedAgent(agent, task);
++    const result = await runGuardedAgent(agent, task, onBeforeDelegate);
+     if ('error' in result) throw new WorkflowError(result.error);
+     return result.text;
+   };
+ }
+ 
+ /** Bounded-concurrency map preserving input order. */
+ export async function mapWithConcurrency<T, R>(
+   items: T[],
+   limit: number,
+   fn: (item: T, i: number) => Promise<R>,
+diff --git a/tests/cli/crew.test.ts b/tests/cli/crew.test.ts
+new file mode 100644
+index 0000000..1787bb1
+--- /dev/null
++++ b/tests/cli/crew.test.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, it } from 'bun:test';
++import { mkdtemp, readFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { z } from 'zod';
++import { runCrewCli } from '../../src/cli/crew.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { defineCrew } from '../../src/crew/define.ts';
++import { type CrewDef, CrewProcess } from '../../src/crew/types.ts';
++
++const crew: CrewDef = defineCrew({
++  id: 'demo-crew',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'a',
++      role: 'A',
++      goal: 'g',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 't1',
++      description: 'do',
++      expectedOutput: 'x',
++      member: 'a',
++      output: z.string(),
++    },
++  ],
++});
++
++describe('runCrewCli', () => {
++  it('writes spans.jsonl with crew.run + result.txt on success', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'crew-'));
++    const outcome = await runCrewCli({
++      def: crew,
++      input: 'hello',
++      runsRoot,
++      runId: 'r1',
++      tools: {},
++      // deps hook: override the agent runner so no real model is needed
++      runAgentStep: async () => 'result text',
++    } as never);
++    expect(outcome.kind).toBe('done');
++    const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
++    expect(spans).toContain('crew.run');
++    const result = await readFile(join(runsRoot, 'r1', 'result.txt'), 'utf8');
++    expect(result).toContain('result text');
++  });
++});
+diff --git a/tests/cli/select-runtime.test.ts b/tests/cli/select-runtime.test.ts
+new file mode 100644
+index 0000000..6766a72
+--- /dev/null
++++ b/tests/cli/select-runtime.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, it } from 'bun:test';
++import { createSelectionRuntime } from '../../src/cli/select-runtime.ts';
++
++describe('createSelectionRuntime', () => {
++  it('returns a select hook + capture + close', async () => {
++    const rt = await createSelectionRuntime();
++    expect(typeof rt.onBeforeDelegate).toBe('function');
++    expect(rt.capture).toBeDefined();
++    await rt.close();
++  });
++});
+diff --git a/tests/crew/compile.test.ts b/tests/crew/compile.test.ts
+new file mode 100644
+index 0000000..c4ccad8
+--- /dev/null
++++ b/tests/crew/compile.test.ts
+@@ -0,0 +1,88 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import {
++  buildHierarchicalOrchestrator,
++  compileToWorkflow,
++} from '../../src/crew/compile.ts';
++import { type CrewDef, CrewProcess } from '../../src/crew/types.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const crew: CrewDef = {
++  id: 'research',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'researcher',
++      role: 'Analyst',
++      goal: 'gather',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++    {
++      name: 'writer',
++      role: 'Writer',
++      goal: 'summarize',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 'gather',
++      description: 'Research the topic',
++      expectedOutput: 'notes',
++      member: 'researcher',
++      output: z.string(),
++    },
++    {
++      id: 'write',
++      description: 'Write a summary',
++      expectedOutput: '3 bullets',
++      member: 'writer',
++    },
++  ],
++};
++
++describe('compileToWorkflow', () => {
++  it('maps each task to an AgentStep with member as agent + resolved deps', () => {
++    const wf = compileToWorkflow(crew);
++    expect(wf.id).toBe('research');
++    expect(wf.steps).toHaveLength(2);
++    const [s0, s1] = wf.steps;
++    if (!s0 || !s1) throw new Error('expected two steps');
++    expect(s0.kind).toBe(StepKind.Agent);
++    expect((s0 as { agent: string }).agent).toBe('researcher');
++    expect((s1 as { agent: string }).agent).toBe('writer');
++    // second task defaults to depending on the first (CrewAI sequential)
++    expect(s1.dependsOn).toEqual(['gather']);
++    // task output default -> the step still validates (z.string() when omitted)
++    expect(s1.output).toBeDefined();
++  });
++
++  it('step input composes the task description + expected output', () => {
++    const wf = compileToWorkflow(crew);
++    const input = (
++      wf.steps[0] as { input: (c: Record<string, unknown>) => string }
++    ).input({ input: 'AI safety' });
++    expect(input).toContain('Research the topic');
++    expect(input).toContain('notes');
++    expect(input).toContain('AI safety'); // root task sees the crew input
++  });
++});
++
++describe('buildHierarchicalOrchestrator', () => {
++  it('builds a manager Agent whose tools delegate to each member', () => {
++    const orch = buildHierarchicalOrchestrator({
++      ...crew,
++      process: CrewProcess.Hierarchical,
++    });
++    // createOrchestrator returns an Agent with delegate_to_<member> tools
++    expect(orch.name).toBe('research');
++    expect(Object.keys(orch.tools)).toEqual(
++      expect.arrayContaining(['delegate_to_researcher', 'delegate_to_writer']),
++    );
++  });
++});
+diff --git a/tests/crew/define.test.ts b/tests/crew/define.test.ts
+new file mode 100644
+index 0000000..b947cac
+--- /dev/null
++++ b/tests/crew/define.test.ts
+@@ -0,0 +1,98 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { defineCrew, effectiveTaskDeps } from '../../src/crew/define.ts';
++import {
++  type CrewMember,
++  CrewProcess,
++  type Task,
++} from '../../src/crew/types.ts';
++
++const m = (name: string): CrewMember => ({
++  name,
++  role: `${name} role`,
++  goal: 'g',
++  backstory: 'b',
++  requires: [Capability.Tools],
++  prefer: PreferPolicy.LargestThatFits,
++});
++const t = (id: string, member: string, dependsOn?: string[]): Task => ({
++  id,
++  description: 'd',
++  expectedOutput: 'e',
++  member,
++  output: z.string(),
++  ...(dependsOn ? { dependsOn } : {}),
++});
++
++describe('defineCrew', () => {
++  it('accepts a valid sequential crew', () => {
++    const def = defineCrew({
++      id: 'c',
++      process: CrewProcess.Sequential,
++      members: [m('a'), m('b')],
++      tasks: [t('t1', 'a'), t('t2', 'b')],
++    });
++    expect(def.tasks).toHaveLength(2);
++  });
++
++  it('rejects a task assigned to an unknown member', () => {
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'ghost')],
++      }),
++    ).toThrow(/unknown member.*ghost/i);
++  });
++
++  it('rejects an unknown dependsOn target', () => {
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'a'), t('t2', 'a', ['nope'])],
++      }),
++    ).toThrow(/unknown.*nope/i);
++  });
++
++  it('rejects duplicate member names and task ids', () => {
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a'), m('a')],
++        tasks: [t('t1', 'a')],
++      }),
++    ).toThrow(/duplicate member/i);
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'a'), t('t1', 'a')],
++      }),
++    ).toThrow(/duplicate task/i);
++  });
++
++  it('rejects a task dependency cycle', () => {
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'a', ['t2']), t('t2', 'a', ['t1'])],
++      }),
++    ).toThrow(/cycle/i);
++  });
++
++  it('effectiveTaskDeps defaults to the previous task', () => {
++    const tasks = [t('t1', 'a'), t('t2', 'a')];
++    const [t0, t1] = tasks;
++    if (!t0 || !t1) throw new Error('unreachable');
++    expect(effectiveTaskDeps(t0, 0, tasks)).toEqual([]);
++    expect(effectiveTaskDeps(t1, 1, tasks)).toEqual(['t1']);
++  });
++});
+diff --git a/tests/crew/engine.test.ts b/tests/crew/engine.test.ts
+new file mode 100644
+index 0000000..eb77b03
+--- /dev/null
++++ b/tests/crew/engine.test.ts
+@@ -0,0 +1,76 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { runCrew } from '../../src/crew/engine.ts';
++import { type CrewDef, CrewProcess } from '../../src/crew/types.ts';
++
++const seqCrew: CrewDef = {
++  id: 'c',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'a',
++      role: 'A',
++      goal: 'g',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++    {
++      name: 'b',
++      role: 'B',
++      goal: 'g',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 't1',
++      description: 'do first',
++      expectedOutput: 'x',
++      member: 'a',
++      output: z.string(),
++    },
++    {
++      id: 't2',
++      description: 'do second',
++      expectedOutput: 'y',
++      member: 'b',
++      output: z.string(),
++    },
++  ],
++};
++
++describe('runCrew (sequential)', () => {
++  it('threads task output as context to the next task', async () => {
++    const seen: string[] = [];
++    const outcome = await runCrew(seqCrew, 'topic', {
++      tools: {},
++      // stub the agent runner: echo which member + whether it saw upstream context
++      runAgentStep: async (member, task) => {
++        seen.push(member);
++        return `${member}:${task.includes('t1') ? 'saw-t1' : 'root'}`;
++      },
++    });
++    expect(outcome.kind).toBe('done');
++    if (outcome.kind === 'done') {
++      const out = outcome.output as Record<string, unknown>;
++      expect(out.t1).toBe('a:root');
++      expect(out.t2).toBe('b:saw-t1'); // t2's prompt embedded t1's output under "Context from \"t1\""
++    }
++    expect(seen).toEqual(['a', 'b']);
++  });
++
++  it('reports a failed task via the outcome', async () => {
++    const outcome = await runCrew(seqCrew, 'topic', {
++      tools: {},
++      runAgentStep: async (member) => {
++        if (member === 'b') throw new Error('boom');
++        return 'ok';
++      },
++    });
++    expect(outcome).toMatchObject({ kind: 'failed', failedTask: 't2' });
++  });
++});
+diff --git a/tests/crew/errors.test.ts b/tests/crew/errors.test.ts
+new file mode 100644
+index 0000000..fcbbc1e
+--- /dev/null
++++ b/tests/crew/errors.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, it } from 'bun:test';
++import { CrewError } from '../../src/core/errors.ts';
++
++describe('CrewError', () => {
++  it('is an Error with the right name', () => {
++    const e = new CrewError('bad crew');
++    expect(e).toBeInstanceOf(Error);
++    expect(e.name).toBe('CrewError');
++    expect(e.message).toBe('bad crew');
++  });
++});
+diff --git a/tests/crew/member-agent.test.ts b/tests/crew/member-agent.test.ts
+new file mode 100644
+index 0000000..102f46e
+--- /dev/null
++++ b/tests/crew/member-agent.test.ts
+@@ -0,0 +1,49 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { buildCrewAgent } from '../../src/crew/member-agent.ts';
++import type { CrewMember } from '../../src/crew/types.ts';
++
++const member: CrewMember = {
++  name: 'researcher',
++  role: 'Senior Research Analyst',
++  goal: 'Find accurate, current facts on the topic',
++  backstory: 'You have 10 years scouring primary sources.',
++  requires: [Capability.Tools],
++  prefer: PreferPolicy.LargestThatFits,
++};
++
++describe('buildCrewAgent', () => {
++  it('composes role/goal/backstory into the system prompt', () => {
++    const agent = buildCrewAgent(member, {});
++    expect(agent.name).toBe('researcher');
++    expect(agent.systemPrompt).toContain('Senior Research Analyst');
++    expect(agent.systemPrompt).toContain('Find accurate, current facts');
++    expect(agent.systemPrompt).toContain('10 years scouring');
++    // description drives hierarchical routing → carries role + goal
++    expect(agent.description).toContain('Senior Research Analyst');
++  });
++
++  it('sets modelReq for live selection, not a hardcoded model choice', () => {
++    const agent = buildCrewAgent(member, {});
++    expect(agent.modelReq).toEqual({
++      role: 'Senior Research Analyst',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    });
++    // a default model is present (overridden live by the selector at delegation)
++    expect(agent.model).toBeDefined();
++  });
++
++  it('uses the member tools when provided', () => {
++    const tools = {
++      probe: {
++        description: 'x',
++        inputSchema: z.object({}),
++        execute: async () => ({}),
++      },
++    };
++    const agent = buildCrewAgent({ ...member, tools } as CrewMember);
++    expect(agent.tools).toBe(tools);
++  });
++});
+diff --git a/tests/integration/crew.live.test.ts b/tests/integration/crew.live.test.ts
+new file mode 100644
+index 0000000..f610a6f
+--- /dev/null
++++ b/tests/integration/crew.live.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, test } from 'bun:test';
++import { mkdtemp } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { getCrew } from '../../crews/index.ts';
++import qwenFast from '../../models/qwen-fast.ts';
++import { runCrewCli } from '../../src/cli/crew.ts';
++import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenFast.model);
++
++describe.skipIf(!ready)('crew.live', () => {
++  test('runs the sequential research crew end-to-end against real Ollama', async () => {
++    const def = getCrew('research-crew');
++    if (!def) throw new Error('research-crew not registered');
++    const fileServer = await createFileTools();
++    try {
++      const fetchServer = await createFetchTools();
++      try {
++        const runsRoot = await mkdtemp(join(tmpdir(), 'crewlive-'));
++        const outcome = await runCrewCli({
++          def,
++          input: 'the example.com domain',
++          runsRoot,
++          runId: 'live',
++          tools: { ...fileServer.tools, ...fetchServer.tools },
++        });
++        expect(outcome.kind).toBe('done');
++      } finally {
++        await fetchServer.close();
++      }
++    } finally {
++      await fileServer.close();
++    }
++  }, 180_000);
++});
+diff --git a/tests/telemetry/crew-spans.test.ts b/tests/telemetry/crew-spans.test.ts
+new file mode 100644
+index 0000000..3de638c
+--- /dev/null
++++ b/tests/telemetry/crew-spans.test.ts
+@@ -0,0 +1,18 @@
++import { describe, expect, it } from 'bun:test';
++import { ATTR, withCrewSpan, withStepSpan } from '../../src/telemetry/spans.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++
++describe('crew spans', () => {
++  it('opens crew.run with id + process and nests child spans under it', async () => {
++    const { exporter } = registerTestProvider();
++    await withCrewSpan('research-crew', 'sequential', async () => {
++      await withStepSpan('t1', 'agent', async () => {});
++    });
++    const spans = exporter.getFinishedSpans();
++    const crew = spans.find((s) => s.name === 'crew.run');
++    const step = spans.find((s) => s.name === 'workflow.step');
++    expect(crew?.attributes[ATTR.CREW_ID]).toBe('research-crew');
++    expect(crew?.attributes[ATTR.CREW_PROCESS]).toBe('sequential');
++    expect(step?.parentSpanContext?.spanId).toBe(crew?.spanContext().spanId);
++  });
++});
+diff --git a/tests/workflow/run-step.test.ts b/tests/workflow/run-step.test.ts
+index c1946bd..98b87a2 100644
+--- a/tests/workflow/run-step.test.ts
++++ b/tests/workflow/run-step.test.ts
+@@ -1,14 +1,17 @@
+ import { describe, expect, it } from 'bun:test';
++import { MockLanguageModelV3 } from 'ai/test';
+ import { z } from 'zod';
++import type { Agent } from '../../src/core/agent-def.ts';
+ import {
+   DEFAULT_MAX_PARALLEL,
++  defaultRunAgentStep,
+   runStepByKind,
+   type WorkflowDeps,
+ } from '../../src/workflow/run-step.ts';
+ import { StepKind } from '../../src/workflow/types.ts';
+ 
+ const baseDeps = (over: Partial<WorkflowDeps> = {}): WorkflowDeps => ({
+   runAgentStep: async (_a, task) => `ran:${task}`,
+   tools: {},
+   ...over,
+ });
+@@ -85,10 +88,45 @@ describe('runStepByKind', () => {
+       {},
+       baseDeps(),
+     );
+     expect(out).toEqual(['ran:n=1', 'ran:n=2', 'ran:n=3']);
+   });
+ 
+   it('exposes a conservative default concurrency cap', () => {
+     expect(DEFAULT_MAX_PARALLEL).toBeGreaterThanOrEqual(1);
+   });
+ });
++
++describe('defaultRunAgentStep', () => {
++  it('threads onBeforeDelegate into the guarded agent run', async () => {
++    const seen: string[] = [];
++    const agent: Agent = {
++      name: 'web_fetch',
++      description: 'fetches',
++      model: new MockLanguageModelV3({
++        doGenerate: async () => ({
++          content: [{ type: 'text', text: 'done' }],
++          finishReason: { unified: 'stop', raw: undefined },
++          usage: {
++            inputTokens: {
++              total: 1,
++              noCache: undefined,
++              cacheRead: undefined,
++              cacheWrite: undefined,
++            },
++            outputTokens: { total: 1, text: undefined, reasoning: undefined },
++          },
++          warnings: [],
++        }),
++      }),
++      systemPrompt: 's',
++      tools: {},
++    };
++    const onBeforeDelegate = async (a: Agent) => {
++      seen.push(a.name);
++    };
++    const run = defaultRunAgentStep({ web_fetch: agent }, onBeforeDelegate);
++    const out = await run('web_fetch', 'do it');
++    expect(out).toBe('done');
++    expect(seen).toEqual(['web_fetch']);
++  });
++});

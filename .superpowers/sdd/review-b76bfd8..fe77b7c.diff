@@ -1,0 +1,223 @@
+# Review package: b76bfd8..fe77b7c
+
+## Commits
+fe77b7c feat(core): add orchestrator (delegate or report capability gap)
+
+## Files changed
+ src/core/orchestrator.ts        |  68 +++++++++++++++++++++
+ tests/core/orchestrator.test.ts | 132 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 200 insertions(+)
+
+## Diff
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+new file mode 100644
+index 0000000..ef5158f
+--- /dev/null
++++ b/src/core/orchestrator.ts
+@@ -0,0 +1,68 @@
++import type { LanguageModel, ToolSet } from 'ai';
++import { type Agent, runDefinedAgent } from './agent-def.ts';
++import {
++  CAPABILITY_GAP_TOOL,
++  capabilityGapTool,
++  findCapabilityGap,
++} from './capability-gap.ts';
++import { asDelegateTool, delegateToolName } from './delegate.ts';
++
++export type OrchestratorResult =
++  | { kind: 'answer'; text: string }
++  | { kind: 'gap'; missingCapability: string; message: string };
++
++/** Build the orchestrator's system prompt: routing rules + the agent catalog. */
++export function buildRoutingPrompt(
++  basePrompt: string,
++  agents: Agent[],
++): string {
++  const catalog = agents.map((a) => `- ${a.name}: ${a.description}`).join('\n');
++  return [
++    basePrompt,
++    '',
++    'Available agents:',
++    catalog,
++    '',
++    'Understand the user intent. If an agent fits, call its delegate_to_<name> tool with the task.',
++    `If NO agent can handle it, call ${CAPABILITY_GAP_TOOL} with the missing capability.`,
++    'Never attempt the task yourself.',
++  ].join('\n');
++}
++
++/** Create the orchestrator: an Agent whose tools delegate to sub-agents (+ gap tool). */
++export function createOrchestrator(opts: {
++  name?: string;
++  model: LanguageModel;
++  systemPrompt: string;
++  agents: Agent[];
++}): Agent {
++  const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
++  for (const agent of opts.agents) {
++    tools[delegateToolName(agent)] = asDelegateTool(agent);
++  }
++  return {
++    name: opts.name ?? 'orchestrator',
++    description:
++      'Routes tasks to specialized agents or reports a capability gap.',
++    model: opts.model,
++    systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
++    tools,
++  };
++}
++
++/** Run the orchestrator; return either the answer or a reported capability gap. */
++export async function runOrchestrator(
++  orchestrator: Agent,
++  task: string,
++): Promise<OrchestratorResult> {
++  const { text, steps } = await runDefinedAgent(orchestrator, task);
++  const gap = findCapabilityGap(steps);
++  if (gap) {
++    return {
++      kind: 'gap',
++      missingCapability: gap.missingCapability,
++      message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
++    };
++  }
++  return { kind: 'answer', text };
++}
+diff --git a/tests/core/orchestrator.test.ts b/tests/core/orchestrator.test.ts
+new file mode 100644
+index 0000000..c742eed
+--- /dev/null
++++ b/tests/core/orchestrator.test.ts
+@@ -0,0 +1,132 @@
++import { expect, test } from 'bun:test';
++import { MockLanguageModelV3 } from 'ai/test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import {
++  createOrchestrator,
++  runOrchestrator,
++} from '../../src/core/orchestrator.ts';
++
++// A sub-agent whose model returns a fixed answer; spy via the model's doGenerate.
++function subAgent(
++  name: string,
++  answer: string,
++): { agent: Agent; ran: () => number } {
++  let calls = 0;
++  const agent: Agent = {
++    name,
++    description: `handles ${name} tasks`,
++    model: new MockLanguageModelV3({
++      doGenerate: async () => {
++        calls += 1;
++        return {
++          content: [{ type: 'text', text: answer }],
++          finishReason: { unified: 'stop', raw: undefined },
++          usage: {
++            inputTokens: {
++              total: 1,
++              noCache: undefined,
++              cacheRead: undefined,
++              cacheWrite: undefined,
++            },
++            outputTokens: { total: 1, text: undefined, reasoning: undefined },
++          },
++          warnings: [],
++        };
++      },
++    }),
++    systemPrompt: 'sub',
++    tools: {},
++  };
++  return { agent, ran: () => calls };
++}
++
++// Orchestrator model that emits a single tool-call to `toolName`, then (turn 2) final text.
++function orchModel(toolName: string, input: unknown) {
++  let call = 0;
++  return new MockLanguageModelV3({
++    doGenerate: async () => {
++      call += 1;
++      if (call === 1) {
++        return {
++          content: [
++            {
++              type: 'tool-call',
++              toolCallId: 'c1',
++              toolName,
++              input: JSON.stringify(input),
++            },
++          ],
++          finishReason: { unified: 'tool-calls', raw: undefined },
++          usage: {
++            inputTokens: {
++              total: 1,
++              noCache: undefined,
++              cacheRead: undefined,
++              cacheWrite: undefined,
++            },
++            outputTokens: { total: 1, text: undefined, reasoning: undefined },
++          },
++          warnings: [],
++        };
++      }
++      return {
++        content: [{ type: 'text', text: 'orchestrator final text' }],
++        finishReason: { unified: 'stop', raw: undefined },
++        usage: {
++          inputTokens: {
++            total: 1,
++            noCache: undefined,
++            cacheRead: undefined,
++            cacheWrite: undefined,
++          },
++          outputTokens: { total: 1, text: undefined, reasoning: undefined },
++        },
++        warnings: [],
++      };
++    },
++  });
++}
++
++test('delegation path: orchestrator delegates and returns kind:answer', async () => {
++  const { agent, ran } = subAgent('file_qa', 'fox and dog');
++  const orch = createOrchestrator({
++    model: orchModel('delegate_to_file_qa', { task: 'read it' }),
++    systemPrompt: 'route',
++    agents: [agent],
++  });
++  const result = await runOrchestrator(orch, 'what does the file say?');
++  expect(result.kind).toBe('answer');
++  expect(ran()).toBe(1); // the sub-agent ran
++});
++
++test('capability-gap path: returns kind:gap and runs no sub-agent', async () => {
++  const { agent, ran } = subAgent('file_qa', 'should not run');
++  const orch = createOrchestrator({
++    model: orchModel('report_capability_gap', {
++      missingCapability: 'book a flight',
++    }),
++    systemPrompt: 'route',
++    agents: [agent],
++  });
++  const result = await runOrchestrator(orch, 'book me a flight');
++  expect(result.kind).toBe('gap');
++  if (result.kind === 'gap') {
++    expect(result.missingCapability).toBe('book a flight');
++    expect(result.message).toContain('book a flight');
++  }
++  expect(ran()).toBe(0); // no sub-agent ran
++});
++
++test('multi-agent selection: only the chosen delegate runs', async () => {
++  const a = subAgent('file_qa', 'A');
++  const b = subAgent('calc', 'B');
++  const orch = createOrchestrator({
++    model: orchModel('delegate_to_calc', { task: '2+2' }),
++    systemPrompt: 'route',
++    agents: [a.agent, b.agent],
++  });
++  const result = await runOrchestrator(orch, 'compute 2+2');
++  expect(result.kind).toBe('answer');
++  expect(a.ran()).toBe(0);
++  expect(b.ran()).toBe(1);
++});

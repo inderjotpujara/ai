@@ -1,0 +1,262 @@
+# Review package: 2866d12..1c04b3f
+
+## Commits
+1c04b3f feat(resource): add model manager (ensureReady with pin + LRU eviction)
+
+## Files changed
+ src/resource/model-manager.ts         | 100 ++++++++++++++++++++++++++++++++++
+ tests/resource/model-manager.test.ts  |  96 ++++++++++++++++++++++++++++++++
+ tests/resource/ollama-control.test.ts |  11 +++-
+ 3 files changed, 205 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+new file mode 100644
+index 0000000..c4d76f6
+--- /dev/null
++++ b/src/resource/model-manager.ts
+@@ -0,0 +1,100 @@
++import { ResourceError } from '../core/errors.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { estimateModelBytes } from './footprint.ts';
++import { machineBudgetBytes } from './hardware.ts';
++import {
++  isModelInstalled,
++  type LoadedModel,
++  listLoadedModels,
++  pullModel,
++  unloadModel,
++  warmModel,
++} from './ollama-control.ts';
++
++export type EnsureOpts = { pinned?: string[] };
++
++/** Injectable dependencies (real Ollama by default; fakes in tests). */
++export type ManagerDeps = {
++  budgetBytes: number;
++  isInstalled: (model: string) => Promise<boolean>;
++  listLoaded: () => Promise<LoadedModel[]>;
++  pull: (model: string) => Promise<void>;
++  warm: (model: string) => Promise<void>;
++  unload: (model: string) => Promise<void>;
++};
++
++/** Estimated resident bytes of a model from its declaration. */
++export function declBytes(decl: ModelDeclaration): number {
++  return estimateModelBytes({
++    paramsBillions: decl.footprint.approxParamsBillions,
++    bytesPerWeight: decl.footprint.bytesPerWeight,
++    contextTokens: decl.params.numCtx ?? 8192,
++    kvBytesPerToken: 131072,
++  });
++}
++
++function defaultDeps(): ManagerDeps {
++  return {
++    budgetBytes: machineBudgetBytes(),
++    isInstalled: (m) => isModelInstalled(m),
++    listLoaded: () => listLoadedModels(),
++    pull: (m) => pullModel(m),
++    warm: (m) => warmModel(m),
++    unload: (m) => unloadModel(m),
++  };
++}
++
++/** Loads/unloads models to keep the active + pinned set within the GPU budget. */
++export function createModelManager(deps: Partial<ManagerDeps> = {}) {
++  const d: ManagerDeps = { ...defaultDeps(), ...deps };
++  const lastUsed = new Map<string, number>();
++  let tick = 0;
++
++  async function ensureReady(
++    decl: ModelDeclaration,
++    opts: EnsureOpts = {},
++  ): Promise<void> {
++    const pinned = new Set(opts.pinned ?? []);
++    const target = decl.model;
++
++    if (!(await d.isInstalled(target))) await d.pull(target);
++
++    let loaded = await d.listLoaded();
++    if (loaded.some((m) => m.name === target)) {
++      lastUsed.set(target, ++tick);
++      return;
++    }
++
++    const needed = declBytes(decl);
++    const resident = () => loaded.reduce((sum, m) => sum + m.sizeBytes, 0);
++
++    while (resident() + needed > d.budgetBytes) {
++      const candidates = loaded
++        .filter((m) => !pinned.has(m.name) && m.name !== target)
++        .sort(
++          (a, b) => (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1),
++        );
++      const evict = candidates[0];
++      if (evict === undefined) {
++        throw new ResourceError(
++          `Cannot load ${target} (~${Math.round(needed / 1e9)}GB): only pinned models remain and the budget (~${Math.round(d.budgetBytes / 1e9)}GB) is exceeded.`,
++        );
++      }
++      await d.unload(evict.name);
++      lastUsed.delete(evict.name);
++      loaded = loaded.filter((m) => m.name !== evict.name);
++    }
++
++    await d.warm(target);
++    lastUsed.set(target, ++tick);
++  }
++
++  async function unloadAll(): Promise<void> {
++    for (const model of [...lastUsed.keys()]) {
++      await d.unload(model);
++    }
++    lastUsed.clear();
++  }
++
++  return { ensureReady, unloadAll };
++}
+diff --git a/tests/resource/model-manager.test.ts b/tests/resource/model-manager.test.ts
+new file mode 100644
+index 0000000..3b1b4fe
+--- /dev/null
++++ b/tests/resource/model-manager.test.ts
+@@ -0,0 +1,96 @@
++import { expect, mock, test } from 'bun:test';
++import { ResourceError } from '../../src/core/errors.ts';
++import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++
++function decl(model: string, b: number): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: { numCtx: 0 }, // numCtx 0 → KV term 0, so bytes == params*1e9*bpw*1.2
++    role: 'test',
++    footprint: { approxParamsBillions: b, bytesPerWeight: 1 }, // bytes = b*1e9*1.2
++  };
++}
++// declBytes(decl(_, b)) === b*1e9*1.2
++
++function fakes(
++  overrides: Partial<Parameters<typeof createModelManager>[0]> = {},
++) {
++  return {
++    isInstalled: mock(async () => true),
++    listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
++    pull: mock(async () => {}),
++    warm: mock(async () => {}),
++    unload: mock(async () => {}),
++    ...overrides,
++  };
++}
++
++test('already-loaded model: no pull/warm/unload', async () => {
++  const f = fakes({
++    listLoaded: mock(async () => [{ name: 'm8', sizeBytes: 1 }]),
++  });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('m8', 8));
++  expect(f.warm).not.toHaveBeenCalled();
++  expect(f.pull).not.toHaveBeenCalled();
++  expect(f.unload).not.toHaveBeenCalled();
++});
++
++test('not installed: pulls then warms', async () => {
++  const f = fakes({ isInstalled: mock(async () => false) });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('m8', 8));
++  expect(f.pull).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8');
++});
++
++test('fits alongside pinned: warms, no eviction', async () => {
++  // pinned router (4*1.2=4.8e9) loaded; target 8*1.2=9.6e9; budget 20e9 → fits
++  const f = fakes({
++    listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
++  });
++  const mgr = createModelManager({ budgetBytes: 20e9, ...f });
++  await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
++  expect(f.unload).not.toHaveBeenCalled();
++  expect(f.warm).toHaveBeenCalledWith('m8');
++});
++
++test('over budget: evicts non-pinned, keeps pinned, then warms', async () => {
++  // resident: r4 (pinned 4.8e9) + old8 (9.6e9) = 14.4e9; target new8 9.6e9; budget 16e9
++  // must evict old8 (non-pinned); after evict resident 4.8 + 9.6 = 14.4 <= 16 → warm
++  const f = fakes({
++    listLoaded: mock(async () => [
++      { name: 'r4', sizeBytes: 4.8e9 },
++      { name: 'old8', sizeBytes: 9.6e9 },
++    ]),
++  });
++  const mgr = createModelManager({ budgetBytes: 16e9, ...f });
++  await mgr.ensureReady(decl('new8', 8), { pinned: ['r4'] });
++  expect(f.unload).toHaveBeenCalledWith('old8');
++  expect(f.unload).not.toHaveBeenCalledWith('r4');
++  expect(f.warm).toHaveBeenCalledWith('new8');
++});
++
++test('cannot fit with pinned: throws ResourceError, warms nothing', async () => {
++  // pinned r8 resident 9.6e9; target big 9.6e9; budget 12e9 → 9.6+9.6 > 12 and only pinned remains
++  const f = fakes({
++    listLoaded: mock(async () => [{ name: 'r8', sizeBytes: 9.6e9 }]),
++  });
++  const mgr = createModelManager({ budgetBytes: 12e9, ...f });
++  await expect(
++    mgr.ensureReady(decl('big', 8), { pinned: ['r8'] }),
++  ).rejects.toBeInstanceOf(ResourceError);
++  expect(f.warm).not.toHaveBeenCalled();
++});
++
++test('unloadAll unloads every warmed model', async () => {
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('a', 1));
++  await mgr.ensureReady(decl('b', 1));
++  await mgr.unloadAll();
++  expect(f.unload).toHaveBeenCalledWith('a');
++  expect(f.unload).toHaveBeenCalledWith('b');
++});
+diff --git a/tests/resource/ollama-control.test.ts b/tests/resource/ollama-control.test.ts
+index 46d9ef1..c74c802 100644
+--- a/tests/resource/ollama-control.test.ts
++++ b/tests/resource/ollama-control.test.ts
+@@ -60,28 +60,35 @@ test('unloadModel POSTs to /api/generate with keep_alive: 0 and stream: false',
+   expect(JSON.parse(init.body as string)).toEqual({
+     model: 'qwen3:8b',
+     keep_alive: 0,
+     stream: false,
+   });
+ });
+ 
+ test('listLoadedModels maps /api/ps name + size to LoadedModel[]', async () => {
+   const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+     new Response(
+-      JSON.stringify({ models: [{ name: 'qwen3:8b', size: 6_000_000_000 }, { name: 'qwen3:4b', size: 3_500_000_000 }] }),
++      JSON.stringify({
++        models: [
++          { name: 'qwen3:8b', size: 6_000_000_000 },
++          { name: 'qwen3:4b', size: 3_500_000_000 },
++        ],
++      }),
+       { status: 200 },
+     ),
+   );
+   const loaded = await listLoadedModels();
+   expect(loaded).toEqual([
+     { name: 'qwen3:8b', sizeBytes: 6_000_000_000 },
+     { name: 'qwen3:4b', sizeBytes: 3_500_000_000 },
+   ]);
+-  expect((fetchSpy.mock.calls[0] as [string])[0]).toBe('http://localhost:11434/api/ps');
++  expect((fetchSpy.mock.calls[0] as [string])[0]).toBe(
++    'http://localhost:11434/api/ps',
++  );
+ });
+ 
+ test('listLoadedModels returns [] when nothing is loaded', async () => {
+   spyOn(globalThis, 'fetch').mockResolvedValue(
+     new Response(JSON.stringify({ models: [] }), { status: 200 }),
+   );
+   expect(await listLoadedModels()).toEqual([]);
+ });

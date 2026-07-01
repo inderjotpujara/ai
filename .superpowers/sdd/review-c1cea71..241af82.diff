@@ -1,0 +1,3460 @@
+# Review package: c1cea71b2a0ae653c3eb46dca1172c6a372eb6c3..241af82
+
+## Commits
+241af82 docs(slice-10): document the workflow engine in architecture.md
+74c9372 style(workflow): organize imports in workflow test files (biome)
+80adaef feat(workflow): bun run flow CLI + registry + fetch-then-summarize example
+f4dce0b feat(workflow): topological executor with onError + branch skipping
+38ebc14 fix(workflow): dedupe tool-exec cast + unique map toolCallId
+fcf2060 feat(workflow): per-kind step runners with bounded map fan-out
+18fec96 feat(telemetry): workflow.run/workflow.step spans + annotateStep
+e77d544 refactor(core): extract runGuardedAgent shared by delegate tool
+e1762c6 feat(workflow): defineWorkflow static graph validation
+99a6dbe feat(workflow): typed step model + WorkflowError
+918bd17 docs(slice-10): workflow engine implementation plan
+ac1198d chore(deps): safe in-range bumps + biome preset migration
+1ba82ec docs(slice-10): workflow/DAG engine design
+
+## Files changed
+ biome.json                                         |    2 +-
+ bun.lock                                           |   18 +-
+ docs/architecture.md                               |   64 +-
+ .../plans/2026-07-01-slice-10-workflow-engine.md   | 1549 ++++++++++++++++++++
+ .../2026-07-01-slice-10-workflow-engine-design.md  |  151 ++
+ package.json                                       |    5 +-
+ src/cli/flow.ts                                    |  118 ++
+ src/core/delegate.ts                               |   62 +-
+ src/core/errors.ts                                 |    3 +
+ src/telemetry/spans.ts                             |   37 +
+ src/workflow/define.ts                             |   67 +
+ src/workflow/engine.ts                             |   97 ++
+ src/workflow/run-step.ts                           |  130 ++
+ src/workflow/types.ts                              |   84 ++
+ tests/cli/flow.test.ts                             |   91 ++
+ tests/core/delegate.test.ts                        |   17 +-
+ tests/integration/workflow.live.test.ts            |   44 +
+ tests/telemetry/workflow-spans.test.ts             |   27 +
+ tests/workflow/define.test.ts                      |   56 +
+ tests/workflow/engine.test.ts                      |  157 ++
+ tests/workflow/errors.test.ts                      |   11 +
+ tests/workflow/run-step.test.ts                    |   94 ++
+ workflows/fetch-then-summarize.ts                  |   29 +
+ workflows/index.ts                                 |   11 +
+ 24 files changed, 2879 insertions(+), 45 deletions(-)
+
+## Diff
+diff --git a/biome.json b/biome.json
+index e282336..29b1f1e 100644
+--- a/biome.json
++++ b/biome.json
+@@ -1,11 +1,11 @@
+ {
+   "$schema": "https://biomejs.dev/schemas/2.5.1/schema.json",
+   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+   "files": { "ignoreUnknown": false },
+   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
+-  "linter": { "enabled": true, "rules": { "recommended": true } },
++  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+   "javascript": {
+     "formatter": { "quoteStyle": "single", "semicolons": "always" }
+   },
+   "assist": { "actions": { "source": { "organizeImports": "on" } } }
+ }
+diff --git a/bun.lock b/bun.lock
+index bb029a7..335a06f 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -1,48 +1,48 @@
+ {
+   "lockfileVersion": 1,
+   "configVersion": 1,
+   "workspaces": {
+     "": {
+       "name": "local-agents",
+       "dependencies": {
+-        "@ai-sdk/mcp": "^1.0.55",
++        "@ai-sdk/mcp": "^1.0.56",
+         "@ai-sdk/openai-compatible": "^1",
+         "@modelcontextprotocol/sdk": "^1.29.0",
+         "@opentelemetry/api": "^1.9.1",
+         "@opentelemetry/context-async-hooks": "^2.8.0",
+         "@opentelemetry/core": "^2.8.0",
+         "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
+         "@opentelemetry/resources": "^2.8.0",
+         "@opentelemetry/sdk-trace-base": "^2.8.0",
+         "@opentelemetry/semantic-conventions": "^1.41.1",
+-        "ai": "^6.0.214",
++        "ai": "^6.0.217",
+         "ollama-ai-provider-v2": "^3.6.0",
+         "zod": "^4.4.3",
+       },
+       "devDependencies": {
+         "@biomejs/biome": "2.5.1",
+         "@types/bun": "^1.3.14",
+         "typescript": "^5.9.0",
+       },
+     },
+   },
+   "packages": {
+-    "@ai-sdk/gateway": ["@ai-sdk/gateway@3.0.139", "", { "dependencies": { "@ai-sdk/provider": "3.0.12", "@ai-sdk/provider-utils": "4.0.33", "@vercel/oidc": "3.2.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-RFpxyh5j9g7ZMfKxhiwCcF7bGU872o3JvoiIqZbHOM4qkR4RCzeKJF+k+zHomcJYGeUabEbeMXTKNASzz4Toxw=="],
++    "@ai-sdk/gateway": ["@ai-sdk/gateway@3.0.141", "", { "dependencies": { "@ai-sdk/provider": "3.0.13", "@ai-sdk/provider-utils": "4.0.34", "@vercel/oidc": "3.2.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-BVisCihanCq+rXJZHY+aKVOSHe+gQDEitSexnvU9UuRTX/P16fu4x31AZLDNIR/bWAShT3Ct+dDltO1enBPK6Q=="],
+ 
+-    "@ai-sdk/mcp": ["@ai-sdk/mcp@1.0.55", "", { "dependencies": { "@ai-sdk/provider": "3.0.12", "@ai-sdk/provider-utils": "4.0.33", "pkce-challenge": "^5.0.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-G2QSVjEP1Q9kclhdlfw5m/tV5YH0h+b45n2ANx5GGpCTeA1D0enp68773EWJMflGREhybsUXNmkaC+vLbLEzKg=="],
++    "@ai-sdk/mcp": ["@ai-sdk/mcp@1.0.56", "", { "dependencies": { "@ai-sdk/provider": "3.0.13", "@ai-sdk/provider-utils": "4.0.34", "pkce-challenge": "^5.0.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-8iNpJeinNDmN4vKoMYtjnGVngj3FxynT//9c95587wIB0p8yjOOocP/duRyIHOBZop8HLeQrIjCbLbQJ1ZSJvA=="],
+ 
+     "@ai-sdk/openai-compatible": ["@ai-sdk/openai-compatible@1.0.42", "", { "dependencies": { "@ai-sdk/provider": "2.0.3", "@ai-sdk/provider-utils": "3.0.28" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-zEvULhRonXDacqpjJGgOhADHsQnPwrx3dWj0wOev5ASUlzVlOO8PhUhXE+tr8v70xc4xmXHEkVSAV/MGVqu69w=="],
+ 
+-    "@ai-sdk/provider": ["@ai-sdk/provider@3.0.12", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-sj9DWTJ2Ze0WR9qsiOPqoqzNx3OxL6iMxHImbhvoe9qOspekbzxNDMiJ4TIGfYHYh9w4OmBjz3prvqhzTi96+Q=="],
++    "@ai-sdk/provider": ["@ai-sdk/provider@3.0.13", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-ZPtVYt5QIJzOta1kdUiDuCx4HhFkvNPv/rvmZ2b1iXwybYjJsCnNYR4PAw4kW7rgVfDARvHXcU64efWuqNp6bw=="],
+ 
+-    "@ai-sdk/provider-utils": ["@ai-sdk/provider-utils@4.0.33", "", { "dependencies": { "@ai-sdk/provider": "3.0.12", "@standard-schema/spec": "^1.1.0", "eventsource-parser": "^3.0.8" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-nJ0bAfegMAIJtrzMJtbzer1cS3nb7c7DsyU1S4nrPm7ZU0Mn6SBBZv5IGZZGTbpWTJwqKTSPeZJTXalbAxt1BA=="],
++    "@ai-sdk/provider-utils": ["@ai-sdk/provider-utils@4.0.34", "", { "dependencies": { "@ai-sdk/provider": "3.0.13", "@standard-schema/spec": "^1.1.0", "eventsource-parser": "^3.0.8" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-VL3tE0RV1ZwrtC8grTfcveFoyy9X96blfnRzIx5ayeGlCyTKpsZ4U4Ej3XpjOppAyAXKNflYSHAktOHE6gTLiw=="],
+ 
+     "@biomejs/biome": ["@biomejs/biome@2.5.1", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.5.1", "@biomejs/cli-darwin-x64": "2.5.1", "@biomejs/cli-linux-arm64": "2.5.1", "@biomejs/cli-linux-arm64-musl": "2.5.1", "@biomejs/cli-linux-x64": "2.5.1", "@biomejs/cli-linux-x64-musl": "2.5.1", "@biomejs/cli-win32-arm64": "2.5.1", "@biomejs/cli-win32-x64": "2.5.1" }, "bin": { "biome": "bin/biome" } }, "sha512-IXWLCxKmae+rI7LOHS1B3EbVisQ6GRAWbhN9msa6KjNCyFWrvKZWR4oUdinaNssrV852OrSHuSPa95h1GPJc7Q=="],
+ 
+     "@biomejs/cli-darwin-arm64": ["@biomejs/cli-darwin-arm64@2.5.1", "", { "os": "darwin", "cpu": "arm64" }, "sha512-npqDzvqv7vFaWRiNN1Te71siRgPaqS9MpqgYCdP/CrUbkJ7ApezaeaKjueKHRN/JH/6lRjJQAHi8acQDCAz22w=="],
+ 
+     "@biomejs/cli-darwin-x64": ["@biomejs/cli-darwin-x64@2.5.1", "", { "os": "darwin", "cpu": "x64" }, "sha512-RgwTqPAM8g2tn1j+b5oRjF/DbSBX8a4gwojtuG9XuhfK7GgomvZ9+T+tqjXiVbjLEeGJOoL6VEk8mvRTVeSybw=="],
+ 
+     "@biomejs/cli-linux-arm64": ["@biomejs/cli-linux-arm64@2.5.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-yhV35CzZh38VyMvTEXi3JTjxZBs++oCKK9KG8vB6VI5+uvQvZNR3BFWEKKzuOmx9DJJj7sQpZ4LQJcmbGTs3+Q=="],
+ 
+     "@biomejs/cli-linux-arm64-musl": ["@biomejs/cli-linux-arm64-musl@2.5.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-WMcvMLgByyTqVxGlq918NBBYliq9FRR9GAQVETHb+VjGVqXCZFfHlZHC1FX4ibuYY/Hg6TJE3rHU0xVrdJXNRw=="],
+@@ -86,21 +86,21 @@
+     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
+ 
+     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+ 
+     "@types/node": ["@types/node@26.0.1", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-fc3KiUoBt6kie0N9bIW3E47vZsuaMf0PM2AaUpLCLT0s/LvX1nxAim6Fc049cNxODPpGm6qRAuUOB86SkRuPQw=="],
+ 
+     "@vercel/oidc": ["@vercel/oidc@3.2.0", "", {}, "sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug=="],
+ 
+     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
+ 
+-    "ai": ["ai@6.0.214", "", { "dependencies": { "@ai-sdk/gateway": "3.0.139", "@ai-sdk/provider": "3.0.12", "@ai-sdk/provider-utils": "4.0.33", "@opentelemetry/api": "^1.9.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-9MlePEXT5pXtQv4fXqmiR0RG3DZU4Dbv+kU9ktEJC2COi2RH2WvI2GiyG9MuCqgPII6f1w+5kB5fNIiArqPzaQ=="],
++    "ai": ["ai@6.0.217", "", { "dependencies": { "@ai-sdk/gateway": "3.0.141", "@ai-sdk/provider": "3.0.13", "@ai-sdk/provider-utils": "4.0.34", "@opentelemetry/api": "^1.9.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-BCA/1sNqQwfmZ8RxK2i+oezgzwfo1IAYt+wxBVpZlRLFswyi+t5TU0/5GvV6Hic7A2/UlnMtljz/Q3F94+2WzA=="],
+ 
+     "ajv": ["ajv@8.20.0", "", { "dependencies": { "fast-deep-equal": "^3.1.3", "fast-uri": "^3.0.1", "json-schema-traverse": "^1.0.0", "require-from-string": "^2.0.2" } }, "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA=="],
+ 
+     "ajv-formats": ["ajv-formats@3.0.1", "", { "dependencies": { "ajv": "^8.0.0" } }, "sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ=="],
+ 
+     "body-parser": ["body-parser@2.3.0", "", { "dependencies": { "bytes": "^3.1.2", "content-type": "^2.0.0", "debug": "^4.4.3", "http-errors": "^2.0.1", "iconv-lite": "^0.7.2", "on-finished": "^2.4.1", "qs": "^6.15.2", "raw-body": "^3.0.2", "type-is": "^2.1.0" } }, "sha512-2cGmJupaNgg+QUwVLAucDuWuoMZ6EX9iHDRswZ5lsNYEmwPaRknMPCLZz07yTzVq/83p4o/wzbDZbBrTvGGTIw=="],
+ 
+     "bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
+ 
+     "bytes": ["bytes@3.1.2", "", {}, "sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg=="],
+@@ -280,13 +280,17 @@
+     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+ 
+     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
+ 
+     "@ai-sdk/openai-compatible/@ai-sdk/provider": ["@ai-sdk/provider@2.0.3", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-h88OPkavHTiN9tMn2l5awAznGB0lXzjcLhgR1/rvjB2zlLprsNxbM2tt6OJsHUxduLC3klq0/eqaSf6fX5XVww=="],
+ 
+     "@ai-sdk/openai-compatible/@ai-sdk/provider-utils": ["@ai-sdk/provider-utils@3.0.28", "", { "dependencies": { "@ai-sdk/provider": "2.0.3", "@standard-schema/spec": "^1.0.0", "eventsource-parser": "^3.0.6" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-bXlX1WX7E50a2N+AJW+1a/x63m52aPhm+6xYe5THxWrx9vW9NR7E2Ay+1G1ndlCdMdYKo2Fnsd7kBhuyQPaphw=="],
+ 
+     "body-parser/content-type": ["content-type@2.0.0", "", {}, "sha512-j/O/d7GcZCyNl7/hwZAb606rzqkyvaDctLmckbxLzHvFBzTJHuGEdodATcP3yIRoDrLHkIATJuvzbFlp/ki2cQ=="],
+ 
++    "ollama-ai-provider-v2/@ai-sdk/provider": ["@ai-sdk/provider@3.0.12", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-sj9DWTJ2Ze0WR9qsiOPqoqzNx3OxL6iMxHImbhvoe9qOspekbzxNDMiJ4TIGfYHYh9w4OmBjz3prvqhzTi96+Q=="],
++
++    "ollama-ai-provider-v2/@ai-sdk/provider-utils": ["@ai-sdk/provider-utils@4.0.33", "", { "dependencies": { "@ai-sdk/provider": "3.0.12", "@standard-schema/spec": "^1.1.0", "eventsource-parser": "^3.0.8" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-nJ0bAfegMAIJtrzMJtbzer1cS3nb7c7DsyU1S4nrPm7ZU0Mn6SBBZv5IGZZGTbpWTJwqKTSPeZJTXalbAxt1BA=="],
++
+     "type-is/content-type": ["content-type@2.0.0", "", {}, "sha512-j/O/d7GcZCyNl7/hwZAb606rzqkyvaDctLmckbxLzHvFBzTJHuGEdodATcP3yIRoDrLHkIATJuvzbFlp/ki2cQ=="],
+   }
+ }
+diff --git a/docs/architecture.md b/docs/architecture.md
+index e14dce7..8b1e155 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -32,20 +32,21 @@ The engine is **Vercel AI SDK 6** (runtime-agnostic `LanguageModel`, the
+ tool-calling loop, MCP client, mock model, and `experimental_telemetry`). We
+ write only the thin layers on top.
+ 
+ ```mermaid
+ graph TD
+     subgraph CLI["CLI · src/cli"]
+         chat["chat.ts (entry)"]
+         runchat["run-chat.ts"]
+         selhook["select-hook.ts"]
+         runscli["runs.ts · bun run runs"]
++        flow["flow.ts · bun run flow"]
+     end
+     subgraph CORE["Core · src/core"]
+         orch["orchestrator.ts"]
+         delegate["delegate.ts"]
+         agent["agent.ts · runAgent loop"]
+         guard["guardrails.ts · ALS depth+budget"]
+         types["types.ts · 4-axis taxonomy"]
+     end
+     subgraph RES["Resource · src/resource"]
+         mgr["model-manager.ts"]
+@@ -66,29 +67,37 @@ graph TD
+     end
+     subgraph MCP["MCP · src/mcp"]
+         mcpclient["client.ts · mountMcpServer"]
+     end
+     subgraph TEL["Telemetry · src/telemetry"]
+         spans["spans.ts · ATTR + helpers"]
+         provider["provider.ts · OTel provider"]
+         exporter["jsonl-exporter.ts"]
+     end
+     subgraph RUN["Run store · src/run"]
++        runstore["run-store.ts"]
+         runtrace["run-trace.ts"]
+     end
++    subgraph WF["Workflow · src/workflow"]
++        wftypes["types.ts · StepKind"]
++        wfdefine["define.ts · defineWorkflow"]
++        wfengine["engine.ts · runWorkflow"]
++        wfrunstep["run-step.ts · runStepByKind"]
++    end
+     subgraph DATA["On-disk · git-ignored"]
+         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
+         images[("model-images/ + catalog.json")]
+     end
+     subgraph DECL["Declarations (pure data)"]
+         agents["agents/*"]
+         models["models/* · BOOTSTRAP"]
++        workflows["workflows/* · WORKFLOWS"]
+     end
+ 
+     chat --> runchat
+     chat --> selhook
+     chat --> buildreg
+     chat --> agents
+     chat -. mounts .-> mcpclient
+     runchat --> orch
+     runchat --> provider
+     orch --> delegate
+@@ -110,34 +119,46 @@ graph TD
+     discover --> hfsrc
+     discover --> reg
+     discover --> images
+     agents -. hold tools .-> mcpclient
+     spans --> provider
+     provider --> exporter
+     exporter --> spansfile
+     octl --> images
+     runscli --> runtrace
+     runtrace --> spansfile
++    flow --> wfengine
++    flow --> runstore
++    flow -. mounts .-> mcpclient
++    flow --> agents
++    flow --> workflows
++    wfengine --> wfrunstep
++    wfrunstep --> delegate
++    wfengine --> spans
++    wfrunstep --> spans
++    wfdefine --> wftypes
++    runstore --> spansfile
+ ```
+ 
+ | Layer | Files | Responsibility | Knows about |
+ |---|---|---|---|
+-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer | everything below |
++| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
+ | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+-| **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
++| **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
++| **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+ ## 3. Runtime data flow (one `chat` run, current)
+ 
+ ```mermaid
+ sequenceDiagram
+     actor User
+@@ -225,58 +246,87 @@ Global type via `AGENT_KV_CACHE_TYPE` (default `q8_0`) + `OLLAMA_FLASH_ATTENTION
+ We use **llama.cpp through Ollama** — it wraps the engine (and Apple MLX on 32 GB+ Macs) and adds model management (`pull`/`ps`, auto-quant), an HTTP control API the resource manager drives, tool-calling, and a clean AI SDK provider. Because the model layer is runtime-agnostic, Ollama is just the default **Tier-1 adapter**; a raw `llama.cpp-server` or dedicated MLX-server can slot behind the same `Runtime` interface with no agent code change.
+ 
+ ---
+ 
+ ## 7. Observability — telemetry & run-viewer (Slice 8)
+ 
+ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewable with a terminal run-viewer. This is the **extensible layer every later feature emits into** (the "observable by default" principle).
+ 
+ - **`provider.ts`** — `initRunTelemetry(runDir)` registers a per-run, Bun-safe `BasicTracerProvider` + `AsyncLocalStorageContextManager` (no Node auto-instrumentation), and processors via `buildProcessors`: a `JsonlFileExporter` always, **plus** an OTLP/HTTP exporter when `AGENT_OTLP_ENDPOINT` is set (the swappable-backend seam → Jaeger/Tempo/Phoenix). `recordIoEnabled()` gates prompt/response capture (`AGENT_TELEMETRY_RECORD_IO`).
+ - **`jsonl-exporter.ts`** — a `SpanExporter` serializing each span to one JSON line (`SpanRecord`); writes are serialized through a promise chain and **flushed on `shutdown()`** so `spans.jsonl` is never truncated.
+-- **`spans.ts`** — the API: the **`ATTR`** key registry + helpers `withRunSpan` / `setRunOutcome` / `withDelegationSpan` / `recordModelSelect` / `withModelLoadSpan` / `recordEvict` / `recordGuardrailViolation`. **AI-SDK** `experimental_telemetry` (enabled per `generateText` with `functionId = agent.name`) contributes `ai.generateText` / `ai.toolCall` / token spans for free, nested under our manual spans via the active context.
++- **`spans.ts`** — the API: the **`ATTR`** key registry + helpers `withRunSpan` / `setRunOutcome` / `withDelegationSpan` / `recordModelSelect` / `withModelLoadSpan` / `recordEvict` / `recordGuardrailViolation` / `withWorkflowSpan` / `withStepSpan` / `annotateStep` (the last three back the workflow/DAG engine, §9). **AI-SDK** `experimental_telemetry` (enabled per `generateText` with `functionId = agent.name`) contributes `ai.generateText` / `ai.toolCall` / token spans for free, nested under our manual spans via the active context.
+ 
+ **Run-viewer** (`bun run runs`, `src/cli/runs.ts`): `runs` lists runs (newest-first); `runs <id>` renders the span tree as an indented timeline (model · duration · tokens · outcome); `--follow` tails the live run. Reader/renderer are pure (`src/run/run-trace.ts` `readSpans`/`buildTree`/`summarizeRun`; `src/cli/render-trace.ts`). `journal.jsonl` is retired — `spans.jsonl` is canonical; `answer/gap/resource.txt` artifacts remain.
+ 
+ **Extending telemetry (standing rule):** a new subsystem adds a `withXSpan`/`recordX` helper + `ATTR` keys here — the transport (provider/exporter) and the OTLP seam are untouched, and both the local viewer and any backend get the new signal for free.
+ 
+ ---
+ 
+ ## 8. Composition guardrails (Slice 9)
+ 
+ The safe-composition foundation for the future workflow/crew engine. Each delegation is a fresh, isolated `generateText` instance, so the risks are **non-termination** and **cost**, not state corruption — both bounded by depth. Backed by an `AsyncLocalStorage<DelegationContext>` (`{depth, ancestors, numCtx}`) in `src/core/guardrails.ts`, enforced at the single delegation chokepoint (`delegate.ts`).
+ 
+ - **Depth limit (the termination guarantee).** `checkDelegation` rejects when `current.depth + 1 > maxDelegationDepth()` (default 5, `AGENT_MAX_DELEGATION_DEPTH`). Every hop goes through `runInDelegationContext` (depth++), and the orchestrator root is seeded via `withRootDelegationContext` — so **no chain can bypass the counter**; any chain (incl. self-recursion) terminates ≤ depth levels. **Recursion is allowed** (no name-based cycle ban — that would forbid legitimate recursive decomposition); ancestry is carried for telemetry only.
+ - **Live return cap.** `concise(text, callerNumCtx)` caps a delegated return to `floor(returnCtxFraction() × callerNumCtx × 4 chars/token)` — a fraction (default 0.25, `AGENT_RETURN_CTX_FRACTION`) of the **consumer's** live `num_ctx`, captured from the parent frame before entering the child. Not a flat constant — it scales with the same hardware-aware budget as everything else.
+ - **Soft failure.** Violations return `{ error }` from the delegate tool (the existing soft-tool-error path) so the calling agent's LLM can adapt, plus an `agent.guardrail.violation` span event. `withDelegationSpan` tags `agent.delegation.depth` / `agent.delegation.ancestors` (visible in `bun run runs`).
+ - **Warm-model reuse** is already provided by the manager (state keyed by model string); locked in by a regression test.
+ 
+ ---
+ 
+-## 9. On-disk stores
++## 9. Workflows / DAG engine (Slice 10)
++
++**Pure types + execution model for deterministic multi-step workflows.** While the agent loop is *agentic* (an LLM autonomously chooses actions), workflows are *choreographed* — steps run in a defined DAG order, each produces validated output, and branches/maps are explicit.
++
++- **Types** (`src/workflow/types.ts`): 
++  - `enum StepKind { Agent, Tool, Branch, Map }` — the four step kinds
++  - `WorkflowContext` — thread of `{stepId: output}` through a run; maps + branches thread `item`/`index`
++  - Step variants: `AgentStep` (run an agent, input is a prompt), `ToolStep` (call a tool, input is args), `BranchStep` (if-then-else on a predicate), `MapStep` (fan-out per item in a list, run sub-step once per item)
++  - `StepError` — per-step failure policy: `'fail'` (fast), `'continue'` (skip on error), `{ fallback }` (use a fallback value)
++  - `WorkflowDef` — a named list of steps + metadata
++  - `WorkflowOutcome` — `{ kind: 'done', output }` or `{ kind: 'failed', failedStep, message }`
++  - `effectiveDeps(step, index, steps)` — helper: explicit `dependsOn` or implicit previous-step deps
++
++- **Error class** (`src/core/errors.ts`): `WorkflowError extends FrameworkError` for workflow-specific failures (bad definition, step failure, context mismatch)
++
++- **Telemetry** (`src/telemetry/spans.ts`) — extended per the standing rule (§7): `withWorkflowSpan(workflowId, fn)` opens the root `workflow.run` span (`ATTR.WORKFLOW_ID`); `withStepSpan(stepId, kind, fn)` opens a nested `workflow.step` span per step (`ATTR.STEP_ID` / `ATTR.STEP_KIND`); `annotateStep(attrs)` tags the active step span with extra attributes (`ATTR.STEP_BRANCH_TAKEN` for the branch taken, `ATTR.STEP_MAP_COUNT` for map fan-out size); `ATTR.WORKFLOW_OUTCOME` records the terminal `WorkflowOutcome`. These are the spans/attrs the execution engine (Task 6) and CLI (Task 7) emit into — transport untouched, so the run-viewer and any OTLP backend get workflow signal for free.
++
++- **Step runner** (`src/workflow/run-step.ts`): `runStepByKind(step, ctx, deps)` dispatches a step to its kind (agent/tool/branch/map) and returns the *raw*, unvalidated result; `WorkflowDeps` (`runAgentStep`, `tools`, `maxParallel`) is the injected boundary the engine and CLI provide; `mapWithConcurrency` bounds fan-out concurrency for `MapStep` (default cap `DEFAULT_MAX_PARALLEL`, overridable via `AGENT_WORKFLOW_MAX_PARALLEL` or per-map `maxParallel`).
++
++- **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready.
++
++- **Definition + validation** (`src/workflow/define.ts`): `defineWorkflow(def)` validates a `WorkflowDef` at construction time — unique step ids, every `dependsOn`/branch target resolves to a real step, and the dependency graph is acyclic (Kahn's algorithm) — throwing `WorkflowError` on any violation, so a malformed workflow fails fast at import time rather than mid-run.
++
++- **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
++
++- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, and prints the last step's output (or the failure) to stdout/stderr — closing the fetch then file server in `finally`, mirroring `chat.ts`'s mount/close order.
++
++---
++
++## 10. On-disk stores
+ 
+ - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
+ - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
+ 
+ ---
+ 
+-## 10. Testing strategy
++## 11. Testing strategy
+ 
+ - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
+ - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
+ - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
+ - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
+ - **MCP** — real stdio round-trip (subprocess server).
+-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
++- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+ 
+ ---
+ 
+-## 11. Glossary
++## 12. Glossary
+ 
+ - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
+ - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
+ - **Span / trace** — OpenTelemetry units. A run = a root `agent.run` span; delegations, model loads, and AI-SDK `generateText`/tool calls nest beneath it via the active async context. `bun run runs` renders the tree.
+ - **Delegation context** — the `AsyncLocalStorage` `{depth, ancestors, numCtx}` threaded through every hop; basis for the depth guard, the live return cap (off the parent's `numCtx`), and the `delegation.depth`/`ancestors` span attrs.
+ - **Live budget** — `min(0.75 × total RAM, 0.8 × availableRamBytes())` (first term = the Metal cap), recomputed per delegation; `availableRamBytes()` parses `vm_stat`.
+ - **Dynamic num_ctx** — `min(desired, modelMax, maxCtxByFit)`, floor 4096, rounded 1024; `modelMax` probed live via `/api/show`; same value for warm + inference.
+ - **Model Manager** — `src/resource/model-manager.ts`; `ensureReady` drives the lifecycle within live budget and returns the chosen context. State keyed by model string ⇒ shared-model agents = one resident copy.
+ - **Mounting an MCP server** — `mountMcpServer({command,args})` connects to any stdio MCP server and returns `{tools, close}`. Capability = pointing at a server, not writing tool code. `createFileTools` (native `read_file`) + `createFetchTools` (`uvx mcp-server-fetch`) are presets.
+ - **Declaration** — a data file describing a model (provider + name + params + footprint) or an agent. Not weights, not logic.
+diff --git a/docs/superpowers/plans/2026-07-01-slice-10-workflow-engine.md b/docs/superpowers/plans/2026-07-01-slice-10-workflow-engine.md
+new file mode 100644
+index 0000000..b6d7f41
+--- /dev/null
++++ b/docs/superpowers/plans/2026-07-01-slice-10-workflow-engine.md
+@@ -0,0 +1,1549 @@
++# Slice 10 — Workflow / DAG Engine — Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Add a second, deterministic orchestration mode — a typed, JSON-serializable DAG of steps (`agent`/`tool`/`branch`/`map`) with zod-validated data flow between steps — that composes on the existing agent/guardrail/telemetry substrate instead of replacing the LLM router.
++
++**Architecture:** A workflow is a plain TS object built with `defineWorkflow({ id, steps })`; `defineWorkflow` statically validates it (unique ids, resolvable deps, acyclic). `runWorkflow(def, input, deps)` topologically executes steps with bounded concurrency, validates each step's output with zod `safeParse`, and threads validated outputs through a `WorkflowContext` keyed by step id. Agent steps reuse the Slice-9 guarded delegation path via a shared `runGuardedAgent` extracted from `delegate.ts` (DRY, no behavior change). A `workflow.run` root span + per-step `workflow.step` spans write to the same `runs/<id>/spans.jsonl` the run-viewer already renders. `bun run flow <name>` is the CLI entry over a `workflows/` registry.
++
++**Tech Stack:** TypeScript + Bun · Vercel AI SDK `ai@^6.0.214` (`ToolSet`, `tool`) · `zod@^4.4.3` (step I/O schemas; use `safeParse`) · OpenTelemetry (existing `src/telemetry/*` Bun-safe provider) · `bun test` + `MockLanguageModelV3` from `ai/test` + `registerTestProvider`.
++
++## Global Constraints
++
++- **Always `bun`, never `npm`.** Run `bun run typecheck`, `bun test`, `bun run lint` (biome).
++- **Prefer `enum` over string-literal unions** for finite named sets (string enums only). Discriminated unions stay as `type` with an enum discriminator. Prefer `type` over `interface`. Early returns; small focused files; descriptive names.
++- **Don't hardcode budgets/limits** — compute live; env vars fallback-only. The workflow concurrency cap is a *thrash-avoidance hint* (the model manager's live-RAM budget is the real guard); default small + env/`maxParallel` overridable.
++- **Documentation hard line:** this slice MUST add a "Workflow engine" section to `docs/architecture.md` or `bun run docs:check` (pre-commit hook) fails. Run `bun run setup` once to activate hooks.
++- **No `console.log` left behind; no commit without `bun run typecheck`; no skipped tests.**
++- **Telemetry-by-default:** every step emits a span; agent steps still emit `agent.delegation`.
++- New error type extends `FrameworkError` (`src/core/errors.ts`); `name` is set automatically via `new.target.name` — do not set it manually.
++- Existing dep edge default: a step with no `dependsOn` depends on the **previous step in declaration order**; `dependsOn: []` makes it a root. This rule is shared by `define.ts` (cycle check) and `engine.ts` (scheduling) — implement it once as `effectiveDeps(step, index, steps)`.
++- **v1 branch constraint:** branch arms are independent tails — no fan-in/join step depending on *both* arms (deferred). A step is skipped if **any** of its effective deps is skipped.
++
++---
++
++## File structure
++
++| File | Responsibility |
++|------|----------------|
++| `src/workflow/types.ts` (new) | Typed model: `StepKind` enum, `Step`/`AgentStep`/`ToolStep`/`BranchStep`/`MapStep`, `WorkflowDef`, `WorkflowContext`, `WorkflowOutcome`, `StepError`, `effectiveDeps` helper |
++| `src/core/errors.ts` (modify) | Add `WorkflowError extends FrameworkError` |
++| `src/workflow/define.ts` (new) | `defineWorkflow(def)` — static validation (unique ids, resolvable deps + branch targets, acyclic via Kahn topo-sort) |
++| `src/core/delegate.ts` (modify) | Extract `runGuardedAgent(agent, task, onBeforeDelegate?)`; `asDelegateTool` delegates to it (no behavior change) |
++| `src/telemetry/spans.ts` (modify) | Add `ATTR.WORKFLOW_ID/STEP_ID/STEP_KIND/STEP_BRANCH_TAKEN/STEP_MAP_COUNT/WORKFLOW_OUTCOME`; `withWorkflowSpan`, `withStepSpan`, `annotateStep` |
++| `src/workflow/run-step.ts` (new) | Per-kind runners: `runStepByKind(step, ctx, deps)` (agent→`runAgentStep`, tool→`tools[t].execute`, branch→predicate, map→bounded sub-runs); `mapWithConcurrency` helper |
++| `src/workflow/engine.ts` (new) | `runWorkflow(def, input, deps)` — topo schedule + bounded concurrency + `safeParse` validation + `onError` policy + branch skip propagation; `WorkflowDeps` type + default `runAgentStep` factory |
++| `src/cli/flow.ts` (new) | `bun run flow <name> [input...]` — mount MCP tools, build agent map, look up workflow, run, write `runs/<id>/{spans.jsonl,result.txt|failed.txt}`, non-zero exit on failure |
++| `workflows/index.ts` + `workflows/fetch-then-summarize.ts` (new) | Registry array + ≥1 real example (tool fetch → agent summarize) |
++| `package.json` (modify) | Add `"flow": "bun run src/cli/flow.ts"` |
++| `docs/architecture.md` (modify) | New "§12. Workflow engine" section (module map edge + data flow) |
++| `tests/workflow/{define,engine,run-step}.test.ts`, `tests/cli/flow.test.ts`, `tests/integration/workflow.live.test.ts` (new) | TDD coverage |
++
++---
++
++## Task 1: Typed workflow model + `WorkflowError`
++
++**Files:**
++- Create: `src/workflow/types.ts`
++- Modify: `src/core/errors.ts` (add `WorkflowError` after `ResourceError`, ~line 25)
++- Test: `tests/workflow/errors.test.ts`
++
++**Interfaces:**
++- Produces: `enum StepKind`; types `WorkflowContext`, `StepError`, `AgentStep`, `ToolStep`, `BranchStep`, `MapStep`, `MapSubStep`, `Step`, `WorkflowDef`, `WorkflowOutcome`; `function effectiveDeps(step, index, steps): string[]`. `class WorkflowError extends FrameworkError`.
++
++- [ ] **Step 1: Add `WorkflowError` to `src/core/errors.ts`**
++
++Match the existing pattern (base sets `name` via `new.target.name`; subclass only needs `super(message)`):
++
++```typescript
++export class WorkflowError extends FrameworkError {}
++```
++
++(Place it alongside `ResourceError`. No constructor needed — it inherits the base, which sets `name = 'WorkflowError'` automatically.)
++
++- [ ] **Step 2: Write `src/workflow/types.ts`**
++
++```typescript
++import type { z } from 'zod';
++
++/** The four step kinds supported in v1. */
++export enum StepKind {
++  Agent = 'agent',
++  Tool = 'tool',
++  Branch = 'branch',
++  Map = 'map',
++}
++
++/** Context threaded through a run: each completed step's validated output, by id.
++ *  `input` holds the workflow's initial input; `map` sub-steps also see `item`/`index`. */
++export type WorkflowContext = Record<string, unknown>;
++
++/** Per-step failure policy. Default 'fail' (fail-fast). */
++export type StepError = 'fail' | 'continue' | { fallback: unknown };
++
++type StepBase<O> = {
++  id: string;
++  /** Execution deps. Omitted = previous step in declaration order (linear pipeline).
++   *  `[]` = a root step. Branch/parallel fan-in set these explicitly. */
++  dependsOn?: string[];
++  /** Structured I/O — the step's result is validated against this after it runs. */
++  output: z.ZodType<O>;
++  /** Failure policy; default 'fail'. */
++  onError?: StepError;
++};
++
++export type AgentStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Agent;
++  agent: string; // agent name resolved from the agent map at run time
++  input: (ctx: WorkflowContext) => string; // the task prompt for the agent
++};
++
++export type ToolStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Tool;
++  tool: string; // tool name in the mounted ToolSet
++  input: (ctx: WorkflowContext) => unknown; // tool args (validated by the tool's own schema)
++};
++
++export type BranchStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Branch;
++  predicate: (ctx: WorkflowContext) => boolean;
++  whenTrue: string; // step id taken when predicate true
++  whenFalse: string; // step id taken when predicate false
++};
++
++/** A map sub-step is an agent/tool step run once per item; id is synthesized,
++ *  deps are implicit (the item), so they are omitted. */
++export type MapSubStep =
++  | (Omit<AgentStep, 'id' | 'dependsOn'>)
++  | (Omit<ToolStep, 'id' | 'dependsOn'>);
++
++export type MapStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Map;
++  over: (ctx: WorkflowContext) => unknown[]; // the list to map
++  step: MapSubStep; // sub-step run per item (sees ctx.item / ctx.index)
++  maxParallel?: number; // per-map override of the engine concurrency cap
++};
++
++export type Step = AgentStep | ToolStep | BranchStep | MapStep;
++
++export type WorkflowDef = {
++  id: string;
++  description?: string;
++  steps: Step[];
++};
++
++export type WorkflowOutcome =
++  | { kind: 'done'; output: WorkflowContext }
++  | { kind: 'failed'; failedStep: string; message: string };
++
++/** The effective dependencies of a step: explicit `dependsOn`, else the previous
++ *  step in declaration order (first step => no deps). Shared by define + engine. */
++export function effectiveDeps(
++  step: Step,
++  index: number,
++  steps: Step[],
++): string[] {
++  if (step.dependsOn) return step.dependsOn;
++  return index === 0 ? [] : [steps[index - 1].id];
++}
++```
++
++- [ ] **Step 3: Write the failing test `tests/workflow/errors.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { WorkflowError } from '../../src/core/errors.ts';
++
++describe('WorkflowError', () => {
++  it('is an Error with the right name', () => {
++    const e = new WorkflowError('bad def');
++    expect(e).toBeInstanceOf(Error);
++    expect(e.name).toBe('WorkflowError');
++    expect(e.message).toBe('bad def');
++  });
++});
++```
++
++- [ ] **Step 4: Run tests**
++
++Run: `bun test tests/workflow/errors.test.ts && bun run typecheck`
++Expected: PASS; typecheck clean.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/workflow/types.ts src/core/errors.ts tests/workflow/errors.test.ts
++git commit -m "feat(workflow): typed step model + WorkflowError"
++```
++
++---
++
++## Task 2: `defineWorkflow` static validation
++
++**Files:**
++- Create: `src/workflow/define.ts`
++- Test: `tests/workflow/define.test.ts`
++
++**Interfaces:**
++- Consumes: `WorkflowDef`, `Step`, `StepKind`, `effectiveDeps` (Task 1); `WorkflowError` (Task 1).
++- Produces: `function defineWorkflow(def: WorkflowDef): WorkflowDef` — returns the def unchanged if valid, throws `WorkflowError` otherwise.
++
++- [ ] **Step 1: Write the failing test `tests/workflow/define.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { defineWorkflow } from '../../src/workflow/define.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const agent = (id: string, dependsOn?: string[]) => ({
++  id,
++  kind: StepKind.Agent as const,
++  agent: 'web_fetch',
++  input: () => 'hi',
++  output: z.string(),
++  ...(dependsOn ? { dependsOn } : {}),
++});
++
++describe('defineWorkflow', () => {
++  it('accepts a valid linear workflow', () => {
++    const def = defineWorkflow({ id: 'wf', steps: [agent('a'), agent('b')] });
++    expect(def.steps).toHaveLength(2);
++  });
++
++  it('rejects duplicate step ids', () => {
++    expect(() =>
++      defineWorkflow({ id: 'wf', steps: [agent('a'), agent('a')] }),
++    ).toThrow(/duplicate step id/i);
++  });
++
++  it('rejects an unknown dependsOn target', () => {
++    expect(() =>
++      defineWorkflow({ id: 'wf', steps: [agent('a'), agent('b', ['ghost'])] }),
++    ).toThrow(/unknown.*ghost/i);
++  });
++
++  it('rejects an unknown branch target', () => {
++    const branch = {
++      id: 'br',
++      kind: StepKind.Branch as const,
++      predicate: () => true,
++      whenTrue: 'a',
++      whenFalse: 'ghost',
++      output: z.object({ taken: z.string() }),
++      dependsOn: [] as string[],
++    };
++    expect(() =>
++      defineWorkflow({ id: 'wf', steps: [branch, agent('a', ['br'])] }),
++    ).toThrow(/unknown.*ghost/i);
++  });
++
++  it('rejects a dependency cycle', () => {
++    expect(() =>
++      defineWorkflow({
++        id: 'wf',
++        steps: [agent('a', ['b']), agent('b', ['a'])],
++      }),
++    ).toThrow(/cycle/i);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/workflow/define.test.ts`
++Expected: FAIL — `defineWorkflow` not defined.
++
++- [ ] **Step 3: Write `src/workflow/define.ts`**
++
++```typescript
++import { WorkflowError } from '../core/errors.ts';
++import { StepKind, type WorkflowDef, effectiveDeps } from './types.ts';
++
++/** Validate a workflow definition at construction:
++ *  unique ids · resolvable deps + branch targets · acyclic dependency graph. */
++export function defineWorkflow(def: WorkflowDef): WorkflowDef {
++  const { steps } = def;
++  const ids = new Set<string>();
++  for (const step of steps) {
++    if (ids.has(step.id)) {
++      throw new WorkflowError(`duplicate step id: ${step.id}`);
++    }
++    ids.add(step.id);
++  }
++
++  // Every dependsOn (explicit) and branch target must resolve to a real step.
++  steps.forEach((step, i) => {
++    for (const dep of effectiveDeps(step, i, steps)) {
++      if (!ids.has(dep)) {
++        throw new WorkflowError(
++          `step ${step.id}: unknown dependsOn target "${dep}"`,
++        );
++      }
++    }
++    if (step.kind === StepKind.Branch) {
++      for (const target of [step.whenTrue, step.whenFalse]) {
++        if (!ids.has(target)) {
++          throw new WorkflowError(
++            `branch ${step.id}: unknown target "${target}"`,
++          );
++        }
++      }
++    }
++  });
++
++  // Acyclic check via Kahn's topological sort over the effective-deps graph.
++  const indeg = new Map<string, number>();
++  const dependents = new Map<string, string[]>();
++  steps.forEach((s) => {
++    indeg.set(s.id, 0);
++    dependents.set(s.id, []);
++  });
++  steps.forEach((step, i) => {
++    for (const dep of effectiveDeps(step, i, steps)) {
++      indeg.set(step.id, (indeg.get(step.id) ?? 0) + 1);
++      dependents.get(dep)?.push(step.id);
++    }
++  });
++  const queue = [...indeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
++  let visited = 0;
++  while (queue.length > 0) {
++    const id = queue.shift() as string;
++    visited++;
++    for (const next of dependents.get(id) ?? []) {
++      const d = (indeg.get(next) ?? 0) - 1;
++      indeg.set(next, d);
++      if (d === 0) queue.push(next);
++    }
++  }
++  if (visited !== steps.length) {
++    throw new WorkflowError(`workflow ${def.id} has a dependency cycle`);
++  }
++
++  return def;
++}
++```
++
++- [ ] **Step 4: Run tests**
++
++Run: `bun test tests/workflow/define.test.ts && bun run typecheck`
++Expected: PASS; typecheck clean.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/workflow/define.ts tests/workflow/define.test.ts
++git commit -m "feat(workflow): defineWorkflow static graph validation"
++```
++
++---
++
++## Task 3: Extract `runGuardedAgent` (DRY, no behavior change)
++
++**Files:**
++- Modify: `src/core/delegate.ts` (extract the `execute` body, ~lines 44–70)
++- Test: `tests/core/delegate.test.ts` (add a direct test; existing tests are the regression gate)
++
++**Interfaces:**
++- Produces: `function runGuardedAgent(agent: Agent, task: string, onBeforeDelegate?: BeforeDelegate): Promise<{ text: string } | { error: string }>`. Wraps `withDelegationSpan` + `checkDelegation` + `concise` + `runInDelegationContext` + `runDefinedAgent` (identical to today's delegate-tool body).
++- Consumes (by Task 5): `runGuardedAgent`.
++
++- [ ] **Step 1: Read the current body to extract**
++
++The current `asDelegateTool` execute (lines 44–70) is the source of truth. Extract its inner async function verbatim into `runGuardedAgent`, keeping all imports already present in `delegate.ts` (`withDelegationSpan`, `checkDelegation`, `recordGuardrailViolation`, `currentDelegationContext`, `runInDelegationContext`, `runDefinedAgent`, `concise`).
++
++- [ ] **Step 2: Add `runGuardedAgent` and rewire `asDelegateTool` in `src/core/delegate.ts`**
++
++Add the exported function (place it above `asDelegateTool`):
++
++```typescript
++/** Run an agent through the full Slice-9 guarded delegation path:
++ *  delegation span · depth guard · before-delegate hook · context wrap · return cap.
++ *  Shared by the orchestrator's delegate tool and the workflow engine's agent step. */
++export function runGuardedAgent(
++  agent: Agent,
++  task: string,
++  onBeforeDelegate?: BeforeDelegate,
++): Promise<{ text: string } | { error: string }> {
++  return withDelegationSpan(agent.name, async () => {
++    const check = checkDelegation(agent.name);
++    if (!check.ok) {
++      recordGuardrailViolation(check.kind, check.reason);
++      return { error: check.reason };
++    }
++    const callerNumCtx = currentDelegationContext().numCtx;
++    try {
++      const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
++      if (pre?.abort) {
++        return { error: pre.abort };
++      }
++      const { text } = await runInDelegationContext(
++        agent.name,
++        pre?.numCtx,
++        () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
++      );
++      return { text: concise(text, callerNumCtx) };
++    } catch (cause) {
++      return {
++        error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
++      };
++    }
++  });
++}
++```
++
++Then collapse the tool's `execute` to delegate to it (behavior is byte-identical — same span, same guard, same cap):
++
++```typescript
++    execute: async ({ task }) => runGuardedAgent(agent, task, onBeforeDelegate),
++```
++
++- [ ] **Step 3: Add a direct regression test in `tests/core/delegate.test.ts`**
++
++Mirror the existing `MockLanguageModelV3` + `registerTestProvider` pattern already in this file. Add:
++
++```typescript
++import { runGuardedAgent } from '../../src/core/delegate.ts';
++import { withRootDelegationContext } from '../../src/core/guardrails.ts';
++
++it('runGuardedAgent returns concise text and emits an agent.delegation span', async () => {
++  const { exporter } = registerTestProvider();
++  const agent = {
++    name: 'web_fetch',
++    description: 'fetch',
++    model: new MockLanguageModelV3({
++      doGenerate: async () => ({
++        content: [{ type: 'text', text: 'done' }],
++        finishReason: { unified: 'stop', raw: undefined },
++        usage: {
++          inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++          outputTokens: { total: 1, text: undefined, reasoning: undefined },
++        },
++        warnings: [],
++      }),
++    }),
++    systemPrompt: 'x',
++    tools: {},
++  };
++  const result = await withRootDelegationContext(8192, () =>
++    runGuardedAgent(agent, 'summarize'),
++  );
++  expect(result).toEqual({ text: 'done' });
++  const del = exporter
++    .getFinishedSpans()
++    .find((s) => s.name === 'agent.delegation');
++  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
++});
++```
++
++(If the existing test file already constructs a canned agent helper, reuse it instead of duplicating the `MockLanguageModelV3` literal — DRY.)
++
++- [ ] **Step 4: Run the full delegate suite (regression) + typecheck**
++
++Run: `bun test tests/core/delegate.test.ts && bun run typecheck`
++Expected: PASS — all pre-existing delegate tests still green (proves no behavior change), plus the new one.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/core/delegate.ts tests/core/delegate.test.ts
++git commit -m "refactor(core): extract runGuardedAgent shared by delegate tool"
++```
++
++---
++
++## Task 4: Workflow telemetry spans
++
++**Files:**
++- Modify: `src/telemetry/spans.ts` (extend `ATTR`; add `withWorkflowSpan`, `withStepSpan`, `annotateStep`)
++- Test: `tests/telemetry/workflow-spans.test.ts`
++
++**Interfaces:**
++- Consumes: existing private `inSpan` + `tracer()` in `spans.ts`; `trace` from `@opentelemetry/api` (mirror `recordGuardrailViolation`).
++- Produces: `ATTR.WORKFLOW_ID/STEP_ID/STEP_KIND/STEP_BRANCH_TAKEN/STEP_MAP_COUNT/WORKFLOW_OUTCOME`; `withWorkflowSpan(workflowId, fn)`, `withStepSpan(stepId, kind, fn)`, `annotateStep(attrs)`.
++
++- [ ] **Step 1: Write the failing test `tests/telemetry/workflow-spans.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++import {
++  ATTR,
++  annotateStep,
++  withStepSpan,
++  withWorkflowSpan,
++} from '../../src/telemetry/spans.ts';
++
++describe('workflow spans', () => {
++  it('nests workflow.step under workflow.run with id/kind attrs', async () => {
++    const { exporter } = registerTestProvider();
++    await withWorkflowSpan('wf-demo', async () => {
++      await withStepSpan('s1', 'agent', async () => {
++        annotateStep({ [ATTR.STEP_MAP_COUNT]: 3 });
++      });
++    });
++    const spans = exporter.getFinishedSpans();
++    const run = spans.find((s) => s.name === 'workflow.run');
++    const step = spans.find((s) => s.name === 'workflow.step');
++    expect(run?.attributes[ATTR.WORKFLOW_ID]).toBe('wf-demo');
++    expect(step?.attributes[ATTR.STEP_ID]).toBe('s1');
++    expect(step?.attributes[ATTR.STEP_KIND]).toBe('agent');
++    expect(step?.attributes[ATTR.STEP_MAP_COUNT]).toBe(3);
++    expect(step?.parentSpanId).toBe(run?.spanContext().spanId);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/telemetry/workflow-spans.test.ts`
++Expected: FAIL — exports not defined.
++
++- [ ] **Step 3: Extend `src/telemetry/spans.ts`**
++
++Add these keys to the existing `ATTR` object (before the closing `} as const;`):
++
++```typescript
++  WORKFLOW_ID: 'workflow.id',
++  WORKFLOW_OUTCOME: 'workflow.outcome',
++  STEP_ID: 'workflow.step.id',
++  STEP_KIND: 'workflow.step.kind',
++  STEP_BRANCH_TAKEN: 'workflow.step.branch.taken',
++  STEP_MAP_COUNT: 'workflow.step.map.count',
++```
++
++Add the helpers (mirror `withDelegationSpan`/`recordGuardrailViolation`; `inSpan` is the existing private wrapper that starts an active span and ends it):
++
++```typescript
++/** Root span for a workflow run. Mirrors withRunSpan but for the DAG engine. */
++export function withWorkflowSpan<T>(
++  workflowId: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('workflow.run', async (span) => {
++    span.setAttribute(ATTR.WORKFLOW_ID, workflowId);
++    return fn();
++  });
++}
++
++/** Span for a single workflow step, tagged with its id + kind. */
++export function withStepSpan<T>(
++  stepId: string,
++  kind: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('workflow.step', async (span) => {
++    span.setAttribute(ATTR.STEP_ID, stepId);
++    span.setAttribute(ATTR.STEP_KIND, kind);
++    return fn();
++  });
++}
++
++/** Set extra attributes on the active step span (branch decision, map count). */
++export function annotateStep(attrs: Record<string, string | number>): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
++}
++```
++
++(Ensure `trace` is imported from `@opentelemetry/api` — it already is, used by `recordGuardrailViolation`.)
++
++- [ ] **Step 4: Run tests + typecheck**
++
++Run: `bun test tests/telemetry/workflow-spans.test.ts && bun run typecheck`
++Expected: PASS.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/telemetry/spans.ts tests/telemetry/workflow-spans.test.ts
++git commit -m "feat(telemetry): workflow.run/workflow.step spans + annotateStep"
++```
++
++---
++
++## Task 5: Per-kind step runners (`run-step.ts`)
++
++**Files:**
++- Create: `src/workflow/run-step.ts`
++- Test: `tests/workflow/run-step.test.ts`
++
++**Interfaces:**
++- Consumes: `Step`, `StepKind`, `WorkflowContext`, `MapSubStep` (Task 1); `runGuardedAgent` + `Agent` (Task 3); `ToolSet` from `ai`; `ATTR`, `annotateStep` (Task 4); `WorkflowError`.
++- Produces:
++  - `type WorkflowDeps = { runAgentStep: (agentName: string, task: string) => Promise<string>; tools: ToolSet; maxParallel?: number }`
++  - `function defaultRunAgentStep(agents: Record<string, Agent>): WorkflowDeps['runAgentStep']`
++  - `function runStepByKind(step: Step, ctx: WorkflowContext, deps: WorkflowDeps): Promise<unknown>`
++  - `const DEFAULT_MAX_PARALLEL: number` and `function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]>`
++
++- [ ] **Step 1: Write the failing test `tests/workflow/run-step.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import {
++  DEFAULT_MAX_PARALLEL,
++  type WorkflowDeps,
++  runStepByKind,
++} from '../../src/workflow/run-step.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const baseDeps = (over: Partial<WorkflowDeps> = {}): WorkflowDeps => ({
++  runAgentStep: async (_a, task) => `ran:${task}`,
++  tools: {},
++  ...over,
++});
++
++describe('runStepByKind', () => {
++  it('agent step calls runAgentStep with the built prompt', async () => {
++    const out = await runStepByKind(
++      {
++        id: 's',
++        kind: StepKind.Agent,
++        agent: 'web_fetch',
++        input: (ctx) => `task:${ctx.input}`,
++        output: z.string(),
++      },
++      { input: 'X' },
++      baseDeps(),
++    );
++    expect(out).toBe('ran:task:X');
++  });
++
++  it('tool step calls the tool execute with built args', async () => {
++    const out = await runStepByKind(
++      {
++        id: 's',
++        kind: StepKind.Tool,
++        tool: 'echo',
++        input: () => ({ msg: 'hi' }),
++        output: z.object({ echoed: z.string() }),
++      },
++      {},
++      baseDeps({
++        tools: {
++          echo: {
++            description: 'echo',
++            inputSchema: z.object({ msg: z.string() }),
++            execute: async (args: { msg: string }) => ({ echoed: args.msg }),
++          },
++        } as unknown as WorkflowDeps['tools'],
++      }),
++    );
++    expect(out).toEqual({ echoed: 'hi' });
++  });
++
++  it('branch step returns the taken arm', async () => {
++    const out = await runStepByKind(
++      {
++        id: 'b',
++        kind: StepKind.Branch,
++        predicate: (ctx) => ctx.input === 'yes',
++        whenTrue: 't',
++        whenFalse: 'f',
++        output: z.object({ taken: z.string() }),
++      },
++      { input: 'yes' },
++      baseDeps(),
++    );
++    expect(out).toEqual({ taken: 'whenTrue' });
++  });
++
++  it('map step fans out over the list and collects results', async () => {
++    const out = await runStepByKind(
++      {
++        id: 'm',
++        kind: StepKind.Map,
++        over: () => [1, 2, 3],
++        step: {
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: (ctx) => `n=${ctx.item}`,
++          output: z.string(),
++        },
++        output: z.array(z.string()),
++      },
++      {},
++      baseDeps(),
++    );
++    expect(out).toEqual(['ran:n=1', 'ran:n=2', 'ran:n=3']);
++  });
++
++  it('exposes a conservative default concurrency cap', () => {
++    expect(DEFAULT_MAX_PARALLEL).toBeGreaterThanOrEqual(1);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/workflow/run-step.test.ts`
++Expected: FAIL — module not found.
++
++- [ ] **Step 3: Write `src/workflow/run-step.ts`**
++
++```typescript
++import type { ToolSet } from 'ai';
++import type { Agent } from '../core/agent-def.ts';
++import { runGuardedAgent } from '../core/delegate.ts';
++import { WorkflowError } from '../core/errors.ts';
++import { ATTR, annotateStep } from '../telemetry/spans.ts';
++import {
++  type MapSubStep,
++  type Step,
++  StepKind,
++  type WorkflowContext,
++} from './types.ts';
++
++/** Conservative thrash-avoidance hint; the model manager's live-RAM budget is the
++ *  real safety guard. Override per-map via `maxParallel` or via AGENT_WORKFLOW_MAX_PARALLEL. */
++export const DEFAULT_MAX_PARALLEL = Number(
++  process.env.AGENT_WORKFLOW_MAX_PARALLEL ?? 2,
++);
++
++export type WorkflowDeps = {
++  /** Run a named agent with a task; returns its (already conciseness-capped) text.
++   *  Default impl resolves from an agent map and goes through runGuardedAgent. */
++  runAgentStep: (agentName: string, task: string) => Promise<string>;
++  /** The mounted tool set (MCP + built-ins) tool steps call into. */
++  tools: ToolSet;
++  /** Engine-wide concurrency cap; defaults to DEFAULT_MAX_PARALLEL. */
++  maxParallel?: number;
++};
++
++/** Default runAgentStep: resolve the agent by name, run it through the shared
++ *  guarded path; a guard/agent error becomes a thrown WorkflowError (the engine
++ *  then applies the step's onError policy). */
++export function defaultRunAgentStep(
++  agents: Record<string, Agent>,
++): WorkflowDeps['runAgentStep'] {
++  return async (agentName, task) => {
++    const agent = agents[agentName];
++    if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
++    const result = await runGuardedAgent(agent, task);
++    if ('error' in result) throw new WorkflowError(result.error);
++    return result.text;
++  };
++}
++
++/** Bounded-concurrency map preserving input order. */
++export async function mapWithConcurrency<T, R>(
++  items: T[],
++  limit: number,
++  fn: (item: T, i: number) => Promise<R>,
++): Promise<R[]> {
++  const out = new Array<R>(items.length);
++  let next = 0;
++  const worker = async (): Promise<void> => {
++    while (next < items.length) {
++      const i = next++;
++      out[i] = await fn(items[i], i);
++    }
++  };
++  const workers = Math.max(1, Math.min(limit, items.length));
++  await Promise.all(Array.from({ length: workers }, worker));
++  return out;
++}
++
++async function runLeaf(
++  sub: MapSubStep,
++  ctx: WorkflowContext,
++  deps: WorkflowDeps,
++): Promise<unknown> {
++  if (sub.kind === StepKind.Agent) {
++    return deps.runAgentStep(sub.agent, sub.input(ctx));
++  }
++  const tool = deps.tools[sub.tool];
++  if (!tool?.execute) throw new WorkflowError(`unknown tool: ${sub.tool}`);
++  return (tool.execute as (a: unknown, o: unknown) => Promise<unknown>)(
++    sub.input(ctx),
++    { toolCallId: `map-leaf`, messages: [] },
++  );
++}
++
++/** Dispatch a step to its kind runner. Returns the RAW result; the engine
++ *  validates it against the step's output schema. */
++export function runStepByKind(
++  step: Step,
++  ctx: WorkflowContext,
++  deps: WorkflowDeps,
++): Promise<unknown> {
++  switch (step.kind) {
++    case StepKind.Agent:
++      return deps.runAgentStep(step.agent, step.input(ctx));
++    case StepKind.Tool: {
++      const tool = deps.tools[step.tool];
++      if (!tool?.execute) {
++        return Promise.reject(new WorkflowError(`unknown tool: ${step.tool}`));
++      }
++      return (tool.execute as (a: unknown, o: unknown) => Promise<unknown>)(
++        step.input(ctx),
++        { toolCallId: step.id, messages: [] },
++      );
++    }
++    case StepKind.Branch: {
++      const taken = step.predicate(ctx) ? 'whenTrue' : 'whenFalse';
++      annotateStep({ [ATTR.STEP_BRANCH_TAKEN]: taken });
++      return Promise.resolve({ taken });
++    }
++    case StepKind.Map: {
++      const items = step.over(ctx);
++      annotateStep({ [ATTR.STEP_MAP_COUNT]: items.length });
++      const limit = step.maxParallel ?? deps.maxParallel ?? DEFAULT_MAX_PARALLEL;
++      return mapWithConcurrency(items, limit, async (item, index) => {
++        const subCtx: WorkflowContext = { ...ctx, item, index };
++        const raw = await runLeaf(step.step, subCtx, deps);
++        const parsed = step.step.output.safeParse(raw);
++        if (!parsed.success) {
++          throw new WorkflowError(
++            `map ${step.id}[${index}] output invalid: ${parsed.error.message}`,
++          );
++        }
++        return parsed.data;
++      });
++    }
++  }
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck**
++
++Run: `bun test tests/workflow/run-step.test.ts && bun run typecheck`
++Expected: PASS.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/workflow/run-step.ts tests/workflow/run-step.test.ts
++git commit -m "feat(workflow): per-kind step runners with bounded map fan-out"
++```
++
++---
++
++## Task 6: The executor (`engine.ts`)
++
++**Files:**
++- Create: `src/workflow/engine.ts`
++- Test: `tests/workflow/engine.test.ts`
++
++**Interfaces:**
++- Consumes: `WorkflowDef`, `Step`, `StepKind`, `WorkflowContext`, `WorkflowOutcome`, `effectiveDeps` (Task 1); `WorkflowDeps`, `runStepByKind`, `DEFAULT_MAX_PARALLEL` (Task 5); `withStepSpan` (Task 4); `WorkflowError`.
++- Produces: `function runWorkflow(def: WorkflowDef, input: unknown, deps: WorkflowDeps): Promise<WorkflowOutcome>`. Re-exports `defaultRunAgentStep` for the CLI convenience.
++
++- [ ] **Step 1: Write the failing test `tests/workflow/engine.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { defineWorkflow } from '../../src/workflow/define.ts';
++import { runWorkflow } from '../../src/workflow/engine.ts';
++import type { WorkflowDeps } from '../../src/workflow/run-step.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const deps = (over: Partial<WorkflowDeps> = {}): WorkflowDeps => ({
++  runAgentStep: async (_a, task) => task.toUpperCase(),
++  tools: {},
++  ...over,
++});
++
++describe('runWorkflow', () => {
++  it('threads validated context through a linear chain', async () => {
++    const def = defineWorkflow({
++      id: 'chain',
++      steps: [
++        {
++          id: 'a',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: (ctx) => `hello ${ctx.input}`,
++          output: z.string(),
++        },
++        {
++          id: 'b',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: (ctx) => `again ${ctx.a}`,
++          output: z.string(),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, 'world', deps());
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') {
++      expect(out.output.a).toBe('HELLO WORLD');
++      expect(out.output.b).toBe('AGAIN HELLO WORLD');
++    }
++  });
++
++  it('fails the workflow when output schema validation fails', async () => {
++    const def = defineWorkflow({
++      id: 'badout',
++      steps: [
++        {
++          id: 'a',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: () => 'text',
++          output: z.number(), // agent returns a string → invalid
++        },
++      ],
++    });
++    const out = await runWorkflow(def, null, deps());
++    expect(out).toMatchObject({ kind: 'failed', failedStep: 'a' });
++  });
++
++  it('branch takes the correct arm and skips the dead arm + its descendants', async () => {
++    const def = defineWorkflow({
++      id: 'br',
++      steps: [
++        {
++          id: 'gate',
++          kind: StepKind.Branch,
++          dependsOn: [],
++          predicate: (ctx) => ctx.input === 'go',
++          whenTrue: 'live',
++          whenFalse: 'dead',
++          output: z.object({ taken: z.string() }),
++        },
++        {
++          id: 'live',
++          kind: StepKind.Agent,
++          agent: 'x',
++          dependsOn: ['gate'],
++          input: () => 'live',
++          output: z.string(),
++        },
++        {
++          id: 'dead',
++          kind: StepKind.Agent,
++          agent: 'x',
++          dependsOn: ['gate'],
++          input: () => 'dead',
++          output: z.string(),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, 'go', deps());
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') {
++      expect(out.output.live).toBe('LIVE');
++      expect('dead' in out.output).toBe(false);
++    }
++  });
++
++  it('onError "continue" skips dependents; {fallback} substitutes', async () => {
++    const failingDeps = deps({
++      runAgentStep: async (_a, task) => {
++        if (task === 'boom') throw new Error('kaboom');
++        return task;
++      },
++    });
++    const def = defineWorkflow({
++      id: 'resil',
++      steps: [
++        {
++          id: 'a',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: () => 'boom',
++          output: z.string(),
++          onError: { fallback: 'SAFE' },
++        },
++        {
++          id: 'b',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: (ctx) => `got ${ctx.a}`,
++          output: z.string(),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, null, failingDeps);
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') {
++      expect(out.output.a).toBe('SAFE');
++      expect(out.output.b).toBe('got SAFE');
++    }
++  });
++
++  it('map fans out and collects validated results', async () => {
++    const def = defineWorkflow({
++      id: 'mapwf',
++      steps: [
++        {
++          id: 'm',
++          kind: StepKind.Map,
++          dependsOn: [],
++          over: (ctx) => ctx.input as string[],
++          step: {
++            kind: StepKind.Agent,
++            agent: 'x',
++            input: (ctx) => String(ctx.item),
++            output: z.string(),
++          },
++          output: z.array(z.string()),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, ['a', 'b'], deps());
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') expect(out.output.m).toEqual(['A', 'B']);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/workflow/engine.test.ts`
++Expected: FAIL — `runWorkflow` not defined.
++
++- [ ] **Step 3: Write `src/workflow/engine.ts`**
++
++```typescript
++import { withStepSpan } from '../telemetry/spans.ts';
++import {
++  type WorkflowDeps,
++  DEFAULT_MAX_PARALLEL,
++  runStepByKind,
++} from './run-step.ts';
++import {
++  type Step,
++  StepKind,
++  type WorkflowContext,
++  type WorkflowDef,
++  type WorkflowOutcome,
++  effectiveDeps,
++} from './types.ts';
++
++export { defaultRunAgentStep } from './run-step.ts';
++export type { WorkflowDeps } from './run-step.ts';
++
++type StepResult =
++  | { step: Step; value: unknown }
++  | { step: Step; error: Error };
++
++/** Execute a workflow DAG: topological scheduling with bounded concurrency,
++ *  per-step zod output validation, per-step onError policy, and branch skipping. */
++export async function runWorkflow(
++  def: WorkflowDef,
++  input: unknown,
++  deps: WorkflowDeps,
++): Promise<WorkflowOutcome> {
++  const maxParallel = deps.maxParallel ?? DEFAULT_MAX_PARALLEL;
++  const ctx: WorkflowContext = { input };
++  const steps = def.steps;
++  const done = new Set<string>();
++  const skipped = new Set<string>();
++
++  const isReady = (step: Step, i: number): boolean => {
++    if (done.has(step.id) || skipped.has(step.id)) return false;
++    const d = effectiveDeps(step, i, steps);
++    if (d.some((id) => skipped.has(id))) {
++      skipped.add(step.id); // dead-arm / continue propagation
++      return false;
++    }
++    return d.every((id) => done.has(id));
++  };
++
++  let failure: WorkflowOutcome | null = null;
++  while (!failure) {
++    const batch = steps.filter((s, i) => isReady(s, i)).slice(0, maxParallel);
++    if (batch.length === 0) break; // nothing runnable → done or fully skipped
++
++    const results: StepResult[] = await Promise.all(
++      batch.map(async (step): Promise<StepResult> => {
++        try {
++          const raw = await withStepSpan(step.id, step.kind, () =>
++            runStepByKind(step, ctx, deps),
++          );
++          const parsed = step.output.safeParse(raw);
++          if (!parsed.success) {
++            throw new Error(
++              `step ${step.id} output failed validation: ${parsed.error.message}`,
++            );
++          }
++          return { step, value: parsed.data };
++        } catch (cause) {
++          return { step, error: cause as Error };
++        }
++      }),
++    );
++
++    for (const r of results) {
++      if ('error' in r) {
++        const policy = r.step.onError ?? 'fail';
++        if (policy === 'fail') {
++          failure = {
++            kind: 'failed',
++            failedStep: r.step.id,
++            message: r.error.message,
++          };
++        } else if (policy === 'continue') {
++          skipped.add(r.step.id);
++        } else {
++          ctx[r.step.id] = policy.fallback;
++          done.add(r.step.id);
++        }
++        continue;
++      }
++      ctx[r.step.id] = r.value;
++      done.add(r.step.id);
++      if (r.step.kind === StepKind.Branch) {
++        const taken = (r.value as { taken: string }).taken;
++        const dead = taken === 'whenTrue' ? r.step.whenFalse : r.step.whenTrue;
++        skipped.add(dead);
++      }
++    }
++  }
++
++  if (failure) return failure;
++  return { kind: 'done', output: ctx };
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck**
++
++Run: `bun test tests/workflow/engine.test.ts && bun run typecheck`
++Expected: PASS.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/workflow/engine.ts tests/workflow/engine.test.ts
++git commit -m "feat(workflow): topological executor with onError + branch skipping"
++```
++
++---
++
++## Task 7: CLI entry (`flow.ts`), registry, and example workflow
++
++**Files:**
++- Create: `src/cli/flow.ts`, `workflows/index.ts`, `workflows/fetch-then-summarize.ts`
++- Modify: `package.json` (add `flow` script)
++- Test: `tests/cli/flow.test.ts`, `tests/integration/workflow.live.test.ts`
++
++**Interfaces:**
++- Consumes: `runWorkflow`, `defaultRunAgentStep` (Task 6); `withWorkflowSpan` + `ATTR.WORKFLOW_OUTCOME` + `annotateStep` (Task 4); `createRun`/`writeArtifact` (`src/run/run-store.ts`); `initRunTelemetry` (`src/telemetry/provider.ts`); `createFileTools`/`createFetchTools` (`src/mcp/client.ts`); `createFileQaAgent`/`createWebFetchAgent` (`agents/`); `defineWorkflow`.
++- Produces:
++  - `workflows/index.ts`: `export const WORKFLOWS: Record<string, WorkflowDef>` and `export function getWorkflow(name: string): WorkflowDef | undefined`.
++  - `src/cli/flow.ts`: `export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome>` where `FlowDeps = { def: WorkflowDef; input: unknown; runsRoot: string; runId: string; agents: Record<string, Agent>; tools: ToolSet }`, plus a `main()`.
++
++- [ ] **Step 1: Write the example `workflows/fetch-then-summarize.ts`**
++
++```typescript
++import { z } from 'zod';
++import { defineWorkflow } from '../src/workflow/define.ts';
++import { StepKind } from '../src/workflow/types.ts';
++
++/** tool(fetch) → agent(summarize): fetch a URL's content, then summarize it.
++ *  The workflow input is the URL string. */
++export default defineWorkflow({
++  id: 'fetch-then-summarize',
++  description: 'Fetch a URL with the fetch tool, then summarize via an agent.',
++  steps: [
++    {
++      id: 'fetch',
++      kind: StepKind.Tool,
++      dependsOn: [],
++      tool: 'fetch', // provided by mcp-server-fetch
++      input: (ctx) => ({ url: String(ctx.input) }),
++      output: z.unknown(),
++    },
++    {
++      id: 'summarize',
++      kind: StepKind.Agent,
++      dependsOn: ['fetch'],
++      agent: 'web_fetch',
++      input: (ctx) =>
++        `Summarize the following web page content in 3 concise bullet points:\n\n${JSON.stringify(ctx.fetch).slice(0, 8000)}`,
++      output: z.string(),
++    },
++  ],
++});
++```
++
++- [ ] **Step 2: Write the registry `workflows/index.ts`**
++
++```typescript
++import type { WorkflowDef } from '../src/workflow/types.ts';
++import fetchThenSummarize from './fetch-then-summarize.ts';
++
++/** name → workflow definition (mirrors models/registry.ts). */
++export const WORKFLOWS: Record<string, WorkflowDef> = {
++  [fetchThenSummarize.id]: fetchThenSummarize,
++};
++
++export function getWorkflow(name: string): WorkflowDef | undefined {
++  return WORKFLOWS[name];
++}
++```
++
++- [ ] **Step 3: Write the failing test `tests/cli/flow.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { mkdtemp, readFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { MockLanguageModelV3 } from 'ai/test';
++import { z } from 'zod';
++import { runFlow } from '../../src/cli/flow.ts';
++import { defineWorkflow } from '../../src/workflow/define.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const cannedAgent = (name: string) => ({
++  name,
++  description: name,
++  model: new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'summary text' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  }),
++  systemPrompt: 'x',
++  tools: {},
++});
++
++describe('runFlow', () => {
++  it('writes spans.jsonl with workflow spans + result.txt on success', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'flow-'));
++    const def = defineWorkflow({
++      id: 'demo',
++      steps: [
++        {
++          id: 'sum',
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: () => 'do it',
++          output: z.string(),
++        },
++      ],
++    });
++    const outcome = await runFlow({
++      def,
++      input: 'hello',
++      runsRoot,
++      runId: 'r1',
++      agents: { web_fetch: cannedAgent('web_fetch') },
++      tools: {},
++    });
++    expect(outcome.kind).toBe('done');
++    const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
++    expect(spans).toContain('workflow.run');
++    expect(spans).toContain('workflow.step');
++    const result = await readFile(join(runsRoot, 'r1', 'result.txt'), 'utf8');
++    expect(result).toContain('summary text');
++  });
++
++  it('writes failed.txt and returns failed on a failing step', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'flow-'));
++    const def = defineWorkflow({
++      id: 'demo',
++      steps: [
++        {
++          id: 'sum',
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: () => 'do it',
++          output: z.number(), // string result → validation failure
++        },
++      ],
++    });
++    const outcome = await runFlow({
++      def,
++      input: null,
++      runsRoot,
++      runId: 'r2',
++      agents: { web_fetch: cannedAgent('web_fetch') },
++      tools: {},
++    });
++    expect(outcome.kind).toBe('failed');
++    const failed = await readFile(join(runsRoot, 'r2', 'failed.txt'), 'utf8');
++    expect(failed).toContain('sum');
++  });
++});
++```
++
++- [ ] **Step 4: Run test to verify it fails**
++
++Run: `bun test tests/cli/flow.test.ts`
++Expected: FAIL — `runFlow` not defined.
++
++- [ ] **Step 5: Write `src/cli/flow.ts`**
++
++```typescript
++import type { ToolSet } from 'ai';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++import { getWorkflow } from '../../workflows/index.ts';
++import type { Agent } from '../core/agent-def.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
++import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
++import type { WorkflowDef, WorkflowOutcome } from '../workflow/types.ts';
++
++export type FlowDeps = {
++  def: WorkflowDef;
++  input: unknown;
++  runsRoot: string;
++  runId: string;
++  agents: Record<string, Agent>;
++  tools: ToolSet;
++};
++
++/** Run a workflow with telemetry + artifact persistence (mirrors runChat). */
++export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  const tel = initRunTelemetry(run.dir);
++  try {
++    const outcome = await withWorkflowSpan(deps.def.id, () =>
++      runWorkflow(deps.def, deps.input, {
++        runAgentStep: defaultRunAgentStep(deps.agents),
++        tools: deps.tools,
++      }),
++    );
++    if (outcome.kind === 'done') {
++      const last = deps.def.steps[deps.def.steps.length - 1].id;
++      const value = outcome.output[last];
++      const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
++      await writeArtifact(run, 'result.txt', text);
++    } else {
++      await writeArtifact(
++        run,
++        'failed.txt',
++        `step ${outcome.failedStep}: ${outcome.message}`,
++      );
++    }
++    return outcome;
++  } finally {
++    await tel.shutdown();
++  }
++}
++
++async function main(): Promise<void> {
++  const [name, ...rest] = process.argv.slice(2);
++  if (!name) {
++    console.error('Usage: bun run flow <name> [input...]');
++    process.exit(1);
++  }
++  const def = getWorkflow(name);
++  if (!def) {
++    console.error(`Unknown workflow: ${name}`);
++    process.exit(1);
++  }
++
++  const fileServer = await createFileTools();
++  try {
++    const fetchServer = await createFetchTools();
++    try {
++      const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++      const agents: Record<string, Agent> = {};
++      const fileQa = createFileQaAgent(fileServer.tools);
++      const webFetch = createWebFetchAgent(fetchServer.tools);
++      agents[fileQa.name] = fileQa;
++      agents[webFetch.name] = webFetch;
++
++      const outcome = await runFlow({
++        def,
++        input: rest.join(' ').trim(),
++        runsRoot: 'runs',
++        runId: `flow-${process.pid}`,
++        agents,
++        tools,
++      });
++      if (outcome.kind === 'done') {
++        const last = def.steps[def.steps.length - 1].id;
++        const value = outcome.output[last];
++        console.log(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
++      } else {
++        console.error(`Workflow failed at ${outcome.failedStep}: ${outcome.message}`);
++        process.exitCode = 1;
++      }
++    } finally {
++      await fetchServer.close();
++    }
++  } finally {
++    await fileServer.close();
++  }
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
++```
++
++(Note: `annotateStep`/`ATTR` are imported because the engine sets `ATTR.WORKFLOW_OUTCOME` — if you prefer, set it inside `runFlow` via `annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind })` right after `runWorkflow` resolves, while still inside `withWorkflowSpan`. To do that, move the artifact-writing into the `withWorkflowSpan` callback. Keep it simple: the import is used either way.)
++
++- [ ] **Step 6: Add the `flow` script to `package.json`**
++
++In `scripts`, after `"discover"`:
++
++```json
++    "flow": "bun run src/cli/flow.ts",
++```
++
++- [ ] **Step 7: Write the live integration test `tests/integration/workflow.live.test.ts`**
++
++```typescript
++import { describe, expect, it } from 'bun:test';
++import { isOllamaUp } from '../helpers/ollama-up.ts'; // reuse existing live-skip helper
++
++const live = await isOllamaUp();
++const maybe = live ? it : it.skip;
++
++describe('workflow.live', () => {
++  maybe(
++    'runs fetch-then-summarize end-to-end against real Ollama',
++    async () => {
++      const { runFlow } = await import('../../src/cli/flow.ts');
++      const { getWorkflow } = await import('../../workflows/index.ts');
++      const { createFetchTools, createFileTools } = await import(
++        '../../src/mcp/client.ts'
++      );
++      const { createFileQaAgent } = await import('../../agents/file-qa.ts');
++      const { createWebFetchAgent } = await import('../../agents/web-fetch.ts');
++      const { mkdtemp } = await import('node:fs/promises');
++      const { tmpdir } = await import('node:os');
++      const { join } = await import('node:path');
++
++      const def = getWorkflow('fetch-then-summarize');
++      expect(def).toBeDefined();
++      const fileServer = await createFileTools();
++      const fetchServer = await createFetchTools();
++      try {
++        const runsRoot = await mkdtemp(join(tmpdir(), 'flowlive-'));
++        const fileQa = createFileQaAgent(fileServer.tools);
++        const webFetch = createWebFetchAgent(fetchServer.tools);
++        const outcome = await runFlow({
++          def: def!,
++          input: 'https://example.com',
++          runsRoot,
++          runId: 'live',
++          agents: { [fileQa.name]: fileQa, [webFetch.name]: webFetch },
++          tools: { ...fileServer.tools, ...fetchServer.tools },
++        });
++        expect(outcome.kind).toBe('done');
++      } finally {
++        await fetchServer.close();
++        await fileServer.close();
++      }
++    },
++    120_000,
++  );
++});
++```
++
++(If `tests/helpers/ollama-up.ts` does not exist, mirror the live-skip guard used by the existing `*.live.test.ts` files — check how `orchestrator.live`/`model-manager.live` decide to skip and copy that exact predicate.)
++
++- [ ] **Step 8: Run tests + typecheck + lint**
++
++Run: `bun test tests/cli/flow.test.ts && bun run typecheck && bun run lint:file -- "src/cli/flow.ts" "workflows/*.ts"`
++Expected: unit test PASS; live test skips when Ollama is down; typecheck + lint clean.
++
++- [ ] **Step 9: Commit**
++
++```bash
++git add src/cli/flow.ts workflows/ package.json tests/cli/flow.test.ts tests/integration/workflow.live.test.ts
++git commit -m "feat(workflow): bun run flow CLI + registry + fetch-then-summarize example"
++```
++
++---
++
++## Task 8: Architecture doc — Workflow engine section (docs hard line)
++
++**Files:**
++- Modify: `docs/architecture.md` (add §12; update the §2 module map + dependency table to include `src/workflow/*` and the `runs/` data-flow edge)
++
++**Interfaces:** none (docs). This task is REQUIRED for `bun run docs:check` to pass (pre-commit hook gates on every `src/<subsystem>` being documented).
++
++- [ ] **Step 1: Add a "§12. Workflow engine" section to `docs/architecture.md`**
++
++Insert after the Glossary section (or as a numbered section in sequence). Content must accurately describe the code as built:
++
++```markdown
++## 12. Workflow engine
++
++A second, **deterministic** orchestration mode beside the LLM router. A workflow is a
++typed, JSON-serializable DAG built with `defineWorkflow({ id, steps })` (`src/workflow/define.ts`),
++validated at construction (unique ids · resolvable deps + branch targets · acyclic).
++
++**Step kinds** (`src/workflow/types.ts`, `StepKind`): `agent` · `tool` · `branch` · `map`.
++Each step declares a **zod `output` schema**; the engine validates the step result with
++`safeParse` and stores it in a `WorkflowContext` keyed by step id. Data flows between steps
++through typed `input: (ctx) => …` mappers (deps are declared, never inferred from `input`).
++
++**Execution** (`src/workflow/engine.ts`, `runWorkflow(def, input, deps)`): topological
++scheduling with bounded concurrency (default conservative, `AGENT_WORKFLOW_MAX_PARALLEL` /
++per-`map` `maxParallel` override; the model-manager live-RAM budget is the real guard).
++Default deps `dependsOn` = previous step in declaration order. **Fail-fast** by default;
++per-step `onError: 'continue' | { fallback }`. A `branch` selects one arm and skips the
++dead arm + its exclusive descendants (no fan-in join in v1).
++
++**Agent steps reuse Slice-9 guardrails**: the per-kind runners (`src/workflow/run-step.ts`)
++invoke `runGuardedAgent` (extracted from `src/core/delegate.ts` — shared by the orchestrator's
++delegate tool and the engine), so depth + return-cap + `agent.delegation` spans apply identically.
++
++**Entry**: `bun run flow <name> [input...]` (`src/cli/flow.ts`) over the `workflows/` registry;
++mounts the same MCP tools `chat.ts` does. A run writes `runs/<id>/spans.jsonl` + `result.txt`
++(or `failed.txt`) — rendered by `bun run runs <id>`.
++
++**Telemetry** (`src/telemetry/spans.ts`): root `workflow.run` span (`ATTR.WORKFLOW_ID`) →
++per-step `workflow.step` spans (`ATTR.STEP_ID`, `STEP_KIND`, `STEP_BRANCH_TAKEN`, `STEP_MAP_COUNT`)
++→ nested `agent.delegation`.
++
++Feeds Slice 11 (crews/roles), Slice 12 (RAG retrieval step), Slice 13 (verifier step).
++Out of scope (v1): JSON/YAML loader + visual editor (shape is serializable), durable/resumable
++runs (Phase E — align with AI SDK 7 `WorkflowAgent` then), branch fan-in joins, streaming step output.
++```
++
++- [ ] **Step 2: Update the §2 module map + dependency table**
++
++Add `src/workflow/` (types, define, engine, run-step) as a module box and its edges:
++`src/cli/flow.ts → src/workflow/engine.ts → src/workflow/run-step.ts → src/core/delegate.ts (runGuardedAgent)`;
++`src/workflow/* → src/telemetry/spans.ts`; `flow.ts → src/run/run-store.ts + src/mcp/client.ts + agents/`.
++Match the exact Mermaid/table style already in the file (read the existing §2 blocks first and follow their format precisely — do not invent a new style).
++
++- [ ] **Step 3: Run docs-check + full gate**
++
++Run: `bun run docs:check && bun run typecheck && bun run lint && bun test`
++Expected: docs-check PASS (workflow subsystem documented); typecheck + lint clean; full suite green (live tests skip if Ollama down).
++
++- [ ] **Step 4: Commit**
++
++```bash
++git add docs/architecture.md
++git commit -m "docs(slice-10): document the workflow engine in architecture.md"
++```
++
++---
++
++## Final verification (before PR)
++
++- [ ] `bun run check` (docs-check · typecheck · lint · test) is GREEN.
++- [ ] `bun run serve` then `bun run flow fetch-then-summarize https://example.com` runs end-to-end and writes `runs/<id>/spans.jsonl` + `result.txt`.
++- [ ] `bun run runs <id>` shows `workflow.run → workflow.step → agent.delegation`.
++- [ ] Existing orchestrator/delegate tests still pass (the `runGuardedAgent` extract caused no behavior change).
++- [ ] Refresh `resume-here.md` with the merge state.
++
++---
++
++## Self-review notes (plan author)
++
++**Spec coverage:** §2.1 types → Task 1; §2.2 define → Task 2; §2.6 runGuardedAgent extract → Task 3; §2.7 spans → Task 4; §2.4 run-step → Task 5; §2.3 engine → Task 6; §2.5 CLI+registry → Task 7; §8 docs → Task 8. §5 testing covered across Tasks 1–7 (unit) + Task 7 (live). §4 determinism = engine `onError` + acyclic `define` + bounded `map`. §7 acceptance = Final verification.
++
++**Latest-internet validation (standing rule [[prefers-latest-methodology]]):** confirmed the deterministic-DAG approach is correct vs AI SDK 6/7 (their native agent loop = the *model-driven* mode we already have; their durable Workflow SDK is Phase-E and infra-coupled). Refinements folded in: zod **`safeParse`** (not `parse`) for step validation; durable/resumable later should align with AI SDK 7 `WorkflowAgent`.
++
++**Type consistency:** `runGuardedAgent` signature identical in Task 3 (definition) and Task 5 (consumer). `WorkflowDeps`/`runStepByKind`/`DEFAULT_MAX_PARALLEL` defined in Task 5, consumed in Task 6/7. `effectiveDeps` defined in Task 1, used in Task 2 + Task 6. `withStepSpan`/`withWorkflowSpan`/`annotateStep`/`ATTR.*` defined Task 4, used Task 5/6/7.
++
++**Known v1 simplifications (documented, deferred):** wave-based bounded concurrency (whole batch awaited per wave — fine for v1); no branch fan-in join; `{fallback}` value is used directly (author's typed escape hatch, not re-validated); concurrency cap is a hint (model-manager live budget is the real guard).
+diff --git a/docs/superpowers/specs/2026-07-01-slice-10-workflow-engine-design.md b/docs/superpowers/specs/2026-07-01-slice-10-workflow-engine-design.md
+new file mode 100644
+index 0000000..7be77e3
+--- /dev/null
++++ b/docs/superpowers/specs/2026-07-01-slice-10-workflow-engine-design.md
+@@ -0,0 +1,151 @@
++# Slice 10 — Workflow / DAG engine — design
++
++**Date:** 2026-07-01
++**Status:** approved (brainstorm complete) → ready for implementation plan
++**Depends on:** Slice 2 (agents/orchestrator/delegate), Slice 8 (OTel telemetry + run-viewer), Slice 9 (composition guardrails — depth + return cap)
++**Feeds:** Slice 11 (Crews & roles — a role/goal/task layer on this engine), Slice 12 (Memory/RAG — a retrieval step), Slice 13 (Grounded verification — a verifier step). This is the **Phase-B substrate**.
++
++---
++
++## 1. Problem & goal
++
++Today the only orchestration is the **LLM router**: one model picks one specialist (`delegate_to_*`), non-deterministic, one hop. The defining gap vs **both** n8n and CrewAI is **deterministic multi-step orchestration** — a typed graph of steps with explicit data flow that *you* define, instead of a model choosing. This slice adds that as a **second entry mode** that composes on the existing substrate (agents, guardrails, telemetry, run store) rather than replacing it.
++
++### Locked decisions
++1. **Code-first, typed, JSON-serializable** (Approach A). A workflow is a TS object built with `defineWorkflow({ id, steps })`; each step is typed with a **zod output schema** and an `input: (ctx) => …` mapper. The shape serializes to JSON so a later visual editor / agent-builder can emit workflows — but no parser/loader is built now.
++2. **Step kinds (v1):** `agent` · `tool` · `branch` · `map` (fan-out). Covers real multi-step + parallel workflows from day one.
++3. **Fail-fast, declarable per step.** A step failure (agent error, tool throw, **output-schema validation failure**) fails the workflow by default; a step may set `onError: 'continue' | { fallback: <value> }`. Failures become span events + a `failed` outcome (non-zero CLI exit).
++4. **Entry = `bun run flow <name>` + a `workflows/` registry**, plus a `runWorkflow(def, input)` core API. A workflow run writes the same `runs/<id>/spans.jsonl` + a result artifact the run-viewer already renders.
++5. **Agent steps reuse the existing guarded delegation path** (depth + return-cap guardrails, `withDelegationSpan`, `concise`) — workflows inherit Slice 9 with no new guardrail code. A shared helper is extracted so the engine and the orchestrator's delegate tool use one guarded agent-invocation (DRY, no behavior change).
++6. **Bounded concurrency.** Independent steps and `map` fan-out run with a conservative concurrency cap (default small, per-`map` overridable) so parallel agent steps don't thrash the live-RAM budget. Fuller co-resident memory arbitration is an engine-line follow-up.
++7. **Telemetry-to-emit (mandated):** a `workflow.run` root span + per-step `workflow.step` spans (`ATTR.WORKFLOW_ID`, `STEP_ID`, `STEP_KIND`), branch-decision + map-fan-out-count as attributes; agent steps still emit `agent.delegation`.
++8. **Architecture-doc update (mandated):** add a "Workflow engine" layer/section to `docs/architecture.md` (the hard line).
++
++---
++
++## 2. Components
++
++### 2.1 `src/workflow/types.ts` (new — the typed model)
++```ts
++import type { z } from 'zod';
++
++export enum StepKind { Agent = 'agent', Tool = 'tool', Branch = 'branch', Map = 'map' }
++
++/** Context threaded through the run: each completed step's validated output, by id. */
++export type WorkflowContext = Record<string, unknown>;
++
++export type StepError = 'fail' | 'continue' | { fallback: unknown };
++
++type StepBase<O> = {
++  id: string;
++  // Execution deps. Default = the previous step in declaration order (linear pipeline);
++  // set explicitly for branches / parallel fan-in. (`input` is an opaque fn, so deps are
++  // never inferred from it — they are declared.) `[]` = no deps (a root step).
++  dependsOn?: string[];
++  output: z.ZodType<O>;           // structured I/O — validated after the step runs
++  onError?: StepError;            // default 'fail'
++};
++
++export type AgentStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Agent;
++  agent: string;                   // agent name from the agents/ registry
++  input: (ctx: WorkflowContext) => string;   // the task prompt for the agent
++};
++export type ToolStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Tool;
++  tool: string;                    // tool name in the mounted ToolSet
++  input: (ctx: WorkflowContext) => unknown;  // tool args (validated by the tool's own schema)
++};
++export type BranchStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Branch;
++  predicate: (ctx: WorkflowContext) => boolean;
++  whenTrue: string;                // step id to take when true
++  whenFalse: string;               // step id to take when false
++};
++export type MapStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Map;
++  over: (ctx: WorkflowContext) => unknown[];   // the list to map
++  step: Omit<AgentStep | ToolStep, 'id' | 'output'> & { output: z.ZodTypeAny }; // sub-step run per item
++  maxParallel?: number;            // default = engine default (conservative)
++};
++
++export type Step = AgentStep | ToolStep | BranchStep | MapStep;
++export type WorkflowDef = { id: string; description?: string; steps: Step[] };
++
++export type WorkflowOutcome =
++  | { kind: 'done'; output: WorkflowContext }
++  | { kind: 'failed'; failedStep: string; message: string };
++```
++
++### 2.2 `src/workflow/define.ts` (new — builder + static validation)
++`defineWorkflow(def: WorkflowDef): WorkflowDef` — validates structure at construction: unique step ids; every `dependsOn` / branch target resolves to a real step; the dependency graph is acyclic (topological sort succeeds). Throws a `WorkflowError` (new in `src/core/errors.ts`, extends `FrameworkError`) on a malformed definition.
++
++### 2.3 `src/workflow/engine.ts` (new — executor)
++`runWorkflow(def, input, deps): Promise<WorkflowOutcome>`
++- Topologically orders steps; runs steps whose deps are satisfied, concurrently up to the bounded cap.
++- For each step: build its input via `step.input(ctx)` (or branch/map equivalents), dispatch to the kind runner (§2.4), then **validate the result against `step.output`** (zod `parse`); store `ctx[step.id] = parsed`.
++- `branch` selects which downstream id is "live"; non-selected branch arms (and their exclusive descendants) are skipped.
++- On a step error or validation failure: apply `onError` (`'fail'` → abort with `{kind:'failed'}`; `'continue'` → record + skip dependents that needed it; `{fallback}` → use the fallback as the step output and continue).
++- `deps` (injectable for tests): `runAgentStep`, `tools: ToolSet`, `maxParallel`. Defaults wire to the real agent registry + mounted tools.
++
++### 2.4 `src/workflow/run-step.ts` (new — per-kind runners)
++- **agent** → the shared guarded delegation helper (§2.6): resolves the agent from the registry, runs it through `checkDelegation` + `withDelegationSpan` + `runInDelegationContext` + `runDefinedAgent` + `concise`. Returns the agent text (the step's `output` schema validates/parses it — e.g. `z.string()` or a structured schema the agent is prompted to emit).
++- **tool** → look up `tool` in the `ToolSet`, call `execute(args)`, return its result.
++- **branch** → evaluate `predicate`; output `{ taken: 'whenTrue'|'whenFalse' }` (recorded as a span attribute); engine uses it for path selection.
++- **map** → `over(ctx)` → run `step` per item with bounded parallelism; output = the array of per-item validated results.
++
++### 2.5 `src/cli/flow.ts` (new — entry) + `workflows/` (new — registry)
++- `bun run flow <name> [input...]` (package.json: `"flow": "bun run src/cli/flow.ts"`). Loads `<name>` from the `workflows/` registry (an index mapping name → `WorkflowDef`, like `models/registry.ts`), calls `runWorkflow`, writes `runs/<id>/{spans.jsonl, result.txt|failed.txt}`, prints the result; non-zero exit on `failed`. Mounts the same MCP tools `chat.ts` does so `tool` steps work.
++- `workflows/` ships ≥1 real example (e.g. `fetch-then-summarize`: a `tool` fetch step → an `agent` summarize step) + an `index.ts`.
++
++### 2.6 `src/core/delegate.ts` (light extract — DRY, no behavior change)
++Extract the guarded agent-invocation body of `asDelegateTool.execute` into a shared `runGuardedAgent(agent, task, onBeforeDelegate?)` used by both the delegate tool and `run-step.ts`'s agent runner — so guardrails (depth/cycle), `withDelegationSpan`, `runInDelegationContext`, and `concise` apply identically in both paths. The orchestrator's delegate tool behavior is unchanged.
++
++### 2.7 `src/telemetry/spans.ts` (extend)
++`ATTR` gains `WORKFLOW_ID: 'workflow.id'`, `STEP_ID: 'workflow.step.id'`, `STEP_KIND: 'workflow.step.kind'`. New `withWorkflowSpan(workflowId, fn)` (root `workflow.run`) and `withStepSpan(stepId, kind, fn)` (`workflow.step`, tags id+kind); branch decision + map item count set as attributes. Run lifecycle (init/shutdown) mirrors `run-chat.ts`.
++
++---
++
++## 3. Data flow
++```
++flow <name>  (or runWorkflow(def, input))
++  → initRunTelemetry(runDir) + withWorkflowSpan(def.id)        root: workflow.run
++    → topological execute:
++        for each ready step (bounded concurrency):
++          withStepSpan(step.id, step.kind):
++            input = step.input(ctx)            (typed, reads prior outputs)
++            result = run by kind:
++              agent → runGuardedAgent(agent, task)   → nests agent.delegation (depth + concise)
++              tool  → toolSet[tool].execute(args)
++              branch→ predicate(ctx) → pick live path
++              map   → bounded-parallel sub-runs over over(ctx)
++            ctx[step.id] = step.output.parse(result)     structured-I/O validation
++        on step failure → onError policy ('fail' aborts; 'continue'/{fallback} proceed)
++  → outcome {done|failed} → writeArtifact(result.txt|failed.txt) + flush spans
++  → `bun run runs <id>` renders workflow.run → workflow.step → agent.delegation tree
++```
++
++## 4. Error handling & determinism
++- DAGs are finite + acyclic (enforced at `defineWorkflow`), so no runaway; `map` is bounded by the input list + a concurrency cap.
++- Fail-fast default; per-step `onError` for resilience (ties into Phase-A graceful degradation later). Output-schema validation failure is a step failure.
++- Telemetry/guardrail helpers never throw into the run (existing contract). The engine catches step errors and converts them to the `onError` policy + a span event; an unexpected engine error → `{kind:'failed'}`, never an unhandled crash.
++- Concurrency capped so parallel agent steps don't evict each other under the live RAM budget (conservative default; per-`map` override).
++
++## 5. Testing (TDD)
++- **`tests/workflow/define.test.ts`** — unique-id / unknown-dep / cycle rejection; valid def passes.
++- **`tests/workflow/engine.test.ts`** — linear chain threads context; output-schema validation rejects a bad output (step fails); `branch` takes the correct arm + skips the other; `map` fans out over a list (bounded) and collects results; fail-fast aborts vs `onError:'continue'` proceeds vs `{fallback}` substitutes. Uses injected `deps` (stub `runAgentStep` + stub `ToolSet`) — no model.
++- **`tests/workflow/run-step.test.ts`** — agent runner goes through the guarded path (assert an `agent.delegation` span via `registerTestProvider`); tool runner calls `execute`.
++- **`tests/cli/flow.test.ts`** — `runWorkflow` over a temp `runsRoot` with `MockLanguageModelV3` agents writes `spans.jsonl` containing `workflow.run` + `workflow.step` spans + the artifact; failed workflow → `failed` outcome.
++- **`tests/integration/workflow.live.test.ts`** (skips if Ollama down) — a real 2-step workflow (tool fetch → agent summarize) produces a coherent span tree.
++- Regression: existing orchestrator/delegate tests still pass after the `runGuardedAgent` extract.
++
++## 6. Out of scope (later)
++Declarative JSON/YAML loader + visual editor (shape is serializable; loader deferred) · crews/roles (Slice 11) · RAG + verification steps (Slices 12–13) · durable/resumable workflows + triggers (Phase E) · fuller co-resident fan-out memory arbitration (engine-line) · streaming step output.
++
++## 7. Acceptance
++- `bun run check` green (docs-check · typecheck · lint · test); live tests skip cleanly when Ollama is down.
++- `defineWorkflow` rejects malformed graphs; the engine runs agent/tool/branch/map with typed, schema-validated data flow; fail-fast + per-step `onError` behave as specified.
++- `bun run flow fetch-then-summarize <url>` runs end-to-end (live), writes `runs/<id>/spans.jsonl`; `bun run runs <id>` shows `workflow.run → workflow.step → agent.delegation`.
++- Agent steps enforce the Slice-9 guardrails (depth + return cap) via the shared `runGuardedAgent`.
++- No regression to the LLM-orchestrator path.
++- `docs/architecture.md` gains a Workflow-engine section (passes `docs:check`).
+diff --git a/package.json b/package.json
+index 2aaed86..ba0cbf3 100644
+--- a/package.json
++++ b/package.json
+@@ -8,33 +8,34 @@
+     "typecheck": "tsc --noEmit",
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+     "lint:file": "biome check",
+     "lint:claude": "bun run lint",
+     "docs:check": "bun run scripts/docs-check.ts",
+     "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
+     "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
+     "discover": "bun run src/cli/discover.ts",
++    "flow": "bun run src/cli/flow.ts",
+     "runs": "bun run src/cli/runs.ts"
+   },
+   "dependencies": {
+-    "@ai-sdk/mcp": "^1.0.55",
++    "@ai-sdk/mcp": "^1.0.56",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/context-async-hooks": "^2.8.0",
+     "@opentelemetry/core": "^2.8.0",
+     "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
+     "@opentelemetry/resources": "^2.8.0",
+     "@opentelemetry/sdk-trace-base": "^2.8.0",
+     "@opentelemetry/semantic-conventions": "^1.41.1",
+-    "ai": "^6.0.214",
++    "ai": "^6.0.217",
+     "ollama-ai-provider-v2": "^3.6.0",
+     "zod": "^4.4.3"
+   },
+   "devDependencies": {
+     "typescript": "^5.9.0",
+     "@biomejs/biome": "2.5.1",
+     "@types/bun": "^1.3.14"
+   }
+ }
+diff --git a/src/cli/flow.ts b/src/cli/flow.ts
+new file mode 100644
+index 0000000..38a69fa
+--- /dev/null
++++ b/src/cli/flow.ts
+@@ -0,0 +1,118 @@
++import type { ToolSet } from 'ai';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++import { getWorkflow } from '../../workflows/index.ts';
++import type { Agent } from '../core/agent-def.ts';
++import { WorkflowError } from '../core/errors.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
++import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
++import type {
++  WorkflowContext,
++  WorkflowDef,
++  WorkflowOutcome,
++} from '../workflow/types.ts';
++
++export type FlowDeps = {
++  def: WorkflowDef;
++  input: unknown;
++  runsRoot: string;
++  runId: string;
++  agents: Record<string, Agent>;
++  tools: ToolSet;
++};
++
++/** The last step's validated output, rendered as text (as-is if string, else pretty JSON). */
++function lastStepOutputText(def: WorkflowDef, output: WorkflowContext): string {
++  const last = def.steps.at(-1);
++  if (!last) throw new WorkflowError(`workflow ${def.id} has no steps`);
++  const value = output[last.id];
++  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
++}
++
++/** Run a workflow with telemetry + artifact persistence (mirrors runChat). */
++export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  const tel = initRunTelemetry(run.dir);
++  try {
++    return await withWorkflowSpan(deps.def.id, async () => {
++      const outcome = await runWorkflow(deps.def, deps.input, {
++        runAgentStep: defaultRunAgentStep(deps.agents),
++        tools: deps.tools,
++      });
++      annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
++      if (outcome.kind === 'done') {
++        await writeArtifact(
++          run,
++          'result.txt',
++          lastStepOutputText(deps.def, outcome.output),
++        );
++      } else {
++        await writeArtifact(
++          run,
++          'failed.txt',
++          `step ${outcome.failedStep}: ${outcome.message}`,
++        );
++      }
++      return outcome;
++    });
++  } finally {
++    await tel.shutdown();
++  }
++}
++
++async function main(): Promise<void> {
++  const [name, ...rest] = process.argv.slice(2);
++  if (!name) {
++    console.error('Usage: bun run flow <name> [input...]');
++    process.exit(1);
++  }
++  const def = getWorkflow(name);
++  if (!def) {
++    console.error(`Unknown workflow: ${name}`);
++    process.exit(1);
++  }
++
++  const fileServer = await createFileTools();
++  try {
++    const fetchServer = await createFetchTools();
++    try {
++      const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++      const agents: Record<string, Agent> = {};
++      const fileQa = createFileQaAgent(fileServer.tools);
++      const webFetch = createWebFetchAgent(fetchServer.tools);
++      agents[fileQa.name] = fileQa;
++      agents[webFetch.name] = webFetch;
++
++      const outcome = await runFlow({
++        def,
++        input: rest.join(' ').trim(),
++        runsRoot: 'runs',
++        runId: `flow-${process.pid}`,
++        agents,
++        tools,
++      });
++      if (outcome.kind === 'done') {
++        console.log(lastStepOutputText(def, outcome.output));
++      } else {
++        console.error(
++          `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
++        );
++        process.exitCode = 1;
++      }
++    } finally {
++      await fetchServer.close();
++    }
++  } finally {
++    await fileServer.close();
++  }
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 2321713..6cf7126 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -21,52 +21,60 @@ export function delegateToolName(agent: Agent): string {
+ /**
+  * A hook run just before a delegated agent executes. May return a chosen context
+  * size, a model to bind for this call, and/or an `abort` message that skips the
+  * delegation entirely (returned to the orchestrator as a soft tool error).
+  */
+ export type BeforeDelegate = (
+   agent: Agent,
+   // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing.
+ ) => Promise<{ numCtx?: number; model?: LanguageModel; abort?: string } | void>;
+ 
++/** Run an agent through the full Slice-9 guarded delegation path:
++ *  delegation span · depth guard · before-delegate hook · context wrap · return cap.
++ *  Shared by the orchestrator's delegate tool and the workflow engine's agent step. */
++export function runGuardedAgent(
++  agent: Agent,
++  task: string,
++  onBeforeDelegate?: BeforeDelegate,
++): Promise<{ text: string } | { error: string }> {
++  return withDelegationSpan(agent.name, async () => {
++    const check = checkDelegation(agent.name);
++    if (!check.ok) {
++      recordGuardrailViolation(check.kind, check.reason);
++      return { error: check.reason };
++    }
++    const callerNumCtx = currentDelegationContext().numCtx;
++    try {
++      const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
++      if (pre?.abort) {
++        return { error: pre.abort };
++      }
++      const { text } = await runInDelegationContext(
++        agent.name,
++        pre?.numCtx,
++        () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
++      );
++      return { text: concise(text, callerNumCtx) };
++    } catch (cause) {
++      return {
++        error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
++      };
++    }
++  });
++}
++
+ /**
+  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
+  * structured error (so the orchestrator model can react) rather than throwing.
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+-    execute: async ({ task }) =>
+-      withDelegationSpan(agent.name, async () => {
+-        const check = checkDelegation(agent.name);
+-        if (!check.ok) {
+-          recordGuardrailViolation(check.kind, check.reason);
+-          return { error: check.reason };
+-        }
+-        const callerNumCtx = currentDelegationContext().numCtx;
+-        try {
+-          const pre = onBeforeDelegate
+-            ? await onBeforeDelegate(agent)
+-            : undefined;
+-          if (pre?.abort) {
+-            return { error: pre.abort };
+-          }
+-          const { text } = await runInDelegationContext(
+-            agent.name,
+-            pre?.numCtx,
+-            () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
+-          );
+-          return { text: concise(text, callerNumCtx) };
+-        } catch (cause) {
+-          return {
+-            error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+-          };
+-        }
+-      }),
++    execute: async ({ task }) => runGuardedAgent(agent, task, onBeforeDelegate),
+   });
+ }
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+index 31c05ef..cd8de67 100644
+--- a/src/core/errors.ts
++++ b/src/core/errors.ts
+@@ -16,10 +16,13 @@ export class ToolError extends FrameworkError {}
+ export class MaxStepsError extends FrameworkError {
+   readonly steps: unknown[];
+   constructor(message: string, steps: unknown[] = []) {
+     super(message);
+     this.steps = steps;
+   }
+ }
+ 
+ /** A model cannot fit the machine's memory budget. */
+ export class ResourceError extends FrameworkError {}
++
++/** A workflow definition or execution error. */
++export class WorkflowError extends FrameworkError {}
+diff --git a/src/telemetry/spans.ts b/src/telemetry/spans.ts
+index 8536c56..75b8403 100644
+--- a/src/telemetry/spans.ts
++++ b/src/telemetry/spans.ts
+@@ -19,20 +19,26 @@ export const ATTR = {
+   MODEL_KV_CACHE_TYPE: 'model.kv_cache_type',
+   MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
+   MODEL_BUDGET_BYTES: 'model.budget_bytes',
+   MODEL_SIZE_BYTES: 'model.size_bytes',
+   EVICT_REASON: 'model.evict.reason',
+   USAGE_INPUT_TOKENS: 'gen_ai.usage.input_tokens',
+   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
+   GUARDRAIL_TYPE: 'agent.guardrail.type',
+   DELEGATION_DEPTH: 'agent.delegation.depth',
+   DELEGATION_ANCESTORS: 'agent.delegation.ancestors',
++  WORKFLOW_ID: 'workflow.id',
++  WORKFLOW_OUTCOME: 'workflow.outcome',
++  STEP_ID: 'workflow.step.id',
++  STEP_KIND: 'workflow.step.kind',
++  STEP_BRANCH_TAKEN: 'workflow.step.branch.taken',
++  STEP_MAP_COUNT: 'workflow.step.map.count',
+ } as const;
+ 
+ export type ModelSelectInfo = {
+   modelId: string;
+   provider: string;
+   numCtx: number;
+   paramsBillions?: number;
+ };
+ 
+ export type ModelLoadInfo = {
+@@ -165,10 +171,41 @@ export function recordGuardrailViolation(
+   type: 'depth_exceeded',
+   detail: string,
+ ): void {
+   const span = trace.getActiveSpan();
+   if (!span) return;
+   span.addEvent('agent.guardrail.violation', {
+     [ATTR.GUARDRAIL_TYPE]: type,
+     'agent.guardrail.detail': detail,
+   });
+ }
++
++/** Root span for a workflow run. Mirrors withRunSpan but for the DAG engine. */
++export function withWorkflowSpan<T>(
++  workflowId: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('workflow.run', async (span) => {
++    span.setAttribute(ATTR.WORKFLOW_ID, workflowId);
++    return fn();
++  });
++}
++
++/** Span for a single workflow step, tagged with its id + kind. */
++export function withStepSpan<T>(
++  stepId: string,
++  kind: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('workflow.step', async (span) => {
++    span.setAttribute(ATTR.STEP_ID, stepId);
++    span.setAttribute(ATTR.STEP_KIND, kind);
++    return fn();
++  });
++}
++
++/** Set extra attributes on the active step span (branch decision, map count). */
++export function annotateStep(attrs: Record<string, string | number>): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
++}
+diff --git a/src/workflow/define.ts b/src/workflow/define.ts
+new file mode 100644
+index 0000000..0f37cfd
+--- /dev/null
++++ b/src/workflow/define.ts
+@@ -0,0 +1,67 @@
++import { WorkflowError } from '../core/errors.ts';
++import { effectiveDeps, StepKind, type WorkflowDef } from './types.ts';
++
++/** Validate a workflow definition at construction:
++ *  unique ids · resolvable deps + branch targets · acyclic dependency graph. */
++export function defineWorkflow(def: WorkflowDef): WorkflowDef {
++  const { steps } = def;
++  const ids = new Set<string>();
++  for (const step of steps) {
++    if (ids.has(step.id)) {
++      throw new WorkflowError(`duplicate step id: ${step.id}`);
++    }
++    ids.add(step.id);
++  }
++
++  // Every dependsOn (explicit) and branch target must resolve to a real step.
++  steps.forEach((step, i) => {
++    for (const dep of effectiveDeps(step, i, steps)) {
++      if (!ids.has(dep)) {
++        throw new WorkflowError(
++          `step ${step.id}: unknown dependsOn target "${dep}"`,
++        );
++      }
++    }
++    if (step.kind === StepKind.Branch) {
++      for (const target of [step.whenTrue, step.whenFalse]) {
++        if (!ids.has(target)) {
++          throw new WorkflowError(
++            `branch ${step.id}: unknown target "${target}"`,
++          );
++        }
++      }
++    }
++  });
++
++  // Acyclic check via Kahn's topological sort over the effective-deps graph.
++  const indeg = new Map<string, number>();
++  const dependents = new Map<string, string[]>();
++  steps.forEach((s) => {
++    indeg.set(s.id, 0);
++    dependents.set(s.id, []);
++  });
++  steps.forEach((step, i) => {
++    for (const dep of effectiveDeps(step, i, steps)) {
++      indeg.set(step.id, (indeg.get(step.id) ?? 0) + 1);
++      dependents.get(dep)?.push(step.id);
++    }
++  });
++  const queue = [...indeg.entries()]
++    .filter(([, d]) => d === 0)
++    .map(([id]) => id);
++  let visited = 0;
++  while (queue.length > 0) {
++    const id = queue.shift() as string;
++    visited++;
++    for (const next of dependents.get(id) ?? []) {
++      const d = (indeg.get(next) ?? 0) - 1;
++      indeg.set(next, d);
++      if (d === 0) queue.push(next);
++    }
++  }
++  if (visited !== steps.length) {
++    throw new WorkflowError(`workflow ${def.id} has a dependency cycle`);
++  }
++
++  return def;
++}
+diff --git a/src/workflow/engine.ts b/src/workflow/engine.ts
+new file mode 100644
+index 0000000..c62e124
+--- /dev/null
++++ b/src/workflow/engine.ts
+@@ -0,0 +1,97 @@
++import { withStepSpan } from '../telemetry/spans.ts';
++import {
++  DEFAULT_MAX_PARALLEL,
++  runStepByKind,
++  type WorkflowDeps,
++} from './run-step.ts';
++import {
++  effectiveDeps,
++  type Step,
++  StepKind,
++  type WorkflowContext,
++  type WorkflowDef,
++  type WorkflowOutcome,
++} from './types.ts';
++
++export type { WorkflowDeps } from './run-step.ts';
++export { defaultRunAgentStep } from './run-step.ts';
++
++type StepResult = { step: Step; value: unknown } | { step: Step; error: Error };
++
++/** Execute a workflow DAG: topological scheduling with bounded concurrency,
++ *  per-step zod output validation, per-step onError policy, and branch skipping. */
++export async function runWorkflow(
++  def: WorkflowDef,
++  input: unknown,
++  deps: WorkflowDeps,
++): Promise<WorkflowOutcome> {
++  const maxParallel = deps.maxParallel ?? DEFAULT_MAX_PARALLEL;
++  const ctx: WorkflowContext = { input };
++  const steps = def.steps;
++  const done = new Set<string>();
++  const skipped = new Set<string>();
++
++  const isReady = (step: Step, i: number): boolean => {
++    if (done.has(step.id) || skipped.has(step.id)) return false;
++    const d = effectiveDeps(step, i, steps);
++    if (d.some((id) => skipped.has(id))) {
++      skipped.add(step.id); // dead-arm / continue propagation
++      return false;
++    }
++    return d.every((id) => done.has(id));
++  };
++
++  let failure: WorkflowOutcome | null = null;
++  while (!failure) {
++    const batch = steps.filter((s, i) => isReady(s, i)).slice(0, maxParallel);
++    if (batch.length === 0) break; // nothing runnable → done or fully skipped
++
++    const results: StepResult[] = await Promise.all(
++      batch.map(async (step): Promise<StepResult> => {
++        try {
++          const raw = await withStepSpan(step.id, step.kind, () =>
++            runStepByKind(step, ctx, deps),
++          );
++          const parsed = step.output.safeParse(raw);
++          if (!parsed.success) {
++            throw new Error(
++              `step ${step.id} output failed validation: ${parsed.error.message}`,
++            );
++          }
++          return { step, value: parsed.data };
++        } catch (cause) {
++          return { step, error: cause as Error };
++        }
++      }),
++    );
++
++    for (const r of results) {
++      if ('error' in r) {
++        const policy = r.step.onError ?? 'fail';
++        if (policy === 'fail') {
++          failure = {
++            kind: 'failed',
++            failedStep: r.step.id,
++            message: r.error.message,
++          };
++        } else if (policy === 'continue') {
++          skipped.add(r.step.id);
++        } else {
++          ctx[r.step.id] = policy.fallback;
++          done.add(r.step.id);
++        }
++        continue;
++      }
++      ctx[r.step.id] = r.value;
++      done.add(r.step.id);
++      if (r.step.kind === StepKind.Branch) {
++        const taken = (r.value as { taken: string }).taken;
++        const dead = taken === 'whenTrue' ? r.step.whenFalse : r.step.whenTrue;
++        skipped.add(dead);
++      }
++    }
++  }
++
++  if (failure) return failure;
++  return { kind: 'done', output: ctx };
++}
+diff --git a/src/workflow/run-step.ts b/src/workflow/run-step.ts
+new file mode 100644
+index 0000000..0794108
+--- /dev/null
++++ b/src/workflow/run-step.ts
+@@ -0,0 +1,130 @@
++import type { ToolSet } from 'ai';
++import type { Agent } from '../core/agent-def.ts';
++import { runGuardedAgent } from '../core/delegate.ts';
++import { WorkflowError } from '../core/errors.ts';
++import { ATTR, annotateStep } from '../telemetry/spans.ts';
++import {
++  type MapSubStep,
++  type Step,
++  StepKind,
++  type WorkflowContext,
++} from './types.ts';
++
++/** Conservative thrash-avoidance hint; the model manager's live-RAM budget is the
++ *  real safety guard. Override per-map via `maxParallel` or via AGENT_WORKFLOW_MAX_PARALLEL. */
++export const DEFAULT_MAX_PARALLEL = Number(
++  process.env.AGENT_WORKFLOW_MAX_PARALLEL ?? 2,
++);
++
++export type WorkflowDeps = {
++  /** Run a named agent with a task; returns its (already conciseness-capped) text.
++   *  Default impl resolves from an agent map and goes through runGuardedAgent. */
++  runAgentStep: (agentName: string, task: string) => Promise<string>;
++  /** The mounted tool set (MCP + built-ins) tool steps call into. */
++  tools: ToolSet;
++  /** Engine-wide concurrency cap; defaults to DEFAULT_MAX_PARALLEL. */
++  maxParallel?: number;
++};
++
++/** Default runAgentStep: resolve the agent by name, run it through the shared
++ *  guarded path; a guard/agent error becomes a thrown WorkflowError (the engine
++ *  then applies the step's onError policy). */
++export function defaultRunAgentStep(
++  agents: Record<string, Agent>,
++): WorkflowDeps['runAgentStep'] {
++  return async (agentName, task) => {
++    const agent = agents[agentName];
++    if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
++    const result = await runGuardedAgent(agent, task);
++    if ('error' in result) throw new WorkflowError(result.error);
++    return result.text;
++  };
++}
++
++/** Bounded-concurrency map preserving input order. */
++export async function mapWithConcurrency<T, R>(
++  items: T[],
++  limit: number,
++  fn: (item: T, i: number) => Promise<R>,
++): Promise<R[]> {
++  const out = new Array<R>(items.length);
++  let next = 0;
++  const worker = async (): Promise<void> => {
++    while (next < items.length) {
++      const i = next++;
++      // Safe: i < items.length is the loop invariant just checked above.
++      out[i] = await fn(items[i] as T, i);
++    }
++  };
++  const workers = Math.max(1, Math.min(limit, items.length));
++  await Promise.all(Array.from({ length: workers }, worker));
++  return out;
++}
++
++function callTool(
++  tool: ToolSet[string],
++  args: unknown,
++  callId: string,
++): Promise<unknown> {
++  return (tool.execute as (a: unknown, o: unknown) => Promise<unknown>)(args, {
++    toolCallId: callId,
++    messages: [],
++  });
++}
++
++async function runLeaf(
++  sub: MapSubStep,
++  ctx: WorkflowContext,
++  deps: WorkflowDeps,
++  callId: string,
++): Promise<unknown> {
++  if (sub.kind === StepKind.Agent) {
++    return deps.runAgentStep(sub.agent, sub.input(ctx));
++  }
++  const tool = deps.tools[sub.tool];
++  if (!tool?.execute) throw new WorkflowError(`unknown tool: ${sub.tool}`);
++  return callTool(tool, sub.input(ctx), callId);
++}
++
++/** Dispatch a step to its kind runner. Returns the RAW result; the engine
++ *  validates it against the step's output schema. */
++export function runStepByKind(
++  step: Step,
++  ctx: WorkflowContext,
++  deps: WorkflowDeps,
++): Promise<unknown> {
++  switch (step.kind) {
++    case StepKind.Agent:
++      return deps.runAgentStep(step.agent, step.input(ctx));
++    case StepKind.Tool: {
++      const tool = deps.tools[step.tool];
++      if (!tool?.execute) {
++        return Promise.reject(new WorkflowError(`unknown tool: ${step.tool}`));
++      }
++      return callTool(tool, step.input(ctx), step.id);
++    }
++    case StepKind.Branch: {
++      const taken = step.predicate(ctx) ? 'whenTrue' : 'whenFalse';
++      annotateStep({ [ATTR.STEP_BRANCH_TAKEN]: taken });
++      return Promise.resolve({ taken });
++    }
++    case StepKind.Map: {
++      const items = step.over(ctx);
++      annotateStep({ [ATTR.STEP_MAP_COUNT]: items.length });
++      const limit =
++        step.maxParallel ?? deps.maxParallel ?? DEFAULT_MAX_PARALLEL;
++      return mapWithConcurrency(items, limit, async (item, index) => {
++        const subCtx: WorkflowContext = { ...ctx, item, index };
++        const callId = `${step.id}[${index}]`;
++        const raw = await runLeaf(step.step, subCtx, deps, callId);
++        const parsed = step.step.output.safeParse(raw);
++        if (!parsed.success) {
++          throw new WorkflowError(
++            `map ${step.id}[${index}] output invalid: ${parsed.error.message}`,
++          );
++        }
++        return parsed.data;
++      });
++    }
++  }
++}
+diff --git a/src/workflow/types.ts b/src/workflow/types.ts
+new file mode 100644
+index 0000000..148e4d1
+--- /dev/null
++++ b/src/workflow/types.ts
+@@ -0,0 +1,84 @@
++import type { z } from 'zod';
++
++/** The four step kinds supported in v1. */
++export enum StepKind {
++  Agent = 'agent',
++  Tool = 'tool',
++  Branch = 'branch',
++  Map = 'map',
++}
++
++/** Context threaded through a run: each completed step's validated output, by id.
++ *  `input` holds the workflow's initial input; `map` sub-steps also see `item`/`index`. */
++export type WorkflowContext = Record<string, unknown>;
++
++/** Per-step failure policy. Default 'fail' (fail-fast). */
++export type StepError = 'fail' | 'continue' | { fallback: unknown };
++
++type StepBase<O> = {
++  id: string;
++  /** Execution deps. Omitted = previous step in declaration order (linear pipeline).
++   *  `[]` = a root step. Branch/parallel fan-in set these explicitly. */
++  dependsOn?: string[];
++  /** Structured I/O — the step's result is validated against this after it runs. */
++  output: z.ZodType<O>;
++  /** Failure policy; default 'fail'. */
++  onError?: StepError;
++};
++
++export type AgentStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Agent;
++  agent: string; // agent name resolved from the agent map at run time
++  input: (ctx: WorkflowContext) => string; // the task prompt for the agent
++};
++
++export type ToolStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Tool;
++  tool: string; // tool name in the mounted ToolSet
++  input: (ctx: WorkflowContext) => unknown; // tool args (validated by the tool's own schema)
++};
++
++export type BranchStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Branch;
++  predicate: (ctx: WorkflowContext) => boolean;
++  whenTrue: string; // step id taken when predicate true
++  whenFalse: string; // step id taken when predicate false
++};
++
++/** A map sub-step is an agent/tool step run once per item; id is synthesized,
++ *  deps are implicit (the item), so they are omitted. */
++export type MapSubStep =
++  | Omit<AgentStep, 'id' | 'dependsOn'>
++  | Omit<ToolStep, 'id' | 'dependsOn'>;
++
++export type MapStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Map;
++  over: (ctx: WorkflowContext) => unknown[]; // the list to map
++  step: MapSubStep; // sub-step run per item (sees ctx.item / ctx.index)
++  maxParallel?: number; // per-map override of the engine concurrency cap
++};
++
++export type Step = AgentStep | ToolStep | BranchStep | MapStep;
++
++export type WorkflowDef = {
++  id: string;
++  description?: string;
++  steps: Step[];
++};
++
++export type WorkflowOutcome =
++  | { kind: 'done'; output: WorkflowContext }
++  | { kind: 'failed'; failedStep: string; message: string };
++
++/** The effective dependencies of a step: explicit `dependsOn`, else the previous
++ *  step in declaration order (first step => no deps). Shared by define + engine. */
++export function effectiveDeps(
++  step: Step,
++  index: number,
++  steps: Step[],
++): string[] {
++  if (step.dependsOn) return step.dependsOn;
++  if (index === 0) return [];
++  const prev = steps[index - 1];
++  return prev ? [prev.id] : [];
++}
+diff --git a/tests/cli/flow.test.ts b/tests/cli/flow.test.ts
+new file mode 100644
+index 0000000..930a3d0
+--- /dev/null
++++ b/tests/cli/flow.test.ts
+@@ -0,0 +1,91 @@
++import { describe, expect, it } from 'bun:test';
++import { mkdtemp, readFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { MockLanguageModelV3 } from 'ai/test';
++import { z } from 'zod';
++import { runFlow } from '../../src/cli/flow.ts';
++import { defineWorkflow } from '../../src/workflow/define.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const cannedAgent = (name: string) => ({
++  name,
++  description: name,
++  model: new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'summary text' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  }),
++  systemPrompt: 'x',
++  tools: {},
++});
++
++describe('runFlow', () => {
++  it('writes spans.jsonl with workflow spans + result.txt on success', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'flow-'));
++    const def = defineWorkflow({
++      id: 'demo',
++      steps: [
++        {
++          id: 'sum',
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: () => 'do it',
++          output: z.string(),
++        },
++      ],
++    });
++    const outcome = await runFlow({
++      def,
++      input: 'hello',
++      runsRoot,
++      runId: 'r1',
++      agents: { web_fetch: cannedAgent('web_fetch') },
++      tools: {},
++    });
++    expect(outcome.kind).toBe('done');
++    const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
++    expect(spans).toContain('workflow.run');
++    expect(spans).toContain('workflow.step');
++    const result = await readFile(join(runsRoot, 'r1', 'result.txt'), 'utf8');
++    expect(result).toContain('summary text');
++  });
++
++  it('writes failed.txt and returns failed on a failing step', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'flow-'));
++    const def = defineWorkflow({
++      id: 'demo',
++      steps: [
++        {
++          id: 'sum',
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: () => 'do it',
++          output: z.number(), // string result → validation failure
++        },
++      ],
++    });
++    const outcome = await runFlow({
++      def,
++      input: null,
++      runsRoot,
++      runId: 'r2',
++      agents: { web_fetch: cannedAgent('web_fetch') },
++      tools: {},
++    });
++    expect(outcome.kind).toBe('failed');
++    const failed = await readFile(join(runsRoot, 'r2', 'failed.txt'), 'utf8');
++    expect(failed).toContain('sum');
++  });
++});
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index 3d740c7..88bb38f 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -1,14 +1,18 @@
+ import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import type { Agent } from '../../src/core/agent-def.ts';
+-import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
++import {
++  asDelegateTool,
++  delegateToolName,
++  runGuardedAgent,
++} from '../../src/core/delegate.ts';
+ import {
+   runInDelegationContext,
+   withRootDelegationContext,
+ } from '../../src/core/guardrails.ts';
+ import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ function cannedAgent(name: string, answer: string): Agent {
+   return {
+     name,
+     description: `agent ${name}`,
+@@ -201,20 +205,31 @@ test('long delegated return is truncated to the caller live cap', async () => {
+     typeof result !== 'object' ||
+     !('text' in result) ||
+     typeof result.text !== 'string'
+   ) {
+     throw new Error('expected text result');
+   }
+   expect(result.text.length).toBeLessThan(9000);
+   expect(result.text).toContain('…[truncated');
+ });
+ 
++test('runGuardedAgent returns concise text and emits an agent.delegation span', async () => {
++  const result = await withRootDelegationContext(8192, () =>
++    runGuardedAgent(cannedAgent('web_fetch', 'done'), 'summarize'),
++  );
++  expect(result).toEqual({ text: 'done' });
++  const del = spanExporter
++    .getFinishedSpans()
++    .find((s) => s.name === 'agent.delegation');
++  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
++});
++
+ test('within-depth recursive re-entry of the same agent name is allowed', async () => {
+   const t = asDelegateTool(leaf('rec', 'ok'));
+   const result = await runInDelegationContext(
+     'rec',
+     8192,
+     async () =>
+       await t.execute?.({ task: 'again' }, { toolCallId: 'c', messages: [] }),
+   );
+   expect(result).toEqual({ text: 'ok' }); // same name 'rec' re-entered, not rejected
+ });
+diff --git a/tests/integration/workflow.live.test.ts b/tests/integration/workflow.live.test.ts
+new file mode 100644
+index 0000000..e2fe27f
+--- /dev/null
++++ b/tests/integration/workflow.live.test.ts
+@@ -0,0 +1,44 @@
++import { describe, expect, test } from 'bun:test';
++import { mkdtemp } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++import qwenFast from '../../models/qwen-fast.ts';
++import { runFlow } from '../../src/cli/flow.ts';
++import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
++import { unloadModel } from '../../src/resource/ollama-control.ts';
++import { getWorkflow } from '../../workflows/index.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenFast.model);
++
++describe.skipIf(!ready)('workflow.live', () => {
++  test('runs fetch-then-summarize end-to-end against real Ollama', async () => {
++    const def = getWorkflow('fetch-then-summarize');
++    if (!def) throw new Error('fetch-then-summarize workflow not registered');
++    const fileServer = await createFileTools();
++    try {
++      const fetchServer = await createFetchTools();
++      try {
++        const runsRoot = await mkdtemp(join(tmpdir(), 'flowlive-'));
++        const fileQa = createFileQaAgent(fileServer.tools);
++        const webFetch = createWebFetchAgent(fetchServer.tools);
++        const outcome = await runFlow({
++          def,
++          input: 'https://example.com',
++          runsRoot,
++          runId: 'live',
++          agents: { [fileQa.name]: fileQa, [webFetch.name]: webFetch },
++          tools: { ...fileServer.tools, ...fetchServer.tools },
++        });
++        expect(outcome.kind).toBe('done');
++      } finally {
++        await fetchServer.close();
++      }
++    } finally {
++      await fileServer.close();
++      await unloadModel(qwenFast.model);
++    }
++  }, 120_000);
++});
+diff --git a/tests/telemetry/workflow-spans.test.ts b/tests/telemetry/workflow-spans.test.ts
+new file mode 100644
+index 0000000..4eac5b1
+--- /dev/null
++++ b/tests/telemetry/workflow-spans.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'bun:test';
++import {
++  ATTR,
++  annotateStep,
++  withStepSpan,
++  withWorkflowSpan,
++} from '../../src/telemetry/spans.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++
++describe('workflow spans', () => {
++  it('nests workflow.step under workflow.run with id/kind attrs', async () => {
++    const { exporter } = registerTestProvider();
++    await withWorkflowSpan('wf-demo', async () => {
++      await withStepSpan('s1', 'agent', async () => {
++        annotateStep({ [ATTR.STEP_MAP_COUNT]: 3 });
++      });
++    });
++    const spans = exporter.getFinishedSpans();
++    const run = spans.find((s) => s.name === 'workflow.run');
++    const step = spans.find((s) => s.name === 'workflow.step');
++    expect(run?.attributes[ATTR.WORKFLOW_ID]).toBe('wf-demo');
++    expect(step?.attributes[ATTR.STEP_ID]).toBe('s1');
++    expect(step?.attributes[ATTR.STEP_KIND]).toBe('agent');
++    expect(step?.attributes[ATTR.STEP_MAP_COUNT]).toBe(3);
++    expect(step?.parentSpanContext?.spanId).toBe(run?.spanContext().spanId);
++  });
++});
+diff --git a/tests/workflow/define.test.ts b/tests/workflow/define.test.ts
+new file mode 100644
+index 0000000..d558d87
+--- /dev/null
++++ b/tests/workflow/define.test.ts
+@@ -0,0 +1,56 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { defineWorkflow } from '../../src/workflow/define.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const agent = (id: string, dependsOn?: string[]) => ({
++  id,
++  kind: StepKind.Agent as const,
++  agent: 'web_fetch',
++  input: () => 'hi',
++  output: z.string(),
++  ...(dependsOn ? { dependsOn } : {}),
++});
++
++describe('defineWorkflow', () => {
++  it('accepts a valid linear workflow', () => {
++    const def = defineWorkflow({ id: 'wf', steps: [agent('a'), agent('b')] });
++    expect(def.steps).toHaveLength(2);
++  });
++
++  it('rejects duplicate step ids', () => {
++    expect(() =>
++      defineWorkflow({ id: 'wf', steps: [agent('a'), agent('a')] }),
++    ).toThrow(/duplicate step id/i);
++  });
++
++  it('rejects an unknown dependsOn target', () => {
++    expect(() =>
++      defineWorkflow({ id: 'wf', steps: [agent('a'), agent('b', ['ghost'])] }),
++    ).toThrow(/unknown.*ghost/i);
++  });
++
++  it('rejects an unknown branch target', () => {
++    const branch = {
++      id: 'br',
++      kind: StepKind.Branch as const,
++      predicate: () => true,
++      whenTrue: 'a',
++      whenFalse: 'ghost',
++      output: z.object({ taken: z.string() }),
++      dependsOn: [] as string[],
++    };
++    expect(() =>
++      defineWorkflow({ id: 'wf', steps: [branch, agent('a', ['br'])] }),
++    ).toThrow(/unknown.*ghost/i);
++  });
++
++  it('rejects a dependency cycle', () => {
++    expect(() =>
++      defineWorkflow({
++        id: 'wf',
++        steps: [agent('a', ['b']), agent('b', ['a'])],
++      }),
++    ).toThrow(/cycle/i);
++  });
++});
+diff --git a/tests/workflow/engine.test.ts b/tests/workflow/engine.test.ts
+new file mode 100644
+index 0000000..4e48e98
+--- /dev/null
++++ b/tests/workflow/engine.test.ts
+@@ -0,0 +1,157 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { defineWorkflow } from '../../src/workflow/define.ts';
++import { runWorkflow } from '../../src/workflow/engine.ts';
++import type { WorkflowDeps } from '../../src/workflow/run-step.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const deps = (over: Partial<WorkflowDeps> = {}): WorkflowDeps => ({
++  runAgentStep: async (_a, task) => task.toUpperCase(),
++  tools: {},
++  ...over,
++});
++
++describe('runWorkflow', () => {
++  it('threads validated context through a linear chain', async () => {
++    const def = defineWorkflow({
++      id: 'chain',
++      steps: [
++        {
++          id: 'a',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: (ctx) => `hello ${ctx.input}`,
++          output: z.string(),
++        },
++        {
++          id: 'b',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: (ctx) => `again ${ctx.a}`,
++          output: z.string(),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, 'world', deps());
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') {
++      expect(out.output.a).toBe('HELLO WORLD');
++      expect(out.output.b).toBe('AGAIN HELLO WORLD');
++    }
++  });
++
++  it('fails the workflow when output schema validation fails', async () => {
++    const def = defineWorkflow({
++      id: 'badout',
++      steps: [
++        {
++          id: 'a',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: () => 'text',
++          output: z.number(), // agent returns a string → invalid
++        },
++      ],
++    });
++    const out = await runWorkflow(def, null, deps());
++    expect(out).toMatchObject({ kind: 'failed', failedStep: 'a' });
++  });
++
++  it('branch takes the correct arm and skips the dead arm + its descendants', async () => {
++    const def = defineWorkflow({
++      id: 'br',
++      steps: [
++        {
++          id: 'gate',
++          kind: StepKind.Branch,
++          dependsOn: [],
++          predicate: (ctx) => ctx.input === 'go',
++          whenTrue: 'live',
++          whenFalse: 'dead',
++          output: z.object({ taken: z.string() }),
++        },
++        {
++          id: 'live',
++          kind: StepKind.Agent,
++          agent: 'x',
++          dependsOn: ['gate'],
++          input: () => 'live',
++          output: z.string(),
++        },
++        {
++          id: 'dead',
++          kind: StepKind.Agent,
++          agent: 'x',
++          dependsOn: ['gate'],
++          input: () => 'dead',
++          output: z.string(),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, 'go', deps());
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') {
++      expect(out.output.live).toBe('LIVE');
++      expect('dead' in out.output).toBe(false);
++    }
++  });
++
++  it('onError "continue" skips dependents; {fallback} substitutes', async () => {
++    const failingDeps = deps({
++      runAgentStep: async (_a, task) => {
++        if (task === 'boom') throw new Error('kaboom');
++        return task;
++      },
++    });
++    const def = defineWorkflow({
++      id: 'resil',
++      steps: [
++        {
++          id: 'a',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: () => 'boom',
++          output: z.string(),
++          onError: { fallback: 'SAFE' },
++        },
++        {
++          id: 'b',
++          kind: StepKind.Agent,
++          agent: 'x',
++          input: (ctx) => `got ${ctx.a}`,
++          output: z.string(),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, null, failingDeps);
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') {
++      expect(out.output.a).toBe('SAFE');
++      expect(out.output.b).toBe('got SAFE');
++    }
++  });
++
++  it('map fans out and collects validated results', async () => {
++    const def = defineWorkflow({
++      id: 'mapwf',
++      steps: [
++        {
++          id: 'm',
++          kind: StepKind.Map,
++          dependsOn: [],
++          over: (ctx) => ctx.input as string[],
++          step: {
++            kind: StepKind.Agent,
++            agent: 'x',
++            input: (ctx) => String(ctx.item),
++            output: z.string(),
++          },
++          output: z.array(z.string()),
++        },
++      ],
++    });
++    const out = await runWorkflow(def, ['a', 'b'], deps());
++    expect(out.kind).toBe('done');
++    if (out.kind === 'done') expect(out.output.m).toEqual(['A', 'B']);
++  });
++});
+diff --git a/tests/workflow/errors.test.ts b/tests/workflow/errors.test.ts
+new file mode 100644
+index 0000000..9d827ea
+--- /dev/null
++++ b/tests/workflow/errors.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, it } from 'bun:test';
++import { WorkflowError } from '../../src/core/errors.ts';
++
++describe('WorkflowError', () => {
++  it('is an Error with the right name', () => {
++    const e = new WorkflowError('bad def');
++    expect(e).toBeInstanceOf(Error);
++    expect(e.name).toBe('WorkflowError');
++    expect(e.message).toBe('bad def');
++  });
++});
+diff --git a/tests/workflow/run-step.test.ts b/tests/workflow/run-step.test.ts
+new file mode 100644
+index 0000000..c1946bd
+--- /dev/null
++++ b/tests/workflow/run-step.test.ts
+@@ -0,0 +1,94 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import {
++  DEFAULT_MAX_PARALLEL,
++  runStepByKind,
++  type WorkflowDeps,
++} from '../../src/workflow/run-step.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const baseDeps = (over: Partial<WorkflowDeps> = {}): WorkflowDeps => ({
++  runAgentStep: async (_a, task) => `ran:${task}`,
++  tools: {},
++  ...over,
++});
++
++describe('runStepByKind', () => {
++  it('agent step calls runAgentStep with the built prompt', async () => {
++    const out = await runStepByKind(
++      {
++        id: 's',
++        kind: StepKind.Agent,
++        agent: 'web_fetch',
++        input: (ctx) => `task:${ctx.input}`,
++        output: z.string(),
++      },
++      { input: 'X' },
++      baseDeps(),
++    );
++    expect(out).toBe('ran:task:X');
++  });
++
++  it('tool step calls the tool execute with built args', async () => {
++    const out = await runStepByKind(
++      {
++        id: 's',
++        kind: StepKind.Tool,
++        tool: 'echo',
++        input: () => ({ msg: 'hi' }),
++        output: z.object({ echoed: z.string() }),
++      },
++      {},
++      baseDeps({
++        tools: {
++          echo: {
++            description: 'echo',
++            inputSchema: z.object({ msg: z.string() }),
++            execute: async (args: { msg: string }) => ({ echoed: args.msg }),
++          },
++        } as unknown as WorkflowDeps['tools'],
++      }),
++    );
++    expect(out).toEqual({ echoed: 'hi' });
++  });
++
++  it('branch step returns the taken arm', async () => {
++    const out = await runStepByKind(
++      {
++        id: 'b',
++        kind: StepKind.Branch,
++        predicate: (ctx) => ctx.input === 'yes',
++        whenTrue: 't',
++        whenFalse: 'f',
++        output: z.object({ taken: z.string() }),
++      },
++      { input: 'yes' },
++      baseDeps(),
++    );
++    expect(out).toEqual({ taken: 'whenTrue' });
++  });
++
++  it('map step fans out over the list and collects results', async () => {
++    const out = await runStepByKind(
++      {
++        id: 'm',
++        kind: StepKind.Map,
++        over: () => [1, 2, 3],
++        step: {
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: (ctx) => `n=${ctx.item}`,
++          output: z.string(),
++        },
++        output: z.array(z.string()),
++      },
++      {},
++      baseDeps(),
++    );
++    expect(out).toEqual(['ran:n=1', 'ran:n=2', 'ran:n=3']);
++  });
++
++  it('exposes a conservative default concurrency cap', () => {
++    expect(DEFAULT_MAX_PARALLEL).toBeGreaterThanOrEqual(1);
++  });
++});
+diff --git a/workflows/fetch-then-summarize.ts b/workflows/fetch-then-summarize.ts
+new file mode 100644
+index 0000000..ee870fa
+--- /dev/null
++++ b/workflows/fetch-then-summarize.ts
+@@ -0,0 +1,29 @@
++import { z } from 'zod';
++import { defineWorkflow } from '../src/workflow/define.ts';
++import { StepKind } from '../src/workflow/types.ts';
++
++/** tool(fetch) → agent(summarize): fetch a URL's content, then summarize it.
++ *  The workflow input is the URL string. */
++export default defineWorkflow({
++  id: 'fetch-then-summarize',
++  description: 'Fetch a URL with the fetch tool, then summarize via an agent.',
++  steps: [
++    {
++      id: 'fetch',
++      kind: StepKind.Tool,
++      dependsOn: [],
++      tool: 'fetch', // provided by mcp-server-fetch
++      input: (ctx) => ({ url: String(ctx.input) }),
++      output: z.unknown(),
++    },
++    {
++      id: 'summarize',
++      kind: StepKind.Agent,
++      dependsOn: ['fetch'],
++      agent: 'web_fetch',
++      input: (ctx) =>
++        `Summarize the following web page content in 3 concise bullet points:\n\n${JSON.stringify(ctx.fetch).slice(0, 8000)}`,
++      output: z.string(),
++    },
++  ],
++});
+diff --git a/workflows/index.ts b/workflows/index.ts
+new file mode 100644
+index 0000000..44e0b07
+--- /dev/null
++++ b/workflows/index.ts
+@@ -0,0 +1,11 @@
++import type { WorkflowDef } from '../src/workflow/types.ts';
++import fetchThenSummarize from './fetch-then-summarize.ts';
++
++/** name → workflow definition (mirrors models/registry.ts). */
++export const WORKFLOWS: Record<string, WorkflowDef> = {
++  [fetchThenSummarize.id]: fetchThenSummarize,
++};
++
++export function getWorkflow(name: string): WorkflowDef | undefined {
++  return WORKFLOWS[name];
++}

@@ -1,0 +1,54 @@
+# Review package: 5c4fc09..cbe7de7
+
+## Commits
+cbe7de7 feat(agents): super-agent orchestrator config with file-qa
+
+## Files changed
+ agents/super.ts            | 20 ++++++++++++++++++++
+ tests/agents/super.test.ts | 11 +++++++++++
+ 2 files changed, 31 insertions(+)
+
+## Diff
+diff --git a/agents/super.ts b/agents/super.ts
+new file mode 100644
+index 0000000..dcb0efc
+--- /dev/null
++++ b/agents/super.ts
+@@ -0,0 +1,20 @@
++import type { ToolSet } from 'ai';
++import qwenFast from '../models/qwen-fast.ts';
++import type { Agent } from '../src/core/agent-def.ts';
++import { createOrchestrator } from '../src/core/orchestrator.ts';
++import { createOllamaModel } from '../src/providers/ollama.ts';
++import { createFileQaAgent } from './file-qa.ts';
++
++const BASE_PROMPT =
++  'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
++
++/** Build the super-agent (orchestrator) with the file-Q&A agent registered. */
++export function createSuperAgent(fileQaTools: ToolSet): Agent {
++  const fileQa = createFileQaAgent(fileQaTools);
++  return createOrchestrator({
++    name: 'super',
++    model: createOllamaModel(qwenFast),
++    systemPrompt: BASE_PROMPT,
++    agents: [fileQa],
++  });
++}
+diff --git a/tests/agents/super.test.ts b/tests/agents/super.test.ts
+new file mode 100644
+index 0000000..99d6550
+--- /dev/null
++++ b/tests/agents/super.test.ts
+@@ -0,0 +1,11 @@
++import { expect, test } from 'bun:test';
++import { createSuperAgent } from '../../agents/super.ts';
++import { CAPABILITY_GAP_TOOL } from '../../src/core/capability-gap.ts';
++
++test('super agent exposes a delegate_to_file_qa tool and the gap tool', () => {
++  const tools = { read_file: { description: 'x' } } as never;
++  const sup = createSuperAgent(tools);
++  expect(Object.keys(sup.tools)).toContain('delegate_to_file_qa');
++  expect(Object.keys(sup.tools)).toContain(CAPABILITY_GAP_TOOL);
++  expect(sup.model).toBeTruthy();
++});

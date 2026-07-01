@@ -1,0 +1,499 @@
+# Review package: a1468db..c3e5be3
+
+## Commits
+c3e5be3 fix(slice-6): route models by runtime + chat selects installed-only + review minors
+
+## Files changed
+ README.md                                |  2 +-
+ src/cli/discover.ts                      |  5 ++-
+ src/cli/select-hook.ts                   | 10 +++--
+ src/discovery/build-registry.ts          | 33 ++++++++++++--
+ src/discovery/huggingface-mlx.ts         |  2 +-
+ src/resource/model-manager.ts            |  2 +-
+ tests/cli/select-hook.test.ts            | 31 ++++++++++++-
+ tests/discovery/build-registry.test.ts   | 74 ++++++++++++++++++++++++++------
+ tests/discovery/huggingface-gguf.test.ts |  3 +-
+ tests/discovery/huggingface-mlx.test.ts  |  8 ++--
+ 10 files changed, 142 insertions(+), 28 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 44bc58f..0600098 100644
+--- a/README.md
++++ b/README.md
+@@ -32,21 +32,21 @@ Under the hood, one CLI run autonomously:
+ 4. **Runs the agent loop** — the model calls a `read_file` tool (exposed over
+    **MCP**) and composes an answer.
+ 5. **Records the run** — writes the answer and an append-only journal to
+    `runs/<id>/`.
+ 6. **Unloads the model** to free memory.
+ 
+ No manual steps. No API keys. Everything runs locally.
+ 
+ **Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder populated at runtime by Slice 6 discovery.
+ 
+-**Model discovery (Slice 6).** `bun run discover` fetches the latest tool-capable GGUF models from Hugging Face (trusted publishers, sized to your live RAM budget), writes a per-machine `model-images/catalog.json`, and pre-pulls the top fitting model. Normal `chat` runs read an **offline** merge of the bootstrap rungs + locally-installed models + the cached catalog — no network needed. A local MLX server (LM Studio / vllm-mlx at `MLX_BASE_URL`) is discovered + used automatically when running. Vision/audio/video and an uncensored mode are typed-in seams shipped in later slices.
++**Model discovery (Slice 6).** `bun run discover` fetches the latest tool-capable GGUF (and MLX, when a local MLX server is running) models from Hugging Face (trusted publishers, sized to your live RAM budget), writes a per-machine `model-images/catalog.json`, and pre-pulls the top fitting model. Normal `chat` runs read an **offline** merge of the bootstrap rungs + locally-installed models + the cached catalog — no network needed. A local MLX server (LM Studio / vllm-mlx at `MLX_BASE_URL`) is discovered + used automatically when running. Vision/audio/video and an uncensored mode are typed-in seams shipped in later slices.
+ 
+ ---
+ 
+ ## Quick start
+ 
+ **Prerequisites:** [Bun](https://bun.com) ≥ 1.3, [Ollama](https://ollama.com)
+ (running locally), an Apple Silicon Mac, and [`uvx`](https://docs.astral.sh/uv/)
+ (for the keyless web-fetch agent — `uvx mcp-server-fetch`). The unit/mock test
+ suite needs none of these; only the CLI and opt-in live tests do.
+ 
+diff --git a/src/cli/discover.ts b/src/cli/discover.ts
+index 3405b40..37b0e65 100644
+--- a/src/cli/discover.ts
++++ b/src/cli/discover.ts
+@@ -10,11 +10,14 @@ async function main(): Promise<void> {
+       `Found ${r.found} candidate(s), ${r.fits} fit the budget. ` +
+         `Pre-pulled: ${r.pulled.length ? r.pulled.join(', ') : 'none'}. Catalog: ${r.path}`,
+     );
+   } catch (err) {
+     console.error(
+       `Discovery failed (using any existing catalog): ${(err as Error).message}`,
+     );
+     process.exitCode = 1;
+   }
+ }
+-main();
++main().catch((err) => {
++  console.error(err);
++  process.exitCode = 1;
++});
+diff --git a/src/cli/select-hook.ts b/src/cli/select-hook.ts
+index 8ddff36..da8adc4 100644
+--- a/src/cli/select-hook.ts
++++ b/src/cli/select-hook.ts
+@@ -1,19 +1,19 @@
+ import type { Agent } from '../core/agent-def.ts';
+ import type { BeforeDelegate } from '../core/delegate.ts';
+ import { ResourceError } from '../core/errors.ts';
+ import type { ResourceCapture } from '../core/resource-capture.ts';
+-import type { ModelDeclaration } from '../core/types.ts';
+-import { createOllamaModel } from '../providers/ollama.ts';
++import { type ModelDeclaration, ProviderKind } from '../core/types.ts';
+ import type { EnsureOpts } from '../resource/model-manager.ts';
+ import type { LoadedModel } from '../resource/ollama-control.ts';
+ import { resolveModel } from '../resource/selector.ts';
++import { runtimeFor } from '../runtime/registry.ts';
+ 
+ export type SelectHookDeps = {
+   registry: ModelDeclaration[];
+   ensureReady: (d: ModelDeclaration, o?: EnsureOpts) => Promise<number>;
+   pinned: string[];
+   capture: ResourceCapture;
+   listLoaded?: () => Promise<LoadedModel[]>;
+   /** Fired before each ensureReady attempt (e.g. to print a selection notice). */
+   onAttempt?: (decl: ModelDeclaration) => void | Promise<void>;
+ };
+@@ -30,21 +30,25 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
+       const { decl, numCtx } = await resolveModel(
+         agent.modelReq,
+         deps.registry,
+         {
+           ensureReady: deps.ensureReady,
+           listLoaded: deps.listLoaded,
+           onAttempt: deps.onAttempt,
+         },
+         { pinned: deps.pinned },
+       );
+-      return { model: createOllamaModel(decl), numCtx };
++      const model = runtimeFor(decl.provider).createModel(decl);
++      return {
++        model,
++        numCtx: decl.provider === ProviderKind.Ollama ? numCtx : undefined,
++      };
+     } catch (err) {
+       if (err instanceof ResourceError) {
+         deps.capture.error = err;
+         return {
+           abort: "Can't run this now — no model fits in available memory.",
+         };
+       }
+       throw err;
+     }
+   };
+diff --git a/src/discovery/build-registry.ts b/src/discovery/build-registry.ts
+index 295f5e0..96520a1 100644
+--- a/src/discovery/build-registry.ts
++++ b/src/discovery/build-registry.ts
+@@ -1,20 +1,26 @@
+ import { BOOTSTRAP } from '../../models/registry.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
+-import { availableRuntimes } from '../runtime/registry.ts';
++import { availableRuntimes, runtimeFor } from '../runtime/registry.ts';
+ import { readCatalog } from './catalog-cache.ts';
+ import type { Candidate } from './catalog-source.ts';
+ 
+ export type BuildRegistryDeps = {
+   bootstrap?: ModelDeclaration[];
+   installed?: () => Promise<ModelDeclaration[]>;
+   readCatalog?: () => Candidate[] | undefined;
++  /**
++   * Probe whether a catalog candidate is installed locally.
++   * Defaults to checking via the candidate's runtime control.
++   * Throws / offline → treat as NOT installed (candidate excluded).
++   */
++  isInstalled?: (decl: ModelDeclaration) => Promise<boolean>;
+ };
+ 
+ async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
+   const out: ModelDeclaration[] = [];
+   for (const rt of await availableRuntimes()) {
+     try {
+       for (const m of await rt.control.listLoaded()) {
+         out.push({
+           provider: rt.kind,
+           model: m.name,
+@@ -23,30 +29,51 @@ async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
+           footprint: { approxParamsBillions: 0, bytesPerWeight: 0 },
+         });
+       }
+     } catch {
+       /* runtime down → contributes nothing */
+     }
+   }
+   return out;
+ }
+ 
+-/** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ cached catalog, deduped by (provider,model). */
++function defaultIsInstalled(decl: ModelDeclaration): Promise<boolean> {
++  return runtimeFor(decl.provider).control.isInstalled(decl.model);
++}
++
++async function filterInstalledCatalog(
++  catalog: Candidate[],
++  probe: (decl: ModelDeclaration) => Promise<boolean>,
++): Promise<ModelDeclaration[]> {
++  const results: ModelDeclaration[] = [];
++  for (const c of catalog) {
++    try {
++      if (await probe(c)) results.push(c);
++    } catch {
++      /* runtime offline or throws → exclude candidate */
++    }
++  }
++  return results;
++}
++
++/** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ catalog (installed-only), deduped by (provider,model). */
+ export async function buildRegistry(
+   deps: BuildRegistryDeps = {},
+ ): Promise<ModelDeclaration[]> {
+   const bootstrap = deps.bootstrap ?? BOOTSTRAP;
+   let installed: ModelDeclaration[] = [];
+   try {
+     installed = await (deps.installed ?? installedFromRuntimes)();
+   } catch {
+     installed = [];
+   }
+-  const catalog = (deps.readCatalog ?? (() => readCatalog()))() ?? [];
++  const rawCatalog = (deps.readCatalog ?? (() => readCatalog()))() ?? [];
++  const probe = deps.isInstalled ?? defaultIsInstalled;
++  const catalog = await filterInstalledCatalog(rawCatalog, probe);
+ 
+   const byKey = new Map<string, ModelDeclaration>();
+   for (const d of [...bootstrap, ...installed, ...catalog]) {
+     const key = `${d.provider}::${d.model}`;
+     if (!byKey.has(key)) byKey.set(key, d); // first wins: bootstrap > installed > catalog
+   }
+   return [...byKey.values()];
+ }
+diff --git a/src/discovery/huggingface-mlx.ts b/src/discovery/huggingface-mlx.ts
+index d761c3f..674cd0d 100644
+--- a/src/discovery/huggingface-mlx.ts
++++ b/src/discovery/huggingface-mlx.ts
+@@ -57,21 +57,21 @@ async function candidateFor(
+     .reduce((s, e) => s + (e.lfs?.size ?? e.size ?? 0), 0);
+   if (total === 0 || total > q.budgetBytes) return undefined;
+ 
+   const params = (cfg.num_parameters ?? 0) / 1e9;
+   const bpw = params > 0 ? total / 1e9 / params : 0.55;
+   const decl: ModelDeclaration = {
+     provider: ProviderKind.MlxServer,
+     model: repo,
+     params: {},
+     role: 'discovered MLX general reasoning + tool use',
+-    capabilities: [Capability.Tools],
++    capabilities: detectTools(tmpl) ? [Capability.Tools] : [],
+     contentPolicy: UNCENSORED_RE.test(repo)
+       ? ContentPolicy.Uncensored
+       : ContentPolicy.Default,
+     footprint: {
+       approxParamsBillions: params > 0 ? params : total / 1e9 / 0.55,
+       bytesPerWeight: bpw,
+     },
+   };
+   return {
+     ...decl,
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+index a7c1f17..2aea70d 100644
+--- a/src/resource/model-manager.ts
++++ b/src/resource/model-manager.ts
+@@ -30,21 +30,21 @@ function defaultDeps(): ManagerDeps {
+   };
+ }
+ 
+ /** Resolve the budget source to a concrete byte figure (live on each call). */
+ async function resolveBudget(source: BudgetSource): Promise<number> {
+   return typeof source === 'function' ? source() : source;
+ }
+ 
+ /** Loads/unloads models to keep the active + pinned set within the GPU budget. */
+ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
+-  const d: ManagerDeps = { ...defaultDeps(), ...deps };
++  const d = deps;
+   const lastUsed = new Map<string, number>();
+   const chosenCtxByModel = new Map<string, number>();
+   const maxCtxByModel = new Map<string, number>();
+   const runtimeByModel = new Map<string, ModelDeclaration>(); // remember how to unload
+   let tick = 0;
+ 
+   async function modelMaxFor(
+     c: RuntimeControl,
+     model: string,
+   ): Promise<number | undefined> {
+diff --git a/tests/cli/select-hook.test.ts b/tests/cli/select-hook.test.ts
+index 840ed13..015e93b 100644
+--- a/tests/cli/select-hook.test.ts
++++ b/tests/cli/select-hook.test.ts
+@@ -1,32 +1,46 @@
+ import { expect, mock, test } from 'bun:test';
+ import { BOOTSTRAP } from '../../models/registry.ts';
+ import { createSelectHook } from '../../src/cli/select-hook.ts';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { ResourceError } from '../../src/core/errors.ts';
+-import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import type { ModelDeclaration } from '../../src/core/types.ts';
++import {
++  Capability,
++  PreferPolicy,
++  ProviderKind,
++} from '../../src/core/types.ts';
+ 
+ function specialist(): Agent {
+   return {
+     name: 'file_qa',
+     description: 'd',
+     systemPrompt: 'sp',
+     tools: {},
+     model: undefined as never, // overridden by the hook
+     modelReq: {
+       role: 'r',
+       requires: [Capability.Tools],
+       prefer: PreferPolicy.LargestThatFits,
+     },
+   };
+ }
+ 
++const mlxDecl: ModelDeclaration = {
++  provider: ProviderKind.MlxServer,
++  model: 'mlx-community/Qwen2.5-7B-Instruct-4bit',
++  params: {},
++  role: 'general reasoning + tool use',
++  capabilities: [Capability.Tools],
++  footprint: { approxParamsBillions: 7, bytesPerWeight: 0.55 },
++};
++
+ test('hook resolves a model + numCtx and returns a bound model', async () => {
+   const ensureReady = mock(async () => 16384);
+   const capture = {};
+   const hook = createSelectHook({
+     registry: BOOTSTRAP,
+     ensureReady,
+     pinned: ['qwen3.5:4b'],
+     capture,
+   });
+   const pre = await hook(specialist());
+@@ -61,10 +75,25 @@ test('agent without modelReq is a no-op', async () => {
+   const pre = await hook({
+     name: 'x',
+     description: 'd',
+     systemPrompt: 's',
+     tools: {},
+     model: undefined as never,
+   });
+   expect(pre).toEqual({});
+   expect(ensureReady).not.toHaveBeenCalled();
+ });
++
++test('hook builds via MLX runtime for MlxServer decl: model defined, numCtx undefined', async () => {
++  const ensureReady = mock(async () => 8192);
++  const capture = {};
++  const hook = createSelectHook({
++    registry: [mlxDecl],
++    ensureReady,
++    pinned: [],
++    capture,
++  });
++  const pre = await hook(specialist());
++  expect(pre && 'model' in pre && pre.model).toBeTruthy();
++  // numCtx is undefined for non-Ollama providers — num_ctx is an Ollama-specific option
++  expect(pre && 'numCtx' in pre ? pre.numCtx : 'absent').toBeUndefined();
++});
+diff --git a/tests/discovery/build-registry.test.ts b/tests/discovery/build-registry.test.ts
+index aeda48c..3357a05 100644
+--- a/tests/discovery/build-registry.test.ts
++++ b/tests/discovery/build-registry.test.ts
+@@ -5,49 +5,97 @@ import { buildRegistry } from '../../src/discovery/build-registry.ts';
+ const bootstrap = [
+   {
+     provider: ProviderKind.Ollama,
+     model: 'qwen3.5:4b',
+     params: {},
+     role: 'r',
+     footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+   },
+ ];
+ 
++const catalogEntry = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3.5:4b',
++  params: {},
++  role: 'c',
++  footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
++  repo: 'x',
++  fileSizeBytes: 1,
++  downloads: 1,
++  installed: true,
++};
++
++const catalogEntryNew = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3.5:14b',
++  params: {},
++  role: 'c',
++  footprint: { approxParamsBillions: 14, bytesPerWeight: 0.56 },
++  repo: 'y',
++  fileSizeBytes: 2,
++  downloads: 2,
++  installed: false,
++};
++
+ test('merges bootstrap + installed + catalog, deduped by (provider,model)', async () => {
+   const reg = await buildRegistry({
+     bootstrap,
+     installed: async () => [
+       {
+         provider: ProviderKind.Ollama,
+         model: 'qwen3.5:9b',
+         params: {},
+         role: 'i',
+         footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
+       },
+     ],
+-    readCatalog: () => [
+-      {
+-        provider: ProviderKind.Ollama,
+-        model: 'qwen3.5:4b',
+-        params: {},
+-        role: 'c',
+-        footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+-        repo: 'x',
+-        fileSizeBytes: 1,
+-        downloads: 1,
+-        installed: true,
+-      },
+-    ],
++    readCatalog: () => [catalogEntry],
++    isInstalled: async () => true,
+   });
+   expect(reg.map((d) => d.model).sort()).toEqual(['qwen3.5:4b', 'qwen3.5:9b']); // 4b deduped
+ });
+ 
+ test('offline: installed throws and catalog missing → still returns bootstrap (no throw)', async () => {
+   const reg = await buildRegistry({
+     bootstrap,
+     installed: async () => {
+       throw new Error('offline');
+     },
+     readCatalog: () => undefined,
+   });
+   expect(reg.map((d) => d.model)).toEqual(['qwen3.5:4b']);
+ });
++
++test('catalog candidate with isInstalled returning false is excluded', async () => {
++  const reg = await buildRegistry({
++    bootstrap,
++    installed: async () => [],
++    readCatalog: () => [catalogEntryNew],
++    isInstalled: async () => false,
++  });
++  // only bootstrap; catalog entry excluded because not installed
++  expect(reg.map((d) => d.model)).toEqual(['qwen3.5:4b']);
++});
++
++test('catalog candidate with isInstalled returning true is included', async () => {
++  const reg = await buildRegistry({
++    bootstrap,
++    installed: async () => [],
++    readCatalog: () => [catalogEntryNew],
++    isInstalled: async () => true,
++  });
++  // bootstrap + catalog entry both present
++  expect(reg.map((d) => d.model).sort()).toEqual(['qwen3.5:14b', 'qwen3.5:4b']);
++});
++
++test('catalog candidate is excluded when isInstalled probe throws (offline-safe)', async () => {
++  const reg = await buildRegistry({
++    bootstrap,
++    installed: async () => [],
++    readCatalog: () => [catalogEntryNew],
++    isInstalled: async () => {
++      throw new Error('runtime offline');
++    },
++  });
++  // probe threw → candidate excluded; only bootstrap survives
++  expect(reg.map((d) => d.model)).toEqual(['qwen3.5:4b']);
++});
+diff --git a/tests/discovery/huggingface-gguf.test.ts b/tests/discovery/huggingface-gguf.test.ts
+index a9ca943..032b3cb 100644
+--- a/tests/discovery/huggingface-gguf.test.ts
++++ b/tests/discovery/huggingface-gguf.test.ts
+@@ -37,16 +37,17 @@ test('builds a fitting tool-capable GGUF candidate', async () => {
+       status: body ? 200 : 404,
+     });
+   }) as unknown as typeof fetch;
+ 
+   const cands = await hfGgufSource.listCandidates({
+     budgetBytes: 12e9,
+     requires: [Capability.Tools],
+     hostTotalRamBytes: 24e9,
+   });
+   expect(cands.length).toBe(1);
+-  const cand = cands[0]!;
++  const cand = cands[0];
++  if (!cand) throw new Error('expected a candidate');
+   expect(cand.provider).toBe(ProviderKind.Ollama);
+   expect(cand.model).toBe('hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M');
+   expect(cand.capabilities).toContain(Capability.Tools);
+   expect(cand.quant).toBe('Q4_K_M');
+ });
+diff --git a/tests/discovery/huggingface-mlx.test.ts b/tests/discovery/huggingface-mlx.test.ts
+index e54c430..f482bdb 100644
+--- a/tests/discovery/huggingface-mlx.test.ts
++++ b/tests/discovery/huggingface-mlx.test.ts
+@@ -37,14 +37,16 @@ test('builds an MLX candidate from config.json + chat_template + tree', async ()
+     const body = key ? routes[key] : null;
+     return new Response(JSON.stringify(body), { status: body ? 200 : 404 });
+   }) as unknown as typeof fetch;
+ 
+   const cands = await hfMlxSource.listCandidates({
+     budgetBytes: 12e9,
+     requires: [Capability.Tools],
+     hostTotalRamBytes: 24e9,
+   });
+   expect(cands.length).toBe(1);
+-  expect(cands[0]!.provider).toBe(ProviderKind.MlxServer);
+-  expect(cands[0]!.model).toBe('mlx-community/Qwen2.5-7B-Instruct-4bit');
+-  expect(cands[0]!.capabilities).toContain(Capability.Tools);
++  const cand = cands[0];
++  if (!cand) throw new Error('expected a candidate');
++  expect(cand.provider).toBe(ProviderKind.MlxServer);
++  expect(cand.model).toBe('mlx-community/Qwen2.5-7B-Instruct-4bit');
++  expect(cand.capabilities).toContain(Capability.Tools);
+ });

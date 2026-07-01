@@ -1,0 +1,908 @@
+# Review package: 6cff656..aedded6
+
+## Commits
+aedded6 style(crew): fix lint in crew test files (non-null assertions, explicit any, import order)
+04cbb65 feat(crew): crew CLI + registry + example; live model selection for flow+crew CLIs
+
+## Files changed
+ crews/index.ts                      |  11 ++++
+ crews/research-crew.ts              |  48 +++++++++++++++++
+ docs/architecture.md                |  26 +++++++--
+ package.json                        |   1 +
+ src/cli/crew.ts                     | 104 ++++++++++++++++++++++++++++++++++++
+ src/cli/flow.ts                     |  53 ++++++++++--------
+ src/cli/select-runtime.ts           |  71 ++++++++++++++++++++++++
+ tests/cli/crew.test.ts              |  53 ++++++++++++++++++
+ tests/cli/select-runtime.test.ts    |  11 ++++
+ tests/crew/define.test.ts           |  92 +++++++++++++++++++++----------
+ tests/crew/member-agent.test.ts     |   9 ++--
+ tests/integration/crew.live.test.ts |  37 +++++++++++++
+ tests/telemetry/crew-spans.test.ts  |   2 +-
+ 13 files changed, 458 insertions(+), 60 deletions(-)
+
+## Diff
+diff --git a/crews/index.ts b/crews/index.ts
+new file mode 100644
+index 0000000..c1cb16e
+--- /dev/null
++++ b/crews/index.ts
+@@ -0,0 +1,11 @@
++import type { CrewDef } from '../src/crew/types.ts';
++import researchCrew from './research-crew.ts';
++
++/** name -> crew definition (mirrors workflows/index.ts). */
++export const CREWS: Record<string, CrewDef> = {
++  [researchCrew.id]: researchCrew,
++};
++
++export function getCrew(name: string): CrewDef | undefined {
++  return CREWS[name];
++}
+diff --git a/crews/research-crew.ts b/crews/research-crew.ts
+new file mode 100644
+index 0000000..65b1e00
+--- /dev/null
++++ b/crews/research-crew.ts
+@@ -0,0 +1,48 @@
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../src/core/types.ts';
++import { defineCrew } from '../src/crew/define.ts';
++import { CrewProcess } from '../src/crew/types.ts';
++
++/** A sequential research crew: researcher gathers, writer summarizes.
++ *  Crew input is the topic/URL. */
++export default defineCrew({
++  id: 'research-crew',
++  description: 'Research a topic and produce a short brief.',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'researcher',
++      role: 'Research Analyst',
++      goal: 'Gather accurate, relevant facts on the given topic',
++      backstory: 'You are meticulous and cite what you find.',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++    {
++      name: 'writer',
++      role: 'Technical Writer',
++      goal: 'Turn research notes into a clear 3-bullet brief',
++      backstory: 'You write tight, plain summaries.',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 'gather',
++      description:
++        'Research the topic given as input and produce concise notes.',
++      expectedOutput: 'A short list of key facts.',
++      member: 'researcher',
++      output: z.string(),
++    },
++    {
++      id: 'brief',
++      description: 'Using the research notes, write a 3-bullet brief.',
++      expectedOutput: 'Exactly 3 bullet points.',
++      member: 'writer',
++      dependsOn: ['gather'],
++      output: z.string(),
++    },
++  ],
++});
+diff --git a/docs/architecture.md b/docs/architecture.md
+index a70c620..c75e181 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -31,22 +31,24 @@ see the [README](../README.md); for the long-range plan see
+ The engine is **Vercel AI SDK 6** (runtime-agnostic `LanguageModel`, the
+ tool-calling loop, MCP client, mock model, and `experimental_telemetry`). We
+ write only the thin layers on top.
+ 
+ ```mermaid
+ graph TD
+     subgraph CLI["CLI · src/cli"]
+         chat["chat.ts (entry)"]
+         runchat["run-chat.ts"]
+         selhook["select-hook.ts"]
++        selrt["select-runtime.ts · createSelectionRuntime"]
+         runscli["runs.ts · bun run runs"]
+         flow["flow.ts · bun run flow"]
++        crewcli["crew.ts · bun run crew"]
+     end
+     subgraph CORE["Core · src/core"]
+         orch["orchestrator.ts"]
+         delegate["delegate.ts"]
+         agent["agent.ts · runAgent loop"]
+         guard["guardrails.ts · ALS depth+budget"]
+         types["types.ts · 4-axis taxonomy"]
+     end
+     subgraph RES["Resource · src/resource"]
+         mgr["model-manager.ts"]
+@@ -91,20 +93,21 @@ graph TD
+         crewengine["engine.ts · runCrew"]
+     end
+     subgraph DATA["On-disk · git-ignored"]
+         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
+         images[("model-images/ + catalog.json")]
+     end
+     subgraph DECL["Declarations (pure data)"]
+         agents["agents/*"]
+         models["models/* · BOOTSTRAP"]
+         workflows["workflows/* · WORKFLOWS"]
++        crews["crews/* · CREWS"]
+     end
+ 
+     chat --> runchat
+     chat --> selhook
+     chat --> buildreg
+     chat --> agents
+     chat -. mounts .-> mcpclient
+     runchat --> orch
+     runchat --> provider
+     orch --> delegate
+@@ -131,51 +134,60 @@ graph TD
+     provider --> exporter
+     exporter --> spansfile
+     octl --> images
+     runscli --> runtrace
+     runtrace --> spansfile
+     flow --> wfengine
+     flow --> runstore
+     flow -. mounts .-> mcpclient
+     flow --> agents
+     flow --> workflows
++    flow --> selrt
+     wfengine --> wfrunstep
+     wfrunstep --> delegate
+     wfengine --> spans
+     wfrunstep --> spans
+     wfdefine --> wftypes
+     crewengine --> crewcompile
+     crewcompile --> crewmember
+     crewcompile --> wfdefine
+     crewmember --> sel
+     crewengine --> wfengine
+     crewengine --> orch
+     crewengine --> spans
+     crewdefine --> crewtypes
+     crewtypes --> wftypes
++    crewcli --> crewengine
++    crewcli --> runstore
++    crewcli -. mounts .-> mcpclient
++    crewcli --> crews
++    crewcli --> selrt
++    selrt --> selhook
++    selrt --> buildreg
++    selrt --> mgr
+     runstore --> spansfile
+ ```
+ 
+ | Layer | Files | Responsibility | Knows about |
+ |---|---|---|---|
+-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
++| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`) | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
+ | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+-| **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
++| **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example) | nothing (pure data) |
+ | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
+-| **Crew / Roles** | `src/crew/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`) | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) |
++| **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+ ## 3. Runtime data flow (one `chat` run, current)
+ 
+ ```mermaid
+ sequenceDiagram
+     actor User
+@@ -307,39 +319,43 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
+ - **Telemetry** (`src/telemetry/spans.ts`) — extended per the standing rule (§7): `withWorkflowSpan(workflowId, fn)` opens the root `workflow.run` span (`ATTR.WORKFLOW_ID`); `withStepSpan(stepId, kind, fn)` opens a nested `workflow.step` span per step (`ATTR.STEP_ID` / `ATTR.STEP_KIND`); `annotateStep(attrs)` tags the active step span with extra attributes (`ATTR.STEP_BRANCH_TAKEN` for the branch taken, `ATTR.STEP_MAP_COUNT` for map fan-out size); `ATTR.WORKFLOW_OUTCOME` records the terminal `WorkflowOutcome`. These are the spans/attrs the execution engine (Task 6) and CLI (Task 7) emit into — transport untouched, so the run-viewer and any OTLP backend get workflow signal for free.
+ 
+ - **Step runner** (`src/workflow/run-step.ts`): `runStepByKind(step, ctx, deps)` dispatches a step to its kind (agent/tool/branch/map) and returns the *raw*, unvalidated result; `WorkflowDeps` (`runAgentStep`, `tools`, `maxParallel`) is the injected boundary the engine and CLI provide; `mapWithConcurrency` bounds fan-out concurrency for `MapStep` (default cap `DEFAULT_MAX_PARALLEL`, overridable via `AGENT_WORKFLOW_MAX_PARALLEL` or per-map `maxParallel`).
+ 
+ - **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready.
+ 
+ - **Definition + validation** (`src/workflow/define.ts`): `defineWorkflow(def)` validates a `WorkflowDef` at construction time — unique step ids, every `dependsOn`/branch target resolves to a real step, and the dependency graph is acyclic (Kahn's algorithm) — throwing `WorkflowError` on any violation, so a malformed workflow fails fast at import time rather than mid-run.
+ 
+ - **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
+ 
+-- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, and prints the last step's output (or the failure) to stdout/stderr — closing the fetch then file server in `finally`, mirroring `chat.ts`'s mount/close order.
++- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, builds the shared live-selection runtime (below) and prints the last step's output (or the failure) to stdout/stderr — closing the selection runtime, then the fetch server, then the file server in `finally`, mirroring `chat.ts`'s mount/close order.
++
++- **Shared live-selection runtime** (`src/cli/select-runtime.ts`, Slice 11 Task 7): `createSelectionRuntime(opts?)` extracts `chat.ts`'s inline manager + offline `buildRegistry()` + `createSelectHook` + one-line selection `notify` into a single reusable async factory, returning `{ onBeforeDelegate, capture, close }`. `close()` calls `manager.unloadAll()`. Both `flow.ts`'s and `crew.ts`'s `main()` build one runtime per CLI invocation (nested inside the mounted file/fetch MCP servers, closed in `finally`) and thread `onBeforeDelegate` into `defaultRunAgentStep`/`runCrew` respectively — so a workflow agent step or a crew member is resolved to the largest model that fits the *live* RAM budget at delegation time, the same guarantee `chat.ts` gives its orchestrator. `chat.ts` itself is left with its original inline wiring in this slice; deduping it against `select-runtime.ts` is a follow-up.
++
++- **Crew CLI entry** (`src/cli/crew.ts`, Slice 11 Task 7): `bun run crew <name> [input...]`. `runCrewCli(deps)` mirrors `runFlow`'s lifecycle exactly: `createRun` → `initRunTelemetry` → `runCrew(def, input, {tools, onBeforeDelegate, runAgentStep})` → on `done`, `writeArtifact('result.txt', <output as text or pretty JSON>)`; on `failed`, `writeArtifact('failed.txt', "task <id>: <message>")` → `shutdown()` in `finally`. `deps.runAgentStep` is an optional test seam (bypasses a real model in unit tests, same pattern `runWorkflow` uses). `main()` resolves the crew via `getCrew` (`crews/index.ts`), mounts file+fetch MCP tools, builds a `createSelectionRuntime()` and passes `onBeforeDelegate` into `runCrewCli`, then prints the crew's final output (or failure) to stdout/stderr.
+ 
+ ---
+ 
+ ## 10. On-disk stores
+ 
+ - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
+ - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
+ 
+ ---
+ 
+ ## 11. Testing strategy
+ 
+ - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
+ - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
+ - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
+ - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
+ - **MCP** — real stdio round-trip (subprocess server).
+-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
++- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+ 
+ ---
+ 
+ ## 12. Glossary
+ 
+ - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
+ - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
+ - **Span / trace** — OpenTelemetry units. A run = a root `agent.run` span; delegations, model loads, and AI-SDK `generateText`/tool calls nest beneath it via the active async context. `bun run runs` renders the tree.
+ - **Delegation context** — the `AsyncLocalStorage` `{depth, ancestors, numCtx}` threaded through every hop; basis for the depth guard, the live return cap (off the parent's `numCtx`), and the `delegation.depth`/`ancestors` span attrs.
+ - **Live budget** — `min(0.75 × total RAM, 0.8 × availableRamBytes())` (first term = the Metal cap), recomputed per delegation; `availableRamBytes()` parses `vm_stat`.
+diff --git a/package.json b/package.json
+index ba0cbf3..29cfcf5 100644
+--- a/package.json
++++ b/package.json
+@@ -9,20 +9,21 @@
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+     "lint:file": "biome check",
+     "lint:claude": "bun run lint",
+     "docs:check": "bun run scripts/docs-check.ts",
+     "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
+     "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
+     "discover": "bun run src/cli/discover.ts",
+     "flow": "bun run src/cli/flow.ts",
++    "crew": "bun run src/cli/crew.ts",
+     "runs": "bun run src/cli/runs.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/mcp": "^1.0.56",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/context-async-hooks": "^2.8.0",
+     "@opentelemetry/core": "^2.8.0",
+     "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
+diff --git a/src/cli/crew.ts b/src/cli/crew.ts
+new file mode 100644
+index 0000000..5e37acb
+--- /dev/null
++++ b/src/cli/crew.ts
+@@ -0,0 +1,104 @@
++import type { ToolSet } from 'ai';
++import { getCrew } from '../../crews/index.ts';
++import { type CrewDeps, runCrew } from '../crew/engine.ts';
++import type { CrewDef, CrewOutcome } from '../crew/types.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { createSelectionRuntime } from './select-runtime.ts';
++
++export type CrewCliDeps = {
++  def: CrewDef;
++  input: unknown;
++  runsRoot: string;
++  runId: string;
++  tools: ToolSet;
++  onBeforeDelegate?: CrewDeps['onBeforeDelegate']; // live model selection
++  runAgentStep?: CrewDeps['runAgentStep']; // test seam
++};
++
++/** Run a crew with telemetry + artifact persistence (mirrors runFlow). */
++export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  const tel = initRunTelemetry(run.dir);
++  try {
++    const outcome = await runCrew(deps.def, deps.input, {
++      tools: deps.tools,
++      onBeforeDelegate: deps.onBeforeDelegate,
++      runAgentStep: deps.runAgentStep,
++    });
++    if (outcome.kind === 'done') {
++      const text =
++        typeof outcome.output === 'string'
++          ? outcome.output
++          : JSON.stringify(outcome.output, null, 2);
++      await writeArtifact(run, 'result.txt', text);
++    } else {
++      await writeArtifact(
++        run,
++        'failed.txt',
++        `task ${outcome.failedTask ?? '?'}: ${outcome.message}`,
++      );
++    }
++    return outcome;
++  } finally {
++    await tel.shutdown();
++  }
++}
++
++async function main(): Promise<void> {
++  const [name, ...rest] = process.argv.slice(2);
++  if (!name) {
++    console.error('Usage: bun run crew <name> [input...]');
++    process.exit(1);
++  }
++  const def = getCrew(name);
++  if (!def) {
++    console.error(`Unknown crew: ${name}`);
++    process.exit(1);
++  }
++
++  const fileServer = await createFileTools();
++  try {
++    const fetchServer = await createFetchTools();
++    try {
++      const selection = await createSelectionRuntime();
++      try {
++        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++        const outcome = await runCrewCli({
++          def,
++          input: rest.join(' ').trim(),
++          runsRoot: 'runs',
++          runId: `crew-${process.pid}`,
++          tools,
++          onBeforeDelegate: selection.onBeforeDelegate,
++        });
++        if (outcome.kind === 'done') {
++          console.log(
++            typeof outcome.output === 'string'
++              ? outcome.output
++              : JSON.stringify(outcome.output, null, 2),
++          );
++        } else {
++          console.error(
++            `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
++          );
++          process.exitCode = 1;
++        }
++      } finally {
++        await selection.close();
++      }
++    } finally {
++      await fetchServer.close();
++    }
++  } finally {
++    await fileServer.close();
++  }
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
+diff --git a/src/cli/flow.ts b/src/cli/flow.ts
+index 38a69fa..19852e1 100644
+--- a/src/cli/flow.ts
++++ b/src/cli/flow.ts
+@@ -1,52 +1,55 @@
+ import type { ToolSet } from 'ai';
+ import { createFileQaAgent } from '../../agents/file-qa.ts';
+ import { createWebFetchAgent } from '../../agents/web-fetch.ts';
+ import { getWorkflow } from '../../workflows/index.ts';
+ import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
+ import { WorkflowError } from '../core/errors.ts';
+ import { createFetchTools, createFileTools } from '../mcp/client.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
+ import { initRunTelemetry } from '../telemetry/provider.ts';
+ import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
+ import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
+ import type {
+   WorkflowContext,
+   WorkflowDef,
+   WorkflowOutcome,
+ } from '../workflow/types.ts';
++import { createSelectionRuntime } from './select-runtime.ts';
+ 
+ export type FlowDeps = {
+   def: WorkflowDef;
+   input: unknown;
+   runsRoot: string;
+   runId: string;
+   agents: Record<string, Agent>;
+   tools: ToolSet;
++  onBeforeDelegate?: BeforeDelegate; // live model selection
+ };
+ 
+ /** The last step's validated output, rendered as text (as-is if string, else pretty JSON). */
+ function lastStepOutputText(def: WorkflowDef, output: WorkflowContext): string {
+   const last = def.steps.at(-1);
+   if (!last) throw new WorkflowError(`workflow ${def.id} has no steps`);
+   const value = output[last.id];
+   return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+ }
+ 
+ /** Run a workflow with telemetry + artifact persistence (mirrors runChat). */
+ export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+   const tel = initRunTelemetry(run.dir);
+   try {
+     return await withWorkflowSpan(deps.def.id, async () => {
+       const outcome = await runWorkflow(deps.def, deps.input, {
+-        runAgentStep: defaultRunAgentStep(deps.agents),
++        runAgentStep: defaultRunAgentStep(deps.agents, deps.onBeforeDelegate),
+         tools: deps.tools,
+       });
+       annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
+       if (outcome.kind === 'done') {
+         await writeArtifact(
+           run,
+           'result.txt',
+           lastStepOutputText(deps.def, outcome.output),
+         );
+       } else {
+@@ -72,42 +75,48 @@ async function main(): Promise<void> {
+   const def = getWorkflow(name);
+   if (!def) {
+     console.error(`Unknown workflow: ${name}`);
+     process.exit(1);
+   }
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+-      const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
+-      const agents: Record<string, Agent> = {};
+-      const fileQa = createFileQaAgent(fileServer.tools);
+-      const webFetch = createWebFetchAgent(fetchServer.tools);
+-      agents[fileQa.name] = fileQa;
+-      agents[webFetch.name] = webFetch;
++      const selection = await createSelectionRuntime();
++      try {
++        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++        const agents: Record<string, Agent> = {};
++        const fileQa = createFileQaAgent(fileServer.tools);
++        const webFetch = createWebFetchAgent(fetchServer.tools);
++        agents[fileQa.name] = fileQa;
++        agents[webFetch.name] = webFetch;
+ 
+-      const outcome = await runFlow({
+-        def,
+-        input: rest.join(' ').trim(),
+-        runsRoot: 'runs',
+-        runId: `flow-${process.pid}`,
+-        agents,
+-        tools,
+-      });
+-      if (outcome.kind === 'done') {
+-        console.log(lastStepOutputText(def, outcome.output));
+-      } else {
+-        console.error(
+-          `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
+-        );
+-        process.exitCode = 1;
++        const outcome = await runFlow({
++          def,
++          input: rest.join(' ').trim(),
++          runsRoot: 'runs',
++          runId: `flow-${process.pid}`,
++          agents,
++          tools,
++          onBeforeDelegate: selection.onBeforeDelegate,
++        });
++        if (outcome.kind === 'done') {
++          console.log(lastStepOutputText(def, outcome.output));
++        } else {
++          console.error(
++            `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
++          );
++          process.exitCode = 1;
++        }
++      } finally {
++        await selection.close();
+       }
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+   }
+ }
+ 
+ if (import.meta.main) {
+diff --git a/src/cli/select-runtime.ts b/src/cli/select-runtime.ts
+new file mode 100644
+index 0000000..81b5742
+--- /dev/null
++++ b/src/cli/select-runtime.ts
+@@ -0,0 +1,71 @@
++import type { BeforeDelegate } from '../core/delegate.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { buildRegistry } from '../discovery/build-registry.ts';
++import { liveBudgetBytes } from '../resource/hardware.ts';
++import {
++  effectiveKvBytesPerToken,
++  f16KvBytesPerToken,
++} from '../resource/kv-cache.ts';
++import { createModelManager } from '../resource/model-manager.ts';
++import {
++  getModelKvArch,
++  isModelInstalled,
++  listLoadedModels,
++} from '../resource/ollama-control.ts';
++import { createSelectHook } from './select-hook.ts';
++import { formatSelectionNotice } from './selection-notice.ts';
++
++/** Live model-selection runtime (manager + offline registry + select-hook)
++ *  shared by the flow and crew CLIs. Agent steps / crew members are resolved to
++ *  the largest model that fits the live RAM budget at delegation. Mirrors the
++ *  inline setup in chat.ts (kept as-is; deduping chat.ts is a follow-up). */
++export async function createSelectionRuntime(opts?: {
++  pinned?: string[];
++}): Promise<{
++  onBeforeDelegate: BeforeDelegate;
++  capture: ResourceCapture;
++  close: () => Promise<void>;
++}> {
++  const manager = createModelManager();
++  const capture: ResourceCapture = {};
++  const announced = new Set<string>();
++
++  const notify = async (
++    decl: ModelDeclaration,
++    numCtx: number,
++  ): Promise<void> => {
++    if (announced.has(decl.model)) return;
++    announced.add(decl.model);
++    const [installed, budget, arch] = await Promise.all([
++      isModelInstalled(decl.model),
++      liveBudgetBytes(),
++      getModelKvArch(decl.model).catch(() => undefined),
++    ]);
++    const f16 = arch
++      ? f16KvBytesPerToken(arch)
++      : (decl.footprint.kvBytesPerToken ?? 131072);
++    const kvBytesPerToken = effectiveKvBytesPerToken(f16);
++    console.error(
++      formatSelectionNotice({
++        decl,
++        numCtx,
++        kvBytesPerToken,
++        budgetBytes: budget,
++        installed,
++      }),
++    );
++  };
++
++  const registry = await buildRegistry();
++  const onBeforeDelegate = createSelectHook({
++    registry,
++    ensureReady: (decl, o) => manager.ensureReady(decl, o),
++    listLoaded: () => listLoadedModels(),
++    pinned: opts?.pinned ?? [],
++    capture,
++    notify,
++  });
++
++  return { onBeforeDelegate, capture, close: () => manager.unloadAll() };
++}
+diff --git a/tests/cli/crew.test.ts b/tests/cli/crew.test.ts
+new file mode 100644
+index 0000000..1787bb1
+--- /dev/null
++++ b/tests/cli/crew.test.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, it } from 'bun:test';
++import { mkdtemp, readFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { z } from 'zod';
++import { runCrewCli } from '../../src/cli/crew.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { defineCrew } from '../../src/crew/define.ts';
++import { type CrewDef, CrewProcess } from '../../src/crew/types.ts';
++
++const crew: CrewDef = defineCrew({
++  id: 'demo-crew',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'a',
++      role: 'A',
++      goal: 'g',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 't1',
++      description: 'do',
++      expectedOutput: 'x',
++      member: 'a',
++      output: z.string(),
++    },
++  ],
++});
++
++describe('runCrewCli', () => {
++  it('writes spans.jsonl with crew.run + result.txt on success', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'crew-'));
++    const outcome = await runCrewCli({
++      def: crew,
++      input: 'hello',
++      runsRoot,
++      runId: 'r1',
++      tools: {},
++      // deps hook: override the agent runner so no real model is needed
++      runAgentStep: async () => 'result text',
++    } as never);
++    expect(outcome.kind).toBe('done');
++    const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
++    expect(spans).toContain('crew.run');
++    const result = await readFile(join(runsRoot, 'r1', 'result.txt'), 'utf8');
++    expect(result).toContain('result text');
++  });
++});
+diff --git a/tests/cli/select-runtime.test.ts b/tests/cli/select-runtime.test.ts
+new file mode 100644
+index 0000000..6766a72
+--- /dev/null
++++ b/tests/cli/select-runtime.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, it } from 'bun:test';
++import { createSelectionRuntime } from '../../src/cli/select-runtime.ts';
++
++describe('createSelectionRuntime', () => {
++  it('returns a select hook + capture + close', async () => {
++    const rt = await createSelectionRuntime();
++    expect(typeof rt.onBeforeDelegate).toBe('function');
++    expect(rt.capture).toBeDefined();
++    await rt.close();
++  });
++});
+diff --git a/tests/crew/define.test.ts b/tests/crew/define.test.ts
+index f3a586c..b947cac 100644
+--- a/tests/crew/define.test.ts
++++ b/tests/crew/define.test.ts
+@@ -1,62 +1,98 @@
+ import { describe, expect, it } from 'bun:test';
+ import { z } from 'zod';
+ import { Capability, PreferPolicy } from '../../src/core/types.ts';
+ import { defineCrew, effectiveTaskDeps } from '../../src/crew/define.ts';
+-import { CrewProcess, type CrewMember, type Task } from '../../src/crew/types.ts';
++import {
++  type CrewMember,
++  CrewProcess,
++  type Task,
++} from '../../src/crew/types.ts';
+ 
+ const m = (name: string): CrewMember => ({
+-  name, role: `${name} role`, goal: 'g', backstory: 'b',
+-  requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits,
++  name,
++  role: `${name} role`,
++  goal: 'g',
++  backstory: 'b',
++  requires: [Capability.Tools],
++  prefer: PreferPolicy.LargestThatFits,
+ });
+ const t = (id: string, member: string, dependsOn?: string[]): Task => ({
+-  id, description: 'd', expectedOutput: 'e', member, output: z.string(),
++  id,
++  description: 'd',
++  expectedOutput: 'e',
++  member,
++  output: z.string(),
+   ...(dependsOn ? { dependsOn } : {}),
+ });
+ 
+ describe('defineCrew', () => {
+   it('accepts a valid sequential crew', () => {
+     const def = defineCrew({
+-      id: 'c', process: CrewProcess.Sequential,
+-      members: [m('a'), m('b')], tasks: [t('t1', 'a'), t('t2', 'b')],
++      id: 'c',
++      process: CrewProcess.Sequential,
++      members: [m('a'), m('b')],
++      tasks: [t('t1', 'a'), t('t2', 'b')],
+     });
+     expect(def.tasks).toHaveLength(2);
+   });
+ 
+   it('rejects a task assigned to an unknown member', () => {
+-    expect(() => defineCrew({
+-      id: 'c', process: CrewProcess.Sequential,
+-      members: [m('a')], tasks: [t('t1', 'ghost')],
+-    })).toThrow(/unknown member.*ghost/i);
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'ghost')],
++      }),
++    ).toThrow(/unknown member.*ghost/i);
+   });
+ 
+   it('rejects an unknown dependsOn target', () => {
+-    expect(() => defineCrew({
+-      id: 'c', process: CrewProcess.Sequential,
+-      members: [m('a')], tasks: [t('t1', 'a'), t('t2', 'a', ['nope'])],
+-    })).toThrow(/unknown.*nope/i);
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'a'), t('t2', 'a', ['nope'])],
++      }),
++    ).toThrow(/unknown.*nope/i);
+   });
+ 
+   it('rejects duplicate member names and task ids', () => {
+-    expect(() => defineCrew({
+-      id: 'c', process: CrewProcess.Sequential,
+-      members: [m('a'), m('a')], tasks: [t('t1', 'a')],
+-    })).toThrow(/duplicate member/i);
+-    expect(() => defineCrew({
+-      id: 'c', process: CrewProcess.Sequential,
+-      members: [m('a')], tasks: [t('t1', 'a'), t('t1', 'a')],
+-    })).toThrow(/duplicate task/i);
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a'), m('a')],
++        tasks: [t('t1', 'a')],
++      }),
++    ).toThrow(/duplicate member/i);
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'a'), t('t1', 'a')],
++      }),
++    ).toThrow(/duplicate task/i);
+   });
+ 
+   it('rejects a task dependency cycle', () => {
+-    expect(() => defineCrew({
+-      id: 'c', process: CrewProcess.Sequential,
+-      members: [m('a')], tasks: [t('t1', 'a', ['t2']), t('t2', 'a', ['t1'])],
+-    })).toThrow(/cycle/i);
++    expect(() =>
++      defineCrew({
++        id: 'c',
++        process: CrewProcess.Sequential,
++        members: [m('a')],
++        tasks: [t('t1', 'a', ['t2']), t('t2', 'a', ['t1'])],
++      }),
++    ).toThrow(/cycle/i);
+   });
+ 
+   it('effectiveTaskDeps defaults to the previous task', () => {
+     const tasks = [t('t1', 'a'), t('t2', 'a')];
+-    expect(effectiveTaskDeps(tasks[0]!, 0, tasks)).toEqual([]);
+-    expect(effectiveTaskDeps(tasks[1]!, 1, tasks)).toEqual(['t1']);
++    const [t0, t1] = tasks;
++    if (!t0 || !t1) throw new Error('unreachable');
++    expect(effectiveTaskDeps(t0, 0, tasks)).toEqual([]);
++    expect(effectiveTaskDeps(t1, 1, tasks)).toEqual(['t1']);
+   });
+ });
+diff --git a/tests/crew/member-agent.test.ts b/tests/crew/member-agent.test.ts
+index 4f93071..102f46e 100644
+--- a/tests/crew/member-agent.test.ts
++++ b/tests/crew/member-agent.test.ts
+@@ -1,11 +1,12 @@
+ import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
+ import { Capability, PreferPolicy } from '../../src/core/types.ts';
+ import { buildCrewAgent } from '../../src/crew/member-agent.ts';
+ import type { CrewMember } from '../../src/crew/types.ts';
+ 
+ const member: CrewMember = {
+   name: 'researcher',
+   role: 'Senior Research Analyst',
+   goal: 'Find accurate, current facts on the topic',
+   backstory: 'You have 10 years scouring primary sources.',
+   requires: [Capability.Tools],
+@@ -31,18 +32,18 @@ describe('buildCrewAgent', () => {
+       prefer: PreferPolicy.LargestThatFits,
+     });
+     // a default model is present (overridden live by the selector at delegation)
+     expect(agent.model).toBeDefined();
+   });
+ 
+   it('uses the member tools when provided', () => {
+     const tools = {
+       probe: {
+         description: 'x',
+-        inputSchema: { type: 'object', properties: {} },
+-        execute: async () => ({})
+-      }
+-    } as any;
++        inputSchema: z.object({}),
++        execute: async () => ({}),
++      },
++    };
+     const agent = buildCrewAgent({ ...member, tools } as CrewMember);
+     expect(agent.tools).toBe(tools);
+   });
+ });
+diff --git a/tests/integration/crew.live.test.ts b/tests/integration/crew.live.test.ts
+new file mode 100644
+index 0000000..f610a6f
+--- /dev/null
++++ b/tests/integration/crew.live.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, test } from 'bun:test';
++import { mkdtemp } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { getCrew } from '../../crews/index.ts';
++import qwenFast from '../../models/qwen-fast.ts';
++import { runCrewCli } from '../../src/cli/crew.ts';
++import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenFast.model);
++
++describe.skipIf(!ready)('crew.live', () => {
++  test('runs the sequential research crew end-to-end against real Ollama', async () => {
++    const def = getCrew('research-crew');
++    if (!def) throw new Error('research-crew not registered');
++    const fileServer = await createFileTools();
++    try {
++      const fetchServer = await createFetchTools();
++      try {
++        const runsRoot = await mkdtemp(join(tmpdir(), 'crewlive-'));
++        const outcome = await runCrewCli({
++          def,
++          input: 'the example.com domain',
++          runsRoot,
++          runId: 'live',
++          tools: { ...fileServer.tools, ...fetchServer.tools },
++        });
++        expect(outcome.kind).toBe('done');
++      } finally {
++        await fetchServer.close();
++      }
++    } finally {
++      await fileServer.close();
++    }
++  }, 180_000);
++});
+diff --git a/tests/telemetry/crew-spans.test.ts b/tests/telemetry/crew-spans.test.ts
+index bc23892..3de638c 100644
+--- a/tests/telemetry/crew-spans.test.ts
++++ b/tests/telemetry/crew-spans.test.ts
+@@ -1,13 +1,13 @@
+ import { describe, expect, it } from 'bun:test';
+-import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ import { ATTR, withCrewSpan, withStepSpan } from '../../src/telemetry/spans.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ describe('crew spans', () => {
+   it('opens crew.run with id + process and nests child spans under it', async () => {
+     const { exporter } = registerTestProvider();
+     await withCrewSpan('research-crew', 'sequential', async () => {
+       await withStepSpan('t1', 'agent', async () => {});
+     });
+     const spans = exporter.getFinishedSpans();
+     const crew = spans.find((s) => s.name === 'crew.run');
+     const step = spans.find((s) => s.name === 'workflow.step');

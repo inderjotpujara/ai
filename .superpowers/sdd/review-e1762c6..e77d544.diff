@@ -1,0 +1,159 @@
+# Review package: e1762c6..e77d544
+
+## Commits
+e77d544 refactor(core): extract runGuardedAgent shared by delegate tool
+
+## Files changed
+ src/core/delegate.ts        | 62 +++++++++++++++++++++++++--------------------
+ tests/core/delegate.test.ts | 17 ++++++++++++-
+ 2 files changed, 51 insertions(+), 28 deletions(-)
+
+## Diff
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 2321713..6cf7126 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -21,52 +21,60 @@ export function delegateToolName(agent: Agent): string {
+ /**
+  * A hook run just before a delegated agent executes. May return a chosen context
+  * size, a model to bind for this call, and/or an `abort` message that skips the
+  * delegation entirely (returned to the orchestrator as a soft tool error).
+  */
+ export type BeforeDelegate = (
+   agent: Agent,
+   // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing.
+ ) => Promise<{ numCtx?: number; model?: LanguageModel; abort?: string } | void>;
+ 
++/** Run an agent through the full Slice-9 guarded delegation path:
++ *  delegation span · depth guard · before-delegate hook · context wrap · return cap.
++ *  Shared by the orchestrator's delegate tool and the workflow engine's agent step. */
++export function runGuardedAgent(
++  agent: Agent,
++  task: string,
++  onBeforeDelegate?: BeforeDelegate,
++): Promise<{ text: string } | { error: string }> {
++  return withDelegationSpan(agent.name, async () => {
++    const check = checkDelegation(agent.name);
++    if (!check.ok) {
++      recordGuardrailViolation(check.kind, check.reason);
++      return { error: check.reason };
++    }
++    const callerNumCtx = currentDelegationContext().numCtx;
++    try {
++      const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
++      if (pre?.abort) {
++        return { error: pre.abort };
++      }
++      const { text } = await runInDelegationContext(
++        agent.name,
++        pre?.numCtx,
++        () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
++      );
++      return { text: concise(text, callerNumCtx) };
++    } catch (cause) {
++      return {
++        error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
++      };
++    }
++  });
++}
++
+ /**
+  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
+  * structured error (so the orchestrator model can react) rather than throwing.
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+-    execute: async ({ task }) =>
+-      withDelegationSpan(agent.name, async () => {
+-        const check = checkDelegation(agent.name);
+-        if (!check.ok) {
+-          recordGuardrailViolation(check.kind, check.reason);
+-          return { error: check.reason };
+-        }
+-        const callerNumCtx = currentDelegationContext().numCtx;
+-        try {
+-          const pre = onBeforeDelegate
+-            ? await onBeforeDelegate(agent)
+-            : undefined;
+-          if (pre?.abort) {
+-            return { error: pre.abort };
+-          }
+-          const { text } = await runInDelegationContext(
+-            agent.name,
+-            pre?.numCtx,
+-            () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
+-          );
+-          return { text: concise(text, callerNumCtx) };
+-        } catch (cause) {
+-          return {
+-            error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+-          };
+-        }
+-      }),
++    execute: async ({ task }) => runGuardedAgent(agent, task, onBeforeDelegate),
+   });
+ }
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index 3d740c7..88bb38f 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -1,14 +1,18 @@
+ import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import type { Agent } from '../../src/core/agent-def.ts';
+-import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
++import {
++  asDelegateTool,
++  delegateToolName,
++  runGuardedAgent,
++} from '../../src/core/delegate.ts';
+ import {
+   runInDelegationContext,
+   withRootDelegationContext,
+ } from '../../src/core/guardrails.ts';
+ import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ function cannedAgent(name: string, answer: string): Agent {
+   return {
+     name,
+     description: `agent ${name}`,
+@@ -201,20 +205,31 @@ test('long delegated return is truncated to the caller live cap', async () => {
+     typeof result !== 'object' ||
+     !('text' in result) ||
+     typeof result.text !== 'string'
+   ) {
+     throw new Error('expected text result');
+   }
+   expect(result.text.length).toBeLessThan(9000);
+   expect(result.text).toContain('…[truncated');
+ });
+ 
++test('runGuardedAgent returns concise text and emits an agent.delegation span', async () => {
++  const result = await withRootDelegationContext(8192, () =>
++    runGuardedAgent(cannedAgent('web_fetch', 'done'), 'summarize'),
++  );
++  expect(result).toEqual({ text: 'done' });
++  const del = spanExporter
++    .getFinishedSpans()
++    .find((s) => s.name === 'agent.delegation');
++  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
++});
++
+ test('within-depth recursive re-entry of the same agent name is allowed', async () => {
+   const t = asDelegateTool(leaf('rec', 'ok'));
+   const result = await runInDelegationContext(
+     'rec',
+     8192,
+     async () =>
+       await t.execute?.({ task: 'again' }, { toolCallId: 'c', messages: [] }),
+   );
+   expect(result).toEqual({ text: 'ok' }); // same name 'rec' re-entered, not rejected
+ });

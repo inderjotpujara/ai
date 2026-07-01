@@ -1,0 +1,2110 @@
+# Review package: 01c9dae..62c2e9e
+
+## Commits
+62c2e9e test(resource): live-assert chosen context is sane and within model max
+07a1272 feat(cli): apply router + specialist chosen num_ctx at inference
+5f793a0 feat(models): declare per-role desired context (router 8192, specialist 16384)
+3a3b2eb style(core): suppress intentional noConfusingVoidType on BeforeDelegate
+319de07 feat(core): thread chosen num_ctx through delegation to inference
+787c8b3 feat(resource): budget-clamped dynamic context, live max via /api/show
+ec84973 feat(resource): warm with num_ctx + live getModelMaxContext probe
+3bd5472 refactor(resource): expose weights/kv split in footprint
+c288947 docs: spec + plan for dynamic budget-clamped context sizing
+
+## Files changed
+ docs/ROADMAP.md                                    |   1 +
+ .../plans/2026-06-29-dynamic-context-sizing.md     | 824 +++++++++++++++++++++
+ .../2026-06-29-dynamic-context-sizing-design.md    | 182 +++++
+ models/qwen-fast.ts                                |   4 +-
+ models/qwen-router.ts                              |   2 +
+ src/cli/chat.ts                                    |  20 +-
+ src/cli/run-chat.ts                                |   7 +-
+ src/core/agent-def.ts                              |  12 +-
+ src/core/delegate.ts                               |  13 +-
+ src/core/orchestrator.ts                           |   3 +-
+ src/core/types.ts                                  |  12 +-
+ src/resource/footprint.ts                          |  26 +-
+ src/resource/model-manager.ts                      |  84 ++-
+ src/resource/ollama-control.ts                     |  38 +-
+ tests/core/agent-def.test.ts                       |  16 +-
+ tests/integration/model-manager.live.test.ts       |  15 +-
+ tests/resource/footprint.test.ts                   |  16 +-
+ tests/resource/model-manager.test.ts               |  77 +-
+ tests/resource/ollama-control.test.ts              |  47 ++
+ 19 files changed, 1337 insertions(+), 62 deletions(-)
+
+## Diff
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index 7d5170b..cdad5ae 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -39,20 +39,21 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
+ ## Headline next — self-extension
+ 
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+ | **7** | **Agent-builder** ⭐ — on `report_capability_gap`, generate a new agent definition file (+ suggest an MCP server to mount) so the system *grows a capability* on demand. The `report_capability_gap` seam is already in place. | Slices 2, 3, (5/6 help) | **Highest-leverage future feature** — makes "describe a need → the system extends itself" real |
+ 
+ ## Orchestration & intelligence
+ 
+ - **Deeper agent graphs** — a "researcher" agent that itself delegates to `web_fetch` + `file_qa` (composability already exists via agents-as-tools), with the **hardware/context-aware guardrails**: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns.
+ - **Parallel fan-out** — when sub-tasks are independent, run specialists **concurrently** within the memory budget the Model Manager enforces.
++  - **Explicit `maxLoaded` cap on the Model Manager** — today the manager has **no count limit** on co-resident models; it loads until the live free-RAM headroom is exhausted, and the only count cap is Ollama's `OLLAMA_MAX_LOADED_MODELS` (default **3** on single-GPU Metal) acting as an implicit backstop. For deterministic parallel fan-out we should add a first-class `maxLoaded` to the manager (bound concurrency in our own scheduler rather than relying on Ollama's env default), so concurrency is governed by both the RAM headroom **and** an explicit model-count ceiling.
+ - **Response-format tooling** — shape answers into JSON / markdown / tables on request (user-confirmed needed).
+ - **Memory / RAG** — a local vector store + local embeddings model so agents recall past runs and indexed docs.
+ - **Image/vision agent** — a local multimodal model (e.g. Gemma 4) describing screenshots/images.
+ 
+ ## UX & interface
+ 
+ - **Run-viewer (`/runs`)** ⭐ — replay the JSONL journals already written: timeline of delegations, gaps, artifacts. Makes everything built so far **visible & demoable** (user-noted high value).
+ - **Streaming CLI** — token-by-token output instead of waiting (already deferred).
+ - **TUI / local web UI** — chat window + live "which agent is running / which model is loaded" panel + run-history browser.
+ - **Voice in/out** — local Whisper (STT) + a local TTS model → generalizes the book→audiobook idea into a voice agent.
+diff --git a/docs/superpowers/plans/2026-06-29-dynamic-context-sizing.md b/docs/superpowers/plans/2026-06-29-dynamic-context-sizing.md
+new file mode 100644
+index 0000000..0d465e6
+--- /dev/null
++++ b/docs/superpowers/plans/2026-06-29-dynamic-context-sizing.md
+@@ -0,0 +1,824 @@
++# Dynamic Context Sizing Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Size each model's `num_ctx` dynamically from the live free-RAM headroom, capped by the model's live-detected max context, and actually pass it to Ollama at both warm and inference.
++
++**Architecture:** The Model Manager is the single source of truth: in `ensureReady` it splits footprint into weights + KV-per-token, fits the model at a `MIN_CTX` floor (reusing the best-effort headroom loop), scales the context up to a budget-clamped `chosenCtx` (clamped by a live `/api/show` context_length probe), warms at that ctx, and returns it. The chosen ctx flows to inference via the `onBeforeDelegate` hook → `providerOptions.ollama.options.num_ctx`, keeping `core/` decoupled from `resource/`.
++
++**Tech Stack:** TypeScript, Bun, Vercel AI SDK 6 (`ai@^6`), `ollama-ai-provider-v2@^3`, Ollama HTTP API, `bun test` with `MockLanguageModelV3` from `ai/test`, Biome.
++
++**Spec:** `docs/superpowers/specs/2026-06-29-dynamic-context-sizing-design.md`
++**Branch:** `dynamic-context-sizing`, stacked on `fix-live-memory-budget`.
++
++## Global Constraints
++
++- Use `bun`, never `npm`. Typecheck `bun run typecheck`; tests `bun test`; lint `bun run lint`.
++- Pins (do not bump): `ai@^6`, `ollama-ai-provider-v2@^3`, `zod@^4`. Lint = Biome.
++- Biome: use `execute?.` not `execute!` (noNonNullAssertion); run `bunx biome check --write <files>` before each commit to fix import order/format.
++- Code style: `type` over `interface`; string `enum` for finite sets; early returns; small focused files; descriptive names.
++- `num_ctx` for inference goes at `providerOptions.ollama.options.num_ctx` (nested `options`), NOT `providerOptions.ollama.num_ctx`.
++- Warm and inference `num_ctx` MUST be the same value (sourced from `chosenCtx`) or Ollama reloads the runner. Ollama's default ctx is 4096.
++- `MIN_CTX = 4096`; chosen ctx rounded DOWN to a multiple of 1024.
++
++---
++
++### Task 1: Split footprint into weights + KV-per-token
++
++**Files:**
++- Modify: `src/resource/footprint.ts`
++- Test: `tests/resource/footprint.test.ts`
++
++**Interfaces:**
++- Produces: `weightsBytes(paramsBillions: number, bytesPerWeight: number): number`; `kvCacheBytes(contextTokens: number, kvBytesPerToken: number): number`. `estimateModelBytes(input)` unchanged (now `= weightsBytes(...) + kvCacheBytes(...)`).
++
++- [ ] **Step 1: Write the failing tests**
++
++Append to `tests/resource/footprint.test.ts`:
++
++```typescript
++import { kvCacheBytes, weightsBytes } from '../../src/resource/footprint.ts';
++
++test('weightsBytes applies the 1.2 runtime overhead', () => {
++  expect(weightsBytes(1, 1)).toBe(1.2e9);
++  expect(weightsBytes(4, 0.56)).toBe(4 * 1e9 * 0.56 * 1.2);
++});
++
++test('kvCacheBytes is contextTokens times bytes-per-token', () => {
++  expect(kvCacheBytes(4096, 131072)).toBe(4096 * 131072);
++  expect(kvCacheBytes(0, 131072)).toBe(0);
++});
++```
++
++(Keep the existing `estimateModelBytes` test in the file unchanged.)
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/resource/footprint.test.ts`
++Expected: FAIL — `weightsBytes`/`kvCacheBytes` not exported.
++
++- [ ] **Step 3: Implement the split**
++
++Replace the body of `src/resource/footprint.ts` below the `FootprintInput` type:
++
++```typescript
++const RUNTIME_OVERHEAD = 1.2;
++
++/** Resident bytes of the weights (quantized) plus runtime overhead — no KV cache. */
++export function weightsBytes(
++  paramsBillions: number,
++  bytesPerWeight: number,
++): number {
++  return paramsBillions * 1e9 * bytesPerWeight * RUNTIME_OVERHEAD;
++}
++
++/** KV-cache bytes for a given context window. */
++export function kvCacheBytes(
++  contextTokens: number,
++  kvBytesPerToken: number,
++): number {
++  return contextTokens * kvBytesPerToken;
++}
++
++/**
++ * Estimate the RAM a model needs before loading it.
++ * weights (with overhead) plus a KV-cache term that grows with context.
++ */
++export function estimateModelBytes(input: FootprintInput): number {
++  return (
++    weightsBytes(input.paramsBillions, input.bytesPerWeight) +
++    kvCacheBytes(input.contextTokens, input.kvBytesPerToken)
++  );
++}
++```
++
++- [ ] **Step 4: Run tests to verify they pass**
++
++Run: `bun test tests/resource/footprint.test.ts`
++Expected: PASS (all, including the existing estimate test).
++
++- [ ] **Step 5: Lint + commit**
++
++```bash
++bunx biome check --write src/resource/footprint.ts tests/resource/footprint.test.ts
++bun run typecheck
++git add src/resource/footprint.ts tests/resource/footprint.test.ts
++git commit -m "refactor(resource): expose weights/kv split in footprint"
++```
++
++---
++
++### Task 2: Ollama control — `num_ctx` on warm + live max-context probe
++
++**Files:**
++- Modify: `src/resource/ollama-control.ts`
++- Test: `tests/resource/ollama-control.test.ts` (create)
++
++**Interfaces:**
++- Produces: `warmModel(model: string, numCtx?: number, baseUrl?: string): Promise<void>` (numCtx inserted as `options.num_ctx`); `getModelMaxContext(model: string, baseUrl?: string): Promise<number | undefined>`.
++- Note: `warmModel`'s second positional arg becomes `numCtx`; callers passing a custom `baseUrl` must now pass it third. (The only non-test caller is the manager via `d.warm`, updated in Task 3.)
++
++- [ ] **Step 1: Write the failing tests**
++
++Create `tests/resource/ollama-control.test.ts`:
++
++```typescript
++import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
++import {
++  getModelMaxContext,
++  warmModel,
++} from '../../src/resource/ollama-control.ts';
++
++const realFetch = globalThis.fetch;
++let lastBody: Record<string, unknown> | undefined;
++
++function stubFetch(json: unknown, ok = true): void {
++  globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {
++    lastBody = init?.body ? JSON.parse(init.body as string) : undefined;
++    return new Response(JSON.stringify(json), { status: ok ? 200 : 500 });
++  }) as unknown as typeof fetch;
++}
++
++beforeEach(() => {
++  lastBody = undefined;
++});
++afterEach(() => {
++  globalThis.fetch = realFetch;
++});
++
++test('warmModel includes options.num_ctx when a context is given', async () => {
++  stubFetch({});
++  await warmModel('m', 8192);
++  expect(lastBody).toMatchObject({ model: 'm', stream: false });
++  expect((lastBody?.options as { num_ctx: number }).num_ctx).toBe(8192);
++});
++
++test('warmModel omits options when no context is given', async () => {
++  stubFetch({});
++  await warmModel('m');
++  expect(lastBody?.options).toBeUndefined();
++});
++
++test('getModelMaxContext reads model_info architecture context_length', async () => {
++  stubFetch({
++    model_info: {
++      'general.architecture': 'qwen35',
++      'qwen35.context_length': 262144,
++    },
++  });
++  expect(await getModelMaxContext('qwen3.5:4b')).toBe(262144);
++});
++
++test('getModelMaxContext returns undefined when the field is absent', async () => {
++  stubFetch({ model_info: { 'general.architecture': 'qwen35' } });
++  expect(await getModelMaxContext('qwen3.5:4b')).toBeUndefined();
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/resource/ollama-control.test.ts`
++Expected: FAIL — `getModelMaxContext` not exported; `warmModel` ignores num_ctx.
++
++- [ ] **Step 3: Implement**
++
++In `src/resource/ollama-control.ts`, replace `warmModel` and add `getModelMaxContext` + the `ShowResponse` type (place `ShowResponse` near the other response types at the top):
++
++```typescript
++type ShowResponse = { model_info?: Record<string, unknown> };
++```
++
++```typescript
++/** Warm/preload a model into memory, optionally reserving a context window. */
++export function warmModel(
++  model: string,
++  numCtx?: number,
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<void> {
++  const body: Record<string, unknown> = { model, stream: false };
++  if (numCtx !== undefined) body.options = { num_ctx: numCtx };
++  return postJson(baseUrl, '/api/generate', body);
++}
++
++/**
++ * The model's true maximum context window, read live from `POST /api/show`
++ * (`model_info["<arch>.context_length"]`). Returns undefined if not reported.
++ */
++export async function getModelMaxContext(
++  model: string,
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<number | undefined> {
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/show`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ model }),
++    });
++  } catch (cause) {
++    throw new ProviderError('Ollama /api/show failed', { cause });
++  }
++  if (!res.ok) {
++    throw new ProviderError(`Ollama /api/show returned ${res.status}`);
++  }
++  const data = (await res.json()) as ShowResponse;
++  const info = data.model_info ?? {};
++  const arch = info['general.architecture'];
++  if (typeof arch !== 'string') return undefined;
++  const ctx = info[`${arch}.context_length`];
++  return typeof ctx === 'number' ? ctx : undefined;
++}
++```
++
++- [ ] **Step 4: Run tests to verify they pass**
++
++Run: `bun test tests/resource/ollama-control.test.ts`
++Expected: PASS (4 tests).
++
++- [ ] **Step 5: Lint + typecheck + commit**
++
++```bash
++bunx biome check --write src/resource/ollama-control.ts tests/resource/ollama-control.test.ts
++bun run typecheck
++git add src/resource/ollama-control.ts tests/resource/ollama-control.test.ts
++git commit -m "feat(resource): warm with num_ctx + live getModelMaxContext probe"
++```
++
++---
++
++### Task 3: Model manager computes & returns the budget-clamped context
++
++**Files:**
++- Modify: `src/core/types.ts` (add `maxContext`, `kvBytesPerToken`)
++- Modify: `src/resource/model-manager.ts`
++- Test: `tests/resource/model-manager.test.ts`
++
++**Interfaces:**
++- Consumes: `weightsBytes`, `kvCacheBytes` (Task 1); `getModelMaxContext` (Task 2).
++- Produces: `ensureReady(decl, opts?): Promise<number>` (returns the chosen `num_ctx`); `ManagerDeps.getModelMax: (model: string) => Promise<number | undefined>`; exported `const MIN_CTX = 4096`.
++
++- [ ] **Step 1: Extend the type**
++
++In `src/core/types.ts`, replace the `ModelDeclaration` type:
++
++```typescript
++export type ModelDeclaration = {
++  provider: ProviderKind;
++  model: string;
++  params: ModelParams;
++  role: string;
++  /** Pre-load sizing hint for the model manager. */
++  footprint: {
++    approxParamsBillions: number;
++    bytesPerWeight: number;
++    /** Bytes of KV cache per token (per-model; defaults to 131072 if omitted). */
++    kvBytesPerToken?: number;
++  };
++  /**
++   * Optional cap on the context window. The true max is detected live from
++   * Ollama; set this only to deliberately cap below it or as a probe fallback.
++   */
++  maxContext?: number;
++};
++```
++
++- [ ] **Step 2: Write the failing tests**
++
++In `tests/resource/model-manager.test.ts`, update `fakes()` to add a `getModelMax` default, and add the new tests. First add to the `fakes()` return object (after `warn:`):
++
++```typescript
++    getModelMax: mock(async () => 262144),
++```
++
++Then update the `decl` helper to allow a desired context and append new tests:
++
++```typescript
++function declCtx(model: string, b: number, numCtx: number): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: { numCtx },
++    role: 'test',
++    footprint: { approxParamsBillions: b, bytesPerWeight: 1 },
++  };
++}
++
++test('ample headroom: chosenCtx is the desired value, warmed at it', async () => {
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(16384);
++  expect(f.warm).toHaveBeenCalledWith('m1', 16384);
++});
++
++test('tight headroom: chosenCtx shrinks to fit, floored & rounded to 1024', async () => {
++  // weights(1,1)=1.2e9; kv/token=131072. budget chosen so maxCtxByFit == 8192:
++  // headroom-weights = 8192*131072 = 1073741824 → budget = 1073741824 + 1.2e9.
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 1073741824 + 1.2e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(8192);
++  expect(ctx % 1024).toBe(0);
++  expect(f.warm).toHaveBeenCalledWith('m1', 8192);
++});
++
++test('chosenCtx is capped by the live-probed model max', async () => {
++  const f = fakes({ getModelMax: mock(async () => 6144) });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(6144);
++});
++
++test('probe failure falls back to decl.maxContext', async () => {
++  const f = fakes({
++    getModelMax: mock(async () => {
++      throw new Error('no show');
++    }),
++  });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const decl = { ...declCtx('m1', 1, 16384), maxContext: 5120 };
++  const ctx = await mgr.ensureReady(decl);
++  expect(ctx).toBe(5120);
++  expect(f.getModelMax).toHaveBeenCalled();
++});
++
++test('cannot fit even the MIN_CTX floor: throws, warms nothing', async () => {
++  // minNeed = weights(1,1)=1.2e9 + 4096*131072 ≈ 1.737e9; budget 1e9 < minNeed, nothing to evict.
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 1e9, ...f });
++  await expect(mgr.ensureReady(declCtx('big', 1, 16384))).rejects.toBeInstanceOf(
++    ResourceError,
++  );
++  expect(f.warm).not.toHaveBeenCalled();
++});
++```
++
++- [ ] **Step 3: Run tests to verify they fail**
++
++Run: `bun test tests/resource/model-manager.test.ts`
++Expected: FAIL — `getModelMax` not a dep; `ensureReady` returns void; warm called with one arg.
++
++- [ ] **Step 4: Implement the manager changes**
++
++In `src/resource/model-manager.ts`:
++
++(a) Update imports — replace the footprint import and add control import:
++
++```typescript
++import { kvCacheBytes, weightsBytes } from './footprint.ts';
++import {
++  getModelMaxContext,
++  isModelInstalled,
++  type LoadedModel,
++  listLoadedModels,
++  pullModel,
++  unloadModel,
++  warmModel,
++} from './ollama-control.ts';
++```
++
++(Remove the old `import { estimateModelBytes } from './footprint.ts';` and the now-unused `declBytes` if nothing else uses it — keep `declBytes` only if other code imports it; the live test does not. Delete `declBytes` and its `estimateModelBytes` use.)
++
++(b) Add constants after the imports:
++
++```typescript
++export const MIN_CTX = 4096;
++const DEFAULT_KV_PER_TOKEN = 131072;
++const CTX_ROUNDING = 1024;
++```
++
++(c) Add `getModelMax` to `ManagerDeps` (after `warn`):
++
++```typescript
++  getModelMax: (model: string) => Promise<number | undefined>;
++```
++
++(d) Add to `defaultDeps()` return (after `warn:`):
++
++```typescript
++    getModelMax: (m) => getModelMaxContext(m),
++```
++
++(e) Replace the entire `ensureReady` function body with the context-aware version. Inside `createModelManager`, keep `lastUsed`/`tick` and add two memo maps:
++
++```typescript
++  const lastUsed = new Map<string, number>();
++  const chosenCtxByModel = new Map<string, number>();
++  const maxCtxByModel = new Map<string, number>();
++  let tick = 0;
++
++  async function modelMaxFor(model: string): Promise<number | undefined> {
++    const cached = maxCtxByModel.get(model);
++    if (cached !== undefined) return cached;
++    let probed: number | undefined;
++    try {
++      probed = await d.getModelMax(model);
++    } catch {
++      probed = undefined;
++    }
++    if (probed !== undefined) maxCtxByModel.set(model, probed);
++    return probed;
++  }
++
++  async function ensureReady(
++    decl: ModelDeclaration,
++    opts: EnsureOpts = {},
++  ): Promise<number> {
++    const pinned = new Set(opts.pinned ?? []);
++    const target = decl.model;
++    const desired = decl.params.numCtx ?? MIN_CTX;
++
++    if (!(await d.isInstalled(target))) await d.pull(target);
++
++    let loaded = await d.listLoaded();
++    if (loaded.some((m) => m.name === target)) {
++      lastUsed.set(target, ++tick);
++      return chosenCtxByModel.get(target) ?? desired;
++    }
++
++    const weights = weightsBytes(
++      decl.footprint.approxParamsBillions,
++      decl.footprint.bytesPerWeight,
++    );
++    const kvPerToken = decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN;
++    const minNeed = weights + kvCacheBytes(MIN_CTX, kvPerToken);
++    const freeBudget = await resolveBudget(d.budgetBytes);
++    const gb = (bytes: number) => Math.round(bytes / 1e9);
++
++    const lru = (a: LoadedModel, b: LoadedModel) =>
++      (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1);
++
++    // Fit the model at its minimum context; evicting returns real bytes to headroom.
++    let headroom = freeBudget;
++    while (minNeed > headroom) {
++      const evictable = loaded.filter((m) => m.name !== target);
++      const nonPinned = evictable.filter((m) => !pinned.has(m.name)).sort(lru);
++      const evict = nonPinned[0] ?? evictable.sort(lru)[0];
++      if (evict === undefined) {
++        throw new ResourceError(
++          `Cannot load ${target} (needs ~${gb(minNeed)}GB at min context): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
++        );
++      }
++      if (pinned.has(evict.name)) {
++        d.warn(
++          `[model-manager] live memory budget (~${gb(freeBudget)}GB) too low to keep ${evict.name} pinned; evicting it to load ${target} (best-effort pin — it will reload on demand).`,
++        );
++      }
++      await d.unload(evict.name);
++      lastUsed.delete(evict.name);
++      chosenCtxByModel.delete(evict.name);
++      headroom += evict.sizeBytes;
++      loaded = loaded.filter((m) => m.name !== evict.name);
++    }
++
++    // Scale context up into the remaining headroom, clamped by the live model max.
++    const probedMax = await modelMaxFor(target);
++    const ceiling = Math.min(
++      decl.maxContext ?? Number.POSITIVE_INFINITY,
++      probedMax ?? Number.POSITIVE_INFINITY,
++    );
++    const maxCtxByFit = Math.floor((headroom - weights) / kvPerToken);
++    let chosenCtx = Math.min(desired, ceiling, maxCtxByFit);
++    chosenCtx = Math.max(MIN_CTX, chosenCtx);
++    chosenCtx -= chosenCtx % CTX_ROUNDING;
++    chosenCtx = Math.max(MIN_CTX, chosenCtx);
++
++    await d.warm(target, chosenCtx);
++    lastUsed.set(target, ++tick);
++    chosenCtxByModel.set(target, chosenCtx);
++    return chosenCtx;
++  }
++```
++
++(f) In `unloadAll`, also clear the ctx memo:
++
++```typescript
++  async function unloadAll(): Promise<void> {
++    for (const model of [...lastUsed.keys()]) {
++      await d.unload(model);
++    }
++    lastUsed.clear();
++    chosenCtxByModel.clear();
++  }
++```
++
++(g) Update `d.unload`/`d.warm` dep types: `ManagerDeps.warm` becomes `(model: string, numCtx?: number) => Promise<void>`. Update `defaultDeps` `warm: (m, n) => warmModel(m, n)`.
++
++- [ ] **Step 5: Run tests to verify they pass**
++
++Run: `bun test tests/resource/model-manager.test.ts`
++Expected: PASS — all prior tests (which use `budgetBytes` as free headroom) still pass, plus the 5 new ones.
++
++- [ ] **Step 6: Lint + typecheck + commit**
++
++```bash
++bunx biome check --write src/core/types.ts src/resource/model-manager.ts tests/resource/model-manager.test.ts
++bun run typecheck
++git add src/core/types.ts src/resource/model-manager.ts tests/resource/model-manager.test.ts
++git commit -m "feat(resource): budget-clamped dynamic context, live max via /api/show"
++```
++
++---
++
++### Task 4: Thread the chosen context into agent inference
++
++**Files:**
++- Modify: `src/core/agent-def.ts` (add `ollamaCtxOptions`, `runDefinedAgent` numCtx param)
++- Modify: `src/core/delegate.ts` (`BeforeDelegate` returns `{ numCtx? }`)
++- Modify: `src/core/orchestrator.ts` (`runOrchestrator` numCtx param)
++- Test: `tests/core/agent-def.test.ts` (create)
++
++**Interfaces:**
++- Produces: `ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined`; `runDefinedAgent(agent, task, numCtx?)`; `BeforeDelegate = (agent: Agent) => Promise<{ numCtx?: number } | void>`; `runOrchestrator(orchestrator, task, numCtx?)`.
++
++- [ ] **Step 1: Write the failing test**
++
++Create `tests/core/agent-def.test.ts`:
++
++```typescript
++import { expect, test } from 'bun:test';
++import { ollamaCtxOptions } from '../../src/core/agent-def.ts';
++
++test('ollamaCtxOptions nests num_ctx under ollama.options', () => {
++  expect(ollamaCtxOptions(8192)).toEqual({
++    ollama: { options: { num_ctx: 8192 } },
++  });
++});
++
++test('ollamaCtxOptions returns undefined when no context is given', () => {
++  expect(ollamaCtxOptions()).toBeUndefined();
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/core/agent-def.test.ts`
++Expected: FAIL — `ollamaCtxOptions` not exported.
++
++- [ ] **Step 3: Implement `agent-def.ts`**
++
++Replace `src/core/agent-def.ts` contents below the `Agent` type:
++
++```typescript
++import type { ProviderOptions } from '@ai-sdk/provider-utils';
++```
++
++(add that import at the top with the others), and replace `runDefinedAgent`:
++
++```typescript
++/** Build provider options that set Ollama's context window for this call. */
++export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
++  return numCtx === undefined
++    ? undefined
++    : { ollama: { options: { num_ctx: numCtx } } };
++}
++
++/** Run an agent definition against a task, optionally at a chosen context size. */
++export function runDefinedAgent(
++  agent: Agent,
++  task: string,
++  numCtx?: number,
++): ReturnType<typeof runAgent> {
++  return runAgent({
++    model: agent.model,
++    systemPrompt: agent.systemPrompt,
++    prompt: task,
++    tools: agent.tools,
++    providerOptions: ollamaCtxOptions(numCtx),
++  });
++}
++```
++
++- [ ] **Step 4: Update `delegate.ts`**
++
++Change the `BeforeDelegate` type and the `execute` body:
++
++```typescript
++/** A hook run just before a delegated agent executes; may return a chosen context size. */
++export type BeforeDelegate = (
++  agent: Agent,
++) => Promise<{ numCtx?: number } | void>;
++```
++
++```typescript
++    execute: async ({ task }) => {
++      try {
++        const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
++        const { text } = await runDefinedAgent(agent, task, pre?.numCtx);
++        return { text };
++      } catch (cause) {
++        return {
++          error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
++        };
++      }
++    },
++```
++
++- [ ] **Step 5: Update `orchestrator.ts`**
++
++Add a `numCtx` parameter to `runOrchestrator` and pass it to both `runDefinedAgent` calls:
++
++```typescript
++export async function runOrchestrator(
++  orchestrator: Agent,
++  task: string,
++  numCtx?: number,
++): Promise<OrchestratorResult> {
++```
++
++```typescript
++    const result = await runDefinedAgent(orchestrator, task, numCtx);
++```
++
++(There is only one `runDefinedAgent` call in `runOrchestrator`; the gap path reads `err.steps`.)
++
++- [ ] **Step 6: Run tests to verify they pass**
++
++Run: `bun test tests/core/agent-def.test.ts && bun test tests/core/`
++Expected: PASS — new helper tests pass; existing orchestrator/delegate tests still pass (the `void`-returning hooks remain valid; `numCtx` is optional).
++
++- [ ] **Step 7: Lint + typecheck + commit**
++
++```bash
++bunx biome check --write src/core/agent-def.ts src/core/delegate.ts src/core/orchestrator.ts tests/core/agent-def.test.ts
++bun run typecheck
++git add src/core/agent-def.ts src/core/delegate.ts src/core/orchestrator.ts tests/core/agent-def.test.ts
++git commit -m "feat(core): thread chosen num_ctx through delegation to inference"
++```
++
++---
++
++### Task 5: Declare desired context per role
++
++**Files:**
++- Modify: `models/qwen-router.ts`, `models/qwen-fast.ts`
++
++**Interfaces:**
++- Consumes: `ModelDeclaration` with optional `maxContext` (Task 3). No new exports.
++
++- [ ] **Step 1: Update the specialist's desired context**
++
++In `models/qwen-fast.ts`, change the params line to a larger desired window (specialists handle documents) and add a clarifying comment:
++
++```typescript
++  // Desired context for the role; the true max is detected live from Ollama
++  // and the manager clamps this down under memory pressure.
++  params: { temperature: 0.2, numCtx: 16384 },
++```
++
++In `models/qwen-router.ts`, keep `numCtx: 8192` and add the same one-line comment above `params`.
++
++- [ ] **Step 2: Typecheck + verify the suite still green**
++
++Run: `bun run typecheck && bun test tests/resource/`
++Expected: PASS.
++
++- [ ] **Step 3: Lint + commit**
++
++```bash
++bunx biome check --write models/qwen-router.ts models/qwen-fast.ts
++git add models/qwen-router.ts models/qwen-fast.ts
++git commit -m "feat(models): declare per-role desired context (router 8192, specialist 16384)"
++```
++
++---
++
++### Task 6: Wire the chosen context through the CLI
++
++**Files:**
++- Modify: `src/cli/run-chat.ts` (`ChatDeps.routerNumCtx`, pass to `runOrchestrator`)
++- Modify: `src/cli/chat.ts` (use `ensureReady` return; hook returns `{ numCtx }`)
++- Test: `tests/` existing run-chat test stays green (no signature break — field is optional)
++
++**Interfaces:**
++- Consumes: `runOrchestrator(orchestrator, task, numCtx?)` (Task 4); `ensureReady` returns `number` (Task 3).
++
++- [ ] **Step 1: Update `run-chat.ts`**
++
++Add the optional field and pass it through:
++
++```typescript
++export type ChatDeps = {
++  orchestrator: Agent;
++  task: string;
++  runsRoot: string;
++  runId: string;
++  routerNumCtx?: number;
++};
++```
++
++```typescript
++  const result = await runOrchestrator(
++    deps.orchestrator,
++    deps.task,
++    deps.routerNumCtx,
++  );
++```
++
++- [ ] **Step 2: Update `chat.ts`**
++
++Capture the router's chosen ctx and make the hook return the specialist's:
++
++```typescript
++  const routerNumCtx = await manager.ensureReady(qwenRouter, {
++    pinned: [qwenRouter.model],
++  });
++```
++
++```typescript
++  // Specialists' models are loaded on demand at a budget-clamped context size,
++  // keeping the router pinned-resident.
++  const onBeforeDelegate = async (agent: {
++    modelDecl?: import('../core/types.ts').ModelDeclaration;
++  }): Promise<{ numCtx?: number }> =>
++    agent.modelDecl
++      ? { numCtx: await manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] }) }
++      : {};
++```
++
++And pass `routerNumCtx` into `runChat`:
++
++```typescript
++      const result = await runChat({
++        orchestrator,
++        task,
++        runsRoot: 'runs',
++        runId: `run-${process.pid}`,
++        routerNumCtx,
++      });
++```
++
++(Remove the now-redundant standalone `await manager.ensureReady(qwenRouter, ...)` line that previously preceded the project-store notice — it is replaced by the `routerNumCtx` assignment above; keep the `console.error` notice after it.)
++
++- [ ] **Step 3: Typecheck + full suite**
++
++Run: `bun run typecheck && bun test`
++Expected: PASS (live tests auto-skip without Ollama).
++
++- [ ] **Step 4: Lint + commit**
++
++```bash
++bunx biome check --write src/cli/run-chat.ts src/cli/chat.ts
++bun run typecheck
++git add src/cli/run-chat.ts src/cli/chat.ts
++git commit -m "feat(cli): apply router + specialist chosen num_ctx at inference"
++```
++
++---
++
++### Task 7: Live verification — context applied & shrinks under pressure
++
++**Files:**
++- Modify: `tests/integration/model-manager.live.test.ts` (add a context assertion)
++
++**Interfaces:**
++- Consumes: `ensureReady` returns chosen ctx; `getModelMaxContext` (Task 2).
++
++- [ ] **Step 1: Add a live test for the chosen context**
++
++Append a test inside the existing `describe.skipIf(!ready)` block in `tests/integration/model-manager.live.test.ts`:
++
++```typescript
++  test('ensureReady returns a sane chosen context within the model max', async () => {
++    const max = await getModelMaxContext(qwenFast.model);
++    const ctx = await manager.ensureReady(qwenFast, {
++      pinned: [qwenRouter.model],
++    });
++    expect(ctx).toBeGreaterThanOrEqual(4096);
++    expect(ctx % 1024).toBe(0);
++    if (max !== undefined) expect(ctx).toBeLessThanOrEqual(max);
++  }, 180_000);
++```
++
++Add the import at the top:
++
++```typescript
++import { getModelMaxContext } from '../../src/resource/ollama-control.ts';
++```
++
++(If `listLoadedModels` is already imported from that module, add `getModelMaxContext` to the same import.)
++
++- [ ] **Step 2: Run the live test with Ollama up**
++
++Run (manual, with Ollama serving + models pulled):
++```bash
++bun run serve   # terminal 1 (quit menu-bar Ollama first)
++bun test tests/integration/model-manager.live.test.ts   # terminal 2
++```
++Expected: PASS — chosen ctx ≥ 4096, multiple of 1024, ≤ model max (262144).
++
++- [ ] **Step 3: Full suite, lint, commit**
++
++```bash
++bun run typecheck && bun run lint && bun test
++git add tests/integration/model-manager.live.test.ts
++git commit -m "test(resource): live-assert chosen context is sane and within model max"
++```
++
++---
++
++## Self-Review
++
++- **Spec coverage:** policy/clamp → Task 3; live max detection → Tasks 2+3; wire-through warm → Tasks 2+3; wire-through inference → Tasks 4+6; per-role desired → Task 5; footprint split → Task 1; forward-compat (probe + fallback) → Task 3 (`modelMaxFor`); tests → every task + Task 7 live. All spec sections mapped.
++- **Placeholder scan:** none — every step has concrete code/commands.
++- **Type consistency:** `ensureReady → Promise<number>` (Task 3) consumed by Task 6; `BeforeDelegate → Promise<{numCtx?}|void>` (Task 4) consumed by Task 6 hook; `warmModel(model, numCtx?, baseUrl?)` (Task 2) consumed by Task 3 `defaultDeps.warm`; `ollamaCtxOptions` (Task 4) consumed by `runDefinedAgent`; `getModelMaxContext` (Task 2) consumed by Tasks 3 + 7. Consistent.
+diff --git a/docs/superpowers/specs/2026-06-29-dynamic-context-sizing-design.md b/docs/superpowers/specs/2026-06-29-dynamic-context-sizing-design.md
+new file mode 100644
+index 0000000..2160529
+--- /dev/null
++++ b/docs/superpowers/specs/2026-06-29-dynamic-context-sizing-design.md
+@@ -0,0 +1,182 @@
++# Dynamic, Budget-Clamped Context Sizing — Design
++
++**Date:** 2026-06-29
++**Status:** approved (pending spec review)
++**Builds on:** the live-memory-budget fix (branch `fix-live-memory-budget`) — this
++change integrates into the `ensureReady` free-headroom loop introduced there.
++
++## Problem
++
++The model context window (`num_ctx`) is today both **static and disconnected**:
++
++1. **Static** — `models/qwen-router.ts` and `models/qwen-fast.ts` hardcode
++   `numCtx: 8192`. Nothing adjusts it at runtime.
++2. **Disconnected** — `numCtx` is used *only* in the KV-cache term of the memory
++   estimate (`declBytes`). It is never passed to Ollama. `createOllamaModel` drops
++   `decl.params`, and `agent.ts` forwards only `temperature`. So Ollama loads every
++   model at its **own default `num_ctx` (4096)**, not 8192.
++
++Consequences: the context we budget for (8192) and the context Ollama actually runs
++(4096) disagree, so the footprint estimate is wrong; and any task needing more than
++4096 tokens is silently truncated despite the "8192" declaration.
++
++This contradicts the project's hardware/context-aware north star: context is the
++*other* lever on memory (KV cache grows linearly with `num_ctx`), so it should be
++**sized to the live budget and actually applied**.
++
++## Goal
++
++Make context sizing **dynamic, hardware-aware, and wired through**:
++
++- Choose `num_ctx` per delegation from the live free-RAM headroom (budget-clamped).
++- Pass the chosen `num_ctx` to Ollama at **both** warm (load) and inference, from a
++  **single source of truth**, so the runner reserves the right window and no reload
++  is triggered.
++
++Non-goal (deferred): input-/task-length-driven sizing. The chosen policy is
++budget-clamped; input-awareness is a later refinement once token telemetry exists.
++
++## Policy
++
++Per `ensureReady` for a model:
++
++```
++weights      = paramsB × 1e9 × bytesPerWeight × RUNTIME_OVERHEAD     // no KV
++kvPerToken   = decl.footprint.kvBytesPerToken ?? 131072
++minNeed      = weights + kvPerToken × MIN_CTX                        // floor footprint
++# (evict non-pinned → best-effort pinned until minNeed fits headroom, else ResourceError)
++modelMax     = probeModelMaxContext(model) ?? decl.maxContext ?? desired   // LIVE, memoized
++ceiling      = decl.maxContext ? min(modelMax, decl.maxContext) : modelMax  // optional cap
++maxCtxByFit  = floor((headroom − weights) / kvPerToken)
++chosenCtx    = clamp(desired, MIN_CTX, min(ceiling, maxCtxByFit))
++chosenCtx    = roundDownTo(chosenCtx, 1024)                          // tidy multiple
++```
++
++Constants / declared / **detected** values:
++
++- `MIN_CTX = 4096` (Ollama's own default; the minimum we will run a model at).
++- `desired` = `decl.params.numCtx` — the role's preferred window: **router 8192,
++  specialists 16384**. This is a *policy* choice (how much context the role wants),
++  so it stays declared.
++- `modelMax` = the model's **true context ceiling, detected live from Ollama** — NOT
++  hardcoded. It is a model *fact*, varies per model, and must work for models we
++  never declared (Slice 6 discovery). Probed via `POST /api/show` →
++  `model_info["${arch}.context_length"]` where `arch = model_info["general.architecture"]`,
++  memoized per model. **Verified live 2026-06-29:** qwen3.5:4b/9b report
++  `general.architecture = "qwen35"` and `qwen35.context_length = 262144` (256K) — the
++  arch key is `qwen35`, not `qwen3.5`, which is exactly why it must be read from Ollama
++  rather than hand-declared. `decl.maxContext?` is an
++  **optional override/cap only** (used to deliberately cap below the true max, or as a
++  fallback if the probe fails). Same calculate-live-with-fallback principle as the
++  memory budget.
++
++Behavior: ample free RAM → `chosenCtx = min(desired, maxContext)`; tight free RAM →
++`chosenCtx` shrinks toward `MIN_CTX`; if even `weights + kv(MIN_CTX)` cannot fit after
++evicting everything evictable → `ResourceError` (the model can't run on this machine
++right now).
++
++## Architecture
++
++The **Model Manager is the single source of truth** for `chosenCtx` — it already owns
++the live headroom, so it owns the context decision. The value then flows to both the
++warm call (inside the manager) and the inference call (via the delegation hook),
++keeping `core/` decoupled from `resource/`.
++
++```
++ensureReady(decl, opts)
++  ├─ split footprint: weights vs kvPerToken
++  ├─ evict to fit minNeed (existing best-effort headroom loop)
++  ├─ chosenCtx = clamp(...)            ← computed here
++  ├─ warmModel(model, chosenCtx)       ← warm at chosenCtx
++  └─ return chosenCtx
++
++onBeforeDelegate(agent) → { numCtx: chosenCtx }     // hook returns the ctx
++asDelegateTool / runDefinedAgent(agent, task, { numCtx })
++  └─ providerOptions = { ollama: { options: { num_ctx: numCtx } } }
++       → existing agent.ts plumbing → generateText → Ollama body options.num_ctx
++```
++
++`chat.ts`: the startup `ensureReady(qwenRouter, {pinned})` return value is the
++orchestrator's own `num_ctx`, applied to the orchestrator run the same way.
++
++## Components touched
++
++| File | Change |
++|---|---|
++| `src/core/types.ts` | `ModelDeclaration.maxContext?: number` (**optional override/cap only**, not the source of truth); `Footprint.kvBytesPerToken?: number` |
++| `src/resource/footprint.ts` | expose **weights** and **kv-per-token** separately (keep `estimateModelBytes` as `weights + kv(ctx)` for back-compat) |
++| `src/resource/ollama-control.ts` | `warmModel(model, numCtx?)` → POST body adds `options:{ num_ctx }` only when `numCtx` is given (residency stays managed by explicit `unloadModel`; no `keep_alive` change); **new `getModelMaxContext(model)`** → `POST /api/show`, parse `model_info["${model_info['general.architecture']}.context_length"]` |
++| `src/resource/model-manager.ts` | compute `chosenCtx` in the headroom loop using a **live, memoized** `modelMax` (probe `getModelMaxContext`, fall back to `decl.maxContext`/`desired` if it fails); `ensureReady` returns `number`; warm at `chosenCtx` |
++| `src/core/delegate.ts` | `BeforeDelegate` returns `{ numCtx }`; build `providerOptions` and pass to `runDefinedAgent` |
++| `src/core/orchestrator.ts` | thread the hook's `numCtx` through the delegate tools |
++| `src/core/agent.ts` | (no change — already forwards `providerOptions`) |
++| `agents/super.ts`, `agents/*.ts` | unchanged shells; rely on hook |
++| `models/qwen-router.ts`, `models/qwen-fast.ts` | `numCtx` (desired) + new `maxContext` (+ optional `kvBytesPerToken`) |
++| `src/cli/chat.ts` | use `ensureReady(router)` return as the orchestrator run's `num_ctx` |
++
++## Data flow (inference)
++
++1. Orchestrator decides to delegate to agent X.
++2. `onBeforeDelegate(X)` → `manager.ensureReady(X.modelDecl, {pinned:[router]})` →
++   warms X at `chosenCtx`, returns `chosenCtx`.
++3. Delegate tool builds `providerOptions.ollama.options.num_ctx = chosenCtx` and runs
++   X via `runDefinedAgent` → `generateText` → Ollama `/api/chat` with matching
++   `num_ctx`. No runner reload (warm ctx == inference ctx).
++
++## Error handling
++
++- Cannot fit `weights + kv(MIN_CTX)` after evicting everything → `ResourceError`
++  (same path/semantics as today's "nothing left to evict").
++- `maxCtxByFit < MIN_CTX` is the same condition (can't even fit the floor) → throw.
++- `warmModel`/inference failures propagate as today.
++
++## Testing (TDD)
++
++**Unit — `footprint.ts`:** weights and kv-per-token split correct; `estimateModelBytes`
++unchanged for existing callers.
++
++**Unit — `model-manager.ts`:**
++- ample headroom → `chosenCtx == min(desired, maxContext)`.
++- tight headroom → `chosenCtx` shrinks below desired, ≥ `MIN_CTX`, rounded to 1024.
++- `chosenCtx` capped by `maxContext` even when headroom is huge.
++- cannot fit `kv(MIN_CTX)` + weights → `ResourceError`, nothing warmed.
++- `ensureReady` returns the chosen value; `warmModel` called with it.
++
++**Unit — `ollama-control.ts`:** `warmModel(m, 8192)` POSTs body containing
++`options.num_ctx === 8192`; `warmModel(m)` with no ctx omits `options`.
++`getModelMaxContext` parses `model_info` (arch → `${arch}.context_length`) from a
++mocked `/api/show` response; returns `undefined`/throws cleanly when the field/probe is
++absent so the manager can fall back.
++
++**Unit — `model-manager.ts` (live max):** with a fake `getModelMaxContext` returning a
++small ceiling, `chosenCtx` is capped by the probed value even when headroom and desired
++are larger; when the probe fails, it falls back to `decl.maxContext` then `desired`.
++
++**Unit — `delegate.ts`:** hook returning `{ numCtx }` produces
++`providerOptions.ollama.options.num_ctx` on the agent run.
++
++**Live (opt-in, auto-skip):** warm + infer at the same chosen ctx against real Ollama;
++assert the run answers and (best-effort) that no reload occurred / ctx took effect;
++under simulated pressure the chosen ctx shrinks and the run still answers.
++
++## Risks
++
++- **kvBytesPerToken accuracy** — 131072 is a coarse constant; real KV/token depends on
++  layers/heads/kv-quant. Mis-estimation only mis-sizes context (clamped by `maxContext`
++  and `MIN_CTX`), never crashes. Per-model override added; precise per-arch computation
++  deferred.
++- **Reload on mismatch** — mitigated by sourcing warm and inference ctx from the one
++  `chosenCtx`. A live test guards against regression.
++- **`/api/show` probe failure** — if Ollama doesn't return a parseable
++  `context_length` (older model, missing field), `getModelMaxContext` returns
++  `undefined` and the manager falls back to `decl.maxContext` then `desired`. Probe
++  result is memoized per model to avoid a `/api/show` call on every delegation.
++
++## Forward-compatibility (dynamic models, Slice 6)
++
++Because `modelMax` is detected from Ollama at runtime (not declared), a model pulled by
++future **discovery** — one with no hand-written declaration — still gets a correct
++context ceiling automatically. The only declared inputs are *policy* (`desired` per
++role) and an *optional* cap (`decl.maxContext`); both have sane fallbacks, so a
++discovered model with neither still runs (desired defaults applied, ceiling probed).
++```
+diff --git a/models/qwen-fast.ts b/models/qwen-fast.ts
+index 5975a49..a98d67c 100644
+--- a/models/qwen-fast.ts
++++ b/models/qwen-fast.ts
+@@ -1,12 +1,14 @@
+ import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
+ 
+ /** Fast general-purpose local model with reliable tool-calling. */
+ const qwenFast: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:9b',
+-  params: { temperature: 0.2, numCtx: 8192 },
++  // Desired context for the role; the true max is detected live from Ollama
++  // and the manager clamps this down under memory pressure.
++  params: { temperature: 0.2, numCtx: 16384 },
+   role: 'general reasoning + tool use',
+   footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenFast;
+diff --git a/models/qwen-router.ts b/models/qwen-router.ts
+index 96f9d51..a84c720 100644
+--- a/models/qwen-router.ts
++++ b/models/qwen-router.ts
+@@ -1,12 +1,14 @@
+ import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
+ 
+ /** Small, fast model for the orchestrator's routing decisions (stays pinned-resident). */
+ const qwenRouter: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:4b',
++  // Desired context for the role; the true max is detected live from Ollama
++  // and the manager clamps this down under memory pressure.
+   params: { temperature: 0.1, numCtx: 8192 },
+   role: 'routing / orchestration',
+   footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenRouter;
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 623b310..ea60263 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -8,49 +8,57 @@ import { runChat } from './run-chat.ts';
+ async function main(): Promise<void> {
+   const task = process.argv.slice(2).join(' ').trim();
+   if (task.length === 0) {
+     console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+     process.exit(1);
+   }
+ 
+   const manager = createModelManager();
+   // Warm + pin the small router model the orchestrator runs on.
+   console.error(`Preparing router model ${qwenRouter.model}...`);
+-  await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
++  const routerNumCtx = await manager.ensureReady(qwenRouter, {
++    pinned: [qwenRouter.model],
++  });
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
+-  // Specialists' models are loaded on demand, keeping the router pinned-resident.
+-  const onBeforeDelegate = (agent: {
++  // Specialists' models are loaded on demand at a budget-clamped context size,
++  // keeping the router pinned-resident.
++  const onBeforeDelegate = async (agent: {
+     modelDecl?: import('../core/types.ts').ModelDeclaration;
+-  }) =>
++  }): Promise<{ numCtx?: number }> =>
+     agent.modelDecl
+-      ? manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] })
+-      : Promise.resolve();
++      ? {
++          numCtx: await manager.ensureReady(agent.modelDecl, {
++            pinned: [qwenRouter.model],
++          }),
++        }
++      : {};
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+       const orchestrator = createSuperAgent(
+         fileServer.tools,
+         fetchServer.tools,
+         onBeforeDelegate,
+       );
+       const result = await runChat({
+         orchestrator,
+         task,
+         runsRoot: 'runs',
+         runId: `run-${process.pid}`,
++        routerNumCtx,
+       });
+       console.log(result.kind === 'answer' ? result.text : result.message);
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+     await manager.unloadAll();
+   }
+ }
+diff --git a/src/cli/run-chat.ts b/src/cli/run-chat.ts
+index 3685a77..eb59c46 100644
+--- a/src/cli/run-chat.ts
++++ b/src/cli/run-chat.ts
+@@ -4,28 +4,33 @@ import {
+   runOrchestrator,
+ } from '../core/orchestrator.ts';
+ import { appendJournal } from '../run/journal.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
+ 
+ export type ChatDeps = {
+   orchestrator: Agent;
+   task: string;
+   runsRoot: string;
+   runId: string;
++  routerNumCtx?: number;
+ };
+ 
+ /** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
+ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+   await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
+ 
+-  const result = await runOrchestrator(deps.orchestrator, deps.task);
++  const result = await runOrchestrator(
++    deps.orchestrator,
++    deps.task,
++    deps.routerNumCtx,
++  );
+ 
+   if (result.kind === 'answer') {
+     await writeArtifact(run, 'answer.txt', result.text);
+     await appendJournal(run.dir, {
+       step: 'answer',
+       data: { text: result.text },
+     });
+   } else {
+     await writeArtifact(run, 'gap.txt', result.message);
+     await appendJournal(run.dir, {
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index e9d2a0e..54efe8b 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -1,27 +1,37 @@
++import type { ProviderOptions } from '@ai-sdk/provider-utils';
+ import type { LanguageModel, ToolSet } from 'ai';
+ import { runAgent } from './agent.ts';
+ import type { ModelDeclaration } from './types.ts';
+ 
+ /** A reusable agent: its own model + system prompt + tools, plus a routing description. */
+ export type Agent = {
+   name: string; // stable id used in delegate tool names, e.g. 'file_qa'
+   description: string; // capability description the orchestrator routes on
+   model: LanguageModel;
+   systemPrompt: string;
+   tools: ToolSet;
+   /** Declaration of the agent's model, for the resource manager (optional; mock agents omit it). */
+   modelDecl?: ModelDeclaration;
+ };
+ 
+-/** Run an agent definition against a task. */
++/** Build provider options that set Ollama's context window for this call. */
++export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
++  return numCtx === undefined
++    ? undefined
++    : { ollama: { options: { num_ctx: numCtx } } };
++}
++
++/** Run an agent definition against a task, optionally at a chosen context size. */
+ export function runDefinedAgent(
+   agent: Agent,
+   task: string,
++  numCtx?: number,
+ ): ReturnType<typeof runAgent> {
+   return runAgent({
+     model: agent.model,
+     systemPrompt: agent.systemPrompt,
+     prompt: task,
+     tools: agent.tools,
++    providerOptions: ollamaCtxOptions(numCtx),
+   });
+ }
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index ff8d812..213282e 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,38 +1,43 @@
+ import { tool } from 'ai';
+ import { z } from 'zod';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
+-/** A hook run just before a delegated agent executes (e.g. ensure its model is loaded). */
+-export type BeforeDelegate = (agent: Agent) => Promise<void>;
++/** A hook run just before a delegated agent executes; may return a chosen context size. */
++export type BeforeDelegate = (
++  agent: Agent,
++  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing; changing to `undefined` would break all void-returning callsites.
++) => Promise<{ numCtx?: number } | void>;
+ 
+ /**
+  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
+  * structured error (so the orchestrator model can react) rather than throwing.
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+     execute: async ({ task }) => {
+       try {
+-        if (onBeforeDelegate) await onBeforeDelegate(agent);
+-        const { text } = await runDefinedAgent(agent, task);
++        const pre = onBeforeDelegate
++          ? await onBeforeDelegate(agent)
++          : undefined;
++        const { text } = await runDefinedAgent(agent, task, pre?.numCtx);
+         return { text };
+       } catch (cause) {
+         return {
+           error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+         };
+       }
+     },
+   });
+ }
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+index bf11160..3a98003 100644
+--- a/src/core/orchestrator.ts
++++ b/src/core/orchestrator.ts
+@@ -58,26 +58,27 @@ export function createOrchestrator(opts: {
+     model: opts.model,
+     systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
+     tools,
+   };
+ }
+ 
+ /** Run the orchestrator; return either the answer or a reported capability gap. */
+ export async function runOrchestrator(
+   orchestrator: Agent,
+   task: string,
++  numCtx?: number,
+ ): Promise<OrchestratorResult> {
+   let text: string;
+   let steps: Parameters<typeof findCapabilityGap>[0];
+ 
+   try {
+-    const result = await runDefinedAgent(orchestrator, task);
++    const result = await runDefinedAgent(orchestrator, task, numCtx);
+     text = result.text;
+     steps = result.steps;
+   } catch (err) {
+     if (err instanceof MaxStepsError) {
+       // Intentional: if report_capability_gap was called during the run, the
+       // result is classified as kind:'gap' (gap takes precedence) regardless of
+       // whether the agent produced any delegate output or final text.
+       const gap = findCapabilityGap(
+         err.steps as Parameters<typeof findCapabilityGap>[0],
+       );
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 754adb2..fed8221 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -12,12 +12,22 @@ export type ModelParams = {
+ /**
+  * A model declaration is DATA, not logic. Slice 1 pins a concrete model name;
+  * later slices can resolve a capability/role to a discovered model.
+  */
+ export type ModelDeclaration = {
+   provider: ProviderKind;
+   model: string;
+   params: ModelParams;
+   role: string;
+   /** Pre-load sizing hint for the model manager. */
+-  footprint: { approxParamsBillions: number; bytesPerWeight: number };
++  footprint: {
++    approxParamsBillions: number;
++    bytesPerWeight: number;
++    /** Bytes of KV cache per token (per-model; defaults to 131072 if omitted). */
++    kvBytesPerToken?: number;
++  };
++  /**
++   * Optional cap on the context window. The true max is detected live from
++   * Ollama; set this only to deliberately cap below it or as a probe fallback.
++   */
++  maxContext?: number;
+ };
+diff --git a/src/resource/footprint.ts b/src/resource/footprint.ts
+index 96cedeb..d1b3972 100644
+--- a/src/resource/footprint.ts
++++ b/src/resource/footprint.ts
+@@ -1,20 +1,36 @@
+ /** Inputs for a rough pre-load RAM estimate of a quantized model. */
+ export type FootprintInput = {
+   paramsBillions: number;
+   bytesPerWeight: number;
+   contextTokens: number;
+   kvBytesPerToken: number;
+ };
+ 
+ const RUNTIME_OVERHEAD = 1.2;
+ 
++/** Resident bytes of the weights (quantized) plus runtime overhead — no KV cache. */
++export function weightsBytes(
++  paramsBillions: number,
++  bytesPerWeight: number,
++): number {
++  return paramsBillions * 1e9 * bytesPerWeight * RUNTIME_OVERHEAD;
++}
++
++/** KV-cache bytes for a given context window. */
++export function kvCacheBytes(
++  contextTokens: number,
++  kvBytesPerToken: number,
++): number {
++  return contextTokens * kvBytesPerToken;
++}
++
+ /**
+  * Estimate the RAM a model needs before loading it.
+- * weights = params * bytesPerWeight * overhead; plus a KV-cache term that grows with context.
++ * weights (with overhead) plus a KV-cache term that grows with context.
+  */
+ export function estimateModelBytes(input: FootprintInput): number {
+-  const weights =
+-    input.paramsBillions * 1e9 * input.bytesPerWeight * RUNTIME_OVERHEAD;
+-  const kvCache = input.contextTokens * input.kvBytesPerToken;
+-  return weights + kvCache;
++  return (
++    weightsBytes(input.paramsBillions, input.bytesPerWeight) +
++    kvCacheBytes(input.contextTokens, input.kvBytesPerToken)
++  );
+ }
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+index 4e4dd99..15a2a64 100644
+--- a/src/resource/model-manager.ts
++++ b/src/resource/model-manager.ts
+@@ -1,129 +1,153 @@
+ import { ResourceError } from '../core/errors.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
+-import { estimateModelBytes } from './footprint.ts';
++import { kvCacheBytes, weightsBytes } from './footprint.ts';
+ import { liveBudgetBytes } from './hardware.ts';
+ import {
++  getModelMaxContext,
+   isModelInstalled,
+   type LoadedModel,
+   listLoadedModels,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from './ollama-control.ts';
+ 
++export const MIN_CTX = 4096;
++const DEFAULT_KV_PER_TOKEN = 131072;
++const CTX_ROUNDING = 1024;
++
+ export type EnsureOpts = { pinned?: string[] };
+ 
+ /** A live budget figure, or a (sync/async) provider that computes one on demand. */
+ export type BudgetSource = number | (() => number | Promise<number>);
+ 
+ /** Injectable dependencies (real Ollama by default; fakes in tests). */
+ export type ManagerDeps = {
+   budgetBytes: BudgetSource;
+   isInstalled: (model: string) => Promise<boolean>;
+   listLoaded: () => Promise<LoadedModel[]>;
+   pull: (model: string) => Promise<void>;
+-  warm: (model: string) => Promise<void>;
++  warm: (model: string, numCtx?: number) => Promise<void>;
+   unload: (model: string) => Promise<void>;
+   warn: (message: string) => void;
++  getModelMax: (model: string) => Promise<number | undefined>;
+ };
+ 
+-/** Estimated resident bytes of a model from its declaration. */
+-export function declBytes(decl: ModelDeclaration): number {
+-  return estimateModelBytes({
+-    paramsBillions: decl.footprint.approxParamsBillions,
+-    bytesPerWeight: decl.footprint.bytesPerWeight,
+-    contextTokens: decl.params.numCtx ?? 8192,
+-    kvBytesPerToken: 131072,
+-  });
+-}
+-
+ function defaultDeps(): ManagerDeps {
+   return {
+     budgetBytes: liveBudgetBytes,
+     isInstalled: (m) => isModelInstalled(m),
+     listLoaded: () => listLoadedModels(),
+     pull: (m) => pullModel(m),
+-    warm: (m) => warmModel(m),
++    warm: (m, n) => warmModel(m, n),
+     unload: (m) => unloadModel(m),
+     warn: (message) => console.error(message),
++    getModelMax: (m) => getModelMaxContext(m),
+   };
+ }
+ 
+ /** Resolve the budget source to a concrete byte figure (live on each call). */
+ async function resolveBudget(source: BudgetSource): Promise<number> {
+   return typeof source === 'function' ? source() : source;
+ }
+ 
+ /** Loads/unloads models to keep the active + pinned set within the GPU budget. */
+ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
+   const d: ManagerDeps = { ...defaultDeps(), ...deps };
+   const lastUsed = new Map<string, number>();
++  const chosenCtxByModel = new Map<string, number>();
++  const maxCtxByModel = new Map<string, number>();
+   let tick = 0;
+ 
++  async function modelMaxFor(model: string): Promise<number | undefined> {
++    const cached = maxCtxByModel.get(model);
++    if (cached !== undefined) return cached;
++    let probed: number | undefined;
++    try {
++      probed = await d.getModelMax(model);
++    } catch {
++      probed = undefined;
++    }
++    if (probed !== undefined) maxCtxByModel.set(model, probed);
++    return probed;
++  }
++
+   async function ensureReady(
+     decl: ModelDeclaration,
+     opts: EnsureOpts = {},
+-  ): Promise<void> {
++  ): Promise<number> {
+     const pinned = new Set(opts.pinned ?? []);
+     const target = decl.model;
++    const desired = decl.params.numCtx ?? MIN_CTX;
+ 
+     if (!(await d.isInstalled(target))) await d.pull(target);
+ 
+     let loaded = await d.listLoaded();
+     if (loaded.some((m) => m.name === target)) {
+       lastUsed.set(target, ++tick);
+-      return;
++      return chosenCtxByModel.get(target) ?? desired;
+     }
+ 
+-    const needed = declBytes(decl);
+-    // Free headroom right now, resolved live per delegation. This is free system
+-    // RAM (already net of every loaded model), so the question is simply "does the
+-    // target fit in what's free?" — never `resident() + needed`, which would
+-    // double-count models the free figure already excludes.
++    const weights = weightsBytes(
++      decl.footprint.approxParamsBillions,
++      decl.footprint.bytesPerWeight,
++    );
++    const kvPerToken = decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN;
++    const minNeed = weights + kvCacheBytes(MIN_CTX, kvPerToken);
+     const freeBudget = await resolveBudget(d.budgetBytes);
+     const gb = (bytes: number) => Math.round(bytes / 1e9);
+ 
+     const lru = (a: LoadedModel, b: LoadedModel) =>
+       (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1);
+ 
+-    // Evicting a model returns its REAL resident bytes (from /api/ps) to the pool,
+-    // so headroom grows as we evict. Keep evicting until the target fits.
++    // Fit the model at its minimum context; evicting returns real bytes to headroom.
+     let headroom = freeBudget;
+-    while (needed > headroom) {
++    while (minNeed > headroom) {
+       const evictable = loaded.filter((m) => m.name !== target);
+-      // Prefer non-pinned LRU; fall back to pinned LRU (pinning is best-effort —
+-      // under real memory pressure we degrade and let the pinned model reload on
+-      // its next turn rather than failing the run).
+       const nonPinned = evictable.filter((m) => !pinned.has(m.name)).sort(lru);
+       const evict = nonPinned[0] ?? evictable.sort(lru)[0];
+       if (evict === undefined) {
+-        // Nothing left to evict and it still doesn't fit — a genuine resource
+-        // failure (the model is too big for this machine's free RAM right now).
+         throw new ResourceError(
+-          `Cannot load ${target} (~${gb(needed)}GB): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
++          `Cannot load ${target} (needs ~${gb(minNeed)}GB at min context): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
+         );
+       }
+       if (pinned.has(evict.name)) {
+         d.warn(
+           `[model-manager] live memory budget (~${gb(freeBudget)}GB) too low to keep ${evict.name} pinned; evicting it to load ${target} (best-effort pin — it will reload on demand).`,
+         );
+       }
+       await d.unload(evict.name);
+       lastUsed.delete(evict.name);
++      chosenCtxByModel.delete(evict.name);
+       headroom += evict.sizeBytes;
+       loaded = loaded.filter((m) => m.name !== evict.name);
+     }
+ 
+-    await d.warm(target);
++    // Scale context up into the remaining headroom, clamped by the live model max.
++    const probedMax = await modelMaxFor(target);
++    const ceiling = Math.min(
++      decl.maxContext ?? Number.POSITIVE_INFINITY,
++      probedMax ?? Number.POSITIVE_INFINITY,
++    );
++    const maxCtxByFit = Math.floor((headroom - weights) / kvPerToken);
++    let chosenCtx = Math.min(desired, ceiling, maxCtxByFit);
++    chosenCtx = Math.max(MIN_CTX, chosenCtx);
++    chosenCtx -= chosenCtx % CTX_ROUNDING;
++    chosenCtx = Math.max(MIN_CTX, chosenCtx);
++
++    await d.warm(target, chosenCtx);
+     lastUsed.set(target, ++tick);
++    chosenCtxByModel.set(target, chosenCtx);
++    return chosenCtx;
+   }
+ 
+   async function unloadAll(): Promise<void> {
+     for (const model of [...lastUsed.keys()]) {
+       await d.unload(model);
+     }
+     lastUsed.clear();
++    chosenCtxByModel.clear();
+   }
+ 
+   return { ensureReady, unloadAll };
+ }
+diff --git a/src/resource/ollama-control.ts b/src/resource/ollama-control.ts
+index df6d20a..5103990 100644
+--- a/src/resource/ollama-control.ts
++++ b/src/resource/ollama-control.ts
+@@ -2,20 +2,22 @@ import { ProviderError } from '../core/errors.ts';
+ 
+ const DEFAULT_BASE_URL = 'http://localhost:11434';
+ 
+ type TagsResponse = { models?: Array<{ name: string }> };
+ 
+ /** A model currently resident in Ollama, with its memory footprint. */
+ export type LoadedModel = { name: string; sizeBytes: number };
+ 
+ type PsResponse = { models?: Array<{ name: string; size: number }> };
+ 
++type ShowResponse = { model_info?: Record<string, unknown> };
++
+ async function postJson(
+   baseUrl: string,
+   path: string,
+   body: Record<string, unknown>,
+ ): Promise<void> {
+   let res: Response;
+   try {
+     res = await fetch(`${baseUrl}${path}`, {
+       method: 'POST',
+       headers: { 'content-type': 'application/json' },
+@@ -48,26 +50,58 @@ export async function isModelInstalled(
+ }
+ 
+ /** Pull a model (blocking, non-streamed). Write field is `model`. */
+ export function pullModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/pull', { model, stream: false });
+ }
+ 
+-/** Warm/preload a model into memory with an empty-prompt generate. */
++/** Warm/preload a model into memory, optionally reserving a context window. */
+ export function warmModel(
+   model: string,
++  numCtx?: number,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+-  return postJson(baseUrl, '/api/generate', { model, stream: false });
++  const body: Record<string, unknown> = { model, stream: false };
++  if (numCtx !== undefined) body.options = { num_ctx: numCtx };
++  return postJson(baseUrl, '/api/generate', body);
++}
++
++/**
++ * The model's true maximum context window, read live from `POST /api/show`
++ * (`model_info["<arch>.context_length"]`). Returns undefined if not reported.
++ */
++export async function getModelMaxContext(
++  model: string,
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<number | undefined> {
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/show`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ model }),
++    });
++  } catch (cause) {
++    throw new ProviderError('Ollama /api/show failed', { cause });
++  }
++  if (!res.ok) {
++    throw new ProviderError(`Ollama /api/show returned ${res.status}`);
++  }
++  const data = (await res.json()) as ShowResponse;
++  const info = data.model_info ?? {};
++  const arch = info['general.architecture'];
++  if (typeof arch !== 'string') return undefined;
++  const ctx = info[`${arch}.context_length`];
++  return typeof ctx === 'number' ? ctx : undefined;
+ }
+ 
+ /** Unload a model from memory immediately (keep_alive: 0). */
+ export function unloadModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/generate', {
+     model,
+     keep_alive: 0,
+diff --git a/tests/core/agent-def.test.ts b/tests/core/agent-def.test.ts
+index 2929dc6..da9b7c7 100644
+--- a/tests/core/agent-def.test.ts
++++ b/tests/core/agent-def.test.ts
+@@ -1,15 +1,19 @@
+ import { expect, mock, test } from 'bun:test';
+ import { tool } from 'ai';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import { z } from 'zod';
+-import { type Agent, runDefinedAgent } from '../../src/core/agent-def.ts';
++import {
++  type Agent,
++  ollamaCtxOptions,
++  runDefinedAgent,
++} from '../../src/core/agent-def.ts';
+ 
+ test('runDefinedAgent runs the agent on the task and returns text', async () => {
+   const execute = mock(async () => ({ value: 42 }));
+   const model = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [{ type: 'text', text: 'done' }],
+       finishReason: { unified: 'stop', raw: undefined },
+       usage: {
+         inputTokens: {
+           total: 1,
+@@ -28,10 +32,20 @@ test('runDefinedAgent runs the agent on the task and returns text', async () =>
+     model,
+     systemPrompt: 'You do math.',
+     tools: {
+       add: tool({ description: 'add', inputSchema: z.object({}), execute }),
+     },
+   };
+ 
+   const { text } = await runDefinedAgent(agent, 'what is 40+2?');
+   expect(text).toBe('done');
+ });
++
++test('ollamaCtxOptions nests num_ctx under ollama.options', () => {
++  expect(ollamaCtxOptions(8192)).toEqual({
++    ollama: { options: { num_ctx: 8192 } },
++  });
++});
++
++test('ollamaCtxOptions returns undefined when no context is given', () => {
++  expect(ollamaCtxOptions()).toBeUndefined();
++});
+diff --git a/tests/integration/model-manager.live.test.ts b/tests/integration/model-manager.live.test.ts
+index 43e364d..dfaa83a 100644
+--- a/tests/integration/model-manager.live.test.ts
++++ b/tests/integration/model-manager.live.test.ts
+@@ -1,15 +1,18 @@
+ import { afterAll, describe, expect, test } from 'bun:test';
+ import qwenFast from '../../models/qwen-fast.ts';
+ import qwenRouter from '../../models/qwen-router.ts';
+ import { createModelManager } from '../../src/resource/model-manager.ts';
+-import { listLoadedModels } from '../../src/resource/ollama-control.ts';
++import {
++  getModelMaxContext,
++  listLoadedModels,
++} from '../../src/resource/ollama-control.ts';
+ import { ollamaReady } from './ollama-available.ts';
+ 
+ const ready =
+   (await ollamaReady(qwenRouter.model)) && (await ollamaReady(qwenFast.model));
+ 
+ describe.skipIf(!ready)(
+   'live model manager: functional routing + pinning',
+   () => {
+     const manager = createModelManager();
+     afterAll(async () => {
+@@ -22,12 +25,22 @@ describe.skipIf(!ready)(
+       let loaded = (await listLoadedModels()).map((m) => m.name);
+       expect(loaded).toContain(qwenFast.model); // specialist loaded for the delegation
+ 
+       // When the live budget has room the pinned router is co-resident here; under
+       // real memory pressure it is evicted best-effort, so re-ensuring it must bring
+       // it back. Either way routing stays functional — that is what we assert.
+       await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
+       loaded = (await listLoadedModels()).map((m) => m.name);
+       expect(loaded).toContain(qwenRouter.model);
+     }, 180_000);
++
++    test('ensureReady returns a sane chosen context within the model max', async () => {
++      const max = await getModelMaxContext(qwenFast.model);
++      const ctx = await manager.ensureReady(qwenFast, {
++        pinned: [qwenRouter.model],
++      });
++      expect(ctx).toBeGreaterThanOrEqual(4096);
++      expect(ctx % 1024).toBe(0);
++      if (max !== undefined) expect(ctx).toBeLessThanOrEqual(max);
++    }, 180_000);
+   },
+ );
+diff --git a/tests/resource/footprint.test.ts b/tests/resource/footprint.test.ts
+index d4ab8af..e69b95e 100644
+--- a/tests/resource/footprint.test.ts
++++ b/tests/resource/footprint.test.ts
+@@ -1,12 +1,16 @@
+ import { expect, test } from 'bun:test';
+-import { estimateModelBytes } from '../../src/resource/footprint.ts';
++import {
++  estimateModelBytes,
++  kvCacheBytes,
++  weightsBytes,
++} from '../../src/resource/footprint.ts';
+ 
+ test('estimates an 8B Q4_K_M model with 8k context', () => {
+   // weights = 8e9 * 0.56 * 1.2 = 5,376,000,000 ; kv = 8192 * 131072 = 1,073,741,824
+   const bytes = estimateModelBytes({
+     paramsBillions: 8,
+     bytesPerWeight: 0.56,
+     contextTokens: 8192,
+     kvBytesPerToken: 131072,
+   });
+   expect(bytes).toBe(5_376_000_000 + 1_073_741_824);
+@@ -14,10 +18,20 @@ test('estimates an 8B Q4_K_M model with 8k context', () => {
+ 
+ test('zero context means weights-only', () => {
+   const bytes = estimateModelBytes({
+     paramsBillions: 1,
+     bytesPerWeight: 2,
+     contextTokens: 0,
+     kvBytesPerToken: 999,
+   });
+   expect(bytes).toBe(1e9 * 2 * 1.2);
+ });
++
++test('weightsBytes applies the 1.2 runtime overhead', () => {
++  expect(weightsBytes(1, 1)).toBe(1.2e9);
++  expect(weightsBytes(4, 0.56)).toBe(4 * 1e9 * 0.56 * 1.2);
++});
++
++test('kvCacheBytes is contextTokens times bytes-per-token', () => {
++  expect(kvCacheBytes(4096, 131072)).toBe(4096 * 131072);
++  expect(kvCacheBytes(0, 131072)).toBe(0);
++});
+diff --git a/tests/resource/model-manager.test.ts b/tests/resource/model-manager.test.ts
+index 3b602c1..bda6921 100644
+--- a/tests/resource/model-manager.test.ts
++++ b/tests/resource/model-manager.test.ts
+@@ -1,109 +1,123 @@
+ import { expect, mock, test } from 'bun:test';
+ import { ResourceError } from '../../src/core/errors.ts';
+ import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
+-import { createModelManager } from '../../src/resource/model-manager.ts';
++import {
++  createModelManager,
++  MIN_CTX,
++} from '../../src/resource/model-manager.ts';
+ 
+ function decl(model: string, b: number): ModelDeclaration {
+   return {
+     provider: ProviderKind.Ollama,
+     model,
+     params: { numCtx: 0 }, // numCtx 0 → KV term 0, so bytes == params*1e9*bpw*1.2
+     role: 'test',
+     footprint: { approxParamsBillions: b, bytesPerWeight: 1 }, // bytes = b*1e9*1.2
+   };
+ }
+-// declBytes(decl(_, b)) === b*1e9*1.2
++// weightsBytes(b, 1) === b*1e9*1.2
+ 
+ function fakes(
+   overrides: Partial<Parameters<typeof createModelManager>[0]> = {},
+ ) {
+   return {
+     isInstalled: mock(async () => true),
+     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
+     pull: mock(async () => {}),
+     warm: mock(async () => {}),
+     unload: mock(async () => {}),
+     warn: mock(() => {}), // no-op so eviction warnings never leak to console
++    getModelMax: mock(async () => 262144),
+     ...overrides,
+   };
+ }
+ 
++function declCtx(model: string, b: number, numCtx: number): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: { numCtx },
++    role: 'test',
++    footprint: { approxParamsBillions: b, bytesPerWeight: 1 },
++  };
++}
++
+ test('already-loaded model: no pull/warm/unload', async () => {
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'm8', sizeBytes: 1 }]),
+   });
+   const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+   await mgr.ensureReady(decl('m8', 8));
+   expect(f.warm).not.toHaveBeenCalled();
+   expect(f.pull).not.toHaveBeenCalled();
+   expect(f.unload).not.toHaveBeenCalled();
+ });
+ 
+ test('not installed: pulls then warms', async () => {
+   const f = fakes({ isInstalled: mock(async () => false) });
+   const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+   await mgr.ensureReady(decl('m8', 8));
+   expect(f.pull).toHaveBeenCalledWith('m8');
+-  expect(f.warm).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
+ });
+ 
+ test('fits in free headroom: warms, no eviction', async () => {
+   // target 8*1.2=9.6e9; free headroom 20e9 → fits without touching the loaded router.
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
+   });
+   const mgr = createModelManager({ budgetBytes: 20e9, ...f });
+   await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
+   expect(f.unload).not.toHaveBeenCalled();
+-  expect(f.warm).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
+ });
+ 
+ test('insufficient free: evicts non-pinned to grow headroom, keeps pinned, then warms', async () => {
+   // free headroom 2e9; target new8 needs 9.6e9 → must evict. Evicting old8 (non-pinned,
+   // 9.6e9) returns its bytes → headroom 2 + 9.6 = 11.6 ≥ 9.6 → warm. Pinned r4 untouched.
+   const f = fakes({
+     listLoaded: mock(async () => [
+       { name: 'r4', sizeBytes: 4.8e9 },
+       { name: 'old8', sizeBytes: 9.6e9 },
+     ]),
+   });
+   const mgr = createModelManager({ budgetBytes: 2e9, ...f });
+   await mgr.ensureReady(decl('new8', 8), { pinned: ['r4'] });
+   expect(f.unload).toHaveBeenCalledWith('old8');
+   expect(f.unload).not.toHaveBeenCalledWith('r4');
+-  expect(f.warm).toHaveBeenCalledWith('new8');
++  expect(f.warm).toHaveBeenCalledWith('new8', MIN_CTX);
+ });
+ 
+ test('budget given as a function is resolved live on each ensureReady', async () => {
+   // function form (the live-budget shape); target 9.6e9 ≤ 20e9 free headroom → no eviction.
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
+   });
+   const budgetBytes = mock(async () => 20e9);
+   const mgr = createModelManager({ budgetBytes, ...f });
+   await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
+   expect(budgetBytes).toHaveBeenCalled();
+   expect(f.unload).not.toHaveBeenCalled();
+-  expect(f.warm).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
+ });
+ 
+ test('best-effort pin: evicts the pinned model when it is all that is left to free', async () => {
+   // free headroom 2e9; only the pinned router r8 (9.6e9) is loaded; target big needs 9.6e9.
+   // Degrade: evict r8 → headroom 2 + 9.6 = 11.6 ≥ 9.6 → warm. Run stays functional.
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'r8', sizeBytes: 9.6e9 }]),
+   });
+   const mgr = createModelManager({ budgetBytes: 2e9, ...f });
+   await mgr.ensureReady(decl('big', 8), { pinned: ['r8'] });
+   expect(f.unload).toHaveBeenCalledWith('r8');
+-  expect(f.warm).toHaveBeenCalledWith('big');
++  expect(f.warm).toHaveBeenCalledWith('big', MIN_CTX);
+   expect(f.warn).toHaveBeenCalled();
+ });
+ 
+ test('target alone exceeds budget: throws ResourceError, warms nothing', async () => {
+   // nothing loaded; target needs 9.6e9 but budget is 8e9 → cannot fit even alone.
+   const f = fakes();
+   const mgr = createModelManager({ budgetBytes: 8e9, ...f });
+   await expect(
+     mgr.ensureReady(decl('big', 8), { pinned: [] }),
+   ).rejects.toBeInstanceOf(ResourceError);
+@@ -112,10 +126,59 @@ test('target alone exceeds budget: throws ResourceError, warms nothing', async (
+ 
+ test('unloadAll unloads every warmed model', async () => {
+   const f = fakes();
+   const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+   await mgr.ensureReady(decl('a', 1));
+   await mgr.ensureReady(decl('b', 1));
+   await mgr.unloadAll();
+   expect(f.unload).toHaveBeenCalledWith('a');
+   expect(f.unload).toHaveBeenCalledWith('b');
+ });
++
++test('ample headroom: chosenCtx is the desired value, warmed at it', async () => {
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(16384);
++  expect(f.warm).toHaveBeenCalledWith('m1', 16384);
++});
++
++test('tight headroom: chosenCtx shrinks to fit, floored & rounded to 1024', async () => {
++  // weights(1,1)=1.2e9; kv/token=131072. budget chosen so maxCtxByFit == 8192:
++  // headroom-weights = 8192*131072 = 1073741824 → budget = 1073741824 + 1.2e9.
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 1073741824 + 1.2e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(8192);
++  expect(ctx % 1024).toBe(0);
++  expect(f.warm).toHaveBeenCalledWith('m1', 8192);
++});
++
++test('chosenCtx is capped by the live-probed model max', async () => {
++  const f = fakes({ getModelMax: mock(async () => 6144) });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(6144);
++});
++
++test('probe failure falls back to decl.maxContext', async () => {
++  const f = fakes({
++    getModelMax: mock(async () => {
++      throw new Error('no show');
++    }),
++  });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const decl = { ...declCtx('m1', 1, 16384), maxContext: 5120 };
++  const ctx = await mgr.ensureReady(decl);
++  expect(ctx).toBe(5120);
++  expect(f.getModelMax).toHaveBeenCalled();
++});
++
++test('cannot fit even the MIN_CTX floor: throws, warms nothing', async () => {
++  // minNeed = weights(1,1)=1.2e9 + 4096*131072 ≈ 1.737e9; budget 1e9 < minNeed, nothing to evict.
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 1e9, ...f });
++  await expect(
++    mgr.ensureReady(declCtx('big', 1, 16384)),
++  ).rejects.toBeInstanceOf(ResourceError);
++  expect(f.warm).not.toHaveBeenCalled();
++});
+diff --git a/tests/resource/ollama-control.test.ts b/tests/resource/ollama-control.test.ts
+index c74c802..04a0c9e 100644
+--- a/tests/resource/ollama-control.test.ts
++++ b/tests/resource/ollama-control.test.ts
+@@ -1,12 +1,13 @@
+ import { afterEach, expect, spyOn, test } from 'bun:test';
+ import {
++  getModelMaxContext,
+   isModelInstalled,
+   listLoadedModels,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../../src/resource/ollama-control.ts';
+ 
+ afterEach(() => {
+   (globalThis.fetch as unknown as { mockRestore?: () => void }).mockRestore?.();
+ });
+@@ -85,10 +86,56 @@ test('listLoadedModels maps /api/ps name + size to LoadedModel[]', async () => {
+     'http://localhost:11434/api/ps',
+   );
+ });
+ 
+ test('listLoadedModels returns [] when nothing is loaded', async () => {
+   spyOn(globalThis, 'fetch').mockResolvedValue(
+     new Response(JSON.stringify({ models: [] }), { status: 200 }),
+   );
+   expect(await listLoadedModels()).toEqual([]);
+ });
++
++test('warmModel includes options.num_ctx when a context is given', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({}), { status: 200 }),
++  );
++  await warmModel('m', 8192);
++  const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
++  const body = JSON.parse(init.body as string) as Record<string, unknown>;
++  expect(body).toMatchObject({ model: 'm', stream: false });
++  expect((body.options as { num_ctx: number }).num_ctx).toBe(8192);
++});
++
++test('warmModel omits options when no context is given', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({}), { status: 200 }),
++  );
++  await warmModel('m');
++  const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
++  const body = JSON.parse(init.body as string) as Record<string, unknown>;
++  expect(body.options).toBeUndefined();
++});
++
++test('getModelMaxContext reads model_info architecture context_length', async () => {
++  spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(
++      JSON.stringify({
++        model_info: {
++          'general.architecture': 'qwen35',
++          'qwen35.context_length': 262144,
++        },
++      }),
++      { status: 200 },
++    ),
++  );
++  expect(await getModelMaxContext('qwen3.5:4b')).toBe(262144);
++});
++
++test('getModelMaxContext returns undefined when the field is absent', async () => {
++  spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(
++      JSON.stringify({ model_info: { 'general.architecture': 'qwen35' } }),
++      { status: 200 },
++    ),
++  );
++  expect(await getModelMaxContext('qwen3.5:4b')).toBeUndefined();
++});

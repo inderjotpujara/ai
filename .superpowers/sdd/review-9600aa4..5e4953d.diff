@@ -1,0 +1,207 @@
+# Review package: 9600aa4..5e4953d
+
+## Commits
+5e4953d feat(run): span reader + trace tree builder + run summary
+
+## Files changed
+ src/run/run-trace.ts        |  83 ++++++++++++++++++++++++++++++++++++
+ tests/run/run-trace.test.ts | 101 ++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 184 insertions(+)
+
+## Diff
+diff --git a/src/run/run-trace.ts b/src/run/run-trace.ts
+new file mode 100644
+index 0000000..1c7cd9b
+--- /dev/null
++++ b/src/run/run-trace.ts
+@@ -0,0 +1,83 @@
++import { readFile } from 'node:fs/promises';
++import { join } from 'node:path';
++import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
++import { ATTR } from '../telemetry/spans.ts';
++
++export async function readSpans(
++  runDir: string,
++): Promise<{ spans: SpanRecord[]; malformed: number }> {
++  let raw: string;
++  try {
++    raw = await readFile(join(runDir, 'spans.jsonl'), 'utf8');
++  } catch {
++    return { spans: [], malformed: 0 };
++  }
++  const spans: SpanRecord[] = [];
++  let malformed = 0;
++  for (const line of raw.split('\n')) {
++    if (line.length === 0) continue;
++    try {
++      spans.push(JSON.parse(line) as SpanRecord);
++    } catch {
++      malformed += 1;
++    }
++  }
++  return { spans, malformed };
++}
++
++export type TraceNode = { span: SpanRecord; children: TraceNode[] };
++
++export function buildTree(spans: SpanRecord[]): TraceNode[] {
++  const byId = new Map<string, TraceNode>();
++  for (const s of spans) byId.set(s.spanId, { span: s, children: [] });
++  const roots: TraceNode[] = [];
++  for (const node of byId.values()) {
++    const parentId = node.span.parentSpanId;
++    const parent = parentId ? byId.get(parentId) : undefined;
++    if (parent) parent.children.push(node);
++    else roots.push(node);
++  }
++  const sortByStart = (a: TraceNode, b: TraceNode) =>
++    a.span.startUnixNano - b.span.startUnixNano;
++  const sortDeep = (n: TraceNode) => {
++    n.children.sort(sortByStart);
++    for (const c of n.children) sortDeep(c);
++  };
++  roots.sort(sortByStart);
++  for (const r of roots) sortDeep(r);
++  return roots;
++}
++
++export type RunSummary = {
++  id: string;
++  startMs: number;
++  durationMs: number;
++  outcome: string;
++  models: string[];
++};
++
++export async function summarizeRun(
++  runsRoot: string,
++  id: string,
++): Promise<RunSummary | undefined> {
++  const { spans } = await readSpans(join(runsRoot, id));
++  if (spans.length === 0) return undefined;
++  const root = spans.find((s) => s.name === 'agent.run');
++  const models = new Set<string>();
++  for (const s of spans) {
++    const m = s.attributes[ATTR.MODEL_ID];
++    if (typeof m === 'string') models.add(m);
++  }
++  return {
++    id,
++    startMs: (root ?? spans[0])?.startUnixNano
++      ? Math.round(((root ?? spans[0]) as SpanRecord).startUnixNano / 1e6)
++      : 0,
++    durationMs: root?.durationMs ?? 0,
++    outcome:
++      typeof root?.attributes[ATTR.OUTCOME] === 'string'
++        ? (root.attributes[ATTR.OUTCOME] as string)
++        : 'unknown',
++    models: [...models],
++  };
++}
+diff --git a/tests/run/run-trace.test.ts b/tests/run/run-trace.test.ts
+new file mode 100644
+index 0000000..d662104
+--- /dev/null
++++ b/tests/run/run-trace.test.ts
+@@ -0,0 +1,101 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { buildTree, readSpans, summarizeRun } from '../../src/run/run-trace.ts';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++
++function span(
++  p: Partial<SpanRecord> & { name: string; spanId: string },
++): SpanRecord {
++  return {
++    kind: 0,
++    traceId: 't1',
++    parentSpanId: null,
++    startUnixNano: 0,
++    endUnixNano: 1_000_000,
++    durationMs: 1,
++    status: { code: 0 },
++    attributes: {},
++    events: [],
++    ...p,
++  };
++}
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'rt-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++test('buildTree links children to parents and sorts by start time', () => {
++  const spans = [
++    span({ name: 'agent.run', spanId: 'a', startUnixNano: 0 }),
++    span({
++      name: 'agent.delegation',
++      spanId: 'c',
++      parentSpanId: 'a',
++      startUnixNano: 20,
++    }),
++    span({
++      name: 'ai.generateText',
++      spanId: 'b',
++      parentSpanId: 'a',
++      startUnixNano: 10,
++    }),
++  ];
++  const tree = buildTree(spans);
++  expect(tree).toHaveLength(1);
++  expect(tree[0]?.span.name).toBe('agent.run');
++  expect(tree[0]?.children.map((c) => c.span.name)).toEqual([
++    'ai.generateText',
++    'agent.delegation',
++  ]);
++});
++
++test('buildTree promotes orphans (missing parent) to roots', () => {
++  const tree = buildTree([
++    span({ name: 'orphan', spanId: 'x', parentSpanId: 'missing' }),
++  ]);
++  expect(tree).toHaveLength(1);
++  expect(tree[0]?.span.name).toBe('orphan');
++});
++
++test('readSpans parses good lines and counts malformed ones', async () => {
++  const dir = join(root, 'run-1');
++  await mkdir(dir, { recursive: true });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${JSON.stringify(span({ name: 'agent.run', spanId: 'a' }))}\nNOT JSON\n`,
++  );
++  const { spans, malformed } = await readSpans(dir);
++  expect(spans).toHaveLength(1);
++  expect(malformed).toBe(1);
++});
++
++test('summarizeRun derives outcome + models from the root and model attrs', async () => {
++  const dir = join(root, 'run-2');
++  await mkdir(dir, { recursive: true });
++  const rootSpan = span({
++    name: 'agent.run',
++    spanId: 'a',
++    durationMs: 42,
++    attributes: { 'agent.outcome': 'answer' },
++  });
++  const loadSpan = span({
++    name: 'agent.model.load',
++    spanId: 'b',
++    parentSpanId: 'a',
++    attributes: { 'gen_ai.request.model': 'qwen3.5:9b' },
++  });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${JSON.stringify(rootSpan)}\n${JSON.stringify(loadSpan)}\n`,
++  );
++  const s = await summarizeRun(root, 'run-2');
++  expect(s?.outcome).toBe('answer');
++  expect(s?.durationMs).toBe(42);
++  expect(s?.models).toContain('qwen3.5:9b');
++});

@@ -1,0 +1,225 @@
+# Review package: 3fed188..d901934
+
+## Commits
+d901934 feat(core): capture-and-check ResourceError -> kind:resource result
+
+## Files changed
+ src/cli/run-chat.ts                      | 13 +++++++----
+ src/core/orchestrator.ts                 | 20 ++++++++++------
+ src/core/resource-capture.ts             |  9 ++++++++
+ tests/core/orchestrator-resource.test.ts | 39 ++++++++++++++++++++++++++++++++
+ 4 files changed, 69 insertions(+), 12 deletions(-)
+
+## Diff
+diff --git a/src/cli/run-chat.ts b/src/cli/run-chat.ts
+index eb59c46..d76af87 100644
+--- a/src/cli/run-chat.ts
++++ b/src/cli/run-chat.ts
+@@ -1,42 +1,45 @@
+ import type { Agent } from '../core/agent-def.ts';
+ import {
+   type OrchestratorResult,
+   runOrchestrator,
+ } from '../core/orchestrator.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
+ import { appendJournal } from '../run/journal.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
+ 
+ export type ChatDeps = {
+   orchestrator: Agent;
+   task: string;
+   runsRoot: string;
+   runId: string;
+   routerNumCtx?: number;
++  capture?: ResourceCapture;
+ };
+ 
+ /** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
+ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+   await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
+ 
+   const result = await runOrchestrator(
+     deps.orchestrator,
+     deps.task,
+     deps.routerNumCtx,
++    deps.capture,
+   );
+ 
+   if (result.kind === 'answer') {
+     await writeArtifact(run, 'answer.txt', result.text);
+-    await appendJournal(run.dir, {
+-      step: 'answer',
+-      data: { text: result.text },
+-    });
+-  } else {
++    await appendJournal(run.dir, { step: 'answer', data: { text: result.text } });
++  } else if (result.kind === 'gap') {
+     await writeArtifact(run, 'gap.txt', result.message);
+     await appendJournal(run.dir, {
+       step: 'gap',
+       data: { missingCapability: result.missingCapability },
+     });
++  } else {
++    await writeArtifact(run, 'resource.txt', result.message);
++    await appendJournal(run.dir, { step: 'resource', data: { message: result.message } });
+   }
+   return result;
+ }
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+index 3a98003..710e121 100644
+--- a/src/core/orchestrator.ts
++++ b/src/core/orchestrator.ts
+@@ -4,24 +4,26 @@ import {
+   CAPABILITY_GAP_TOOL,
+   capabilityGapTool,
+   findCapabilityGap,
+ } from './capability-gap.ts';
+ import {
+   asDelegateTool,
+   type BeforeDelegate,
+   delegateToolName,
+ } from './delegate.ts';
+ import { MaxStepsError } from './errors.ts';
++import type { ResourceCapture } from './resource-capture.ts';
+ 
+ export type OrchestratorResult =
+   | { kind: 'answer'; text: string }
+-  | { kind: 'gap'; missingCapability: string; message: string };
++  | { kind: 'gap'; missingCapability: string; message: string }
++  | { kind: 'resource'; message: string };
+ 
+ /** Build the orchestrator's system prompt: routing rules + the agent catalog. */
+ export function buildRoutingPrompt(
+   basePrompt: string,
+   agents: Agent[],
+ ): string {
+   const catalog = agents
+     .map((a) => `- ${delegateToolName(a)}: ${a.description}`)
+     .join('\n');
+   return [
+@@ -54,54 +56,58 @@ export function createOrchestrator(opts: {
+   return {
+     name: opts.name ?? 'orchestrator',
+     description:
+       'Routes tasks to specialized agents or reports a capability gap.',
+     model: opts.model,
+     systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
+     tools,
+   };
+ }
+ 
+-/** Run the orchestrator; return either the answer or a reported capability gap. */
++/** Run the orchestrator; return the answer, a capability gap, or a resource failure. */
+ export async function runOrchestrator(
+   orchestrator: Agent,
+   task: string,
+   numCtx?: number,
++  capture?: ResourceCapture,
+ ): Promise<OrchestratorResult> {
+   let text: string;
+   let steps: Parameters<typeof findCapabilityGap>[0];
+ 
+   try {
+     const result = await runDefinedAgent(orchestrator, task, numCtx);
+     text = result.text;
+     steps = result.steps;
+   } catch (err) {
++    // A genuine resource failure during delegation takes precedence over anything else.
++    if (capture?.error) {
++      return { kind: 'resource', message: capture.error.message };
++    }
+     if (err instanceof MaxStepsError) {
+-      // Intentional: if report_capability_gap was called during the run, the
+-      // result is classified as kind:'gap' (gap takes precedence) regardless of
+-      // whether the agent produced any delegate output or final text.
+       const gap = findCapabilityGap(
+         err.steps as Parameters<typeof findCapabilityGap>[0],
+       );
+       if (gap) {
+         return {
+           kind: 'gap',
+           missingCapability: gap.missingCapability,
+           message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
+         };
+       }
+     }
+     throw err;
+   }
+ 
+-  // Intentional: if report_capability_gap was called in the run, the result is
+-  // classified as kind:'gap' (gap takes precedence) regardless of any delegate output.
++  if (capture?.error) {
++    return { kind: 'resource', message: capture.error.message };
++  }
++
+   const gap = findCapabilityGap(steps);
+   if (gap) {
+     return {
+       kind: 'gap',
+       missingCapability: gap.missingCapability,
+       message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
+     };
+   }
+   return { kind: 'answer', text };
+ }
+diff --git a/src/core/resource-capture.ts b/src/core/resource-capture.ts
+new file mode 100644
+index 0000000..0db390b
+--- /dev/null
++++ b/src/core/resource-capture.ts
+@@ -0,0 +1,9 @@
++import type { ResourceError } from './errors.ts';
++
++/**
++ * Shared seam between the delegation hook and the orchestrator. onBeforeDelegate
++ * records a genuine resource failure here (the AI SDK would otherwise swallow a
++ * thrown ResourceError into a soft tool-result); runOrchestrator reads it and
++ * surfaces a hard {kind:'resource'} result instead of a hallucinated answer.
++ */
++export type ResourceCapture = { error?: ResourceError };
+diff --git a/tests/core/orchestrator-resource.test.ts b/tests/core/orchestrator-resource.test.ts
+new file mode 100644
+index 0000000..7580979
+--- /dev/null
++++ b/tests/core/orchestrator-resource.test.ts
+@@ -0,0 +1,39 @@
++import { expect, test } from 'bun:test';
++import { MockLanguageModelV3 } from 'ai/test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { ResourceError } from '../../src/core/errors.ts';
++import { runOrchestrator } from '../../src/core/orchestrator.ts';
++
++function answeringAgent(): Agent {
++  return {
++    name: 'orch',
++    description: 'orchestrator',
++    systemPrompt: 'sp',
++    tools: {},
++    model: new MockLanguageModelV3({
++      doGenerate: async () => ({
++        content: [{ type: 'text', text: 'a normal answer' }],
++        finishReason: { unified: 'stop', raw: undefined },
++        usage: {
++          inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++          outputTokens: { total: 1, text: undefined, reasoning: undefined },
++        },
++        warnings: [],
++      }),
++    }),
++  };
++}
++
++test('captured ResourceError yields kind:resource, overriding the answer', async () => {
++  const capture = { error: new ResourceError('no model fits') };
++  const result = await runOrchestrator(answeringAgent(), 'do it', undefined, capture);
++  expect(result.kind).toBe('resource');
++  if (result.kind === 'resource') {
++    expect(result.message).toBe('no model fits');
++  }
++});
++
++test('no capture -> normal answer path unaffected', async () => {
++  const result = await runOrchestrator(answeringAgent(), 'do it', undefined, {});
++  expect(result.kind).toBe('answer');
++});

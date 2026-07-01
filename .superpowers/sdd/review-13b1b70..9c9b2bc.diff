@@ -1,0 +1,1513 @@
+# Review package: 13b1b70..9c9b2bc
+
+## Commits
+9c9b2bc style(slice-5): biome import-type/format autofix
+3e78ac3 test(resource): live selection verify + docs for Slice 5
+bd29e30 feat(cli): selector-driven delegation hook + selection notice + resource exit
+d901934 feat(core): capture-and-check ResourceError -> kind:resource result
+3fed188 feat(agents): specialists declare a capability requirement (modelReq)
+aa112dc feat(core): lazy model binding + abort in BeforeDelegate/runDefinedAgent
+d0f54d7 feat(resource): resolveModel fallback loop with ResourceError propagation
+9eb1f05 feat(resource): pure selectCandidates (capability filter + largest-that-fits)
+678b791 feat(models): capability tags + model requirement types + registry
+
+## Files changed
+ README.md                                | 20 +++----
+ agents/file-qa.ts                        |  8 ++-
+ agents/web-fetch.ts                      |  8 ++-
+ docs/ROADMAP.md                          | 22 +++++---
+ docs/architecture.md                     |  2 +
+ models/qwen-fast.ts                      |  9 ++--
+ models/qwen-router.ts                    |  9 ++--
+ models/registry.ts                       | 11 ++++
+ src/cli/chat.ts                          | 65 +++++++++++++++++-----
+ src/cli/run-chat.ts                      | 11 +++-
+ src/cli/select-hook.ts                   | 51 ++++++++++++++++++
+ src/cli/selection-notice.ts              | 25 +++++++++
+ src/core/agent-def.ts                    | 11 ++--
+ src/core/delegate.ts                     | 21 ++++++--
+ src/core/orchestrator.ts                 | 20 ++++---
+ src/core/resource-capture.ts             |  9 ++++
+ src/core/types.ts                        | 24 +++++++++
+ src/resource/selector.ts                 | 93 ++++++++++++++++++++++++++++++++
+ tests/agents/specialist-req.test.ts      | 16 ++++++
+ tests/cli/select-hook.test.ts            | 70 ++++++++++++++++++++++++
+ tests/cli/selection-notice.test.ts       | 39 ++++++++++++++
+ tests/core/delegate.test.ts              | 58 ++++++++++++++++++++
+ tests/core/orchestrator-resource.test.ts | 54 +++++++++++++++++++
+ tests/integration/selection.live.test.ts | 31 +++++++++++
+ tests/models/registry.test.ts            | 16 ++++++
+ tests/resource/resolve-model.test.ts     | 78 +++++++++++++++++++++++++++
+ tests/resource/selector.test.ts          | 67 +++++++++++++++++++++++
+ 27 files changed, 792 insertions(+), 56 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 5d4906b..7db4888 100644
+--- a/README.md
++++ b/README.md
+@@ -1,26 +1,23 @@
+ # Local Agents
+ 
+ A **local-first, multi-agent framework** for Apple Silicon. Build and run AI
+ agents against **local models** (no API keys), orchestrated by a super-agent,
+ on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
+ Mini.
+ 
+-> **Status:** Slice 4 complete — **multi-model, hardware-aware**. The
+-> orchestrator routes on a small pinned `qwen3.5:4b`; specialists load
+-> `qwen3.5:9b` on demand. The Model Manager uses a **live free-RAM budget**
+-> (`min(75% × Metal cap, 80% × available RAM)`, recomputed each delegation via
+-> `vm_stat`) to load/evict models; pinned models are evicted only as a last resort
+-> (best-effort pinning). Context windows are sized **dynamically** from live
+-> headroom, clamped by the model's true max detected live (`POST /api/show`),
+-> floored at 4096 tokens — no hardcoded budgets or context sizes. Built on Slice
+-> 3's pluggable integrations. See [Roadmap](#roadmap).
++> **Status:** Slice 5 complete — **dynamic model selection**. Specialists declare
++> a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`)
++> rather than a fixed model; a selector picks the largest registry model that fits
++> the live RAM budget (degrading 9b→4b under pressure). Built on Slice 4's
++> hardware-aware Model Manager (live free-RAM budget via `vm_stat`, dynamic
++> `num_ctx`, best-effort pinning). See [Roadmap](#roadmap).
+ 
+ ---
+ 
+ ## What it does (today)
+ 
+ ```sh
+ # Ask a question about a local file. The agent reads the file via a tool and answers.
+ bun run src/cli/chat.ts "What animal is mentioned in /tmp/sample.txt?"
+ ```
+ 
+@@ -33,20 +30,22 @@ Under the hood, one CLI run autonomously:
+    (no hardcoded download step you have to run).
+ 3. **Warms the model** into memory.
+ 4. **Runs the agent loop** — the model calls a `read_file` tool (exposed over
+    **MCP**) and composes an answer.
+ 5. **Records the run** — writes the answer and an append-only journal to
+    `runs/<id>/`.
+ 6. **Unloads the model** to free memory.
+ 
+ No manual steps. No API keys. Everything runs locally.
+ 
++**Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder that Slice 6 discovery will populate at runtime.
++
+ ---
+ 
+ ## Quick start
+ 
+ **Prerequisites:** [Bun](https://bun.com) ≥ 1.3, [Ollama](https://ollama.com)
+ (running locally), an Apple Silicon Mac, and [`uvx`](https://docs.astral.sh/uv/)
+ (for the keyless web-fetch agent — `uvx mcp-server-fetch`). The unit/mock test
+ suite needs none of these; only the CLI and opt-in live tests do.
+ 
+ ```sh
+@@ -158,21 +157,22 @@ interface — no agent code changes. See
+ ---
+ 
+ ## Roadmap
+ 
+ | Slice | Scope | Status |
+ |---|---|---|
+ | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
+ | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
+ | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
+ | **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation) · best-effort pin (pinned evicted only as last resort) · dynamic `num_ctx` sized from headroom, clamped by live model max, floored at 4096 | ✅ Done |
+-| **Next** | **Slice 5 — dynamic model selection** (role → registry → pick best model that fits → manager loads); then **Slice 6 — model discovery** (auto-fetch latest from Hugging Face). The two latent Slice-4 items (live budget + dynamic context sizing) are now shipped, unblocking Slice 5. | Planned |
++| **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
++| **Next** | **Slice 6 — model discovery** (auto-fetch latest models from Hugging Face, pull on demand, keep registry current — no hardcoded list) | Planned |
+ | **Later** | Agent-builder ⭐ (self-extend on a capability gap) · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
+ 
+ **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
+ daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
+ implementation plans live in [`docs/superpowers/`](docs/superpowers/).
+ 
+ ---
+ 
+ ## Development
+ 
+diff --git a/agents/file-qa.ts b/agents/file-qa.ts
+index 2b610cd..06c3433 100644
+--- a/agents/file-qa.ts
++++ b/agents/file-qa.ts
+@@ -1,20 +1,26 @@
+ import type { ToolSet } from 'ai';
+ import qwenFast from '../models/qwen-fast.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
++import { Capability, PreferPolicy } from '../src/core/types.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ 
+ const SYSTEM_PROMPT =
+   'You answer questions about local files. Use the read_file tool to read any file you need, then answer concisely.';
+ 
+ /** Build the file-Q&A agent with an injected tool set (e.g. the MCP read_file tools). */
+ export function createFileQaAgent(tools: ToolSet): Agent {
+   return {
+     name: 'file_qa',
+     description:
+       'Answers questions about, and summarizes, the contents of a specific local file using read_file.',
+-    model: createOllamaModel(qwenFast),
++    model: createOllamaModel(qwenFast), // default binding; selector may override live
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
+     modelDecl: qwenFast,
++    modelReq: {
++      role: 'general reasoning + tool use',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
+   };
+ }
+diff --git a/agents/web-fetch.ts b/agents/web-fetch.ts
+index 3cc7c3b..53daf76 100644
+--- a/agents/web-fetch.ts
++++ b/agents/web-fetch.ts
+@@ -1,20 +1,26 @@
+ import type { ToolSet } from 'ai';
+ import qwenFast from '../models/qwen-fast.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
++import { Capability, PreferPolicy } from '../src/core/types.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ 
+ const SYSTEM_PROMPT =
+   'You answer questions about web pages. Use the fetch tool to retrieve the given URL, then answer or summarize concisely based on the page content.';
+ 
+ /** Build the web-fetch agent with an injected tool set (the mounted `fetch` tool). */
+ export function createWebFetchAgent(tools: ToolSet): Agent {
+   return {
+     name: 'web_fetch',
+     description:
+       'Fetches a URL and answers questions about or summarizes the content of a web page.',
+-    model: createOllamaModel(qwenFast),
++    model: createOllamaModel(qwenFast), // default binding; selector may override live
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
+     modelDecl: qwenFast,
++    modelReq: {
++      role: 'general reasoning + tool use',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
+   };
+ }
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index 8f37f1e..9c1a406 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -1,45 +1,51 @@
+ # Roadmap
+ 
+ The long-range plan for this local-first, self-owned multi-agent platform. Each
+ item below becomes its own **brainstorm → spec → plan → subagent-driven build**
+-cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
++cycle (the same flow used for Slices 1–5). Order is a recommendation driven by
+ **dependencies + leverage**, not a contract — reprioritize freely.
+ 
+ > **North stars:** local-first & self-owned (no API keys) · one orchestrator
+ > routing to a growing fleet of specialists · capabilities are pluggable (mount
+ > an MCP server) · self-extending (build new agents on demand) · autonomous &
+ > **hardware/context-aware** on Apple Silicon.
+ 
+ ## Shipped
+ 
+ | Slice | Capability | Status |
+ |---|---|---|
+ | **1** | Local file-Q&A agent · model warm-up/unload · MCP `read_file` · run store | ✅ shipped + live-verified |
+ | **2** | Orchestrator (agents-as-tools) — route to a specialist or report a capability gap | ✅ shipped + live-verified |
+ | **3** | `mountMcpServer` (mount any MCP server) · web-fetch agent (`uvx mcp-server-fetch`) | ✅ shipped + live-verified |
+ 
+ | **4** | **Model Manager** — multi-model, hardware-aware: live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation); load/evict/pin within budget; best-effort pin (pinned evicted only as last resort); dynamic `num_ctx` sized from headroom, clamped by live model max (`POST /api/show`), floored at 4096; orchestrator on pinned `qwen3.5:4b`, specialists on `qwen3.5:9b` on demand | ✅ shipped + live-verified |
++| **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; a bootstrap registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` and a non-zero exit instead of a hallucinated answer | ✅ shipped + live-verified |
+ 
+ ## Near-term — finish the resource-manager line
+ 
+-> Slice 5 is the next active slice; not yet started.
+-
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+-| **5** | **Dynamic model selection** — an agent declares a *role/requirements* (`requires:['tools'], prefer:'fits-budget'`); a model **registry** + selector picks the best model that fits; the manager loads it | Slice 4 | Turns model choice from hardcoded into capability-driven |
+ | **6** | **Model discovery** — auto-fetch the latest models from Hugging Face, pull on demand, keep declarations current (no hardcoded list); feeds the Slice-5 registry | Slice 5 | "Always on the latest models" becomes runtime behavior |
+ | **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
+ 
+-**Slice 5 must also fix one remaining latent Model-Manager item** (from the Slice-4 final review — safe today because the 4b+9b budget has huge headroom, but it bites once varied/larger models compete):
+-1. **Propagate `ResourceError` from `onBeforeDelegate`** — today a "can't fit" error becomes a soft tool-result (AI SDK wraps tool-`execute` throws). When selection introduces models that can genuinely fail to fit, surface it as a real resource failure (e.g. pre-flight the chosen model at the CLI, or a capture-and-check seam).
+-2. ~~**Budget from real sizes, not the lower-bound estimate**~~ — **resolved**: `ensureReady` now uses `weightsBytes`/`kvCacheBytes` helpers against the live `liveBudgetBytes()` budget (recomputed each delegation from `vm_stat`); the static `estimateModelBytes` lower-bound issue is fixed.
++### Future Work (from Slice 5 brainstorm)
++
++The following items were identified during Slice 5 design (see spec §8) as valuable but deliberately deferred. They are committed for future slices — none are blocking:
++
++- **Global / lookahead scheduler** — today selection is greedy and per-delegation; a planner-aware scheduler with a task DAG could pre-warm models and schedule concurrent delegations globally rather than locally. Depends on a task planner / DAG component.
++- **Parallel fan-out memory arbitration** — when multiple specialists run concurrently, their combined footprints must be co-scheduled within the live budget. Requires an explicit `maxLoaded` cap on the Model Manager (today the only count ceiling is Ollama's `OLLAMA_MAX_LOADED_MODELS` env default) so concurrency is governed by both RAM headroom and a first-class model-count limit.
++- **Interactive resource arbitration** ("user takes calls") — when memory is genuinely exhausted and degradation has already bottomed out, surface a user-visible ask before killing non-essential processes. Overlaps with Reclaim (Slice 4.5); design together.
++- **Quality-ranked selection** — once Slice 6 populates the registry with richer metadata (benchmark scores, eval results), the selector can rank by quality-within-budget rather than pure size. This is the Slice 6 signal.
++- **Richer registry + discovery** — the current registry is a static bootstrap ladder; Slice 6 replaces it with a per-machine runtime fetch from Hugging Face. Includes per-machine capability metadata, pulled-model tracking, and multi-quantization awareness.
++- **Router-as-selected** — today the router (`qwen3.5:4b`) is pinned and hardcoded. A future slice could run it through the selector too, so even the routing model is capability-declared and hardware-adaptive.
++- **Fuller anti-churn / hysteresis** — the warm-aware tie-break in `selectCandidates` is a lightweight first step. A proper hysteresis policy (e.g. don't evict a resident model unless the challenger is significantly better, or a cooldown window after a recent load) would reduce unnecessary model thrashing under oscillating load.
+ 
+ ## Headline next — self-extension
+ 
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+ | **7** | **Agent-builder** ⭐ — on `report_capability_gap`, generate a new agent definition file (+ suggest an MCP server to mount) so the system *grows a capability* on demand. The `report_capability_gap` seam is already in place. | Slices 2, 3, (5/6 help) | **Highest-leverage future feature** — makes "describe a need → the system extends itself" real |
+ 
+ ## Orchestration & intelligence
+ 
+ - **Deeper agent graphs** — a "researcher" agent that itself delegates to `web_fetch` + `file_qa` (composability already exists via agents-as-tools), with the **hardware/context-aware guardrails**: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns.
+@@ -74,19 +80,19 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
+ - **Scheduled / triggered agents** — cron- or event-driven (file added → process it) — the n8n "trigger" concept.
+ - **Multi-machine** — laptop delegates heavy work to the Mac Mini over the network.
+ - **A2A interop** — expose this orchestrator as an agent other tools can call, and consume external agents (Agent2Agent protocol).
+ 
+ ## Recommended priority next
+ 
+ 1. **Agent-builder (Slice 7)** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
+ 2. **Model discovery (Slice 6)** — keeps the system on the latest models automatically.
+ 3. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
+ 
+-(Slices 5 → 6 are the natural continuation of the resource line currently being built; the agent-builder can also be pulled forward if it's the exciting one.)
++(Slice 6 is the natural continuation of the resource line; the agent-builder can also be pulled forward if it's the exciting one.)
+ 
+ ## Deferred technical items (cross-cutting, fold in opportunistically)
+ 
+ - Declarative **`mcp.json` mount registry** (list servers + which agents get them, loaded at startup) — generalizes Slice 3's in-code mounts.
+ - **Codex** heavy-lifting backup (`@openai/codex-sdk`, personal plan) as an opt-in delegate agent.
+ - Migrate `biome.json` off the deprecated `recommended` field.
+ - **Per-slice Minor review findings** are recorded in `.superpowers/sdd/progress.md` (the SDD ledger) as each slice completes — e.g. run-journal O(n²) append, `runAgent.providerOptions` cross-package type, gap `message` hardcoded English, `ensureReady` post-pull comment. ~~hardcoded `kvBytesPerToken`~~ — **resolved**: `footprint.kvBytesPerToken` is now an optional per-model declaration field with default fallback. Sweep remaining items opportunistically; none are blocking.
+ - **Hardware/context-aware guardrails for deeper composition** (recorded constraint): the agent-graph/parallel-fan-out slices MUST bound delegation depth, add cross-agent cycle detection, reuse warm models (shared-model agents = one resident copy), keep returned answers concise, and schedule concurrency within the Model Manager's budget. Cost compounds ~15× for naive orchestrator-workers, so depth/fan-out are bounded deliberately.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index ef61a41..56c6362 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -132,20 +132,22 @@ rounded to `CTX_ROUNDING = 1024`.
+ 
+ **Control endpoints** via Ollama HTTP: warm = empty-prompt `POST /api/generate`
+ (`stream:false`, with `options:{num_ctx}`); pin = `keep_alive:-1`; unload =
+ `keep_alive:0`; inspect = `GET /api/ps`; model-max probe = `POST /api/show`.
+ Write requests use field `model`; `/api/tags` and `/api/ps` report it as `name`.
+ 
+ **Best-effort pinning:** a pinned model IS evicted as a last resort if it is the
+ only way to fit the target (logged as a warning). `ResourceError` is thrown only
+ when nothing is left to evict.
+ 
++**Selector (`src/resource/selector.ts`).** `selectCandidates` (pure: capability hard-filter + largest-that-fits rank + warm-aware tie-break) feeds `resolveModel`, a live fallback loop that walks candidates best-first against `manager.ensureReady` (the single fit-authority). The chosen model is bound lazily at delegation time via `onBeforeDelegate` (`src/cli/select-hook.ts`). A genuine no-fit is recorded in a `ResourceCapture` seam and surfaced by `runOrchestrator` as `{kind:'resource'}`.
++
+ **Slice 4 data flow (addition to the Slice 1 diagram above):**
+ 
+ ```
+ liveBudgetBytes()
+   → POST /api/show  (getModelMaxContext)
+   → choose chosenCtx  (min of desired / modelMax / headroom-fit, floor 4096)
+   → warm with options.num_ctx = chosenCtx
+   → inference reuses chosenCtx via providerOptions.ollama.options.num_ctx
+ ```
+ 
+diff --git a/models/qwen-fast.ts b/models/qwen-fast.ts
+index a98d67c..4bac7d6 100644
+--- a/models/qwen-fast.ts
++++ b/models/qwen-fast.ts
+@@ -1,14 +1,17 @@
+-import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
++import {
++  Capability,
++  type ModelDeclaration,
++  ProviderKind,
++} from '../src/core/types.ts';
+ 
+ /** Fast general-purpose local model with reliable tool-calling. */
+ const qwenFast: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:9b',
+-  // Desired context for the role; the true max is detected live from Ollama
+-  // and the manager clamps this down under memory pressure.
+   params: { temperature: 0.2, numCtx: 16384 },
+   role: 'general reasoning + tool use',
++  capabilities: [Capability.Tools],
+   footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenFast;
+diff --git a/models/qwen-router.ts b/models/qwen-router.ts
+index a84c720..bdbd402 100644
+--- a/models/qwen-router.ts
++++ b/models/qwen-router.ts
+@@ -1,14 +1,17 @@
+-import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
++import {
++  Capability,
++  type ModelDeclaration,
++  ProviderKind,
++} from '../src/core/types.ts';
+ 
+ /** Small, fast model for the orchestrator's routing decisions (stays pinned-resident). */
+ const qwenRouter: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:4b',
+-  // Desired context for the role; the true max is detected live from Ollama
+-  // and the manager clamps this down under memory pressure.
+   params: { temperature: 0.1, numCtx: 8192 },
+   role: 'routing / orchestration',
++  capabilities: [Capability.Tools],
+   footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenRouter;
+diff --git a/models/registry.ts b/models/registry.ts
+new file mode 100644
+index 0000000..1f064a1
+--- /dev/null
++++ b/models/registry.ts
+@@ -0,0 +1,11 @@
++import type { ModelDeclaration } from '../src/core/types.ts';
++import qwenFast from './qwen-fast.ts';
++import qwenRouter from './qwen-router.ts';
++
++/**
++ * Bootstrap content of a machine-adaptive capability LADDER. The selector is
++ * N-rung capable; the live-budget fits-filter makes any rung inert where it does
++ * not fit. Only rungs verified on this hardware ship here; Slice 6 discovery will
++ * replace this static array with a per-machine runtime fetch.
++ */
++export const REGISTRY: ModelDeclaration[] = [qwenRouter, qwenFast];
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index ea60263..69fe32a 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,66 +1,103 @@
+ import { createSuperAgent } from '../../agents/super.ts';
+ import qwenRouter from '../../models/qwen-router.ts';
++import { REGISTRY } from '../../models/registry.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import type { ModelDeclaration } from '../core/types.ts';
+ import { createFetchTools, createFileTools } from '../mcp/client.ts';
+-import { createModelManager } from '../resource/model-manager.ts';
++import { liveBudgetBytes } from '../resource/hardware.ts';
++import { createModelManager, MIN_CTX } from '../resource/model-manager.ts';
+ import { isProjectStoreActive } from '../resource/model-store.ts';
++import {
++  isModelInstalled,
++  listLoadedModels,
++} from '../resource/ollama-control.ts';
+ import { runChat } from './run-chat.ts';
++import { createSelectHook } from './select-hook.ts';
++import { formatSelectionNotice } from './selection-notice.ts';
+ 
+ async function main(): Promise<void> {
+   const task = process.argv.slice(2).join(' ').trim();
+   if (task.length === 0) {
+     console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+     process.exit(1);
+   }
+ 
+   const manager = createModelManager();
+   // Warm + pin the small router model the orchestrator runs on.
+   console.error(`Preparing router model ${qwenRouter.model}...`);
+   const routerNumCtx = await manager.ensureReady(qwenRouter, {
+     pinned: [qwenRouter.model],
+   });
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
+-  // Specialists' models are loaded on demand at a budget-clamped context size,
+-  // keeping the router pinned-resident.
+-  const onBeforeDelegate = async (agent: {
+-    modelDecl?: import('../core/types.ts').ModelDeclaration;
+-  }): Promise<{ numCtx?: number }> =>
+-    agent.modelDecl
+-      ? {
+-          numCtx: await manager.ensureReady(agent.modelDecl, {
+-            pinned: [qwenRouter.model],
+-          }),
+-        }
+-      : {};
++  // Capture seam: a genuine no-fit during delegation is recorded here and surfaced
++  // by runOrchestrator as kind:'resource' instead of being swallowed.
++  const capture: ResourceCapture = {};
++
++  // Announce each NEW model decision (size, context, footprint, install state) once.
++  const announced = new Set<string>();
++  const notify = async (decl: ModelDeclaration): Promise<void> => {
++    if (announced.has(decl.model)) return;
++    announced.add(decl.model);
++    const [installed, budget] = await Promise.all([
++      isModelInstalled(decl.model),
++      liveBudgetBytes(),
++    ]);
++    console.error(
++      formatSelectionNotice({
++        decl,
++        numCtx: decl.params.numCtx ?? MIN_CTX,
++        budgetBytes: budget,
++        installed,
++      }),
++    );
++  };
++
++  const onBeforeDelegate = createSelectHook({
++    registry: REGISTRY,
++    ensureReady: (decl, opts) => manager.ensureReady(decl, opts),
++    listLoaded: () => listLoadedModels(),
++    pinned: [qwenRouter.model],
++    capture,
++    onAttempt: notify,
++  });
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+       const orchestrator = createSuperAgent(
+         fileServer.tools,
+         fetchServer.tools,
+         onBeforeDelegate,
+       );
+       const result = await runChat({
+         orchestrator,
+         task,
+         runsRoot: 'runs',
+         runId: `run-${process.pid}`,
+         routerNumCtx,
++        capture,
+       });
+-      console.log(result.kind === 'answer' ? result.text : result.message);
++      if (result.kind === 'answer') {
++        console.log(result.text);
++      } else if (result.kind === 'gap') {
++        console.log(result.message);
++      } else {
++        console.error(result.message);
++        process.exitCode = 1;
++      }
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+     await manager.unloadAll();
+   }
+ }
+ 
+ main().catch((err) => {
+diff --git a/src/cli/run-chat.ts b/src/cli/run-chat.ts
+index eb59c46..cf200b1 100644
+--- a/src/cli/run-chat.ts
++++ b/src/cli/run-chat.ts
+@@ -1,42 +1,51 @@
+ import type { Agent } from '../core/agent-def.ts';
+ import {
+   type OrchestratorResult,
+   runOrchestrator,
+ } from '../core/orchestrator.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
+ import { appendJournal } from '../run/journal.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
+ 
+ export type ChatDeps = {
+   orchestrator: Agent;
+   task: string;
+   runsRoot: string;
+   runId: string;
+   routerNumCtx?: number;
++  capture?: ResourceCapture;
+ };
+ 
+ /** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
+ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+   await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
+ 
+   const result = await runOrchestrator(
+     deps.orchestrator,
+     deps.task,
+     deps.routerNumCtx,
++    deps.capture,
+   );
+ 
+   if (result.kind === 'answer') {
+     await writeArtifact(run, 'answer.txt', result.text);
+     await appendJournal(run.dir, {
+       step: 'answer',
+       data: { text: result.text },
+     });
+-  } else {
++  } else if (result.kind === 'gap') {
+     await writeArtifact(run, 'gap.txt', result.message);
+     await appendJournal(run.dir, {
+       step: 'gap',
+       data: { missingCapability: result.missingCapability },
+     });
++  } else {
++    await writeArtifact(run, 'resource.txt', result.message);
++    await appendJournal(run.dir, {
++      step: 'resource',
++      data: { message: result.message },
++    });
+   }
+   return result;
+ }
+diff --git a/src/cli/select-hook.ts b/src/cli/select-hook.ts
+new file mode 100644
+index 0000000..8ddff36
+--- /dev/null
++++ b/src/cli/select-hook.ts
+@@ -0,0 +1,51 @@
++import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import { ResourceError } from '../core/errors.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import type { EnsureOpts } from '../resource/model-manager.ts';
++import type { LoadedModel } from '../resource/ollama-control.ts';
++import { resolveModel } from '../resource/selector.ts';
++
++export type SelectHookDeps = {
++  registry: ModelDeclaration[];
++  ensureReady: (d: ModelDeclaration, o?: EnsureOpts) => Promise<number>;
++  pinned: string[];
++  capture: ResourceCapture;
++  listLoaded?: () => Promise<LoadedModel[]>;
++  /** Fired before each ensureReady attempt (e.g. to print a selection notice). */
++  onAttempt?: (decl: ModelDeclaration) => void | Promise<void>;
++};
++
++/**
++ * Build the onBeforeDelegate hook: resolve the agent's requirement live, bind the
++ * chosen model + numCtx, and on a genuine no-fit record it in `capture` and abort
++ * the delegation (rather than letting the AI SDK swallow the error).
++ */
++export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
++  return async (agent: Agent) => {
++    if (!agent.modelReq) return {};
++    try {
++      const { decl, numCtx } = await resolveModel(
++        agent.modelReq,
++        deps.registry,
++        {
++          ensureReady: deps.ensureReady,
++          listLoaded: deps.listLoaded,
++          onAttempt: deps.onAttempt,
++        },
++        { pinned: deps.pinned },
++      );
++      return { model: createOllamaModel(decl), numCtx };
++    } catch (err) {
++      if (err instanceof ResourceError) {
++        deps.capture.error = err;
++        return {
++          abort: "Can't run this now — no model fits in available memory.",
++        };
++      }
++      throw err;
++    }
++  };
++}
+diff --git a/src/cli/selection-notice.ts b/src/cli/selection-notice.ts
+new file mode 100644
+index 0000000..ef2d59a
+--- /dev/null
++++ b/src/cli/selection-notice.ts
+@@ -0,0 +1,25 @@
++import type { ModelDeclaration } from '../core/types.ts';
++import { kvCacheBytes, weightsBytes } from '../resource/footprint.ts';
++
++const DEFAULT_KV_PER_TOKEN = 131072;
++const gb = (b: number): string => (b / 1e9).toFixed(1);
++
++export type NoticeInput = {
++  decl: ModelDeclaration;
++  numCtx: number;
++  budgetBytes: number;
++  installed: boolean;
++};
++
++/** Human-readable heads-up about the model chosen for a delegation. */
++export function formatSelectionNotice(i: NoticeInput): string {
++  const f = i.decl.footprint;
++  const w = weightsBytes(f.approxParamsBillions, f.bytesPerWeight);
++  const kv = kvCacheBytes(i.numCtx, f.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN);
++  const install = i.installed ? 'installed' : 'not installed — will pull';
++  return [
++    `▸ selected ${i.decl.model}`,
++    `  ${f.approxParamsBillions}B · weights ≈${gb(w)}GB + KV ≈${gb(kv)}GB @ up to ${i.numCtx} ctx = ≈${gb(w + kv)}GB`,
++    `  live budget ≈${gb(i.budgetBytes)}GB · ${install}`,
++  ].join('\n');
++}
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index 54efe8b..f761a3a 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -1,37 +1,40 @@
+ import type { ProviderOptions } from '@ai-sdk/provider-utils';
+ import type { LanguageModel, ToolSet } from 'ai';
+ import { runAgent } from './agent.ts';
+-import type { ModelDeclaration } from './types.ts';
++import type { ModelDeclaration, ModelRequirement } from './types.ts';
+ 
+ /** A reusable agent: its own model + system prompt + tools, plus a routing description. */
+ export type Agent = {
+   name: string; // stable id used in delegate tool names, e.g. 'file_qa'
+   description: string; // capability description the orchestrator routes on
+   model: LanguageModel;
+   systemPrompt: string;
+   tools: ToolSet;
+-  /** Declaration of the agent's model, for the resource manager (optional; mock agents omit it). */
++  /** Declaration of the agent's model, for the resource manager (optional). */
+   modelDecl?: ModelDeclaration;
++  /** Capability requirement resolved LIVE by the selector via onBeforeDelegate. */
++  modelReq?: ModelRequirement;
+ };
+ 
+ /** Build provider options that set Ollama's context window for this call. */
+ export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
+   return numCtx === undefined
+     ? undefined
+     : { ollama: { options: { num_ctx: numCtx } } };
+ }
+ 
+-/** Run an agent definition against a task, optionally at a chosen context size. */
++/** Run an agent definition against a task, optionally at a chosen context size and model. */
+ export function runDefinedAgent(
+   agent: Agent,
+   task: string,
+   numCtx?: number,
++  modelOverride?: LanguageModel,
+ ): ReturnType<typeof runAgent> {
+   return runAgent({
+-    model: agent.model,
++    model: modelOverride ?? agent.model,
+     systemPrompt: agent.systemPrompt,
+     prompt: task,
+     tools: agent.tools,
+     providerOptions: ollamaCtxOptions(numCtx),
+   });
+ }
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 213282e..07bcd21 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,43 +1,56 @@
++import type { LanguageModel } from 'ai';
+ import { tool } from 'ai';
+ import { z } from 'zod';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
+-/** A hook run just before a delegated agent executes; may return a chosen context size. */
++/**
++ * A hook run just before a delegated agent executes. May return a chosen context
++ * size, a model to bind for this call, and/or an `abort` message that skips the
++ * delegation entirely (returned to the orchestrator as a soft tool error).
++ */
+ export type BeforeDelegate = (
+   agent: Agent,
+-  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing; changing to `undefined` would break all void-returning callsites.
+-) => Promise<{ numCtx?: number } | void>;
++  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing.
++) => Promise<{ numCtx?: number; model?: LanguageModel; abort?: string } | void>;
+ 
+ /**
+  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
+  * structured error (so the orchestrator model can react) rather than throwing.
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+     execute: async ({ task }) => {
+       try {
+         const pre = onBeforeDelegate
+           ? await onBeforeDelegate(agent)
+           : undefined;
+-        const { text } = await runDefinedAgent(agent, task, pre?.numCtx);
++        if (pre?.abort) {
++          return { error: pre.abort };
++        }
++        const { text } = await runDefinedAgent(
++          agent,
++          task,
++          pre?.numCtx,
++          pre?.model,
++        );
+         return { text };
+       } catch (cause) {
+         return {
+           error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+         };
+       }
+     },
+   });
+ }
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+index 3a98003..710e121 100644
+--- a/src/core/orchestrator.ts
++++ b/src/core/orchestrator.ts
+@@ -4,24 +4,26 @@ import {
+   CAPABILITY_GAP_TOOL,
+   capabilityGapTool,
+   findCapabilityGap,
+ } from './capability-gap.ts';
+ import {
+   asDelegateTool,
+   type BeforeDelegate,
+   delegateToolName,
+ } from './delegate.ts';
+ import { MaxStepsError } from './errors.ts';
++import type { ResourceCapture } from './resource-capture.ts';
+ 
+ export type OrchestratorResult =
+   | { kind: 'answer'; text: string }
+-  | { kind: 'gap'; missingCapability: string; message: string };
++  | { kind: 'gap'; missingCapability: string; message: string }
++  | { kind: 'resource'; message: string };
+ 
+ /** Build the orchestrator's system prompt: routing rules + the agent catalog. */
+ export function buildRoutingPrompt(
+   basePrompt: string,
+   agents: Agent[],
+ ): string {
+   const catalog = agents
+     .map((a) => `- ${delegateToolName(a)}: ${a.description}`)
+     .join('\n');
+   return [
+@@ -54,54 +56,58 @@ export function createOrchestrator(opts: {
+   return {
+     name: opts.name ?? 'orchestrator',
+     description:
+       'Routes tasks to specialized agents or reports a capability gap.',
+     model: opts.model,
+     systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
+     tools,
+   };
+ }
+ 
+-/** Run the orchestrator; return either the answer or a reported capability gap. */
++/** Run the orchestrator; return the answer, a capability gap, or a resource failure. */
+ export async function runOrchestrator(
+   orchestrator: Agent,
+   task: string,
+   numCtx?: number,
++  capture?: ResourceCapture,
+ ): Promise<OrchestratorResult> {
+   let text: string;
+   let steps: Parameters<typeof findCapabilityGap>[0];
+ 
+   try {
+     const result = await runDefinedAgent(orchestrator, task, numCtx);
+     text = result.text;
+     steps = result.steps;
+   } catch (err) {
++    // A genuine resource failure during delegation takes precedence over anything else.
++    if (capture?.error) {
++      return { kind: 'resource', message: capture.error.message };
++    }
+     if (err instanceof MaxStepsError) {
+-      // Intentional: if report_capability_gap was called during the run, the
+-      // result is classified as kind:'gap' (gap takes precedence) regardless of
+-      // whether the agent produced any delegate output or final text.
+       const gap = findCapabilityGap(
+         err.steps as Parameters<typeof findCapabilityGap>[0],
+       );
+       if (gap) {
+         return {
+           kind: 'gap',
+           missingCapability: gap.missingCapability,
+           message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
+         };
+       }
+     }
+     throw err;
+   }
+ 
+-  // Intentional: if report_capability_gap was called in the run, the result is
+-  // classified as kind:'gap' (gap takes precedence) regardless of any delegate output.
++  if (capture?.error) {
++    return { kind: 'resource', message: capture.error.message };
++  }
++
+   const gap = findCapabilityGap(steps);
+   if (gap) {
+     return {
+       kind: 'gap',
+       missingCapability: gap.missingCapability,
+       message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
+     };
+   }
+   return { kind: 'answer', text };
+ }
+diff --git a/src/core/resource-capture.ts b/src/core/resource-capture.ts
+new file mode 100644
+index 0000000..0db390b
+--- /dev/null
++++ b/src/core/resource-capture.ts
+@@ -0,0 +1,9 @@
++import type { ResourceError } from './errors.ts';
++
++/**
++ * Shared seam between the delegation hook and the orchestrator. onBeforeDelegate
++ * records a genuine resource failure here (the AI SDK would otherwise swallow a
++ * thrown ResourceError into a soft tool-result); runOrchestrator reads it and
++ * surfaces a hard {kind:'resource'} result instead of a hallucinated answer.
++ */
++export type ResourceCapture = { error?: ResourceError };
+diff --git a/src/core/types.ts b/src/core/types.ts
+index fed8221..ad8f1bd 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -1,30 +1,54 @@
+ /** Which local runtime backs a model. String enum per project style. */
+ export enum ProviderKind {
+   Ollama = 'Ollama',
+ }
+ 
++/** A capability a model advertises and an agent can require. String enum (extensible). */
++export enum Capability {
++  Tools = 'tools',
++  // future: Vision = 'vision', LongContext = 'long-context', Coding = 'coding'
++}
++
++/** How the selector ranks the candidates that survive the hard filter. */
++export enum PreferPolicy {
++  LargestThatFits = 'largest-that-fits',
++  // future: SmallestThatFits, QualityRanked, GlobalSchedule
++}
++
++/** What a requirement-driven agent declares instead of a concrete model name. */
++export type ModelRequirement = {
++  /** Human description of the role. */
++  role: string;
++  /** HARD filter — every listed capability must be present on the model. */
++  requires: Capability[];
++  /** SOFT rank over the survivors. */
++  prefer: PreferPolicy;
++};
++
+ /** Tunable inference parameters carried by a model declaration. */
+ export type ModelParams = {
+   temperature?: number;
+   numCtx?: number;
+ };
+ 
+ /**
+  * A model declaration is DATA, not logic. Slice 1 pins a concrete model name;
+  * later slices can resolve a capability/role to a discovered model.
+  */
+ export type ModelDeclaration = {
+   provider: ProviderKind;
+   model: string;
+   params: ModelParams;
+   role: string;
++  /** Capabilities this model provides; selector hard-filters on these. Missing = none. */
++  capabilities?: Capability[];
+   /** Pre-load sizing hint for the model manager. */
+   footprint: {
+     approxParamsBillions: number;
+     bytesPerWeight: number;
+     /** Bytes of KV cache per token (per-model; defaults to 131072 if omitted). */
+     kvBytesPerToken?: number;
+   };
+   /**
+    * Optional cap on the context window. The true max is detected live from
+    * Ollama; set this only to deliberately cap below it or as a probe fallback.
+diff --git a/src/resource/selector.ts b/src/resource/selector.ts
+new file mode 100644
+index 0000000..d9387f9
+--- /dev/null
++++ b/src/resource/selector.ts
+@@ -0,0 +1,93 @@
++import { ResourceError } from '../core/errors.ts';
++import type {
++  Capability,
++  ModelDeclaration,
++  ModelRequirement,
++} from '../core/types.ts';
++import { weightsBytes } from './footprint.ts';
++import type { EnsureOpts } from './model-manager.ts';
++import type { LoadedModel } from './ollama-control.ts';
++
++function hasAll(decl: ModelDeclaration, requires: Capability[]): boolean {
++  const caps = new Set(decl.capabilities ?? []);
++  return requires.every((c) => caps.has(c));
++}
++
++/**
++ * PURE. Hard-filter by `requires`, then rank by `prefer`.
++ * LargestThatFits: most params first; tie-break smaller footprint; then a
++ * warm-aware bias (resident wins among otherwise-equal candidates) to avoid
++ * needless reload churn. The fits check itself is the manager's job, not here.
++ */
++export function selectCandidates(
++  req: ModelRequirement,
++  registry: ModelDeclaration[],
++  loaded?: ReadonlySet<string>,
++): ModelDeclaration[] {
++  const capable = registry.filter((d) => hasAll(d, req.requires));
++  return [...capable].sort((a, b) => {
++    const pa = a.footprint.approxParamsBillions;
++    const pb = b.footprint.approxParamsBillions;
++    if (pb !== pa) return pb - pa; // largest params first
++    const fa = weightsBytes(pa, a.footprint.bytesPerWeight);
++    const fb = weightsBytes(pb, b.footprint.bytesPerWeight);
++    if (fa !== fb) return fa - fb; // smaller footprint first
++    if (loaded) {
++      const la = loaded.has(a.model) ? 0 : 1;
++      const lb = loaded.has(b.model) ? 0 : 1;
++      if (la !== lb) return la - lb; // resident first
++    }
++    return 0;
++  });
++}
++
++/** Dependencies for the live resolve loop. */
++export type ResolveDeps = {
++  ensureReady: (d: ModelDeclaration, o?: EnsureOpts) => Promise<number>;
++  /** Optional resident-set probe; enables the warm-aware bias. */
++  listLoaded?: () => Promise<LoadedModel[]>;
++  /** Optional callback fired before each ensureReady attempt (e.g. selection notice). */
++  onAttempt?: (decl: ModelDeclaration) => void | Promise<void>;
++};
++
++/**
++ * LIVE. Walk candidates best-first; the first the manager can ready wins. On a
++ * genuine ResourceError, drop to the next candidate; if none fit, rethrow a real
++ * ResourceError. The manager remains the single fit-authority (real /api/ps sizes).
++ */
++export async function resolveModel(
++  req: ModelRequirement,
++  registry: ModelDeclaration[],
++  deps: ResolveDeps,
++  opts?: EnsureOpts,
++): Promise<{ decl: ModelDeclaration; numCtx: number }> {
++  const loaded = deps.listLoaded
++    ? new Set((await deps.listLoaded()).map((mm) => mm.name))
++    : undefined;
++  const candidates = selectCandidates(req, registry, loaded);
++  if (candidates.length === 0) {
++    throw new ResourceError(
++      `No model in the registry satisfies requirements: ${req.requires.join(', ')}.`,
++    );
++  }
++  let lastErr: unknown;
++  for (const decl of candidates) {
++    await deps.onAttempt?.(decl);
++    try {
++      const numCtx = await deps.ensureReady(decl, opts);
++      return { decl, numCtx };
++    } catch (err) {
++      if (err instanceof ResourceError) {
++        lastErr = err;
++        continue;
++      }
++      throw err;
++    }
++  }
++  throw new ResourceError(
++    `No candidate model fits the live budget for ${req.role}.`,
++    {
++      cause: lastErr,
++    },
++  );
++}
+diff --git a/tests/agents/specialist-req.test.ts b/tests/agents/specialist-req.test.ts
+new file mode 100644
+index 0000000..0aca5ed
+--- /dev/null
++++ b/tests/agents/specialist-req.test.ts
+@@ -0,0 +1,16 @@
++import { expect, test } from 'bun:test';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++
++test('file_qa declares a tool requirement with largest-that-fits', () => {
++  const a = createFileQaAgent({});
++  expect(a.modelReq?.requires).toContain(Capability.Tools);
++  expect(a.modelReq?.prefer).toBe(PreferPolicy.LargestThatFits);
++});
++
++test('web_fetch declares a tool requirement with largest-that-fits', () => {
++  const a = createWebFetchAgent({});
++  expect(a.modelReq?.requires).toContain(Capability.Tools);
++  expect(a.modelReq?.prefer).toBe(PreferPolicy.LargestThatFits);
++});
+diff --git a/tests/cli/select-hook.test.ts b/tests/cli/select-hook.test.ts
+new file mode 100644
+index 0000000..5efa9df
+--- /dev/null
++++ b/tests/cli/select-hook.test.ts
+@@ -0,0 +1,70 @@
++import { expect, mock, test } from 'bun:test';
++import { REGISTRY } from '../../models/registry.ts';
++import { createSelectHook } from '../../src/cli/select-hook.ts';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { ResourceError } from '../../src/core/errors.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++
++function specialist(): Agent {
++  return {
++    name: 'file_qa',
++    description: 'd',
++    systemPrompt: 'sp',
++    tools: {},
++    model: undefined as never, // overridden by the hook
++    modelReq: {
++      role: 'r',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  };
++}
++
++test('hook resolves a model + numCtx and returns a bound model', async () => {
++  const ensureReady = mock(async () => 16384);
++  const capture = {};
++  const hook = createSelectHook({
++    registry: REGISTRY,
++    ensureReady,
++    pinned: ['qwen3.5:4b'],
++    capture,
++  });
++  const pre = await hook(specialist());
++  expect(pre && 'model' in pre && pre.model).toBeTruthy();
++  expect(pre && 'numCtx' in pre && pre.numCtx).toBe(16384);
++});
++
++test('hook records ResourceError into capture and returns abort', async () => {
++  const ensureReady = mock(async () => {
++    throw new ResourceError('no fit');
++  });
++  const capture: { error?: ResourceError } = {};
++  const hook = createSelectHook({
++    registry: REGISTRY,
++    ensureReady,
++    pinned: ['qwen3.5:4b'],
++    capture,
++  });
++  const pre = await hook(specialist());
++  expect(capture.error).toBeInstanceOf(ResourceError);
++  expect(pre && 'abort' in pre && pre.abort).toBeTruthy();
++});
++
++test('agent without modelReq is a no-op', async () => {
++  const ensureReady = mock(async () => 0);
++  const hook = createSelectHook({
++    registry: REGISTRY,
++    ensureReady,
++    pinned: [],
++    capture: {},
++  });
++  const pre = await hook({
++    name: 'x',
++    description: 'd',
++    systemPrompt: 's',
++    tools: {},
++    model: undefined as never,
++  });
++  expect(pre).toEqual({});
++  expect(ensureReady).not.toHaveBeenCalled();
++});
+diff --git a/tests/cli/selection-notice.test.ts b/tests/cli/selection-notice.test.ts
+new file mode 100644
+index 0000000..583276d
+--- /dev/null
++++ b/tests/cli/selection-notice.test.ts
+@@ -0,0 +1,39 @@
++import { expect, test } from 'bun:test';
++import { formatSelectionNotice } from '../../src/cli/selection-notice.ts';
++import {
++  Capability,
++  type ModelDeclaration,
++  ProviderKind,
++} from '../../src/core/types.ts';
++
++const decl: ModelDeclaration = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3.5:9b',
++  params: { numCtx: 16384 },
++  role: 'general',
++  capabilities: [Capability.Tools],
++  footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
++};
++
++test('notice includes model, size, ctx, budget and install state', () => {
++  const s = formatSelectionNotice({
++    decl,
++    numCtx: 16384,
++    budgetBytes: 12.3e9,
++    installed: true,
++  });
++  expect(s).toContain('qwen3.5:9b');
++  expect(s).toContain('9B');
++  expect(s).toContain('16384');
++  expect(s).toContain('installed');
++});
++
++test('not-installed notice announces a pull', () => {
++  const s = formatSelectionNotice({
++    decl,
++    numCtx: 16384,
++    budgetBytes: 12.3e9,
++    installed: false,
++  });
++  expect(s.toLowerCase()).toContain('pull');
++});
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index e3f6d37..d2aebc7 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -44,10 +44,68 @@ test('asDelegateTool runs onBeforeDelegate before the agent runs', async () => {
+   const order: string[] = [];
+   const agent = cannedAgent('file_qa', 'answer'); // existing helper in this file
+   const hook = mock(async (a: typeof agent) => {
+     order.push(`hook:${a.name}`);
+   });
+   const t = asDelegateTool(agent, hook);
+   await t.execute?.({ task: 'go' }, {} as never);
+   expect(hook).toHaveBeenCalledTimes(1);
+   expect(order).toEqual(['hook:file_qa']); // hook ran (before the agent's own run)
+ });
++
++function textModel(label: string) {
++  return new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: label }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++}
++
++function agent(): Agent {
++  return {
++    name: 'spec',
++    description: 'a specialist',
++    model: textModel('DEFAULT MODEL'),
++    systemPrompt: 'sp',
++    tools: {},
++  };
++}
++
++test('uses the model override returned by onBeforeDelegate', async () => {
++  const t = asDelegateTool(agent(), async () => ({
++    model: textModel('OVERRIDE MODEL'),
++  }));
++  const out = await t.execute?.(
++    { task: 'hi' },
++    { toolCallId: 't', messages: [] },
++  );
++  expect(out).toEqual({ text: 'OVERRIDE MODEL' });
++});
++
++test('abort short-circuits: agent never runs, returns soft error', async () => {
++  let ran = false;
++  const a = agent();
++  a.model = new MockLanguageModelV3({
++    doGenerate: async () => {
++      ran = true;
++      throw new Error('should not run');
++    },
++  });
++  const t = asDelegateTool(a, async () => ({ abort: 'no fit' }));
++  const out = await t.execute?.(
++    { task: 'hi' },
++    { toolCallId: 't', messages: [] },
++  );
++  expect(out).toEqual({ error: 'no fit' });
++  expect(ran).toBe(false);
++});
+diff --git a/tests/core/orchestrator-resource.test.ts b/tests/core/orchestrator-resource.test.ts
+new file mode 100644
+index 0000000..5d83e66
+--- /dev/null
++++ b/tests/core/orchestrator-resource.test.ts
+@@ -0,0 +1,54 @@
++import { expect, test } from 'bun:test';
++import { MockLanguageModelV3 } from 'ai/test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { ResourceError } from '../../src/core/errors.ts';
++import { runOrchestrator } from '../../src/core/orchestrator.ts';
++
++function answeringAgent(): Agent {
++  return {
++    name: 'orch',
++    description: 'orchestrator',
++    systemPrompt: 'sp',
++    tools: {},
++    model: new MockLanguageModelV3({
++      doGenerate: async () => ({
++        content: [{ type: 'text', text: 'a normal answer' }],
++        finishReason: { unified: 'stop', raw: undefined },
++        usage: {
++          inputTokens: {
++            total: 1,
++            noCache: undefined,
++            cacheRead: undefined,
++            cacheWrite: undefined,
++          },
++          outputTokens: { total: 1, text: undefined, reasoning: undefined },
++        },
++        warnings: [],
++      }),
++    }),
++  };
++}
++
++test('captured ResourceError yields kind:resource, overriding the answer', async () => {
++  const capture = { error: new ResourceError('no model fits') };
++  const result = await runOrchestrator(
++    answeringAgent(),
++    'do it',
++    undefined,
++    capture,
++  );
++  expect(result.kind).toBe('resource');
++  if (result.kind === 'resource') {
++    expect(result.message).toBe('no model fits');
++  }
++});
++
++test('no capture -> normal answer path unaffected', async () => {
++  const result = await runOrchestrator(
++    answeringAgent(),
++    'do it',
++    undefined,
++    {},
++  );
++  expect(result.kind).toBe('answer');
++});
+diff --git a/tests/integration/selection.live.test.ts b/tests/integration/selection.live.test.ts
+new file mode 100644
+index 0000000..df741b0
+--- /dev/null
++++ b/tests/integration/selection.live.test.ts
+@@ -0,0 +1,31 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import qwenFast from '../../models/qwen-fast.ts';
++import { REGISTRY } from '../../models/registry.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++import { unloadModel } from '../../src/resource/ollama-control.ts';
++import { resolveModel } from '../../src/resource/selector.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenFast.model);
++
++describe.skipIf(!ready)('live dynamic model selection (real Ollama)', () => {
++  afterAll(async () => {
++    await unloadModel(qwenFast.model);
++  });
++
++  test('with plentiful RAM, largest-that-fits resolves to the 9b specialist', async () => {
++    const manager = createModelManager();
++    const { decl, numCtx } = await resolveModel(
++      {
++        role: 'general reasoning + tool use',
++        requires: [Capability.Tools],
++        prefer: PreferPolicy.LargestThatFits,
++      },
++      REGISTRY,
++      { ensureReady: (d, o) => manager.ensureReady(d, o) },
++    );
++    expect(decl.model).toBe('qwen3.5:9b');
++    expect(numCtx).toBeGreaterThanOrEqual(4096);
++  }, 180_000);
++});
+diff --git a/tests/models/registry.test.ts b/tests/models/registry.test.ts
+new file mode 100644
+index 0000000..1947787
+--- /dev/null
++++ b/tests/models/registry.test.ts
+@@ -0,0 +1,16 @@
++import { expect, test } from 'bun:test';
++import { REGISTRY } from '../../models/registry.ts';
++import { Capability } from '../../src/core/types.ts';
++
++test('registry contains the two verified rungs, both tool-capable', () => {
++  const names = REGISTRY.map((d) => d.model).sort();
++  expect(names).toEqual(['qwen3.5:4b', 'qwen3.5:9b']);
++  for (const d of REGISTRY) {
++    expect(d.capabilities ?? []).toContain(Capability.Tools);
++  }
++});
++
++test('registry has a real capability ladder (distinct sizes)', () => {
++  const sizes = REGISTRY.map((d) => d.footprint.approxParamsBillions);
++  expect(new Set(sizes).size).toBe(REGISTRY.length);
++});
+diff --git a/tests/resource/resolve-model.test.ts b/tests/resource/resolve-model.test.ts
+new file mode 100644
+index 0000000..b027b29
+--- /dev/null
++++ b/tests/resource/resolve-model.test.ts
+@@ -0,0 +1,78 @@
++import { expect, mock, test } from 'bun:test';
++import { ResourceError } from '../../src/core/errors.ts';
++import {
++  Capability,
++  type ModelDeclaration,
++  PreferPolicy,
++  ProviderKind,
++} from '../../src/core/types.ts';
++import { resolveModel } from '../../src/resource/selector.ts';
++
++function m(model: string, b: number): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: { numCtx: 8192 },
++    role: 'test',
++    capabilities: [Capability.Tools],
++    footprint: { approxParamsBillions: b, bytesPerWeight: 0.56 },
++  };
++}
++
++const reg = [m('big', 9), m('small', 4)];
++const req = {
++  role: 'r',
++  requires: [Capability.Tools],
++  prefer: PreferPolicy.LargestThatFits,
++};
++
++test('returns the largest model when it fits', async () => {
++  const ensureReady = mock(async () => 8192);
++  const { decl, numCtx } = await resolveModel(req, reg, { ensureReady });
++  expect(decl.model).toBe('big');
++  expect(numCtx).toBe(8192);
++  expect(ensureReady).toHaveBeenCalledTimes(1);
++});
++
++test('falls back to the next candidate when the largest cannot fit', async () => {
++  const ensureReady = mock(async (d: ModelDeclaration) => {
++    if (d.model === 'big') throw new ResourceError('no fit');
++    return 4096;
++  });
++  const { decl } = await resolveModel(req, reg, { ensureReady });
++  expect(decl.model).toBe('small');
++  expect(ensureReady).toHaveBeenCalledTimes(2);
++});
++
++test('throws ResourceError when nothing fits', async () => {
++  const ensureReady = mock(async () => {
++    throw new ResourceError('no fit');
++  });
++  await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(
++    ResourceError,
++  );
++});
++
++test('non-resource errors propagate immediately', async () => {
++  const ensureReady = mock(async () => {
++    throw new TypeError('boom');
++  });
++  await expect(resolveModel(req, reg, { ensureReady })).rejects.toBeInstanceOf(
++    TypeError,
++  );
++});
++
++test('passes the resident set to the ranker and calls onAttempt', async () => {
++  const ensureReady = mock(async () => 8192);
++  const listLoaded = mock(async () => [{ name: 'big', sizeBytes: 1 }]);
++  const seen: string[] = [];
++  await resolveModel(req, reg, {
++    ensureReady,
++    listLoaded,
++    onAttempt: (d) => {
++      seen.push(d.model);
++    },
++  });
++  expect(listLoaded).toHaveBeenCalledTimes(1);
++  expect(seen[0]).toBe('big');
++});
+diff --git a/tests/resource/selector.test.ts b/tests/resource/selector.test.ts
+new file mode 100644
+index 0000000..f735041
+--- /dev/null
++++ b/tests/resource/selector.test.ts
+@@ -0,0 +1,67 @@
++import { expect, test } from 'bun:test';
++import {
++  Capability,
++  type ModelDeclaration,
++  PreferPolicy,
++  ProviderKind,
++} from '../../src/core/types.ts';
++import { selectCandidates } from '../../src/resource/selector.ts';
++
++function m(
++  model: string,
++  b: number,
++  caps: Capability[],
++  bpw = 0.56,
++): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: {},
++    role: 'test',
++    capabilities: caps,
++    footprint: { approxParamsBillions: b, bytesPerWeight: bpw },
++  };
++}
++
++const tools = {
++  role: 'r',
++  requires: [Capability.Tools],
++  prefer: PreferPolicy.LargestThatFits,
++};
++
++test('hard-filters out models missing a required capability', () => {
++  const reg = [
++    m('big-novtools', 9, []),
++    m('small-tools', 4, [Capability.Tools]),
++  ];
++  const out = selectCandidates(tools, reg);
++  expect(out.map((d) => d.model)).toEqual(['small-tools']);
++});
++
++test('ranks largest params first', () => {
++  const reg = [m('a4', 4, [Capability.Tools]), m('b9', 9, [Capability.Tools])];
++  expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual([
++    'b9',
++    'a4',
++  ]);
++});
++
++test('tie-break: equal params -> smaller footprint first', () => {
++  const reg = [
++    m('heavy', 9, [Capability.Tools], 0.9),
++    m('light', 9, [Capability.Tools], 0.5),
++  ];
++  expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual([
++    'light',
++    'heavy',
++  ]);
++});
++
++test('warm-aware bias: among identical candidates, resident first', () => {
++  const reg = [
++    m('cold', 9, [Capability.Tools]),
++    m('warm', 9, [Capability.Tools]),
++  ];
++  const out = selectCandidates(tools, reg, new Set(['warm']));
++  expect(out.map((d) => d.model)).toEqual(['warm', 'cold']);
++});

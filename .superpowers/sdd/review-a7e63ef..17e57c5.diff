@@ -1,0 +1,90 @@
+# Review package: a7e63ef..17e57c5
+
+## Commits
+17e57c5 feat(core): runAgent returns steps for downstream inspection
+
+## Files changed
+ src/core/agent.ts        | 6 +++---
+ tests/core/agent.test.ts | 4 +++-
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/src/core/agent.ts b/src/core/agent.ts
+index 96072ee..6599951 100644
+--- a/src/core/agent.ts
++++ b/src/core/agent.ts
+@@ -12,31 +12,31 @@ const DEFAULT_MAX_STEPS = 10;
+ export type RunAgentInput = {
+   model: LanguageModel;
+   systemPrompt: string;
+   prompt: string;
+   tools: ToolSet;
+   maxSteps?: number;
+   temperature?: number;
+   providerOptions?: ProviderOptions;
+ };
+ 
+-/** Run one agent turn: model + tools loop, bounded by a step guard. */
++/** Run one agent turn: model + tools loop, bounded by a step guard. Returns text + steps. */
+ export async function runAgent(
+   input: RunAgentInput,
+-): Promise<{ text: string }> {
++): Promise<{ text: string; steps: Awaited<ReturnType<typeof generateText>>['steps'] }> {
+   const result = await generateText({
+     model: input.model,
+     system: input.systemPrompt,
+     prompt: input.prompt,
+     tools: input.tools,
+     temperature: input.temperature,
+     providerOptions: input.providerOptions,
+     stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
+   });
+   const { text, finishReason, steps } = result;
+   if (text.trim() === '' && finishReason !== 'stop') {
+     throw new MaxStepsError(
+       `Agent exhausted step ceiling (${steps.length} steps) without producing a final answer.`,
+     );
+   }
+-  return { text };
++  return { text, steps };
+ }
+diff --git a/tests/core/agent.test.ts b/tests/core/agent.test.ts
+index 0d4eb62..b5f3495 100644
+--- a/tests/core/agent.test.ts
++++ b/tests/core/agent.test.ts
+@@ -55,32 +55,34 @@ test('agent calls the tool then returns the final answer', async () => {
+   });
+ 
+   const tools = {
+     read_file: tool({
+       description: 'read a file',
+       inputSchema: z.object({ path: z.string() }),
+       execute,
+     }),
+   };
+ 
+-  const { text } = await runAgent({
++  const { text, steps } = await runAgent({
+     model,
+     systemPrompt: 'You answer questions about files.',
+     prompt: 'What does /tmp/x.txt say?',
+     tools,
+   });
+ 
+   expect(execute).toHaveBeenCalledWith(
+     { path: '/tmp/x.txt' },
+     expect.anything(),
+   );
+   expect(text).toBe('The file says hello.');
++  expect(Array.isArray(steps)).toBe(true);
++  expect(steps.length).toBeGreaterThanOrEqual(2);
+ });
+ 
+ test('runAgent throws MaxStepsError when step ceiling is hit without a final answer', async () => {
+   // A model that always returns a tool-call (never produces final text), so the
+   // loop exhausts maxSteps and generateText stops with finishReason != 'stop'.
+   const model = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [
+         {
+           type: 'tool-call',

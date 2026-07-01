@@ -1,0 +1,463 @@
+# Review package: ec84973..787c8b3
+
+## Commits
+787c8b3 feat(resource): budget-clamped dynamic context, live max via /api/show
+
+## Files changed
+ src/cli/chat.ts                      | 13 +++---
+ src/core/types.ts                    | 12 +++++-
+ src/resource/model-manager.ts        | 84 +++++++++++++++++++++++-------------
+ tests/resource/model-manager.test.ts | 77 ++++++++++++++++++++++++++++++---
+ 4 files changed, 143 insertions(+), 43 deletions(-)
+
+## Diff
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 623b310..9bf006a 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -16,26 +16,29 @@ async function main(): Promise<void> {
+   // Warm + pin the small router model the orchestrator runs on.
+   console.error(`Preparing router model ${qwenRouter.model}...`);
+   await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
+   // Specialists' models are loaded on demand, keeping the router pinned-resident.
+-  const onBeforeDelegate = (agent: {
++  const onBeforeDelegate = async (agent: {
+     modelDecl?: import('../core/types.ts').ModelDeclaration;
+-  }) =>
+-    agent.modelDecl
+-      ? manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] })
+-      : Promise.resolve();
++  }): Promise<void> => {
++    if (agent.modelDecl) {
++      await manager.ensureReady(agent.modelDecl, {
++        pinned: [qwenRouter.model],
++      });
++    }
++  };
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+       const orchestrator = createSuperAgent(
+         fileServer.tools,
+         fetchServer.tools,
+         onBeforeDelegate,
+       );
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 754adb2..fed8221 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -12,12 +12,22 @@ export type ModelParams = {
+ /**
+  * A model declaration is DATA, not logic. Slice 1 pins a concrete model name;
+  * later slices can resolve a capability/role to a discovered model.
+  */
+ export type ModelDeclaration = {
+   provider: ProviderKind;
+   model: string;
+   params: ModelParams;
+   role: string;
+   /** Pre-load sizing hint for the model manager. */
+-  footprint: { approxParamsBillions: number; bytesPerWeight: number };
++  footprint: {
++    approxParamsBillions: number;
++    bytesPerWeight: number;
++    /** Bytes of KV cache per token (per-model; defaults to 131072 if omitted). */
++    kvBytesPerToken?: number;
++  };
++  /**
++   * Optional cap on the context window. The true max is detected live from
++   * Ollama; set this only to deliberately cap below it or as a probe fallback.
++   */
++  maxContext?: number;
+ };
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+index 4e4dd99..15a2a64 100644
+--- a/src/resource/model-manager.ts
++++ b/src/resource/model-manager.ts
+@@ -1,129 +1,153 @@
+ import { ResourceError } from '../core/errors.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
+-import { estimateModelBytes } from './footprint.ts';
++import { kvCacheBytes, weightsBytes } from './footprint.ts';
+ import { liveBudgetBytes } from './hardware.ts';
+ import {
++  getModelMaxContext,
+   isModelInstalled,
+   type LoadedModel,
+   listLoadedModels,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from './ollama-control.ts';
+ 
++export const MIN_CTX = 4096;
++const DEFAULT_KV_PER_TOKEN = 131072;
++const CTX_ROUNDING = 1024;
++
+ export type EnsureOpts = { pinned?: string[] };
+ 
+ /** A live budget figure, or a (sync/async) provider that computes one on demand. */
+ export type BudgetSource = number | (() => number | Promise<number>);
+ 
+ /** Injectable dependencies (real Ollama by default; fakes in tests). */
+ export type ManagerDeps = {
+   budgetBytes: BudgetSource;
+   isInstalled: (model: string) => Promise<boolean>;
+   listLoaded: () => Promise<LoadedModel[]>;
+   pull: (model: string) => Promise<void>;
+-  warm: (model: string) => Promise<void>;
++  warm: (model: string, numCtx?: number) => Promise<void>;
+   unload: (model: string) => Promise<void>;
+   warn: (message: string) => void;
++  getModelMax: (model: string) => Promise<number | undefined>;
+ };
+ 
+-/** Estimated resident bytes of a model from its declaration. */
+-export function declBytes(decl: ModelDeclaration): number {
+-  return estimateModelBytes({
+-    paramsBillions: decl.footprint.approxParamsBillions,
+-    bytesPerWeight: decl.footprint.bytesPerWeight,
+-    contextTokens: decl.params.numCtx ?? 8192,
+-    kvBytesPerToken: 131072,
+-  });
+-}
+-
+ function defaultDeps(): ManagerDeps {
+   return {
+     budgetBytes: liveBudgetBytes,
+     isInstalled: (m) => isModelInstalled(m),
+     listLoaded: () => listLoadedModels(),
+     pull: (m) => pullModel(m),
+-    warm: (m) => warmModel(m),
++    warm: (m, n) => warmModel(m, n),
+     unload: (m) => unloadModel(m),
+     warn: (message) => console.error(message),
++    getModelMax: (m) => getModelMaxContext(m),
+   };
+ }
+ 
+ /** Resolve the budget source to a concrete byte figure (live on each call). */
+ async function resolveBudget(source: BudgetSource): Promise<number> {
+   return typeof source === 'function' ? source() : source;
+ }
+ 
+ /** Loads/unloads models to keep the active + pinned set within the GPU budget. */
+ export function createModelManager(deps: Partial<ManagerDeps> = {}) {
+   const d: ManagerDeps = { ...defaultDeps(), ...deps };
+   const lastUsed = new Map<string, number>();
++  const chosenCtxByModel = new Map<string, number>();
++  const maxCtxByModel = new Map<string, number>();
+   let tick = 0;
+ 
++  async function modelMaxFor(model: string): Promise<number | undefined> {
++    const cached = maxCtxByModel.get(model);
++    if (cached !== undefined) return cached;
++    let probed: number | undefined;
++    try {
++      probed = await d.getModelMax(model);
++    } catch {
++      probed = undefined;
++    }
++    if (probed !== undefined) maxCtxByModel.set(model, probed);
++    return probed;
++  }
++
+   async function ensureReady(
+     decl: ModelDeclaration,
+     opts: EnsureOpts = {},
+-  ): Promise<void> {
++  ): Promise<number> {
+     const pinned = new Set(opts.pinned ?? []);
+     const target = decl.model;
++    const desired = decl.params.numCtx ?? MIN_CTX;
+ 
+     if (!(await d.isInstalled(target))) await d.pull(target);
+ 
+     let loaded = await d.listLoaded();
+     if (loaded.some((m) => m.name === target)) {
+       lastUsed.set(target, ++tick);
+-      return;
++      return chosenCtxByModel.get(target) ?? desired;
+     }
+ 
+-    const needed = declBytes(decl);
+-    // Free headroom right now, resolved live per delegation. This is free system
+-    // RAM (already net of every loaded model), so the question is simply "does the
+-    // target fit in what's free?" — never `resident() + needed`, which would
+-    // double-count models the free figure already excludes.
++    const weights = weightsBytes(
++      decl.footprint.approxParamsBillions,
++      decl.footprint.bytesPerWeight,
++    );
++    const kvPerToken = decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN;
++    const minNeed = weights + kvCacheBytes(MIN_CTX, kvPerToken);
+     const freeBudget = await resolveBudget(d.budgetBytes);
+     const gb = (bytes: number) => Math.round(bytes / 1e9);
+ 
+     const lru = (a: LoadedModel, b: LoadedModel) =>
+       (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1);
+ 
+-    // Evicting a model returns its REAL resident bytes (from /api/ps) to the pool,
+-    // so headroom grows as we evict. Keep evicting until the target fits.
++    // Fit the model at its minimum context; evicting returns real bytes to headroom.
+     let headroom = freeBudget;
+-    while (needed > headroom) {
++    while (minNeed > headroom) {
+       const evictable = loaded.filter((m) => m.name !== target);
+-      // Prefer non-pinned LRU; fall back to pinned LRU (pinning is best-effort —
+-      // under real memory pressure we degrade and let the pinned model reload on
+-      // its next turn rather than failing the run).
+       const nonPinned = evictable.filter((m) => !pinned.has(m.name)).sort(lru);
+       const evict = nonPinned[0] ?? evictable.sort(lru)[0];
+       if (evict === undefined) {
+-        // Nothing left to evict and it still doesn't fit — a genuine resource
+-        // failure (the model is too big for this machine's free RAM right now).
+         throw new ResourceError(
+-          `Cannot load ${target} (~${gb(needed)}GB): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
++          `Cannot load ${target} (needs ~${gb(minNeed)}GB at min context): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
+         );
+       }
+       if (pinned.has(evict.name)) {
+         d.warn(
+           `[model-manager] live memory budget (~${gb(freeBudget)}GB) too low to keep ${evict.name} pinned; evicting it to load ${target} (best-effort pin — it will reload on demand).`,
+         );
+       }
+       await d.unload(evict.name);
+       lastUsed.delete(evict.name);
++      chosenCtxByModel.delete(evict.name);
+       headroom += evict.sizeBytes;
+       loaded = loaded.filter((m) => m.name !== evict.name);
+     }
+ 
+-    await d.warm(target);
++    // Scale context up into the remaining headroom, clamped by the live model max.
++    const probedMax = await modelMaxFor(target);
++    const ceiling = Math.min(
++      decl.maxContext ?? Number.POSITIVE_INFINITY,
++      probedMax ?? Number.POSITIVE_INFINITY,
++    );
++    const maxCtxByFit = Math.floor((headroom - weights) / kvPerToken);
++    let chosenCtx = Math.min(desired, ceiling, maxCtxByFit);
++    chosenCtx = Math.max(MIN_CTX, chosenCtx);
++    chosenCtx -= chosenCtx % CTX_ROUNDING;
++    chosenCtx = Math.max(MIN_CTX, chosenCtx);
++
++    await d.warm(target, chosenCtx);
+     lastUsed.set(target, ++tick);
++    chosenCtxByModel.set(target, chosenCtx);
++    return chosenCtx;
+   }
+ 
+   async function unloadAll(): Promise<void> {
+     for (const model of [...lastUsed.keys()]) {
+       await d.unload(model);
+     }
+     lastUsed.clear();
++    chosenCtxByModel.clear();
+   }
+ 
+   return { ensureReady, unloadAll };
+ }
+diff --git a/tests/resource/model-manager.test.ts b/tests/resource/model-manager.test.ts
+index 3b602c1..bda6921 100644
+--- a/tests/resource/model-manager.test.ts
++++ b/tests/resource/model-manager.test.ts
+@@ -1,109 +1,123 @@
+ import { expect, mock, test } from 'bun:test';
+ import { ResourceError } from '../../src/core/errors.ts';
+ import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
+-import { createModelManager } from '../../src/resource/model-manager.ts';
++import {
++  createModelManager,
++  MIN_CTX,
++} from '../../src/resource/model-manager.ts';
+ 
+ function decl(model: string, b: number): ModelDeclaration {
+   return {
+     provider: ProviderKind.Ollama,
+     model,
+     params: { numCtx: 0 }, // numCtx 0 → KV term 0, so bytes == params*1e9*bpw*1.2
+     role: 'test',
+     footprint: { approxParamsBillions: b, bytesPerWeight: 1 }, // bytes = b*1e9*1.2
+   };
+ }
+-// declBytes(decl(_, b)) === b*1e9*1.2
++// weightsBytes(b, 1) === b*1e9*1.2
+ 
+ function fakes(
+   overrides: Partial<Parameters<typeof createModelManager>[0]> = {},
+ ) {
+   return {
+     isInstalled: mock(async () => true),
+     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
+     pull: mock(async () => {}),
+     warm: mock(async () => {}),
+     unload: mock(async () => {}),
+     warn: mock(() => {}), // no-op so eviction warnings never leak to console
++    getModelMax: mock(async () => 262144),
+     ...overrides,
+   };
+ }
+ 
++function declCtx(model: string, b: number, numCtx: number): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: { numCtx },
++    role: 'test',
++    footprint: { approxParamsBillions: b, bytesPerWeight: 1 },
++  };
++}
++
+ test('already-loaded model: no pull/warm/unload', async () => {
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'm8', sizeBytes: 1 }]),
+   });
+   const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+   await mgr.ensureReady(decl('m8', 8));
+   expect(f.warm).not.toHaveBeenCalled();
+   expect(f.pull).not.toHaveBeenCalled();
+   expect(f.unload).not.toHaveBeenCalled();
+ });
+ 
+ test('not installed: pulls then warms', async () => {
+   const f = fakes({ isInstalled: mock(async () => false) });
+   const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+   await mgr.ensureReady(decl('m8', 8));
+   expect(f.pull).toHaveBeenCalledWith('m8');
+-  expect(f.warm).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
+ });
+ 
+ test('fits in free headroom: warms, no eviction', async () => {
+   // target 8*1.2=9.6e9; free headroom 20e9 → fits without touching the loaded router.
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
+   });
+   const mgr = createModelManager({ budgetBytes: 20e9, ...f });
+   await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
+   expect(f.unload).not.toHaveBeenCalled();
+-  expect(f.warm).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
+ });
+ 
+ test('insufficient free: evicts non-pinned to grow headroom, keeps pinned, then warms', async () => {
+   // free headroom 2e9; target new8 needs 9.6e9 → must evict. Evicting old8 (non-pinned,
+   // 9.6e9) returns its bytes → headroom 2 + 9.6 = 11.6 ≥ 9.6 → warm. Pinned r4 untouched.
+   const f = fakes({
+     listLoaded: mock(async () => [
+       { name: 'r4', sizeBytes: 4.8e9 },
+       { name: 'old8', sizeBytes: 9.6e9 },
+     ]),
+   });
+   const mgr = createModelManager({ budgetBytes: 2e9, ...f });
+   await mgr.ensureReady(decl('new8', 8), { pinned: ['r4'] });
+   expect(f.unload).toHaveBeenCalledWith('old8');
+   expect(f.unload).not.toHaveBeenCalledWith('r4');
+-  expect(f.warm).toHaveBeenCalledWith('new8');
++  expect(f.warm).toHaveBeenCalledWith('new8', MIN_CTX);
+ });
+ 
+ test('budget given as a function is resolved live on each ensureReady', async () => {
+   // function form (the live-budget shape); target 9.6e9 ≤ 20e9 free headroom → no eviction.
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
+   });
+   const budgetBytes = mock(async () => 20e9);
+   const mgr = createModelManager({ budgetBytes, ...f });
+   await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
+   expect(budgetBytes).toHaveBeenCalled();
+   expect(f.unload).not.toHaveBeenCalled();
+-  expect(f.warm).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8', MIN_CTX);
+ });
+ 
+ test('best-effort pin: evicts the pinned model when it is all that is left to free', async () => {
+   // free headroom 2e9; only the pinned router r8 (9.6e9) is loaded; target big needs 9.6e9.
+   // Degrade: evict r8 → headroom 2 + 9.6 = 11.6 ≥ 9.6 → warm. Run stays functional.
+   const f = fakes({
+     listLoaded: mock(async () => [{ name: 'r8', sizeBytes: 9.6e9 }]),
+   });
+   const mgr = createModelManager({ budgetBytes: 2e9, ...f });
+   await mgr.ensureReady(decl('big', 8), { pinned: ['r8'] });
+   expect(f.unload).toHaveBeenCalledWith('r8');
+-  expect(f.warm).toHaveBeenCalledWith('big');
++  expect(f.warm).toHaveBeenCalledWith('big', MIN_CTX);
+   expect(f.warn).toHaveBeenCalled();
+ });
+ 
+ test('target alone exceeds budget: throws ResourceError, warms nothing', async () => {
+   // nothing loaded; target needs 9.6e9 but budget is 8e9 → cannot fit even alone.
+   const f = fakes();
+   const mgr = createModelManager({ budgetBytes: 8e9, ...f });
+   await expect(
+     mgr.ensureReady(decl('big', 8), { pinned: [] }),
+   ).rejects.toBeInstanceOf(ResourceError);
+@@ -112,10 +126,59 @@ test('target alone exceeds budget: throws ResourceError, warms nothing', async (
+ 
+ test('unloadAll unloads every warmed model', async () => {
+   const f = fakes();
+   const mgr = createModelManager({ budgetBytes: 100e9, ...f });
+   await mgr.ensureReady(decl('a', 1));
+   await mgr.ensureReady(decl('b', 1));
+   await mgr.unloadAll();
+   expect(f.unload).toHaveBeenCalledWith('a');
+   expect(f.unload).toHaveBeenCalledWith('b');
+ });
++
++test('ample headroom: chosenCtx is the desired value, warmed at it', async () => {
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(16384);
++  expect(f.warm).toHaveBeenCalledWith('m1', 16384);
++});
++
++test('tight headroom: chosenCtx shrinks to fit, floored & rounded to 1024', async () => {
++  // weights(1,1)=1.2e9; kv/token=131072. budget chosen so maxCtxByFit == 8192:
++  // headroom-weights = 8192*131072 = 1073741824 → budget = 1073741824 + 1.2e9.
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 1073741824 + 1.2e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(8192);
++  expect(ctx % 1024).toBe(0);
++  expect(f.warm).toHaveBeenCalledWith('m1', 8192);
++});
++
++test('chosenCtx is capped by the live-probed model max', async () => {
++  const f = fakes({ getModelMax: mock(async () => 6144) });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const ctx = await mgr.ensureReady(declCtx('m1', 1, 16384));
++  expect(ctx).toBe(6144);
++});
++
++test('probe failure falls back to decl.maxContext', async () => {
++  const f = fakes({
++    getModelMax: mock(async () => {
++      throw new Error('no show');
++    }),
++  });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  const decl = { ...declCtx('m1', 1, 16384), maxContext: 5120 };
++  const ctx = await mgr.ensureReady(decl);
++  expect(ctx).toBe(5120);
++  expect(f.getModelMax).toHaveBeenCalled();
++});
++
++test('cannot fit even the MIN_CTX floor: throws, warms nothing', async () => {
++  // minNeed = weights(1,1)=1.2e9 + 4096*131072 ≈ 1.737e9; budget 1e9 < minNeed, nothing to evict.
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 1e9, ...f });
++  await expect(
++    mgr.ensureReady(declCtx('big', 1, 16384)),
++  ).rejects.toBeInstanceOf(ResourceError);
++  expect(f.warm).not.toHaveBeenCalled();
++});

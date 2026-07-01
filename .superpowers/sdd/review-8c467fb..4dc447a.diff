@@ -1,0 +1,115 @@
+# Review package: 8c467fb..4dc447a
+
+## Commits
+4dc447a feat(resource): add listLoadedModels (GET /api/ps)
+
+## Files changed
+ src/resource/ollama-control.ts        | 20 ++++++++++++++++++++
+ tests/resource/ollama-control.test.ts | 23 +++++++++++++++++++++++
+ 2 files changed, 43 insertions(+)
+
+## Diff
+diff --git a/src/resource/ollama-control.ts b/src/resource/ollama-control.ts
+index 2d49bb8..df6d20a 100644
+--- a/src/resource/ollama-control.ts
++++ b/src/resource/ollama-control.ts
+@@ -1,16 +1,21 @@
+ import { ProviderError } from '../core/errors.ts';
+ 
+ const DEFAULT_BASE_URL = 'http://localhost:11434';
+ 
+ type TagsResponse = { models?: Array<{ name: string }> };
+ 
++/** A model currently resident in Ollama, with its memory footprint. */
++export type LoadedModel = { name: string; sizeBytes: number };
++
++type PsResponse = { models?: Array<{ name: string; size: number }> };
++
+ async function postJson(
+   baseUrl: string,
+   path: string,
+   body: Record<string, unknown>,
+ ): Promise<void> {
+   let res: Response;
+   try {
+     res = await fetch(`${baseUrl}${path}`, {
+       method: 'POST',
+       headers: { 'content-type': 'application/json' },
+@@ -62,10 +67,25 @@ export function warmModel(
+ export function unloadModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/generate', {
+     model,
+     keep_alive: 0,
+     stream: false,
+   });
+ }
++
++/** Models currently loaded in memory, from `GET /api/ps`. */
++export async function listLoadedModels(
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<LoadedModel[]> {
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/ps`);
++  } catch (cause) {
++    throw new ProviderError('Ollama /api/ps failed', { cause });
++  }
++  if (!res.ok) throw new ProviderError(`Ollama /api/ps returned ${res.status}`);
++  const data = (await res.json()) as PsResponse;
++  return (data.models ?? []).map((m) => ({ name: m.name, sizeBytes: m.size }));
++}
+diff --git a/tests/resource/ollama-control.test.ts b/tests/resource/ollama-control.test.ts
+index 902b47d..46d9ef1 100644
+--- a/tests/resource/ollama-control.test.ts
++++ b/tests/resource/ollama-control.test.ts
+@@ -1,13 +1,14 @@
+ import { afterEach, expect, spyOn, test } from 'bun:test';
+ import {
+   isModelInstalled,
++  listLoadedModels,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../../src/resource/ollama-control.ts';
+ 
+ afterEach(() => {
+   (globalThis.fetch as unknown as { mockRestore?: () => void }).mockRestore?.();
+ });
+ 
+ test('isModelInstalled returns true when /api/tags lists the model by name', async () => {
+@@ -55,10 +56,32 @@ test('unloadModel POSTs to /api/generate with keep_alive: 0 and stream: false',
+   );
+   await unloadModel('qwen3:8b');
+   const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+   expect(url).toBe('http://localhost:11434/api/generate');
+   expect(JSON.parse(init.body as string)).toEqual({
+     model: 'qwen3:8b',
+     keep_alive: 0,
+     stream: false,
+   });
+ });
++
++test('listLoadedModels maps /api/ps name + size to LoadedModel[]', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(
++      JSON.stringify({ models: [{ name: 'qwen3:8b', size: 6_000_000_000 }, { name: 'qwen3:4b', size: 3_500_000_000 }] }),
++      { status: 200 },
++    ),
++  );
++  const loaded = await listLoadedModels();
++  expect(loaded).toEqual([
++    { name: 'qwen3:8b', sizeBytes: 6_000_000_000 },
++    { name: 'qwen3:4b', sizeBytes: 3_500_000_000 },
++  ]);
++  expect((fetchSpy.mock.calls[0] as [string])[0]).toBe('http://localhost:11434/api/ps');
++});
++
++test('listLoadedModels returns [] when nothing is loaded', async () => {
++  spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({ models: [] }), { status: 200 }),
++  );
++  expect(await listLoadedModels()).toEqual([]);
++});

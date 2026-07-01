@@ -1,0 +1,186 @@
+# Review package: 47ca633..0f2470d
+
+## Commits
+0f2470d feat(cli): wire file-qa agent end-to-end with autonomous warm-up/unload
+
+## Files changed
+ src/cli/answer-file-question.ts        | 35 +++++++++++++++++++
+ src/cli/chat.ts                        | 63 ++++++++++++++++++++++++++++++++++
+ tests/cli/answer-file-question.test.ts | 58 +++++++++++++++++++++++++++++++
+ 3 files changed, 156 insertions(+)
+
+## Diff
+diff --git a/src/cli/answer-file-question.ts b/src/cli/answer-file-question.ts
+new file mode 100644
+index 0000000..71c6186
+--- /dev/null
++++ b/src/cli/answer-file-question.ts
+@@ -0,0 +1,35 @@
++import type { LanguageModel, ToolSet } from 'ai';
++import { runAgent } from '../core/agent.ts';
++import { appendJournal } from '../run/journal.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++
++const SYSTEM_PROMPT =
++  'You answer questions about local files. Use the read_file tool to read any file you need, then answer concisely.';
++
++export type AnswerDeps = {
++  model: LanguageModel;
++  tools: ToolSet;
++  question: string;
++  runsRoot: string;
++  runId: string;
++};
++
++/** Orchestrate one file-Q&A run: journal, agent, artifact, journal. */
++export async function answerFileQuestion(deps: AnswerDeps): Promise<string> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  await appendJournal(run.dir, {
++    step: 'start',
++    data: { question: deps.question },
++  });
++
++  const { text } = await runAgent({
++    model: deps.model,
++    systemPrompt: SYSTEM_PROMPT,
++    prompt: deps.question,
++    tools: deps.tools,
++  });
++
++  await writeArtifact(run, 'answer.txt', text);
++  await appendJournal(run.dir, { step: 'answer', data: { text } });
++  return text;
++}
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+new file mode 100644
+index 0000000..0863675
+--- /dev/null
++++ b/src/cli/chat.ts
+@@ -0,0 +1,63 @@
++import qwenFast from '../../models/qwen-fast.ts';
++import { ResourceError } from '../core/errors.ts';
++import { createFileTools } from '../mcp/client.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import { estimateModelBytes } from '../resource/footprint.ts';
++import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
++import {
++  isModelInstalled,
++  pullModel,
++  unloadModel,
++  warmModel,
++} from '../resource/ollama-control.ts';
++import { answerFileQuestion } from './answer-file-question.ts';
++
++// qwen3:8b @ Q4_K_M, 8k context — rough footprint for the budget check.
++const FOOTPRINT = estimateModelBytes({
++  paramsBillions: 8,
++  bytesPerWeight: 0.56,
++  contextTokens: qwenFast.params.numCtx ?? 8192,
++  kvBytesPerToken: 131072,
++});
++
++async function main(): Promise<void> {
++  const question = process.argv.slice(2).join(' ').trim();
++  if (question.length === 0) {
++    console.error('Usage: bun run src/cli/chat.ts "<question about a file>"');
++    process.exit(1);
++  }
++
++  const budget = machineBudgetBytes();
++  if (!fitsBudget(FOOTPRINT, budget)) {
++    throw new ResourceError(
++      `${qwenFast.model} (~${Math.round(FOOTPRINT / 1e9)}GB) exceeds the GPU budget (~${Math.round(budget / 1e9)}GB)`,
++    );
++  }
++
++  if (!(await isModelInstalled(qwenFast.model))) {
++    console.error(`Pulling ${qwenFast.model} (first run only)...`);
++    await pullModel(qwenFast.model);
++  }
++  await warmModel(qwenFast.model);
++
++  const model = createOllamaModel(qwenFast);
++  const { tools, close } = await createFileTools();
++  try {
++    const answer = await answerFileQuestion({
++      model,
++      tools,
++      question,
++      runsRoot: 'runs',
++      runId: `run-${process.pid}`,
++    });
++    console.log(answer);
++  } finally {
++    await close();
++    await unloadModel(qwenFast.model);
++  }
++}
++
++main().catch((err) => {
++  console.error(err);
++  process.exit(1);
++});
+diff --git a/tests/cli/answer-file-question.test.ts b/tests/cli/answer-file-question.test.ts
+new file mode 100644
+index 0000000..522eebc
+--- /dev/null
++++ b/tests/cli/answer-file-question.test.ts
+@@ -0,0 +1,58 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { tool } from 'ai';
++import { MockLanguageModelV3 } from 'ai/test';
++import { z } from 'zod';
++import { answerFileQuestion } from '../../src/cli/answer-file-question.ts';
++import { readJournal } from '../../src/run/journal.ts';
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'cli-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++test('answers a question, writes the answer artifact, and journals the run', async () => {
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'The file is a greeting.' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const tools = {
++    read_file: tool({
++      description: 'read a file',
++      inputSchema: z.object({ path: z.string() }),
++      execute: async ({ path }) => ({ text: `contents of ${path}` }),
++    }),
++  };
++
++  const answer = await answerFileQuestion({
++    model,
++    tools,
++    question: 'Summarize notes.txt',
++    runsRoot: root,
++    runId: 'run-1',
++  });
++
++  expect(answer).toBe('The file is a greeting.');
++  expect(await readFile(join(root, 'run-1', 'answer.txt'), 'utf8')).toBe(
++    'The file is a greeting.',
++  );
++  const journal = await readJournal(join(root, 'run-1'));
++  expect(journal.map((e) => e.step)).toEqual(['start', 'answer']);
++});

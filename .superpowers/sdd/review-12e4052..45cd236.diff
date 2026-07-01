@@ -1,0 +1,78 @@
+# Review package: 12e4052..45cd236
+
+## Commits
+45cd236 fix(resource): move response-reuse handling from production into test mock
+
+## Files changed
+ src/resource/ollama-control.ts        |  5 +++--
+ tests/resource/ollama-control.test.ts | 11 +++++++----
+ 2 files changed, 10 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/src/resource/ollama-control.ts b/src/resource/ollama-control.ts
+index c6b995e..8a4aca9 100644
+--- a/src/resource/ollama-control.ts
++++ b/src/resource/ollama-control.ts
+@@ -28,23 +28,24 @@ async function postJson(
+ export async function isModelInstalled(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<boolean> {
+   let res: Response;
+   try {
+     res = await fetch(`${baseUrl}/api/tags`);
+   } catch (cause) {
+     throw new ProviderError('Ollama /api/tags failed', { cause });
+   }
+-  if (!res.ok)
++  if (!res.ok) {
+     throw new ProviderError(`Ollama /api/tags returned ${res.status}`);
+-  const data = (await res.clone().json()) as TagsResponse;
++  }
++  const data = (await res.json()) as TagsResponse;
+   return (data.models ?? []).some((m) => m.name === model);
+ }
+ 
+ /** Pull a model (blocking, non-streamed). Write field is `model`. */
+ export function pullModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/pull', { model, stream: false });
+ }
+diff --git a/tests/resource/ollama-control.test.ts b/tests/resource/ollama-control.test.ts
+index eed831a..9a4029d 100644
+--- a/tests/resource/ollama-control.test.ts
++++ b/tests/resource/ollama-control.test.ts
+@@ -2,24 +2,27 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
+ import {
+   isModelInstalled,
+   pullModel,
+ } from '../../src/resource/ollama-control.ts';
+ 
+ afterEach(() => {
+   (globalThis.fetch as unknown as { mockRestore?: () => void }).mockRestore?.();
+ });
+ 
+ test('isModelInstalled returns true when /api/tags lists the model by name', async () => {
+-  spyOn(globalThis, 'fetch').mockResolvedValue(
+-    new Response(JSON.stringify({ models: [{ name: 'qwen3:8b' }] }), {
+-      status: 200,
+-    }),
++  // biome-ignore lint/suspicious/noExplicitAny: spyOn requires dynamic property access
++  spyOn(globalThis, 'fetch' as any).mockImplementation(() =>
++    Promise.resolve(
++      new Response(JSON.stringify({ models: [{ name: 'qwen3:8b' }] }), {
++        status: 200,
++      }),
++    ),
+   );
+   expect(await isModelInstalled('qwen3:8b')).toBe(true);
+   expect(await isModelInstalled('llama3:8b')).toBe(false);
+ });
+ 
+ test('pullModel POSTs the model field and resolves on 200', async () => {
+   const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+     new Response(JSON.stringify({ status: 'success' }), { status: 200 }),
+   );
+   await pullModel('qwen3:8b');

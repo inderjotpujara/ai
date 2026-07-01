@@ -1,0 +1,243 @@
+# Review package: 97537e4..01e591d
+
+## Commits
+01e591d test(resource): live KV-arch probe + Slice 7 docs
+
+## Files changed
+ README.md                               | 14 +++++++-------
+ docs/ROADMAP.md                         | 21 +++++++++++++++------
+ docs/architecture.md                    | 16 ++++++++++++++++
+ tests/integration/kv-cache.live.test.ts | 14 ++++++++++++++
+ 4 files changed, 52 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 0600098..c7930b0 100644
+--- a/README.md
++++ b/README.md
+@@ -1,23 +1,21 @@
+ # Local Agents
+ 
+ A **local-first, multi-agent framework** for Apple Silicon. Build and run AI
+ agents against **local models** (no API keys), orchestrated by a super-agent,
+ on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
+ Mini.
+ 
+-> **Status:** Slice 6 complete — **model discovery**. `bun run discover` fetches
+-> the latest tool-capable GGUF/MLX models from Hugging Face, writes a per-machine
+-> catalog, and pre-pulls the top fit. Normal `chat` runs merge the bootstrap rungs +
+-> locally-installed models + the cached catalog — no network needed at inference time.
+-> Built on Slice 5's dynamic model selection (capability requirements + largest-that-fits
+-> selector). See [Roadmap](#roadmap).
++> **Status:** Slice 7 complete — **KV-cache quantization**. `bun run serve` sets
++> `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE=q8_0` (default); the manager
++> sizes context per-model from live arch data (`/api/show`) and warns on arch-risky
++> models. Built on Slice 6's model discovery. See [Roadmap](#roadmap).
+ 
+ ---
+ 
+ ## What it does (today)
+ 
+ ```sh
+ # Ask a question about a local file. The agent reads the file via a tool and answers.
+ bun run src/cli/chat.ts "What animal is mentioned in /tmp/sample.txt?"
+ ```
+ 
+@@ -34,20 +32,22 @@ Under the hood, one CLI run autonomously:
+ 5. **Records the run** — writes the answer and an append-only journal to
+    `runs/<id>/`.
+ 6. **Unloads the model** to free memory.
+ 
+ No manual steps. No API keys. Everything runs locally.
+ 
+ **Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder populated at runtime by Slice 6 discovery.
+ 
+ **Model discovery (Slice 6).** `bun run discover` fetches the latest tool-capable GGUF (and MLX, when a local MLX server is running) models from Hugging Face (trusted publishers, sized to your live RAM budget), writes a per-machine `model-images/catalog.json`, and pre-pulls the top fitting model. Normal `chat` runs read an **offline** merge of the bootstrap rungs + locally-installed models + the cached catalog — no network needed. A local MLX server (LM Studio / vllm-mlx at `MLX_BASE_URL`) is discovered + used automatically when running. Vision/audio/video and an uncensored mode are typed-in seams shipped in later slices.
+ 
++**KV-cache quantization (Slice 7).** Start with `bun run serve` (sets `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE`, default `q8_0` — flash attention is *required* and not auto-enabled on Apple Silicon). KV cache type is **global** (Ollama limitation), but the manager sizes context **per-model from each model's live architecture** (`/api/show`), so q8_0 yields ~2× context (near-lossless on tolerant architectures) and a generalized advisory warns when an *arch-risky* model (small head_dim / MoE) runs under a quantized cache. Override with `AGENT_KV_CACHE_TYPE=f16|q8_0|q4_0`.
++
+ ---
+ 
+ ## Quick start
+ 
+ **Prerequisites:** [Bun](https://bun.com) ≥ 1.3, [Ollama](https://ollama.com)
+ (running locally), an Apple Silicon Mac, and [`uvx`](https://docs.astral.sh/uv/)
+ (for the keyless web-fetch agent — `uvx mcp-server-fetch`). The unit/mock test
+ suite needs none of these; only the CLI and opt-in live tests do.
+ 
+ ```sh
+@@ -161,21 +161,21 @@ interface — no agent code changes. See
+ ## Roadmap
+ 
+ | Slice | Scope | Status |
+ |---|---|---|
+ | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
+ | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
+ | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
+ | **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation) · best-effort pin (pinned evicted only as last resort) · dynamic `num_ctx` sized from headroom, clamped by live model max, floored at 4096 | ✅ Done |
+ | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
+ | **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline merge of bootstrap + local + catalog at chat time; Ollama + MLX-server runtimes; four-axis taxonomy (capability/modality, runtime, source, content-policy) | ✅ Done |
+-| **Next** | **Slice 7 — KV-cache quantization** (q8_0 default, q4_0 opt-in with high-GQA guard, global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION`) | Planned |
++| **7** | **KV-cache quantization** — global `AGENT_KV_CACHE_TYPE` (default q8_0); `OLLAMA_FLASH_ATTENTION=1` required; per-model arch-derived sizing from `/api/show`; generalized arch-risk advisory (small head_dim / MoE) | ✅ Done |
+ | **Later** | Agent-builder ⭐ (self-extend on a capability gap) · Vision · Audio · Video · Uncensored mode · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
+ 
+ **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
+ daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
+ implementation plans live in [`docs/superpowers/`](docs/superpowers/).
+ 
+ ---
+ 
+ ## Development
+ 
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index afa113a..8005465 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -13,47 +13,56 @@ cycle (the same flow used for Slices 1–5). Order is a recommendation driven by
+ ## Shipped
+ 
+ | Slice | Capability | Status |
+ |---|---|---|
+ | **1** | Local file-Q&A agent · model warm-up/unload · MCP `read_file` · run store | ✅ shipped + live-verified |
+ | **2** | Orchestrator (agents-as-tools) — route to a specialist or report a capability gap | ✅ shipped + live-verified |
+ | **3** | `mountMcpServer` (mount any MCP server) · web-fetch agent (`uvx mcp-server-fetch`) | ✅ shipped + live-verified |
+ | **4** | **Model Manager** — multi-model, hardware-aware: live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation); load/evict/pin within budget; best-effort pin (pinned evicted only as last resort); dynamic `num_ctx` sized from headroom, clamped by live model max (`POST /api/show`), floored at 4096; orchestrator on pinned `qwen3.5:4b`, specialists on `qwen3.5:9b` on demand | ✅ shipped + live-verified |
+ | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; a bootstrap registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` and a non-zero exit instead of a hallucinated answer | ✅ shipped + live-verified |
+ | **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline `buildRegistry` merges bootstrap + local + catalog at chat time; Ollama + MLX-server runtime ports; four-axis taxonomy (capability/modality, runtime, source, content-policy); `hf-gguf` + `hf-mlx` catalog sources; host detector; live discover + MLX verify tests. See spec §11 for committed follow-ons. | ✅ shipped + live-verified |
++| **7** | **KV-cache quantization** — global `AGENT_KV_CACHE_TYPE` (default `q8_0`); `OLLAMA_FLASH_ATTENTION=1` required (not auto-enabled on Apple Silicon); per-model arch-derived sizing from `POST /api/show` (`block_count × head_count_kv × (key+value_length) × 2` × type multiplier); generalized arch-risk advisory (head_dim ≤ 64 / MoE); `AGENT_KV_CACHE_TYPE=f16\|q8_0\|q4_0` override. See committed follow-ons below (spec §6). | ✅ shipped + live-verified |
+ 
+ ## Near-term — resource-manager & model quality line
+ 
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+-| **7** | **KV-cache quantization** — `q8_0` as the default KV-cache type, `q4_0` opt-in with a high-GQA guard (safe only when GQA count is high enough to absorb the quality drop); global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION` env wiring. (See spec §11.) | Slice 6 | Cuts KV-cache RAM by 4× vs fp16 on q4_0; q8_0 default is lossless in practice |
+ | **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
+ 
+ ### Future Work (from Slice 5 brainstorm)
+ 
+ The following items were identified during Slice 5 design (see spec §8) as valuable but deliberately deferred. They are committed for future slices — none are blocking:
+ 
+ - **Global / lookahead scheduler** — today selection is greedy and per-delegation; a planner-aware scheduler with a task DAG could pre-warm models and schedule concurrent delegations globally rather than locally. Depends on a task planner / DAG component.
+ - **Parallel fan-out memory arbitration** — when multiple specialists run concurrently, their combined footprints must be co-scheduled within the live budget. Requires an explicit `maxLoaded` cap on the Model Manager (today the only count ceiling is Ollama's `OLLAMA_MAX_LOADED_MODELS` env default) so concurrency is governed by both RAM headroom and a first-class model-count limit.
+ - **Interactive resource arbitration** ("user takes calls") — when memory is genuinely exhausted and degradation has already bottomed out, surface a user-visible ask before killing non-essential processes. Overlaps with Reclaim (Slice 4.5); design together.
+ - **Quality-ranked selection** — once Slice 6 populates the registry with richer metadata (benchmark scores, eval results), the selector can rank by quality-within-budget rather than pure size. This is the Slice 6 signal.
+ - **Richer registry + discovery** — the current registry is a static bootstrap ladder; Slice 6 replaces it with a per-machine runtime fetch from Hugging Face. Includes per-machine capability metadata, pulled-model tracking, and multi-quantization awareness.
+ - **Router-as-selected** — today the router (`qwen3.5:4b`) is pinned and hardcoded. A future slice could run it through the selector too, so even the routing model is capability-declared and hardware-adaptive.
+ - **Fuller anti-churn / hysteresis** — the warm-aware tie-break in `selectCandidates` is a lightweight first step. A proper hysteresis policy (e.g. don't evict a resident model unless the challenger is significantly better, or a cooldown window after a recent load) would reduce unnecessary model thrashing under oscillating load.
+ 
++## Committed follow-ons from Slice 7 (spec §6)
++
++These items were identified during Slice 7 design as natural next steps. None are blocking the shipped behavior; each requires additional infrastructure listed in Notes.
++
++- **Per-model KV *type* enforcement** — the current global type (Ollama) is the only option available through Ollama's single-server model. Enforcing a different KV type per model requires running separate per-process runtimes (llama.cpp-server, vLLM, or MLX-server); each model would then be routed to its own server instance. No code change is safe until the runtime-port layer (Slice 6) is extended with a per-process lifecycle API.
++- **Reserve-headroom / co-resident KV budgeting** — when multiple specialists run concurrently (parallel fan-out), their combined KV footprints must be co-scheduled. Today each delegation sizes KV independently; a shared reservation table on the Model Manager is needed so KV budgets don't collide under concurrent load.
++- **Context compression (Headroom)** — a separate composed slice that compresses in-context history when the context window fills. Separate from KV quantization; both can be active at once.
++- **Asymmetric K/V quantization** — applying different types to the key and value caches independently (e.g. q4_0 values, q8_0 keys). Currently broken on Apple Silicon Metal backends; deferred until upstream llama.cpp support stabilises.
++- **Server KV-type probe** — a runtime probe (`POST /api/show` or a health endpoint) to read back the *actual* KV cache type the running Ollama server was started with, so the manager can detect mismatches between `AGENT_KV_CACHE_TYPE` and the live server config and warn early.
++
+ ## Committed follow-ons from Slice 6 (spec §11)
+ 
+ These items were identified during Slice 6 design as the natural continuation of the four-axis taxonomy. The `Capability`, `ProviderKind`, and `ContentPolicy` seams are already typed; each slice activates a seam.
+ 
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+-| **7** | **KV-cache quantization** — `q8_0` default KV-cache type; `q4_0` opt-in with a high-GQA guard; global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION` env wiring | Slice 6 | Cuts KV-cache RAM 2–4× vs fp16; guard prevents quality regression on low-GQA models |
+ | **8** | **Vision** — activate the `Capability.Vision` seam; wire a local multimodal model (e.g. Gemma 4, LLaVA) as a specialist; add `hf-gguf` + `hf-mlx` catalog sources filtered by vision capability | Slice 6 | `Capability.Vision` is already declared in `src/core/types.ts` |
+ | **9** | **Audio** — activate `Capability.Audio`; local Whisper STT + TTS specialist; audio agent exposes a `transcribe`/`speak` tool | Slice 8 | Pairs with voice-in/out UX item |
+ | **10** | **Video** — activate `Capability.Video`; local video-description specialist (frame sampling + vision model) | Slice 9 | Resumable long jobs (run store already supports it) |
+ | **11** | **Uncensored mode** — activate `ContentPolicy.Uncensored` seam; add an opt-in uncensored catalog source (trusted publishers, explicit user flag); never the default | Slice 6 | `ContentPolicy` enum is already typed; activation requires explicit opt-in |
+ 
+ Additional committed items (no fixed slice yet):
+ 
+ - **Ollama-native MLX on Mac Mini** — Ollama 0.19+ uses the MLX backend on 32 GB+ Apple Silicon automatically; no code change required; the runtime port means larger MLX-backed Ollama models (e.g. `qwen3.5:14b+`) are picked up by discovery automatically.
+ - **BFCL offline ranking** — integrate Berkeley Function-Calling Leaderboard offline scores as a quality signal in the catalog; the selector then ranks by quality-within-budget rather than pure downloads/size. Depends on Slice 6's richer catalog metadata.
+ 
+@@ -93,23 +102,23 @@ Additional committed items (no fixed slice yet):
+ ## Bigger leaps — the Mac Mini era
+ 
+ - **MLX backend + bigger models** — the Mac Mini (>32 GB unified memory) engages Ollama's MLX backend (Ollama 0.19+) and can host larger specialists (e.g. `qwen3.5:14b`+, `llama4:scout` long-context) that don't fit the 24 GB laptop budget — the Model Manager already budgets to the host, so this is mostly a declaration change.
+ - **Always-on daemon** — the orchestrator as a background service with a task **queue**: fire tasks, collect results later.
+ - **Scheduled / triggered agents** — cron- or event-driven (file added → process it) — the n8n "trigger" concept.
+ - **Multi-machine** — laptop delegates heavy work to the Mac Mini over the network.
+ - **A2A interop** — expose this orchestrator as an agent other tools can call, and consume external agents (Agent2Agent protocol).
+ 
+ ## Recommended priority next
+ 
+-1. **KV-cache quantization (Slice 7)** — immediate RAM savings with no new capabilities required; q8_0 default is safe, q4_0 opt-in with the GQA guard.
+-2. **Agent-builder** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
+-3. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
++1. **Agent-builder** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
++2. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
++3. **Vision (Slice 8)** — first seam activation now that KV-cache quant (Slice 7) is shipped.
+ 
+-(Slices 8–11 [Vision/Audio/Video/Uncensored] follow naturally once KV-cache quant lands; each is a seam activation.)
++(Slices 8–11 [Vision/Audio/Video/Uncensored] follow naturally from Slice 7; each is a seam activation.)
+ 
+ ## Deferred technical items (cross-cutting, fold in opportunistically)
+ 
+ - Declarative **`mcp.json` mount registry** (list servers + which agents get them, loaded at startup) — generalizes Slice 3's in-code mounts.
+ - **Codex** heavy-lifting backup (`@openai/codex-sdk`, personal plan) as an opt-in delegate agent.
+ - Migrate `biome.json` off the deprecated `recommended` field.
+ - **Per-slice Minor review findings** are recorded in `.superpowers/sdd/progress.md` (the SDD ledger) as each slice completes — e.g. run-journal O(n²) append, `runAgent.providerOptions` cross-package type, gap `message` hardcoded English, `ensureReady` post-pull comment. ~~hardcoded `kvBytesPerToken`~~ — **resolved**: `footprint.kvBytesPerToken` is now an optional per-model declaration field with default fallback. Sweep remaining items opportunistically; none are blocking.
+ - **Hardware/context-aware guardrails for deeper composition** (recorded constraint): the agent-graph/parallel-fan-out slices MUST bound delegation depth, add cross-agent cycle detection, reuse warm models (shared-model agents = one resident copy), keep returned answers concise, and schedule concurrency within the Model Manager's budget. Cost compounds ~15× for naive orchestrator-workers, so depth/fan-out are bounded deliberately.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 086186f..253b442 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -134,20 +134,36 @@ rounded to `CTX_ROUNDING = 1024`.
+ 
+ **Control endpoints** via Ollama HTTP: warm = empty-prompt `POST /api/generate`
+ (`stream:false`, with `options:{num_ctx}`); pin = `keep_alive:-1`; unload =
+ `keep_alive:0`; inspect = `GET /api/ps`; model-max probe = `POST /api/show`.
+ Write requests use field `model`; `/api/tags` and `/api/ps` report it as `name`.
+ 
+ **Best-effort pinning:** a pinned model IS evicted as a last resort if it is the
+ only way to fit the target (logged as a warning). `ResourceError` is thrown only
+ when nothing is left to evict.
+ 
++### KV-cache quantization (Slice 7)
++
++KV-cache quantization lets the manager trade a small amount of floating-point precision for a large reduction in KV-cache RAM, which directly increases the context window available per model.
++
++**Global type via `AGENT_KV_CACHE_TYPE` / `serve.sh`.** The KV cache type (`f16`, `q8_0`, or `q4_0`) is a process-global setting in Ollama — it cannot be varied per model without running separate server processes. `scripts/serve.sh` sets `OLLAMA_KV_CACHE_TYPE=q8_0` (the default) and `OLLAMA_FLASH_ATTENTION=1` (flash attention is *required* for quantized KV caches and is *not* auto-enabled on Apple Silicon). The active type is read at runtime via `activeKvCacheType()` (`src/resource/kv-cache.ts`), which reads `AGENT_KV_CACHE_TYPE` and defaults to `q8_0`; unrecognized values fall back to `q8_0`.
++
++**Per-model f16 KV baseline from `/api/show`.** Although the type is global, the *size* of the KV cache is arch-specific. `getModelKvArch()` (`src/resource/ollama-control.ts`) calls `POST /api/show` and extracts four fields from `model_info`: `block_count`, `attention.head_count_kv`, `attention.key_length`, and `attention.value_length`. From these, `f16KvBytesPerToken(arch)` computes the f16 baseline:
++
++```
++f16 KV bytes/token = block_count × head_count_kv × (key_length + value_length) × 2
++```
++
++`effectiveKvBytesPerToken(f16Baseline)` then multiplies by the active type's RAM multiplier (`q8_0` → 0.5, `q4_0` → 0.25, `f16` → 1.0). The Model Manager uses this effective value to size `maxCtxByFit` per delegation — no arch or model-family is hardcoded.
++
++**Arch-derived risk advisory.** `isKvQuantRisky(arch)` flags a model as arch-risky when `key_length ≤ 64` (small head_dim) or `expert_count > 0` (MoE routing). Both conditions are known to degrade more under KV quantization. This check is purely arch-derived — no model-family names appear anywhere. When a risky model is loaded under a quantized cache type, the manager emits a one-line advisory so the operator can override with `AGENT_KV_CACHE_TYPE=f16` if needed.
++
+ ### Dynamic model selection (Slice 5)
+ 
+ **Selector (`src/resource/selector.ts`).** `selectCandidates` (pure: capability hard-filter + largest-that-fits rank + warm-aware tie-break) feeds `resolveModel`, a live fallback loop that walks candidates best-first against `manager.ensureReady` (the single fit-authority); on a `ResourceError` it drops to the next candidate, and throws only when nothing fits. The chosen model is bound lazily at delegation time via `onBeforeDelegate` (`src/cli/select-hook.ts`), which also prints a one-line selection notice (`src/cli/selection-notice.ts`: size · context · footprint · installed-or-pulling · budget) once per new model. Agents declare a capability `ModelRequirement` (`requires` / `prefer`); the registry (`models/registry.ts` = `qwen3.5:4b` + `qwen3.5:9b`) is a machine-adaptive bootstrap ladder — the fits-filter makes bigger rungs inert where they don't fit, and Slice 6 discovery will populate it per-machine at runtime. A genuine no-fit is recorded in a `ResourceCapture` seam (`src/core/resource-capture.ts`) and surfaced by `runOrchestrator` as `{kind:'resource'}` → the CLI prints the message and exits non-zero (no hallucinated answer).
+ 
+ Selection flow:
+ 
+ ```
+ selectCandidates(req, registry, loaded)   ← pure: hard-filter + largest-that-fits + warm tie-break
+   → resolveModel (live fallback loop)
+       → manager.ensureReady(decl)          ← single fit-authority; ResourceError → next candidate
+diff --git a/tests/integration/kv-cache.live.test.ts b/tests/integration/kv-cache.live.test.ts
+new file mode 100644
+index 0000000..0e895e6
+--- /dev/null
++++ b/tests/integration/kv-cache.live.test.ts
+@@ -0,0 +1,14 @@
++import { describe, expect, test } from 'bun:test';
++import qwenFast from '../../models/qwen-fast.ts';
++import { f16KvBytesPerToken } from '../../src/resource/kv-cache.ts';
++import { getModelKvArch } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenFast.model);
++describe.skipIf(!ready)('live KV arch probe', () => {
++  test('reads real KV arch and computes a positive f16 baseline', async () => {
++    const arch = await getModelKvArch(qwenFast.model);
++    expect(arch).toBeDefined();
++    if (arch) expect(f16KvBytesPerToken(arch)).toBeGreaterThan(0);
++  }, 30_000);
++});

@@ -1,0 +1,213 @@
+# Review package: 49be1e9..91a488a
+
+## Commits
+91a488a feat(resource): per-model arch-derived KV sizing + generalized quant-risk advisory
+
+## Files changed
+ src/resource/model-manager.ts           | 36 ++++++++++++++++++++-
+ tests/resource/model-manager-kv.test.ts | 57 +++++++++++++++++++++++++++++++++
+ tests/resource/model-manager.test.ts    |  6 +++-
+ 3 files changed, 97 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+index 2aea70d..6cad76e 100644
+--- a/src/resource/model-manager.ts
++++ b/src/resource/model-manager.ts
+@@ -1,16 +1,19 @@
+ import { ResourceError } from '../core/errors.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
+ import { runtimeFor } from '../runtime/registry.ts';
+ import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
+ import { kvCacheBytes, weightsBytes } from './footprint.ts';
+ import { liveBudgetBytes } from './hardware.ts';
++import {
++  activeKvCacheType, effectiveKvBytesPerToken, f16KvBytesPerToken, isKvQuantRisky, KvCacheType,
++} from './kv-cache.ts';
+ 
+ export const MIN_CTX = 4096;
+ const DEFAULT_KV_PER_TOKEN = 131072;
+ const CTX_ROUNDING = 1024;
+ 
+ export type EnsureOpts = { pinned?: string[] };
+ 
+ /** A live budget figure, or a (sync/async) provider that computes one on demand. */
+ export type BudgetSource = number | (() => number | Promise<number>);
+ 
+@@ -35,38 +38,68 @@ async function resolveBudget(source: BudgetSource): Promise<number> {
+   return typeof source === 'function' ? source() : source;
+ }
+ 
+ /** Loads/unloads models to keep the active + pinned set within the GPU budget. */
+ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
+   const d = deps;
+   const lastUsed = new Map<string, number>();
+   const chosenCtxByModel = new Map<string, number>();
+   const maxCtxByModel = new Map<string, number>();
+   const runtimeByModel = new Map<string, ModelDeclaration>(); // remember how to unload
++  const kvF16ByModel = new Map<string, number>();
++  const kvRiskWarned = new Set<string>();
+   let tick = 0;
+ 
+   async function modelMaxFor(
+     c: RuntimeControl,
+     model: string,
+   ): Promise<number | undefined> {
+     const cached = maxCtxByModel.get(model);
+     if (cached !== undefined) return cached;
+     let probed: number | undefined;
+     try {
+       probed = await c.getModelMax(model);
+     } catch {
+       probed = undefined;
+     }
+     if (probed !== undefined) maxCtxByModel.set(model, probed);
+     return probed;
+   }
+ 
++  async function kvF16For(
++    c: RuntimeControl,
++    model: string,
++    decl: ModelDeclaration,
++  ): Promise<number> {
++    const cached = kvF16ByModel.get(model);
++    if (cached !== undefined) return cached;
++    let arch: Awaited<ReturnType<RuntimeControl['getModelKvArch']>>;
++    try {
++      arch = await c.getModelKvArch(model);
++    } catch {
++      arch = undefined;
++    }
++    if (arch) {
++      // generalized, arch-derived risk advisory (type is global, so this is informational)
++      const type = activeKvCacheType();
++      if (type !== KvCacheType.F16 && isKvQuantRisky(arch) && !kvRiskWarned.has(model)) {
++        kvRiskWarned.add(model);
++        d.warn(
++          `[model-manager] ${model}: arch (small head_dim / MoE) may lose accuracy under ${type} KV cache; set AGENT_KV_CACHE_TYPE=f16 if quality matters for it.`,
++        );
++      }
++    }
++    const f16 = arch ? f16KvBytesPerToken(arch) : (decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN);
++    kvF16ByModel.set(model, f16);
++    return f16;
++  }
++
+   async function ensureReady(
+     decl: ModelDeclaration,
+     opts: EnsureOpts = {},
+   ): Promise<number> {
+     const c = d.controlFor(decl);
+     const pinned = new Set(opts.pinned ?? []);
+     const target = decl.model;
+     const desired = decl.params.numCtx ?? MIN_CTX;
+ 
+     if (!(await c.isInstalled(target))) await c.pull(target);
+@@ -74,21 +107,22 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
+     let loaded = await c.listLoaded();
+     if (loaded.some((m) => m.name === target)) {
+       lastUsed.set(target, ++tick);
+       return chosenCtxByModel.get(target) ?? desired;
+     }
+ 
+     const weights = weightsBytes(
+       decl.footprint.approxParamsBillions,
+       decl.footprint.bytesPerWeight,
+     );
+-    const kvPerToken = decl.footprint.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN;
++    const f16Base = await kvF16For(c, target, decl);
++    const kvPerToken = effectiveKvBytesPerToken(f16Base);
+     const minNeed = weights + kvCacheBytes(MIN_CTX, kvPerToken);
+     const freeBudget = await resolveBudget(d.budgetBytes);
+     const gb = (bytes: number) => Math.round(bytes / 1e9);
+ 
+     const lru = (a: LoadedModel, b: LoadedModel) =>
+       (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1);
+ 
+     // Fit the model at its minimum context; evicting returns real bytes to headroom.
+     let headroom = freeBudget;
+     while (minNeed > headroom) {
+diff --git a/tests/resource/model-manager-kv.test.ts b/tests/resource/model-manager-kv.test.ts
+new file mode 100644
+index 0000000..37d7fe7
+--- /dev/null
++++ b/tests/resource/model-manager-kv.test.ts
+@@ -0,0 +1,57 @@
++import { afterEach, expect, mock, test } from 'bun:test';
++import { ProviderKind } from '../../src/core/types.ts';
++import type { ModelDeclaration } from '../../src/core/types.ts';
++import { createModelManager, MIN_CTX } from '../../src/resource/model-manager.ts';
++import type { KvArch } from '../../src/resource/kv-cache.ts';
++import type { RuntimeControl } from '../../src/runtime/runtime.ts';
++
++afterEach(() => { delete process.env.AGENT_KV_CACHE_TYPE; });
++
++const arch: KvArch = { blockCount: 32, headCountKv: 8, keyLength: 128, valueLength: 128, expertCount: 0 };
++function control(over: Partial<RuntimeControl> = {}): RuntimeControl {
++  return {
++    isInstalled: mock(async () => true),
++    pull: mock(async () => {}),
++    warm: mock(async () => {}),
++    unload: mock(async () => {}),
++    listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
++    getModelMax: mock(async () => 262144),
++    getModelKvArch: mock(async () => arch),
++    ...over,
++  };
++}
++function decl(numCtx: number): ModelDeclaration {
++  return { provider: ProviderKind.Ollama, model: 'm', params: { numCtx }, role: 't',
++    footprint: { approxParamsBillions: 1, bytesPerWeight: 0 } }; // weights 0 → all headroom is KV
++}
++
++test('q8_0 doubles chosenCtx vs f16 for the same budget (per-model arch baseline)', async () => {
++  const c = control();
++  const f16KvPerTok = arch.blockCount * arch.headCountKv * (arch.keyLength + arch.valueLength) * 2; // 32*8*256*2
++  const budget = f16KvPerTok * 8192; // exactly 8192 tokens at f16
++  process.env.AGENT_KV_CACHE_TYPE = 'f16';
++  const ctxF16 = await createModelManager({ budgetBytes: budget, warn: () => {}, controlFor: () => c })
++    .ensureReady(decl(1_000_000));
++  process.env.AGENT_KV_CACHE_TYPE = 'q8_0';
++  const ctxQ8 = await createModelManager({ budgetBytes: budget, warn: () => {}, controlFor: () => c })
++    .ensureReady(decl(1_000_000));
++  expect(ctxF16).toBe(8192);
++  expect(ctxQ8).toBe(16384); // ~2× under q8_0
++});
++
++test('arch-risky model under a quantized type triggers a one-time advisory', async () => {
++  process.env.AGENT_KV_CACHE_TYPE = 'q8_0';
++  const warn = mock((_: string) => {});
++  const c = control({ getModelKvArch: mock(async () => ({ ...arch, keyLength: 64, valueLength: 64 })) }); // small head_dim
++  await createModelManager({ budgetBytes: 100e9, warn, controlFor: () => c }).ensureReady(decl(8192));
++  expect(warn).toHaveBeenCalled();
++  expect((warn.mock.calls[0]?.[0] ?? '')).toContain('KV');
++});
++
++test('probe failure falls back to the 131072 f16 baseline (no throw)', async () => {
++  process.env.AGENT_KV_CACHE_TYPE = 'f16';
++  const c = control({ getModelKvArch: mock(async () => undefined) });
++  const budget = 131072 * 4096; // exactly MIN_CTX at the default baseline
++  const ctx = await createModelManager({ budgetBytes: budget, warn: () => {}, controlFor: () => c }).ensureReady(decl(1_000_000));
++  expect(ctx).toBe(MIN_CTX);
++});
+diff --git a/tests/resource/model-manager.test.ts b/tests/resource/model-manager.test.ts
+index 73e6ea0..521fc99 100644
+--- a/tests/resource/model-manager.test.ts
++++ b/tests/resource/model-manager.test.ts
+@@ -1,11 +1,15 @@
+-import { expect, mock, test } from 'bun:test';
++import { afterAll, beforeAll, expect, mock, test } from 'bun:test';
++
++let __prevKv: string | undefined;
++beforeAll(() => { __prevKv = process.env.AGENT_KV_CACHE_TYPE; process.env.AGENT_KV_CACHE_TYPE = 'f16'; });
++afterAll(() => { if (__prevKv === undefined) delete process.env.AGENT_KV_CACHE_TYPE; else process.env.AGENT_KV_CACHE_TYPE = __prevKv; });
+ import { ResourceError } from '../../src/core/errors.ts';
+ import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
+ import {
+   createModelManager,
+   MIN_CTX,
+ } from '../../src/resource/model-manager.ts';
+ import type { RuntimeControl } from '../../src/runtime/runtime.ts';
+ 
+ function decl(model: string, b: number): ModelDeclaration {
+   return {

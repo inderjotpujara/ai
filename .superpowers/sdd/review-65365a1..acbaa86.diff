@@ -1,0 +1,144 @@
+# Review package: 65365a1..acbaa86
+
+## Commits
+acbaa86 feat(runtime): Runtime port + Ollama runtime + runtime registry (MLX stub)
+
+## Files changed
+ src/runtime/mlx-server.ts      | 17 +++++++++++++++++
+ src/runtime/ollama.ts          | 30 ++++++++++++++++++++++++++++++
+ src/runtime/registry.ts        | 17 +++++++++++++++++
+ src/runtime/runtime.ts         | 23 +++++++++++++++++++++++
+ tests/runtime/registry.test.ts | 13 +++++++++++++
+ 5 files changed, 100 insertions(+)
+
+## Diff
+diff --git a/src/runtime/mlx-server.ts b/src/runtime/mlx-server.ts
+new file mode 100644
+index 0000000..18dc0f9
+--- /dev/null
++++ b/src/runtime/mlx-server.ts
+@@ -0,0 +1,17 @@
++// src/runtime/mlx-server.ts (stub; Task 3 implements)
++import { ProviderKind } from '../core/types.ts';
++import type { Runtime } from './runtime.ts';
++
++export const mlxServerRuntime: Runtime = {
++  kind: ProviderKind.MlxServer,
++  isAvailable: async () => false,
++  createModel: () => { throw new Error('MLX runtime not implemented'); },
++  control: {
++    isInstalled: async () => false,
++    pull: async () => { throw new Error('MLX pull not implemented'); },
++    warm: async () => {},
++    unload: async () => {},
++    listLoaded: async () => [],
++    getModelMax: async () => undefined,
++  },
++};
+diff --git a/src/runtime/ollama.ts b/src/runtime/ollama.ts
+new file mode 100644
+index 0000000..c11c9dc
+--- /dev/null
++++ b/src/runtime/ollama.ts
+@@ -0,0 +1,30 @@
++import { ProviderKind } from '../core/types.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import {
++  getModelMaxContext, isModelInstalled, listLoadedModels,
++  pullModel, unloadModel, warmModel,
++} from '../resource/ollama-control.ts';
++import type { Runtime } from './runtime.ts';
++
++const BASE = 'http://localhost:11434';
++
++export const ollamaRuntime: Runtime = {
++  kind: ProviderKind.Ollama,
++  async isAvailable() {
++    try {
++      const res = await fetch(`${BASE}/api/version`, { signal: AbortSignal.timeout(1500) });
++      return res.ok;
++    } catch {
++      return false;
++    }
++  },
++  createModel: (decl) => createOllamaModel(decl),
++  control: {
++    isInstalled: (m) => isModelInstalled(m),
++    pull: (m) => pullModel(m),
++    warm: (m, n) => warmModel(m, n),
++    unload: (m) => unloadModel(m),
++    listLoaded: () => listLoadedModels(),
++    getModelMax: (m) => getModelMaxContext(m),
++  },
++};
+diff --git a/src/runtime/registry.ts b/src/runtime/registry.ts
+new file mode 100644
+index 0000000..13cc5ec
+--- /dev/null
++++ b/src/runtime/registry.ts
+@@ -0,0 +1,17 @@
++import type { ProviderKind } from '../core/types.ts';
++import { mlxServerRuntime } from './mlx-server.ts';
++import { ollamaRuntime } from './ollama.ts';
++import type { Runtime } from './runtime.ts';
++
++export const RUNTIMES: Runtime[] = [ollamaRuntime, mlxServerRuntime];
++
++export function runtimeFor(kind: ProviderKind): Runtime {
++  const rt = RUNTIMES.find((r) => r.kind === kind);
++  if (!rt) throw new Error(`No runtime registered for provider ${kind}`);
++  return rt;
++}
++
++export async function availableRuntimes(): Promise<Runtime[]> {
++  const flags = await Promise.all(RUNTIMES.map((r) => r.isAvailable()));
++  return RUNTIMES.filter((_, i) => flags[i]);
++}
+diff --git a/src/runtime/runtime.ts b/src/runtime/runtime.ts
+new file mode 100644
+index 0000000..f48eeed
+--- /dev/null
++++ b/src/runtime/runtime.ts
+@@ -0,0 +1,23 @@
++import type { LanguageModel } from 'ai';
++import type { ModelDeclaration, ProviderKind } from '../core/types.ts';
++import type { LoadedModel } from '../resource/ollama-control.ts';
++
++export type { LoadedModel };
++
++/** Lifecycle the Model Manager drives, abstracted per runtime. */
++export type RuntimeControl = {
++  isInstalled(model: string): Promise<boolean>;
++  pull(model: string): Promise<void>;
++  warm(model: string, numCtx?: number): Promise<void>;
++  unload(model: string): Promise<void>;
++  listLoaded(): Promise<LoadedModel[]>;
++  getModelMax(model: string): Promise<number | undefined>;
++};
++
++/** A model runtime: builds AI-SDK models and owns their lifecycle + availability. */
++export type Runtime = {
++  kind: ProviderKind;
++  isAvailable(): Promise<boolean>;
++  createModel(decl: ModelDeclaration): LanguageModel;
++  control: RuntimeControl;
++};
+diff --git a/tests/runtime/registry.test.ts b/tests/runtime/registry.test.ts
+new file mode 100644
+index 0000000..0c3a991
+--- /dev/null
++++ b/tests/runtime/registry.test.ts
+@@ -0,0 +1,13 @@
++import { expect, test } from 'bun:test';
++import { ProviderKind } from '../../src/core/types.ts';
++import { runtimeFor } from '../../src/runtime/registry.ts';
++
++test('runtimeFor returns the Ollama runtime', () => {
++  const rt = runtimeFor(ProviderKind.Ollama);
++  expect(rt.kind).toBe(ProviderKind.Ollama);
++  expect(typeof rt.control.isInstalled).toBe('function');
++  expect(typeof rt.createModel).toBe('function');
++});
++test('runtimeFor throws on an unknown kind', () => {
++  expect(() => runtimeFor('nope' as ProviderKind)).toThrow();
++});

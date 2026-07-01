@@ -1,0 +1,176 @@
+# Review package: c900d03..91a44d8
+
+## Commits
+91a44d8 feat(crew): typed crew model + CrewError
+
+## Files changed
+ docs/architecture.md      | 12 ++++++++++++
+ src/core/errors.ts        |  3 +++
+ src/crew/types.ts         | 48 +++++++++++++++++++++++++++++++++++++++++++++++
+ tests/crew/errors.test.ts | 11 +++++++++++
+ 4 files changed, 74 insertions(+)
+
+## Diff
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 8b1e155..35992a6 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -76,20 +76,25 @@ graph TD
+     subgraph RUN["Run store · src/run"]
+         runstore["run-store.ts"]
+         runtrace["run-trace.ts"]
+     end
+     subgraph WF["Workflow · src/workflow"]
+         wftypes["types.ts · StepKind"]
+         wfdefine["define.ts · defineWorkflow"]
+         wfengine["engine.ts · runWorkflow"]
+         wfrunstep["run-step.ts · runStepByKind"]
+     end
++    subgraph CREW["Crew · src/crew"]
++        crewtypes["types.ts · CrewMember/Task/CrewProcess"]
++        crewengine["engine.ts · runCrew"]
++        crewrunner["runner.ts · roleDispatch"]
++    end
+     subgraph DATA["On-disk · git-ignored"]
+         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
+         images[("model-images/ + catalog.json")]
+     end
+     subgraph DECL["Declarations (pure data)"]
+         agents["agents/*"]
+         models["models/* · BOOTSTRAP"]
+         workflows["workflows/* · WORKFLOWS"]
+     end
+ 
+@@ -129,36 +134,43 @@ graph TD
+     flow --> wfengine
+     flow --> runstore
+     flow -. mounts .-> mcpclient
+     flow --> agents
+     flow --> workflows
+     wfengine --> wfrunstep
+     wfrunstep --> delegate
+     wfengine --> spans
+     wfrunstep --> spans
+     wfdefine --> wftypes
++    crewengine --> crewrunner
++    crewrunner --> sel
++    crewengine --> spans
++    crewrunner --> spans
++    crewengine --> delegate
++    crewtypes --> wftypes
+     runstore --> spansfile
+ ```
+ 
+ | Layer | Files | Responsibility | Knows about |
+ |---|---|---|---|
+ | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
+ | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+ | **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
+ | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
++| **Crew / Roles** | `src/crew/` | Team-of-agents orchestration layer (Slice 11): typed crew model + process definition (`types.ts`), execution engine for sequential/hierarchical teams (`engine.ts`), role-based agent selection and task dispatch (`runner.ts`) | `core/delegate.ts` + `workflow/engine.ts` + `resource/selector.ts` |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+ ## 3. Runtime data flow (one `chat` run, current)
+ 
+ ```mermaid
+ sequenceDiagram
+     actor User
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+index cd8de67..71ae338 100644
+--- a/src/core/errors.ts
++++ b/src/core/errors.ts
+@@ -19,10 +19,13 @@ export class MaxStepsError extends FrameworkError {
+     super(message);
+     this.steps = steps;
+   }
+ }
+ 
+ /** A model cannot fit the machine's memory budget. */
+ export class ResourceError extends FrameworkError {}
+ 
+ /** A workflow definition or execution error. */
+ export class WorkflowError extends FrameworkError {}
++
++/** A crew definition or execution error. */
++export class CrewError extends FrameworkError {}
+diff --git a/src/crew/types.ts b/src/crew/types.ts
+new file mode 100644
+index 0000000..e611f9c
+--- /dev/null
++++ b/src/crew/types.ts
+@@ -0,0 +1,48 @@
++import type { ToolSet } from 'ai';
++import type { z } from 'zod';
++import type {
++  Capability,
++  ModelDeclaration,
++  PreferPolicy,
++} from '../core/types.ts';
++
++/** A role-bearing team member. role/goal/backstory are prompt scaffolding;
++ *  the concrete model is resolved live by the selector from requires/prefer. */
++export type CrewMember = {
++  name: string; // stable id; used as the agent name + delegate tool name
++  role: string; // e.g. "Senior Research Analyst"
++  goal: string; // the member's individual objective
++  backstory: string; // persona/context that enriches its prompt
++  requires: Capability[]; // capability hard-filter for live model selection
++  prefer: PreferPolicy; // soft rank over survivors
++  tools?: ToolSet; // optional tools this member can call
++};
++
++/** A unit of work assigned to a member. expectedOutput is prompt guidance;
++ *  output (optional) is the enforced zod schema for typed hand-offs. */
++export type Task<O = unknown> = {
++  id: string;
++  description: string; // what to do (prompt)
++  expectedOutput: string; // what good output looks like (prompt guidance)
++  member: string; // CrewMember.name that runs this task
++  dependsOn?: string[]; // upstream task ids whose outputs are context
++  output?: z.ZodType<O>; // optional structured output; validated if present
++};
++
++export enum CrewProcess {
++  Sequential = 'sequential',
++  Hierarchical = 'hierarchical',
++}
++
++export type CrewDef = {
++  id: string;
++  description?: string;
++  members: CrewMember[];
++  tasks: Task[];
++  process: CrewProcess;
++  managerModel?: ModelDeclaration; // hierarchical only; defaults to the router
++};
++
++export type CrewOutcome =
++  | { kind: 'done'; output: unknown }
++  | { kind: 'failed'; failedTask?: string; message: string };
+diff --git a/tests/crew/errors.test.ts b/tests/crew/errors.test.ts
+new file mode 100644
+index 0000000..fcbbc1e
+--- /dev/null
++++ b/tests/crew/errors.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, it } from 'bun:test';
++import { CrewError } from '../../src/core/errors.ts';
++
++describe('CrewError', () => {
++  it('is an Error with the right name', () => {
++    const e = new CrewError('bad crew');
++    expect(e).toBeInstanceOf(Error);
++    expect(e.name).toBe('CrewError');
++    expect(e.message).toBe('bad crew');
++  });
++});

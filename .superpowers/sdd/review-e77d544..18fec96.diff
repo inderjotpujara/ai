@@ -1,0 +1,170 @@
+# Review package: e77d544..18fec96
+
+## Commits
+18fec96 feat(telemetry): workflow.run/workflow.step spans + annotateStep
+
+## Files changed
+ docs/architecture.md                   |  6 ++++--
+ src/telemetry/spans.ts                 | 37 ++++++++++++++++++++++++++++++++++
+ tests/telemetry/workflow-spans.test.ts | 27 +++++++++++++++++++++++++
+ 3 files changed, 68 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 9a3c179..d976dbc 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -226,21 +226,21 @@ Global type via `AGENT_KV_CACHE_TYPE` (default `q8_0`) + `OLLAMA_FLASH_ATTENTION
+ We use **llama.cpp through Ollama** — it wraps the engine (and Apple MLX on 32 GB+ Macs) and adds model management (`pull`/`ps`, auto-quant), an HTTP control API the resource manager drives, tool-calling, and a clean AI SDK provider. Because the model layer is runtime-agnostic, Ollama is just the default **Tier-1 adapter**; a raw `llama.cpp-server` or dedicated MLX-server can slot behind the same `Runtime` interface with no agent code change.
+ 
+ ---
+ 
+ ## 7. Observability — telemetry & run-viewer (Slice 8)
+ 
+ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewable with a terminal run-viewer. This is the **extensible layer every later feature emits into** (the "observable by default" principle).
+ 
+ - **`provider.ts`** — `initRunTelemetry(runDir)` registers a per-run, Bun-safe `BasicTracerProvider` + `AsyncLocalStorageContextManager` (no Node auto-instrumentation), and processors via `buildProcessors`: a `JsonlFileExporter` always, **plus** an OTLP/HTTP exporter when `AGENT_OTLP_ENDPOINT` is set (the swappable-backend seam → Jaeger/Tempo/Phoenix). `recordIoEnabled()` gates prompt/response capture (`AGENT_TELEMETRY_RECORD_IO`).
+ - **`jsonl-exporter.ts`** — a `SpanExporter` serializing each span to one JSON line (`SpanRecord`); writes are serialized through a promise chain and **flushed on `shutdown()`** so `spans.jsonl` is never truncated.
+-- **`spans.ts`** — the API: the **`ATTR`** key registry + helpers `withRunSpan` / `setRunOutcome` / `withDelegationSpan` / `recordModelSelect` / `withModelLoadSpan` / `recordEvict` / `recordGuardrailViolation`. **AI-SDK** `experimental_telemetry` (enabled per `generateText` with `functionId = agent.name`) contributes `ai.generateText` / `ai.toolCall` / token spans for free, nested under our manual spans via the active context.
++- **`spans.ts`** — the API: the **`ATTR`** key registry + helpers `withRunSpan` / `setRunOutcome` / `withDelegationSpan` / `recordModelSelect` / `withModelLoadSpan` / `recordEvict` / `recordGuardrailViolation` / `withWorkflowSpan` / `withStepSpan` / `annotateStep` (the last three back the workflow/DAG engine, §9). **AI-SDK** `experimental_telemetry` (enabled per `generateText` with `functionId = agent.name`) contributes `ai.generateText` / `ai.toolCall` / token spans for free, nested under our manual spans via the active context.
+ 
+ **Run-viewer** (`bun run runs`, `src/cli/runs.ts`): `runs` lists runs (newest-first); `runs <id>` renders the span tree as an indented timeline (model · duration · tokens · outcome); `--follow` tails the live run. Reader/renderer are pure (`src/run/run-trace.ts` `readSpans`/`buildTree`/`summarizeRun`; `src/cli/render-trace.ts`). `journal.jsonl` is retired — `spans.jsonl` is canonical; `answer/gap/resource.txt` artifacts remain.
+ 
+ **Extending telemetry (standing rule):** a new subsystem adds a `withXSpan`/`recordX` helper + `ATTR` keys here — the transport (provider/exporter) and the OTLP seam are untouched, and both the local viewer and any backend get the new signal for free.
+ 
+ ---
+ 
+ ## 8. Composition guardrails (Slice 9)
+ 
+ The safe-composition foundation for the future workflow/crew engine. Each delegation is a fresh, isolated `generateText` instance, so the risks are **non-termination** and **cost**, not state corruption — both bounded by depth. Backed by an `AsyncLocalStorage<DelegationContext>` (`{depth, ancestors, numCtx}`) in `src/core/guardrails.ts`, enforced at the single delegation chokepoint (`delegate.ts`).
+@@ -260,21 +260,23 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
+   - `enum StepKind { Agent, Tool, Branch, Map }` — the four step kinds
+   - `WorkflowContext` — thread of `{stepId: output}` through a run; maps + branches thread `item`/`index`
+   - Step variants: `AgentStep` (run an agent, input is a prompt), `ToolStep` (call a tool, input is args), `BranchStep` (if-then-else on a predicate), `MapStep` (fan-out per item in a list, run sub-step once per item)
+   - `StepError` — per-step failure policy: `'fail'` (fast), `'continue'` (skip on error), `{ fallback }` (use a fallback value)
+   - `WorkflowDef` — a named list of steps + metadata
+   - `WorkflowOutcome` — `{ kind: 'done', output }` or `{ kind: 'failed', failedStep, message }`
+   - `effectiveDeps(step, index, steps)` — helper: explicit `dependsOn` or implicit previous-step deps
+ 
+ - **Error class** (`src/core/errors.ts`): `WorkflowError extends FrameworkError` for workflow-specific failures (bad definition, step failure, context mismatch)
+ 
+-Execution engine (`src/workflow/engine.ts` — later tasks) will traverse the DAG, thread context, validate outputs, and handle failures per policy. Every step emission will produce `agent.workflow.*` spans (one per step, one per branch taken, one per map iteration).
++- **Telemetry** (`src/telemetry/spans.ts`) — extended per the standing rule (§7): `withWorkflowSpan(workflowId, fn)` opens the root `workflow.run` span (`ATTR.WORKFLOW_ID`); `withStepSpan(stepId, kind, fn)` opens a nested `workflow.step` span per step (`ATTR.STEP_ID` / `ATTR.STEP_KIND`); `annotateStep(attrs)` tags the active step span with extra attributes (`ATTR.STEP_BRANCH_TAKEN` for the branch taken, `ATTR.STEP_MAP_COUNT` for map fan-out size); `ATTR.WORKFLOW_OUTCOME` records the terminal `WorkflowOutcome`. These are the spans/attrs the execution engine (Task 6) and CLI (Task 7) emit into — transport untouched, so the run-viewer and any OTLP backend get workflow signal for free.
++
++Execution engine (`src/workflow/engine.ts` — later tasks) will traverse the DAG, thread context, validate outputs, and handle failures per policy using the spans above (one `workflow.step` per step, `STEP_BRANCH_TAKEN`/`STEP_MAP_COUNT` per branch/map).
+ 
+ ---
+ 
+ ## 10. On-disk stores
+ 
+ - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
+ - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
+ 
+ ---
+ 
+diff --git a/src/telemetry/spans.ts b/src/telemetry/spans.ts
+index 8536c56..75b8403 100644
+--- a/src/telemetry/spans.ts
++++ b/src/telemetry/spans.ts
+@@ -19,20 +19,26 @@ export const ATTR = {
+   MODEL_KV_CACHE_TYPE: 'model.kv_cache_type',
+   MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
+   MODEL_BUDGET_BYTES: 'model.budget_bytes',
+   MODEL_SIZE_BYTES: 'model.size_bytes',
+   EVICT_REASON: 'model.evict.reason',
+   USAGE_INPUT_TOKENS: 'gen_ai.usage.input_tokens',
+   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
+   GUARDRAIL_TYPE: 'agent.guardrail.type',
+   DELEGATION_DEPTH: 'agent.delegation.depth',
+   DELEGATION_ANCESTORS: 'agent.delegation.ancestors',
++  WORKFLOW_ID: 'workflow.id',
++  WORKFLOW_OUTCOME: 'workflow.outcome',
++  STEP_ID: 'workflow.step.id',
++  STEP_KIND: 'workflow.step.kind',
++  STEP_BRANCH_TAKEN: 'workflow.step.branch.taken',
++  STEP_MAP_COUNT: 'workflow.step.map.count',
+ } as const;
+ 
+ export type ModelSelectInfo = {
+   modelId: string;
+   provider: string;
+   numCtx: number;
+   paramsBillions?: number;
+ };
+ 
+ export type ModelLoadInfo = {
+@@ -165,10 +171,41 @@ export function recordGuardrailViolation(
+   type: 'depth_exceeded',
+   detail: string,
+ ): void {
+   const span = trace.getActiveSpan();
+   if (!span) return;
+   span.addEvent('agent.guardrail.violation', {
+     [ATTR.GUARDRAIL_TYPE]: type,
+     'agent.guardrail.detail': detail,
+   });
+ }
++
++/** Root span for a workflow run. Mirrors withRunSpan but for the DAG engine. */
++export function withWorkflowSpan<T>(
++  workflowId: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('workflow.run', async (span) => {
++    span.setAttribute(ATTR.WORKFLOW_ID, workflowId);
++    return fn();
++  });
++}
++
++/** Span for a single workflow step, tagged with its id + kind. */
++export function withStepSpan<T>(
++  stepId: string,
++  kind: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('workflow.step', async (span) => {
++    span.setAttribute(ATTR.STEP_ID, stepId);
++    span.setAttribute(ATTR.STEP_KIND, kind);
++    return fn();
++  });
++}
++
++/** Set extra attributes on the active step span (branch decision, map count). */
++export function annotateStep(attrs: Record<string, string | number>): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
++}
+diff --git a/tests/telemetry/workflow-spans.test.ts b/tests/telemetry/workflow-spans.test.ts
+new file mode 100644
+index 0000000..b6d6153
+--- /dev/null
++++ b/tests/telemetry/workflow-spans.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'bun:test';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++import {
++  ATTR,
++  annotateStep,
++  withStepSpan,
++  withWorkflowSpan,
++} from '../../src/telemetry/spans.ts';
++
++describe('workflow spans', () => {
++  it('nests workflow.step under workflow.run with id/kind attrs', async () => {
++    const { exporter } = registerTestProvider();
++    await withWorkflowSpan('wf-demo', async () => {
++      await withStepSpan('s1', 'agent', async () => {
++        annotateStep({ [ATTR.STEP_MAP_COUNT]: 3 });
++      });
++    });
++    const spans = exporter.getFinishedSpans();
++    const run = spans.find((s) => s.name === 'workflow.run');
++    const step = spans.find((s) => s.name === 'workflow.step');
++    expect(run?.attributes[ATTR.WORKFLOW_ID]).toBe('wf-demo');
++    expect(step?.attributes[ATTR.STEP_ID]).toBe('s1');
++    expect(step?.attributes[ATTR.STEP_KIND]).toBe('agent');
++    expect(step?.attributes[ATTR.STEP_MAP_COUNT]).toBe(3);
++    expect(step?.parentSpanContext?.spanId).toBe(run?.spanContext().spanId);
++  });
++});

@@ -1,0 +1,296 @@
+# Review package: 68c54c1..152ad56
+
+## Commits
+152ad56 fix(core): detect capability gap even when runAgent hits step ceiling; harden routing prompt; drop dead DelegationError
+
+## Files changed
+ src/core/agent.ts               |  1 +
+ src/core/errors.ts              | 11 +++++++----
+ src/core/orchestrator.ts        | 34 +++++++++++++++++++++++++++++++--
+ tests/cli/run-chat.test.ts      | 39 ++++++++++++++++++++++++++++++++++++++
+ tests/core/errors.test.ts       | 13 +------------
+ tests/core/orchestrator.test.ts | 42 +++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 122 insertions(+), 18 deletions(-)
+
+## Diff
+diff --git a/src/core/agent.ts b/src/core/agent.ts
+index c304f57..ab0d81d 100644
+--- a/src/core/agent.ts
++++ b/src/core/agent.ts
+@@ -30,14 +30,15 @@ export async function runAgent(input: RunAgentInput): Promise<{
+     prompt: input.prompt,
+     tools: input.tools,
+     temperature: input.temperature,
+     providerOptions: input.providerOptions,
+     stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
+   });
+   const { text, finishReason, steps } = result;
+   if (text.trim() === '' && finishReason !== 'stop') {
+     throw new MaxStepsError(
+       `Agent exhausted step ceiling (${steps.length} steps) without producing a final answer.`,
++      steps,
+     );
+   }
+   return { text, steps };
+ }
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+index 71dca4b..31c05ef 100644
+--- a/src/core/errors.ts
++++ b/src/core/errors.ts
+@@ -6,17 +6,20 @@ class FrameworkError extends Error {
+   }
+ }
+ 
+ /** A model provider/runtime failed (e.g. Ollama unreachable). */
+ export class ProviderError extends FrameworkError {}
+ 
+ /** A tool failed in a way the loop could not recover from. */
+ export class ToolError extends FrameworkError {}
+ 
+ /** The agent loop hit its step ceiling without finishing. */
+-export class MaxStepsError extends FrameworkError {}
++export class MaxStepsError extends FrameworkError {
++  readonly steps: unknown[];
++  constructor(message: string, steps: unknown[] = []) {
++    super(message);
++    this.steps = steps;
++  }
++}
+ 
+ /** A model cannot fit the machine's memory budget. */
+ export class ResourceError extends FrameworkError {}
+-
+-/** A delegated sub-agent run failed irrecoverably. */
+-export class DelegationError extends FrameworkError {}
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+index ef5158f..2527438 100644
+--- a/src/core/orchestrator.ts
++++ b/src/core/orchestrator.ts
+@@ -1,29 +1,32 @@
+ import type { LanguageModel, ToolSet } from 'ai';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ import {
+   CAPABILITY_GAP_TOOL,
+   capabilityGapTool,
+   findCapabilityGap,
+ } from './capability-gap.ts';
+ import { asDelegateTool, delegateToolName } from './delegate.ts';
++import { MaxStepsError } from './errors.ts';
+ 
+ export type OrchestratorResult =
+   | { kind: 'answer'; text: string }
+   | { kind: 'gap'; missingCapability: string; message: string };
+ 
+ /** Build the orchestrator's system prompt: routing rules + the agent catalog. */
+ export function buildRoutingPrompt(
+   basePrompt: string,
+   agents: Agent[],
+ ): string {
+-  const catalog = agents.map((a) => `- ${a.name}: ${a.description}`).join('\n');
++  const catalog = agents
++    .map((a) => `- ${delegateToolName(a)}: ${a.description}`)
++    .join('\n');
+   return [
+     basePrompt,
+     '',
+     'Available agents:',
+     catalog,
+     '',
+     'Understand the user intent. If an agent fits, call its delegate_to_<name> tool with the task.',
+     `If NO agent can handle it, call ${CAPABILITY_GAP_TOOL} with the missing capability.`,
+     'Never attempt the task yourself.',
+   ].join('\n');
+@@ -48,21 +51,48 @@ export function createOrchestrator(opts: {
+     systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
+     tools,
+   };
+ }
+ 
+ /** Run the orchestrator; return either the answer or a reported capability gap. */
+ export async function runOrchestrator(
+   orchestrator: Agent,
+   task: string,
+ ): Promise<OrchestratorResult> {
+-  const { text, steps } = await runDefinedAgent(orchestrator, task);
++  let text: string;
++  let steps: Parameters<typeof findCapabilityGap>[0];
++
++  try {
++    const result = await runDefinedAgent(orchestrator, task);
++    text = result.text;
++    steps = result.steps;
++  } catch (err) {
++    if (err instanceof MaxStepsError) {
++      // Intentional: if report_capability_gap was called during the run, the
++      // result is classified as kind:'gap' (gap takes precedence) regardless of
++      // whether the agent produced any delegate output or final text.
++      const gap = findCapabilityGap(
++        err.steps as Parameters<typeof findCapabilityGap>[0],
++      );
++      if (gap) {
++        return {
++          kind: 'gap',
++          missingCapability: gap.missingCapability,
++          message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
++        };
++      }
++    }
++    throw err;
++  }
++
++  // Intentional: if report_capability_gap was called in the run, the result is
++  // classified as kind:'gap' (gap takes precedence) regardless of any delegate output.
+   const gap = findCapabilityGap(steps);
+   if (gap) {
+     return {
+       kind: 'gap',
+       missingCapability: gap.missingCapability,
+       message: `I don't have a capability to handle this yet: ${gap.missingCapability}.`,
+     };
+   }
+   return { kind: 'answer', text };
+ }
+diff --git a/tests/cli/run-chat.test.ts b/tests/cli/run-chat.test.ts
+index fd8046d..dab688c 100644
+--- a/tests/cli/run-chat.test.ts
++++ b/tests/cli/run-chat.test.ts
+@@ -71,10 +71,49 @@ test('runChat records a gap run and writes the gap artifact', async () => {
+     runsRoot: root,
+     runId: 'run-1',
+   });
+   expect(result.kind).toBe('gap');
+   expect(await readFile(join(root, 'run-1', 'gap.txt'), 'utf8')).toContain(
+     'send email',
+   );
+   const journal = await readJournal(join(root, 'run-1'));
+   expect(journal.map((e) => e.step)).toEqual(['start', 'gap']);
+ });
++
++function answerOrchestrator(): Agent {
++  // orchestrator model that produces final text directly (no tool calls)
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'Here is your answer.' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  return createOrchestrator({ model, systemPrompt: 'route', agents: [] });
++}
++
++test('runChat records an answer run and writes the answer artifact', async () => {
++  const result = await runChat({
++    orchestrator: answerOrchestrator(),
++    task: 'what is 2+2?',
++    runsRoot: root,
++    runId: 'run-2',
++  });
++  expect(result.kind).toBe('answer');
++  if (result.kind === 'answer') {
++    expect(result.text).toBe('Here is your answer.');
++  }
++  expect(await readFile(join(root, 'run-2', 'answer.txt'), 'utf8')).toBe(
++    'Here is your answer.',
++  );
++  const journal = await readJournal(join(root, 'run-2'));
++  expect(journal.map((e) => e.step)).toEqual(['start', 'answer']);
++});
+diff --git a/tests/core/errors.test.ts b/tests/core/errors.test.ts
+index d743b18..2a18c52 100644
+--- a/tests/core/errors.test.ts
++++ b/tests/core/errors.test.ts
+@@ -1,27 +1,16 @@
+ import { expect, test } from 'bun:test';
+-import {
+-  DelegationError,
+-  ProviderError,
+-  ResourceError,
+-} from '../../src/core/errors.ts';
++import { ProviderError, ResourceError } from '../../src/core/errors.ts';
+ 
+ test('typed errors carry their class name and message', () => {
+   const err = new ResourceError('model does not fit budget');
+   expect(err).toBeInstanceOf(Error);
+   expect(err.name).toBe('ResourceError');
+   expect(err.message).toBe('model does not fit budget');
+ });
+ 
+ test('ProviderError preserves an optional cause', () => {
+   const cause = new Error('connection refused');
+   const err = new ProviderError('ollama unreachable', { cause });
+   expect(err.name).toBe('ProviderError');
+   expect(err.cause).toBe(cause);
+ });
+-
+-test('DelegationError carries its class name', () => {
+-  const err = new DelegationError('sub-agent file_qa failed');
+-  expect(err).toBeInstanceOf(Error);
+-  expect(err.name).toBe('DelegationError');
+-  expect(err.message).toBe('sub-agent file_qa failed');
+-});
+diff --git a/tests/core/orchestrator.test.ts b/tests/core/orchestrator.test.ts
+index c742eed..bd972ef 100644
+--- a/tests/core/orchestrator.test.ts
++++ b/tests/core/orchestrator.test.ts
+@@ -123,10 +123,52 @@ test('multi-agent selection: only the chosen delegate runs', async () => {
+   const orch = createOrchestrator({
+     model: orchModel('delegate_to_calc', { task: '2+2' }),
+     systemPrompt: 'route',
+     agents: [a.agent, b.agent],
+   });
+   const result = await runOrchestrator(orch, 'compute 2+2');
+   expect(result.kind).toBe('answer');
+   expect(a.ran()).toBe(0);
+   expect(b.ran()).toBe(1);
+ });
++
++test('gap detected from MaxStepsError: orchestrator resolves kind:gap when runAgent throws after report_capability_gap', async () => {
++  // A model that ALWAYS returns a report_capability_gap tool-call and never
++  // produces final text. The loop hits the step ceiling (MaxStepsError is thrown
++  // with steps attached), and runOrchestrator must detect the gap from those steps.
++  const gapOnlyModel = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [
++        {
++          type: 'tool-call',
++          toolCallId: 'c1',
++          toolName: 'report_capability_gap',
++          input: JSON.stringify({ missingCapability: 'translate language' }),
++        },
++      ],
++      finishReason: { unified: 'tool-calls', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const orch = createOrchestrator({
++    model: gapOnlyModel,
++    systemPrompt: 'route',
++    agents: [],
++  });
++  // Default 10 steps: the loop will exhaust and throw MaxStepsError; runOrchestrator
++  // must catch it, find the gap in err.steps, and resolve (not rethrow).
++  const result = await runOrchestrator(orch, 'translate this document');
++  expect(result.kind).toBe('gap');
++  if (result.kind === 'gap') {
++    expect(result.missingCapability).toBe('translate language');
++    expect(result.message).toContain('translate language');
++  }
++});

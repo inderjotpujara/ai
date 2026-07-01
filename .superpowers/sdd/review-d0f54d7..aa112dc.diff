@@ -1,0 +1,169 @@
+# Review package: d0f54d7..aa112dc
+
+## Commits
+aa112dc feat(core): lazy model binding + abort in BeforeDelegate/runDefinedAgent
+
+## Files changed
+ src/core/agent-def.ts       |  5 +++--
+ src/core/delegate.ts        | 21 +++++++++++++++++----
+ tests/core/delegate.test.ts | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 65 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index 54efe8b..2b5402e 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -14,24 +14,25 @@ export type Agent = {
+   modelDecl?: ModelDeclaration;
+ };
+ 
+ /** Build provider options that set Ollama's context window for this call. */
+ export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
+   return numCtx === undefined
+     ? undefined
+     : { ollama: { options: { num_ctx: numCtx } } };
+ }
+ 
+-/** Run an agent definition against a task, optionally at a chosen context size. */
++/** Run an agent definition against a task, optionally at a chosen context size and model. */
+ export function runDefinedAgent(
+   agent: Agent,
+   task: string,
+   numCtx?: number,
++  modelOverride?: LanguageModel,
+ ): ReturnType<typeof runAgent> {
+   return runAgent({
+-    model: agent.model,
++    model: modelOverride ?? agent.model,
+     systemPrompt: agent.systemPrompt,
+     prompt: task,
+     tools: agent.tools,
+     providerOptions: ollamaCtxOptions(numCtx),
+   });
+ }
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 213282e..41aa166 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,43 +1,56 @@
+ import { tool } from 'ai';
++import type { LanguageModel } from 'ai';
+ import { z } from 'zod';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
+-/** A hook run just before a delegated agent executes; may return a chosen context size. */
++/**
++ * A hook run just before a delegated agent executes. May return a chosen context
++ * size, a model to bind for this call, and/or an `abort` message that skips the
++ * delegation entirely (returned to the orchestrator as a soft tool error).
++ */
+ export type BeforeDelegate = (
+   agent: Agent,
+-  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing; changing to `undefined` would break all void-returning callsites.
+-) => Promise<{ numCtx?: number } | void>;
++  // biome-ignore lint/suspicious/noConfusingVoidType: void is intentional — hooks may return nothing.
++) => Promise<{ numCtx?: number; model?: LanguageModel; abort?: string } | void>;
+ 
+ /**
+  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
+  * structured error (so the orchestrator model can react) rather than throwing.
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+     execute: async ({ task }) => {
+       try {
+         const pre = onBeforeDelegate
+           ? await onBeforeDelegate(agent)
+           : undefined;
+-        const { text } = await runDefinedAgent(agent, task, pre?.numCtx);
++        if (pre?.abort) {
++          return { error: pre.abort };
++        }
++        const { text } = await runDefinedAgent(
++          agent,
++          task,
++          pre?.numCtx,
++          pre?.model,
++        );
+         return { text };
+       } catch (cause) {
+         return {
+           error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+         };
+       }
+     },
+   });
+ }
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index e3f6d37..5fbceaf 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -44,10 +44,55 @@ test('asDelegateTool runs onBeforeDelegate before the agent runs', async () => {
+   const order: string[] = [];
+   const agent = cannedAgent('file_qa', 'answer'); // existing helper in this file
+   const hook = mock(async (a: typeof agent) => {
+     order.push(`hook:${a.name}`);
+   });
+   const t = asDelegateTool(agent, hook);
+   await t.execute?.({ task: 'go' }, {} as never);
+   expect(hook).toHaveBeenCalledTimes(1);
+   expect(order).toEqual(['hook:file_qa']); // hook ran (before the agent's own run)
+ });
++
++function textModel(label: string) {
++  return new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: label }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++}
++
++function agent(): Agent {
++  return {
++    name: 'spec',
++    description: 'a specialist',
++    model: textModel('DEFAULT MODEL'),
++    systemPrompt: 'sp',
++    tools: {},
++  };
++}
++
++test('uses the model override returned by onBeforeDelegate', async () => {
++  const t = asDelegateTool(agent(), async () => ({ model: textModel('OVERRIDE MODEL') }));
++  const out = await t.execute?.({ task: 'hi' }, { toolCallId: 't', messages: [] });
++  expect(out).toEqual({ text: 'OVERRIDE MODEL' });
++});
++
++test('abort short-circuits: agent never runs, returns soft error', async () => {
++  let ran = false;
++  const a = agent();
++  a.model = new MockLanguageModelV3({
++    doGenerate: async () => {
++      ran = true;
++      throw new Error('should not run');
++    },
++  });
++  const t = asDelegateTool(a, async () => ({ abort: 'no fit' }));
++  const out = await t.execute?.({ task: 'hi' }, { toolCallId: 't', messages: [] });
++  expect(out).toEqual({ error: 'no fit' });
++  expect(ran).toBe(false);
++});

@@ -1,0 +1,58 @@
+# Review package: 17e57c5..2248b62
+
+## Commits
+2248b62 feat(core): add DelegationError
+
+## Files changed
+ src/core/errors.ts        | 3 +++
+ tests/core/errors.test.ts | 9 ++++++++-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+index aea4620..71dca4b 100644
+--- a/src/core/errors.ts
++++ b/src/core/errors.ts
+@@ -10,10 +10,13 @@ class FrameworkError extends Error {
+ export class ProviderError extends FrameworkError {}
+ 
+ /** A tool failed in a way the loop could not recover from. */
+ export class ToolError extends FrameworkError {}
+ 
+ /** The agent loop hit its step ceiling without finishing. */
+ export class MaxStepsError extends FrameworkError {}
+ 
+ /** A model cannot fit the machine's memory budget. */
+ export class ResourceError extends FrameworkError {}
++
++/** A delegated sub-agent run failed irrecoverably. */
++export class DelegationError extends FrameworkError {}
+diff --git a/tests/core/errors.test.ts b/tests/core/errors.test.ts
+index 2a18c52..e1ef66e 100644
+--- a/tests/core/errors.test.ts
++++ b/tests/core/errors.test.ts
+@@ -1,16 +1,23 @@
+ import { expect, test } from 'bun:test';
+-import { ProviderError, ResourceError } from '../../src/core/errors.ts';
++import { DelegationError, ProviderError, ResourceError } from '../../src/core/errors.ts';
+ 
+ test('typed errors carry their class name and message', () => {
+   const err = new ResourceError('model does not fit budget');
+   expect(err).toBeInstanceOf(Error);
+   expect(err.name).toBe('ResourceError');
+   expect(err.message).toBe('model does not fit budget');
+ });
+ 
+ test('ProviderError preserves an optional cause', () => {
+   const cause = new Error('connection refused');
+   const err = new ProviderError('ollama unreachable', { cause });
+   expect(err.name).toBe('ProviderError');
+   expect(err.cause).toBe(cause);
+ });
++
++test('DelegationError carries its class name', () => {
++  const err = new DelegationError('sub-agent file_qa failed');
++  expect(err).toBeInstanceOf(Error);
++  expect(err.name).toBe('DelegationError');
++  expect(err.message).toBe('sub-agent file_qa failed');
++});

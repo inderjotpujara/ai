@@ -1,0 +1,69 @@
+# Review package: 7aeed74..bc44f71
+
+## Commits
+bc44f71 feat(run): add file-based run store
+
+## Files changed
+ src/run/run-store.ts        | 25 +++++++++++++++++++++++++
+ tests/run/run-store.test.ts | 21 +++++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+## Diff
+diff --git a/src/run/run-store.ts b/src/run/run-store.ts
+new file mode 100644
+index 0000000..0aa3699
+--- /dev/null
++++ b/src/run/run-store.ts
+@@ -0,0 +1,25 @@
++import { mkdir, writeFile } from 'node:fs/promises';
++import { join } from 'node:path';
++
++export type RunHandle = { id: string; dir: string };
++
++/** Create (or reuse) the directory for a run and return its handle. */
++export async function createRun(
++  rootDir: string,
++  id: string,
++): Promise<RunHandle> {
++  const dir = join(rootDir, id);
++  await mkdir(dir, { recursive: true });
++  return { id, dir };
++}
++
++/** Write a text artifact into the run directory; returns its full path. */
++export async function writeArtifact(
++  run: RunHandle,
++  name: string,
++  contents: string,
++): Promise<string> {
++  const path = join(run.dir, name);
++  await writeFile(path, contents);
++  return path;
++}
+diff --git a/tests/run/run-store.test.ts b/tests/run/run-store.test.ts
+new file mode 100644
+index 0000000..4e544b7
+--- /dev/null
++++ b/tests/run/run-store.test.ts
+@@ -0,0 +1,21 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { createRun, writeArtifact } from '../../src/run/run-store.ts';
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'runs-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++test('creates a run dir and writes an artifact into it', async () => {
++  const run = await createRun(root, 'run-123');
++  expect(run.id).toBe('run-123');
++  expect(run.dir).toBe(join(root, 'run-123'));
++  const path = await writeArtifact(run, 'answer.txt', 'the answer');
++  expect(await readFile(path, 'utf8')).toBe('the answer');
++});

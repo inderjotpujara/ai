@@ -1,0 +1,110 @@
+# Review package: 678b791..9eb1f05
+
+## Commits
+9eb1f05 feat(resource): pure selectCandidates (capability filter + largest-that-fits)
+
+## Files changed
+ src/resource/selector.ts        | 39 +++++++++++++++++++++++++++++++++
+ tests/resource/selector.test.ts | 48 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 87 insertions(+)
+
+## Diff
+diff --git a/src/resource/selector.ts b/src/resource/selector.ts
+new file mode 100644
+index 0000000..bd3bb9b
+--- /dev/null
++++ b/src/resource/selector.ts
+@@ -0,0 +1,39 @@
++import {
++  type Capability,
++  type ModelDeclaration,
++  type ModelRequirement,
++} from '../core/types.ts';
++import { weightsBytes } from './footprint.ts';
++
++function hasAll(decl: ModelDeclaration, requires: Capability[]): boolean {
++  const caps = new Set(decl.capabilities ?? []);
++  return requires.every((c) => caps.has(c));
++}
++
++/**
++ * PURE. Hard-filter by `requires`, then rank by `prefer`.
++ * LargestThatFits: most params first; tie-break smaller footprint; then a
++ * warm-aware bias (resident wins among otherwise-equal candidates) to avoid
++ * needless reload churn. The fits check itself is the manager's job, not here.
++ */
++export function selectCandidates(
++  req: ModelRequirement,
++  registry: ModelDeclaration[],
++  loaded?: ReadonlySet<string>,
++): ModelDeclaration[] {
++  const capable = registry.filter((d) => hasAll(d, req.requires));
++  return [...capable].sort((a, b) => {
++    const pa = a.footprint.approxParamsBillions;
++    const pb = b.footprint.approxParamsBillions;
++    if (pb !== pa) return pb - pa; // largest params first
++    const fa = weightsBytes(pa, a.footprint.bytesPerWeight);
++    const fb = weightsBytes(pb, b.footprint.bytesPerWeight);
++    if (fa !== fb) return fa - fb; // smaller footprint first
++    if (loaded) {
++      const la = loaded.has(a.model) ? 0 : 1;
++      const lb = loaded.has(b.model) ? 0 : 1;
++      if (la !== lb) return la - lb; // resident first
++    }
++    return 0;
++  });
++}
+diff --git a/tests/resource/selector.test.ts b/tests/resource/selector.test.ts
+new file mode 100644
+index 0000000..af64932
+--- /dev/null
++++ b/tests/resource/selector.test.ts
+@@ -0,0 +1,48 @@
++import { expect, test } from 'bun:test';
++import {
++  Capability,
++  type ModelDeclaration,
++  PreferPolicy,
++  ProviderKind,
++} from '../../src/core/types.ts';
++import { selectCandidates } from '../../src/resource/selector.ts';
++
++function m(
++  model: string,
++  b: number,
++  caps: Capability[],
++  bpw = 0.56,
++): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: {},
++    role: 'test',
++    capabilities: caps,
++    footprint: { approxParamsBillions: b, bytesPerWeight: bpw },
++  };
++}
++
++const tools = { role: 'r', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits };
++
++test('hard-filters out models missing a required capability', () => {
++  const reg = [m('big-novtools', 9, []), m('small-tools', 4, [Capability.Tools])];
++  const out = selectCandidates(tools, reg);
++  expect(out.map((d) => d.model)).toEqual(['small-tools']);
++});
++
++test('ranks largest params first', () => {
++  const reg = [m('a4', 4, [Capability.Tools]), m('b9', 9, [Capability.Tools])];
++  expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual(['b9', 'a4']);
++});
++
++test('tie-break: equal params -> smaller footprint first', () => {
++  const reg = [m('heavy', 9, [Capability.Tools], 0.9), m('light', 9, [Capability.Tools], 0.5)];
++  expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual(['light', 'heavy']);
++});
++
++test('warm-aware bias: among identical candidates, resident first', () => {
++  const reg = [m('cold', 9, [Capability.Tools]), m('warm', 9, [Capability.Tools])];
++  const out = selectCandidates(tools, reg, new Set(['warm']));
++  expect(out.map((d) => d.model)).toEqual(['warm', 'cold']);
++});

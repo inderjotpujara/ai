@@ -1,0 +1,115 @@
+# Review package: 964718a..bd9f8cb
+
+## Commits
+bd9f8cb feat(agents): register web_fetch on the orchestrator (file_qa + web_fetch routing)
+
+## Files changed
+ agents/super.ts                 | 11 ++++++++---
+ tests/agents/super.test.ts      | 13 ++++++++-----
+ tests/core/orchestrator.test.ts | 21 +++++++++++++++++++++
+ 3 files changed, 37 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/agents/super.ts b/agents/super.ts
+index dcb0efc..2b2945b 100644
+--- a/agents/super.ts
++++ b/agents/super.ts
+@@ -1,20 +1,25 @@
+ import type { ToolSet } from 'ai';
+ import qwenFast from '../models/qwen-fast.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
+ import { createOrchestrator } from '../src/core/orchestrator.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ import { createFileQaAgent } from './file-qa.ts';
++import { createWebFetchAgent } from './web-fetch.ts';
+ 
+ const BASE_PROMPT =
+   'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
+ 
+-/** Build the super-agent (orchestrator) with the file-Q&A agent registered. */
+-export function createSuperAgent(fileQaTools: ToolSet): Agent {
++/** Build the super-agent (orchestrator) with file-Q&A and web-fetch registered. */
++export function createSuperAgent(
++  fileQaTools: ToolSet,
++  fetchTools: ToolSet,
++): Agent {
+   const fileQa = createFileQaAgent(fileQaTools);
++  const webFetch = createWebFetchAgent(fetchTools);
+   return createOrchestrator({
+     name: 'super',
+     model: createOllamaModel(qwenFast),
+     systemPrompt: BASE_PROMPT,
+-    agents: [fileQa],
++    agents: [fileQa, webFetch],
+   });
+ }
+diff --git a/tests/agents/super.test.ts b/tests/agents/super.test.ts
+index 99d6550..57d24c2 100644
+--- a/tests/agents/super.test.ts
++++ b/tests/agents/super.test.ts
+@@ -1,11 +1,14 @@
+ import { expect, test } from 'bun:test';
+ import { createSuperAgent } from '../../agents/super.ts';
+ import { CAPABILITY_GAP_TOOL } from '../../src/core/capability-gap.ts';
+ 
+-test('super agent exposes a delegate_to_file_qa tool and the gap tool', () => {
+-  const tools = { read_file: { description: 'x' } } as never;
+-  const sup = createSuperAgent(tools);
+-  expect(Object.keys(sup.tools)).toContain('delegate_to_file_qa');
+-  expect(Object.keys(sup.tools)).toContain(CAPABILITY_GAP_TOOL);
++test('super agent exposes delegate tools for both specialists and the gap tool', () => {
++  const fileTools = { read_file: { description: 'x' } } as never;
++  const fetchTools = { fetch: { description: 'x' } } as never;
++  const sup = createSuperAgent(fileTools, fetchTools);
++  const toolNames = Object.keys(sup.tools);
++  expect(toolNames).toContain('delegate_to_file_qa');
++  expect(toolNames).toContain('delegate_to_web_fetch');
++  expect(toolNames).toContain(CAPABILITY_GAP_TOOL);
+   expect(sup.model).toBeTruthy();
+ });
+diff --git a/tests/core/orchestrator.test.ts b/tests/core/orchestrator.test.ts
+index bd972ef..8eb0d35 100644
+--- a/tests/core/orchestrator.test.ts
++++ b/tests/core/orchestrator.test.ts
+@@ -124,20 +124,41 @@ test('multi-agent selection: only the chosen delegate runs', async () => {
+     model: orchModel('delegate_to_calc', { task: '2+2' }),
+     systemPrompt: 'route',
+     agents: [a.agent, b.agent],
+   });
+   const result = await runOrchestrator(orch, 'compute 2+2');
+   expect(result.kind).toBe('answer');
+   expect(a.ran()).toBe(0);
+   expect(b.ran()).toBe(1);
+ });
+ 
++test('routes a URL task to web_fetch and a file task to file_qa', async () => {
++  const fileQa = subAgent('file_qa', 'file answer');
++  const webFetch = subAgent('web_fetch', 'web answer');
++
++  // model that picks delegate_to_web_fetch
++  const orchWeb = createOrchestrator({
++    model: orchModel('delegate_to_web_fetch', {
++      task: 'summarize https://example.com',
++    }),
++    systemPrompt: 'route',
++    agents: [fileQa.agent, webFetch.agent],
++  });
++  const webResult = await runOrchestrator(
++    orchWeb,
++    'summarize https://example.com',
++  );
++  expect(webResult.kind).toBe('answer');
++  expect(fileQa.ran()).toBe(0);
++  expect(webFetch.ran()).toBe(1);
++});
++
+ test('gap detected from MaxStepsError: orchestrator resolves kind:gap when runAgent throws after report_capability_gap', async () => {
+   // A model that ALWAYS returns a report_capability_gap tool-call and never
+   // produces final text. The loop hits the step ceiling (MaxStepsError is thrown
+   // with steps attached), and runOrchestrator must detect the gap from those steps.
+   const gapOnlyModel = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [
+         {
+           type: 'tool-call',
+           toolCallId: 'c1',

@@ -1,0 +1,100 @@
+# Review package: c288947..3bd5472
+
+## Commits
+3bd5472 refactor(resource): expose weights/kv split in footprint
+
+## Files changed
+ src/resource/footprint.ts        | 26 +++++++++++++++++++++-----
+ tests/resource/footprint.test.ts | 16 +++++++++++++++-
+ 2 files changed, 36 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/src/resource/footprint.ts b/src/resource/footprint.ts
+index 96cedeb..d1b3972 100644
+--- a/src/resource/footprint.ts
++++ b/src/resource/footprint.ts
+@@ -1,20 +1,36 @@
+ /** Inputs for a rough pre-load RAM estimate of a quantized model. */
+ export type FootprintInput = {
+   paramsBillions: number;
+   bytesPerWeight: number;
+   contextTokens: number;
+   kvBytesPerToken: number;
+ };
+ 
+ const RUNTIME_OVERHEAD = 1.2;
+ 
++/** Resident bytes of the weights (quantized) plus runtime overhead — no KV cache. */
++export function weightsBytes(
++  paramsBillions: number,
++  bytesPerWeight: number,
++): number {
++  return paramsBillions * 1e9 * bytesPerWeight * RUNTIME_OVERHEAD;
++}
++
++/** KV-cache bytes for a given context window. */
++export function kvCacheBytes(
++  contextTokens: number,
++  kvBytesPerToken: number,
++): number {
++  return contextTokens * kvBytesPerToken;
++}
++
+ /**
+  * Estimate the RAM a model needs before loading it.
+- * weights = params * bytesPerWeight * overhead; plus a KV-cache term that grows with context.
++ * weights (with overhead) plus a KV-cache term that grows with context.
+  */
+ export function estimateModelBytes(input: FootprintInput): number {
+-  const weights =
+-    input.paramsBillions * 1e9 * input.bytesPerWeight * RUNTIME_OVERHEAD;
+-  const kvCache = input.contextTokens * input.kvBytesPerToken;
+-  return weights + kvCache;
++  return (
++    weightsBytes(input.paramsBillions, input.bytesPerWeight) +
++    kvCacheBytes(input.contextTokens, input.kvBytesPerToken)
++  );
+ }
+diff --git a/tests/resource/footprint.test.ts b/tests/resource/footprint.test.ts
+index d4ab8af..e69b95e 100644
+--- a/tests/resource/footprint.test.ts
++++ b/tests/resource/footprint.test.ts
+@@ -1,12 +1,16 @@
+ import { expect, test } from 'bun:test';
+-import { estimateModelBytes } from '../../src/resource/footprint.ts';
++import {
++  estimateModelBytes,
++  kvCacheBytes,
++  weightsBytes,
++} from '../../src/resource/footprint.ts';
+ 
+ test('estimates an 8B Q4_K_M model with 8k context', () => {
+   // weights = 8e9 * 0.56 * 1.2 = 5,376,000,000 ; kv = 8192 * 131072 = 1,073,741,824
+   const bytes = estimateModelBytes({
+     paramsBillions: 8,
+     bytesPerWeight: 0.56,
+     contextTokens: 8192,
+     kvBytesPerToken: 131072,
+   });
+   expect(bytes).toBe(5_376_000_000 + 1_073_741_824);
+@@ -14,10 +18,20 @@ test('estimates an 8B Q4_K_M model with 8k context', () => {
+ 
+ test('zero context means weights-only', () => {
+   const bytes = estimateModelBytes({
+     paramsBillions: 1,
+     bytesPerWeight: 2,
+     contextTokens: 0,
+     kvBytesPerToken: 999,
+   });
+   expect(bytes).toBe(1e9 * 2 * 1.2);
+ });
++
++test('weightsBytes applies the 1.2 runtime overhead', () => {
++  expect(weightsBytes(1, 1)).toBe(1.2e9);
++  expect(weightsBytes(4, 0.56)).toBe(4 * 1e9 * 0.56 * 1.2);
++});
++
++test('kvCacheBytes is contextTokens times bytes-per-token', () => {
++  expect(kvCacheBytes(4096, 131072)).toBe(4096 * 131072);
++  expect(kvCacheBytes(0, 131072)).toBe(0);
++});

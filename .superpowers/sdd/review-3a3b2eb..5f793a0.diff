@@ -1,0 +1,50 @@
+# Review package: 3a3b2eb..5f793a0
+
+## Commits
+5f793a0 feat(models): declare per-role desired context (router 8192, specialist 16384)
+
+## Files changed
+ models/qwen-fast.ts   | 4 +++-
+ models/qwen-router.ts | 2 ++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/models/qwen-fast.ts b/models/qwen-fast.ts
+index 5975a49..a98d67c 100644
+--- a/models/qwen-fast.ts
++++ b/models/qwen-fast.ts
+@@ -1,12 +1,14 @@
+ import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
+ 
+ /** Fast general-purpose local model with reliable tool-calling. */
+ const qwenFast: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:9b',
+-  params: { temperature: 0.2, numCtx: 8192 },
++  // Desired context for the role; the true max is detected live from Ollama
++  // and the manager clamps this down under memory pressure.
++  params: { temperature: 0.2, numCtx: 16384 },
+   role: 'general reasoning + tool use',
+   footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenFast;
+diff --git a/models/qwen-router.ts b/models/qwen-router.ts
+index 96f9d51..a84c720 100644
+--- a/models/qwen-router.ts
++++ b/models/qwen-router.ts
+@@ -1,12 +1,14 @@
+ import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
+ 
+ /** Small, fast model for the orchestrator's routing decisions (stays pinned-resident). */
+ const qwenRouter: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:4b',
++  // Desired context for the role; the true max is detected live from Ollama
++  // and the manager clamps this down under memory pressure.
+   params: { temperature: 0.1, numCtx: 8192 },
+   role: 'routing / orchestration',
+   footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenRouter;

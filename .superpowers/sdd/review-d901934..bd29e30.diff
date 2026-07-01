@@ -1,0 +1,306 @@
+# Review package: d901934..bd29e30
+
+## Commits
+bd29e30 feat(cli): selector-driven delegation hook + selection notice + resource exit
+
+## Files changed
+ src/cli/chat.ts                    | 65 ++++++++++++++++++++++++++++++--------
+ src/cli/select-hook.ts             | 51 ++++++++++++++++++++++++++++++
+ src/cli/selection-notice.ts        | 25 +++++++++++++++
+ tests/cli/select-hook.test.ts      | 45 ++++++++++++++++++++++++++
+ tests/cli/selection-notice.test.ts | 25 +++++++++++++++
+ 5 files changed, 197 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index ea60263..69fe32a 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,66 +1,103 @@
+ import { createSuperAgent } from '../../agents/super.ts';
+ import qwenRouter from '../../models/qwen-router.ts';
++import { REGISTRY } from '../../models/registry.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import type { ModelDeclaration } from '../core/types.ts';
+ import { createFetchTools, createFileTools } from '../mcp/client.ts';
+-import { createModelManager } from '../resource/model-manager.ts';
++import { liveBudgetBytes } from '../resource/hardware.ts';
++import { createModelManager, MIN_CTX } from '../resource/model-manager.ts';
+ import { isProjectStoreActive } from '../resource/model-store.ts';
++import {
++  isModelInstalled,
++  listLoadedModels,
++} from '../resource/ollama-control.ts';
+ import { runChat } from './run-chat.ts';
++import { createSelectHook } from './select-hook.ts';
++import { formatSelectionNotice } from './selection-notice.ts';
+ 
+ async function main(): Promise<void> {
+   const task = process.argv.slice(2).join(' ').trim();
+   if (task.length === 0) {
+     console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+     process.exit(1);
+   }
+ 
+   const manager = createModelManager();
+   // Warm + pin the small router model the orchestrator runs on.
+   console.error(`Preparing router model ${qwenRouter.model}...`);
+   const routerNumCtx = await manager.ensureReady(qwenRouter, {
+     pinned: [qwenRouter.model],
+   });
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
+-  // Specialists' models are loaded on demand at a budget-clamped context size,
+-  // keeping the router pinned-resident.
+-  const onBeforeDelegate = async (agent: {
+-    modelDecl?: import('../core/types.ts').ModelDeclaration;
+-  }): Promise<{ numCtx?: number }> =>
+-    agent.modelDecl
+-      ? {
+-          numCtx: await manager.ensureReady(agent.modelDecl, {
+-            pinned: [qwenRouter.model],
+-          }),
+-        }
+-      : {};
++  // Capture seam: a genuine no-fit during delegation is recorded here and surfaced
++  // by runOrchestrator as kind:'resource' instead of being swallowed.
++  const capture: ResourceCapture = {};
++
++  // Announce each NEW model decision (size, context, footprint, install state) once.
++  const announced = new Set<string>();
++  const notify = async (decl: ModelDeclaration): Promise<void> => {
++    if (announced.has(decl.model)) return;
++    announced.add(decl.model);
++    const [installed, budget] = await Promise.all([
++      isModelInstalled(decl.model),
++      liveBudgetBytes(),
++    ]);
++    console.error(
++      formatSelectionNotice({
++        decl,
++        numCtx: decl.params.numCtx ?? MIN_CTX,
++        budgetBytes: budget,
++        installed,
++      }),
++    );
++  };
++
++  const onBeforeDelegate = createSelectHook({
++    registry: REGISTRY,
++    ensureReady: (decl, opts) => manager.ensureReady(decl, opts),
++    listLoaded: () => listLoadedModels(),
++    pinned: [qwenRouter.model],
++    capture,
++    onAttempt: notify,
++  });
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+       const orchestrator = createSuperAgent(
+         fileServer.tools,
+         fetchServer.tools,
+         onBeforeDelegate,
+       );
+       const result = await runChat({
+         orchestrator,
+         task,
+         runsRoot: 'runs',
+         runId: `run-${process.pid}`,
+         routerNumCtx,
++        capture,
+       });
+-      console.log(result.kind === 'answer' ? result.text : result.message);
++      if (result.kind === 'answer') {
++        console.log(result.text);
++      } else if (result.kind === 'gap') {
++        console.log(result.message);
++      } else {
++        console.error(result.message);
++        process.exitCode = 1;
++      }
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+     await manager.unloadAll();
+   }
+ }
+ 
+ main().catch((err) => {
+diff --git a/src/cli/select-hook.ts b/src/cli/select-hook.ts
+new file mode 100644
+index 0000000..8ddff36
+--- /dev/null
++++ b/src/cli/select-hook.ts
+@@ -0,0 +1,51 @@
++import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import { ResourceError } from '../core/errors.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { createOllamaModel } from '../providers/ollama.ts';
++import type { EnsureOpts } from '../resource/model-manager.ts';
++import type { LoadedModel } from '../resource/ollama-control.ts';
++import { resolveModel } from '../resource/selector.ts';
++
++export type SelectHookDeps = {
++  registry: ModelDeclaration[];
++  ensureReady: (d: ModelDeclaration, o?: EnsureOpts) => Promise<number>;
++  pinned: string[];
++  capture: ResourceCapture;
++  listLoaded?: () => Promise<LoadedModel[]>;
++  /** Fired before each ensureReady attempt (e.g. to print a selection notice). */
++  onAttempt?: (decl: ModelDeclaration) => void | Promise<void>;
++};
++
++/**
++ * Build the onBeforeDelegate hook: resolve the agent's requirement live, bind the
++ * chosen model + numCtx, and on a genuine no-fit record it in `capture` and abort
++ * the delegation (rather than letting the AI SDK swallow the error).
++ */
++export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
++  return async (agent: Agent) => {
++    if (!agent.modelReq) return {};
++    try {
++      const { decl, numCtx } = await resolveModel(
++        agent.modelReq,
++        deps.registry,
++        {
++          ensureReady: deps.ensureReady,
++          listLoaded: deps.listLoaded,
++          onAttempt: deps.onAttempt,
++        },
++        { pinned: deps.pinned },
++      );
++      return { model: createOllamaModel(decl), numCtx };
++    } catch (err) {
++      if (err instanceof ResourceError) {
++        deps.capture.error = err;
++        return {
++          abort: "Can't run this now — no model fits in available memory.",
++        };
++      }
++      throw err;
++    }
++  };
++}
+diff --git a/src/cli/selection-notice.ts b/src/cli/selection-notice.ts
+new file mode 100644
+index 0000000..ef2d59a
+--- /dev/null
++++ b/src/cli/selection-notice.ts
+@@ -0,0 +1,25 @@
++import type { ModelDeclaration } from '../core/types.ts';
++import { kvCacheBytes, weightsBytes } from '../resource/footprint.ts';
++
++const DEFAULT_KV_PER_TOKEN = 131072;
++const gb = (b: number): string => (b / 1e9).toFixed(1);
++
++export type NoticeInput = {
++  decl: ModelDeclaration;
++  numCtx: number;
++  budgetBytes: number;
++  installed: boolean;
++};
++
++/** Human-readable heads-up about the model chosen for a delegation. */
++export function formatSelectionNotice(i: NoticeInput): string {
++  const f = i.decl.footprint;
++  const w = weightsBytes(f.approxParamsBillions, f.bytesPerWeight);
++  const kv = kvCacheBytes(i.numCtx, f.kvBytesPerToken ?? DEFAULT_KV_PER_TOKEN);
++  const install = i.installed ? 'installed' : 'not installed — will pull';
++  return [
++    `▸ selected ${i.decl.model}`,
++    `  ${f.approxParamsBillions}B · weights ≈${gb(w)}GB + KV ≈${gb(kv)}GB @ up to ${i.numCtx} ctx = ≈${gb(w + kv)}GB`,
++    `  live budget ≈${gb(i.budgetBytes)}GB · ${install}`,
++  ].join('\n');
++}
+diff --git a/tests/cli/select-hook.test.ts b/tests/cli/select-hook.test.ts
+new file mode 100644
+index 0000000..177ae93
+--- /dev/null
++++ b/tests/cli/select-hook.test.ts
+@@ -0,0 +1,45 @@
++import { expect, mock, test } from 'bun:test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { ResourceError } from '../../src/core/errors.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { createSelectHook } from '../../src/cli/select-hook.ts';
++import { REGISTRY } from '../../models/registry.ts';
++
++function specialist(): Agent {
++  return {
++    name: 'file_qa',
++    description: 'd',
++    systemPrompt: 'sp',
++    tools: {},
++    model: undefined as never, // overridden by the hook
++    modelReq: { role: 'r', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
++  };
++}
++
++test('hook resolves a model + numCtx and returns a bound model', async () => {
++  const ensureReady = mock(async () => 16384);
++  const capture = {};
++  const hook = createSelectHook({ registry: REGISTRY, ensureReady, pinned: ['qwen3.5:4b'], capture });
++  const pre = await hook(specialist());
++  expect(pre && 'model' in pre && pre.model).toBeTruthy();
++  expect(pre && 'numCtx' in pre && pre.numCtx).toBe(16384);
++});
++
++test('hook records ResourceError into capture and returns abort', async () => {
++  const ensureReady = mock(async () => {
++    throw new ResourceError('no fit');
++  });
++  const capture: { error?: ResourceError } = {};
++  const hook = createSelectHook({ registry: REGISTRY, ensureReady, pinned: ['qwen3.5:4b'], capture });
++  const pre = await hook(specialist());
++  expect(capture.error).toBeInstanceOf(ResourceError);
++  expect(pre && 'abort' in pre && pre.abort).toBeTruthy();
++});
++
++test('agent without modelReq is a no-op', async () => {
++  const ensureReady = mock(async () => 0);
++  const hook = createSelectHook({ registry: REGISTRY, ensureReady, pinned: [], capture: {} });
++  const pre = await hook({ name: 'x', description: 'd', systemPrompt: 's', tools: {}, model: undefined as never });
++  expect(pre).toEqual({});
++  expect(ensureReady).not.toHaveBeenCalled();
++});
+diff --git a/tests/cli/selection-notice.test.ts b/tests/cli/selection-notice.test.ts
+new file mode 100644
+index 0000000..ff5037a
+--- /dev/null
++++ b/tests/cli/selection-notice.test.ts
+@@ -0,0 +1,25 @@
++import { expect, test } from 'bun:test';
++import { Capability, type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
++import { formatSelectionNotice } from '../../src/cli/selection-notice.ts';
++
++const decl: ModelDeclaration = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3.5:9b',
++  params: { numCtx: 16384 },
++  role: 'general',
++  capabilities: [Capability.Tools],
++  footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
++};
++
++test('notice includes model, size, ctx, budget and install state', () => {
++  const s = formatSelectionNotice({ decl, numCtx: 16384, budgetBytes: 12.3e9, installed: true });
++  expect(s).toContain('qwen3.5:9b');
++  expect(s).toContain('9B');
++  expect(s).toContain('16384');
++  expect(s).toContain('installed');
++});
++
++test('not-installed notice announces a pull', () => {
++  const s = formatSelectionNotice({ decl, numCtx: 16384, budgetBytes: 12.3e9, installed: false });
++  expect(s.toLowerCase()).toContain('pull');
++});

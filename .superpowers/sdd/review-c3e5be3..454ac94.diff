@@ -1,0 +1,479 @@
+# Review package: c3e5be3..454ac94
+
+## Commits
+454ac94 fix(discovery): shard-aware quant sizing + footprint-consistent fit + pre-pull failure reporting
+
+## Files changed
+ src/cli/discover.ts                      |  3 ++
+ src/discovery/discover.ts                | 10 +++-
+ src/discovery/huggingface-gguf.ts        | 82 +++++++++++++++++++++---------
+ tests/discovery/discover.test.ts         | 65 ++++++++++++++++++------
+ tests/discovery/huggingface-gguf.test.ts | 85 ++++++++++++++++++++++++++++++++
+ 5 files changed, 206 insertions(+), 39 deletions(-)
+
+## Diff
+diff --git a/src/cli/discover.ts b/src/cli/discover.ts
+index 37b0e65..4c5a822 100644
+--- a/src/cli/discover.ts
++++ b/src/cli/discover.ts
+@@ -3,20 +3,23 @@ import { runDiscovery } from '../discovery/discover.ts';
+ async function main(): Promise<void> {
+   console.error(
+     'Discovering models from Hugging Face (this needs internet)...',
+   );
+   try {
+     const r = await runDiscovery();
+     console.error(
+       `Found ${r.found} candidate(s), ${r.fits} fit the budget. ` +
+         `Pre-pulled: ${r.pulled.length ? r.pulled.join(', ') : 'none'}. Catalog: ${r.path}`,
+     );
++    for (const f of r.pullFailed) {
++      console.error(`failed-to-pull: ${f.model}: ${f.reason}`);
++    }
+   } catch (err) {
+     console.error(
+       `Discovery failed (using any existing catalog): ${(err as Error).message}`,
+     );
+     process.exitCode = 1;
+   }
+ }
+ main().catch((err) => {
+   console.error(err);
+   process.exitCode = 1;
+diff --git a/src/discovery/discover.ts b/src/discovery/discover.ts
+index 69fcc85..23073f7 100644
+--- a/src/discovery/discover.ts
++++ b/src/discovery/discover.ts
+@@ -19,20 +19,21 @@ export type DiscoverDeps = {
+   writeCatalog?: (c: Candidate[]) => void;
+   pullTop?: (model: string, provider: Candidate['provider']) => Promise<void>;
+   catalogPathStr?: string;
+   prePullCount?: number;
+ };
+ 
+ export type DiscoverResult = {
+   found: number;
+   fits: number;
+   pulled: string[];
++  pullFailed: { model: string; reason: string }[];
+   path: string;
+ };
+ 
+ export async function runDiscovery(
+   deps: DiscoverDeps = {},
+ ): Promise<DiscoverResult> {
+   const host = deps.host ?? (await detectHost());
+   const sources = (deps.sources ?? SOURCES).filter((s) => s.appliesTo(host));
+   const requires: Capability[] = [Cap.Tools];
+ 
+@@ -59,31 +60,36 @@ export async function runDiscovery(
+   }
+   const ranked = [...byRepo.values()].sort(
+     (a, b) =>
+       b.downloads - a.downloads ||
+       b.footprint.approxParamsBillions - a.footprint.approxParamsBillions,
+   );
+ 
+   (deps.writeCatalog ?? ((c) => writeCatalogFile(c)))(ranked);
+ 
+   const pulled: string[] = [];
++  const pullFailed: { model: string; reason: string }[] = [];
+   const n = deps.prePullCount ?? 1;
+   const pull =
+     deps.pullTop ??
+     (async (model, provider) => {
+       await runtimeFor(provider).control.pull(model);
+     });
+   for (const c of ranked.slice(0, n)) {
+     try {
+       await pull(c.model, c.provider);
+       pulled.push(c.model);
+-    } catch {
+-      /* report, don't fail */
++    } catch (err) {
++      pullFailed.push({
++        model: c.model,
++        reason: (err as Error).message ?? String(err),
++      });
+     }
+   }
+   return {
+     found: all.length,
+     fits: ranked.length,
+     pulled,
++    pullFailed,
+     path: deps.catalogPathStr ?? catalogPath(),
+   };
+ }
+diff --git a/src/discovery/huggingface-gguf.ts b/src/discovery/huggingface-gguf.ts
+index a2b8bca..9cc2d96 100644
+--- a/src/discovery/huggingface-gguf.ts
++++ b/src/discovery/huggingface-gguf.ts
+@@ -1,53 +1,63 @@
+ import {
+   Capability,
+   ContentPolicy,
+   type ModelDeclaration,
+   ProviderKind,
+ } from '../core/types.ts';
++import { kvCacheBytes, weightsBytes } from '../resource/footprint.ts';
++import { MIN_CTX } from '../resource/model-manager.ts';
+ import type {
+   Candidate,
+   CatalogSource,
+   DiscoveryQuery,
+   HostCapabilities,
+ } from './catalog-source.ts';
+ import { hfGet } from './hf-client.ts';
+-import {
+-  bytesPerWeightForQuant,
+-  pickBestQuantThatFits,
+-  type QuantFile,
+-} from './quant.ts';
++import { bytesPerWeightForQuant } from './quant.ts';
+ 
+ export const TRUSTED_PUBLISHERS = [
+   'bartowski',
+   'unsloth',
+   'MaziyarPanahi',
+   'Qwen',
+   'lmstudio-community',
+ ];
+ const PER_AUTHOR_LIMIT = 20;
+ const UNCENSORED_RE = /(abliterated|uncensored|dolphin)/i;
+-const QUANT_RE = /-(IQ?\d[\w_]*|Q\d[\w_]*|F16|FP16)\.gguf$/i;
++
++/** Bytes-per-token for the KV cache — mirrors DEFAULT_KV_PER_TOKEN in model-manager. */
++const DEFAULT_KV = 131072;
++
++/** Full-precision quant labels to exclude from candidate selection. */
++const FULL_PRECISION = new Set(['F16', 'F32', 'FP16', 'BF16']);
++
++/**
++ * Regex to extract a quant token from anywhere in a filename (case-insensitive).
++ * Matches IQ-style and Q-digit-style quants.
++ */
++const QUANT_TOKEN_RE = /\b(IQ\d\w*|Q\d[\w_]*)\b/i;
+ 
+ /** True if a chat template exposes tool/function calling. */
+ export function detectTools(chatTemplate: string): boolean {
+   return /tool_call|tools|function/i.test(chatTemplate);
+ }
+ 
+ type ListItem = { id: string; downloads?: number };
+ type GgufInfo = {
+   gguf?: { total?: number; context_length?: number; chat_template?: string };
+ };
+ type TreeEntry = { path: string; size?: number; lfs?: { size?: number } };
+ 
++/** Extract a quant label from anywhere in a filename. Returns uppercase or undefined. */
+ function quantOf(path: string): string | undefined {
+-  const m = path.match(QUANT_RE);
++  const m = path.match(QUANT_TOKEN_RE);
+   return m?.[1]?.toUpperCase();
+ }
+ 
+ async function candidateFor(
+   item: ListItem,
+   q: DiscoveryQuery,
+ ): Promise<Candidate | undefined> {
+   const repo = item.id;
+   let info: GgufInfo;
+   try {
+@@ -58,54 +68,82 @@ async function candidateFor(
+   const tmpl = info.gguf?.chat_template ?? '';
+   if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl))
+     return undefined;
+ 
+   let tree: TreeEntry[];
+   try {
+     tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[];
+   } catch {
+     return undefined;
+   }
+-  const files: QuantFile[] = [];
++
++  // Group shards by quant label, summing their sizes.
++  // Exclude full-precision files and mmproj/projector files.
++  const quantSums = new Map<string, number>();
+   for (const e of tree) {
+-    const quant = quantOf(e.path);
++    const filename = e.path.split('/').pop() ?? e.path;
++    if (/mmproj|projector/i.test(filename)) continue;
++
++    const quant = quantOf(filename);
++    if (!quant) continue;
++    if (FULL_PRECISION.has(quant)) continue;
++
+     const sizeBytes = e.lfs?.size ?? e.size;
+-    if (quant && typeof sizeBytes === 'number')
+-      files.push({ quant, sizeBytes });
++    if (typeof sizeBytes !== 'number') continue;
++
++    quantSums.set(quant, (quantSums.get(quant) ?? 0) + sizeBytes);
+   }
+-  const best = pickBestQuantThatFits(files, q.budgetBytes);
+-  if (!best) return undefined;
+ 
+-  const params = (info.gguf?.total ?? 0) / 1e9;
++  // Select the best quant: footprint <= budgetBytes, then largest summedBytes wins.
++  let bestQuant: string | undefined;
++  let bestSummedBytes = 0;
++
++  for (const [quant, summedBytes] of quantSums) {
++    const bpw = bytesPerWeightForQuant(quant);
++    const approxParamsBillions = summedBytes / 1e9 / bpw;
++    const footprint =
++      weightsBytes(approxParamsBillions, bpw) +
++      kvCacheBytes(MIN_CTX, DEFAULT_KV);
++
++    if (footprint > q.budgetBytes) continue;
++
++    if (summedBytes > bestSummedBytes) {
++      bestSummedBytes = summedBytes;
++      bestQuant = quant;
++    }
++  }
++
++  if (!bestQuant) return undefined;
++
++  const bpw = bytesPerWeightForQuant(bestQuant);
++  const approxParamsBillions = bestSummedBytes / 1e9 / bpw;
++
+   const decl: ModelDeclaration = {
+     provider: ProviderKind.Ollama,
+-    model: `hf.co/${repo}:${best.quant}`,
++    model: `hf.co/${repo}:${bestQuant}`,
+     params: {},
+     role: 'discovered general reasoning + tool use',
+     capabilities: detectTools(tmpl) ? [Capability.Tools] : [],
+     contentPolicy: UNCENSORED_RE.test(repo)
+       ? ContentPolicy.Uncensored
+       : ContentPolicy.Default,
+     footprint: {
+-      approxParamsBillions:
+-        params > 0
+-          ? params
+-          : best.sizeBytes / 1e9 / bytesPerWeightForQuant(best.quant),
+-      bytesPerWeight: bytesPerWeightForQuant(best.quant),
++      approxParamsBillions,
++      bytesPerWeight: bpw,
+     },
+     maxContext: info.gguf?.context_length,
+   };
+   return {
+     ...decl,
+     repo,
+-    quant: best.quant,
+-    fileSizeBytes: best.sizeBytes,
++    quant: bestQuant,
++    fileSizeBytes: bestSummedBytes,
+     downloads: item.downloads ?? 0,
+     installed: false,
+   };
+ }
+ 
+ export const hfGgufSource: CatalogSource = {
+   name: 'hf-gguf',
+   appliesTo: (_host: HostCapabilities) => true, // Ollama runs GGUF on every host
+   async listCandidates(q: DiscoveryQuery): Promise<Candidate[]> {
+     const items: ListItem[] = [];
+diff --git a/tests/discovery/discover.test.ts b/tests/discovery/discover.test.ts
+index cefd137..ae1f4fa 100644
+--- a/tests/discovery/discover.test.ts
++++ b/tests/discovery/discover.test.ts
+@@ -1,44 +1,79 @@
+ import { expect, test } from 'bun:test';
+ import { Capability, ProviderKind } from '../../src/core/types.ts';
+ import { runDiscovery } from '../../src/discovery/discover.ts';
+ 
++const makeCandidate = (model: string, dl: number, params: number) => ({
++  provider: ProviderKind.Ollama,
++  model,
++  params: {},
++  role: 'r',
++  capabilities: [Capability.Tools],
++  footprint: { approxParamsBillions: params, bytesPerWeight: 0.56 },
++  repo: model,
++  quant: 'Q4_K_M',
++  fileSizeBytes: params * 0.56e9 * 1.2,
++  downloads: dl,
++  installed: false,
++});
++
+ test('fetches from applicable sources, filters/ranks, writes, pre-pulls top-1', async () => {
+-  const c = (model: string, dl: number, params: number) => ({
+-    provider: ProviderKind.Ollama,
+-    model,
+-    params: {},
+-    role: 'r',
+-    capabilities: [Capability.Tools],
+-    footprint: { approxParamsBillions: params, bytesPerWeight: 0.56 },
+-    repo: model,
+-    quant: 'Q4_K_M',
+-    fileSizeBytes: params * 0.56e9 * 1.2,
+-    downloads: dl,
+-    installed: false,
+-  });
+   const pulled: string[] = [];
+   const out = await runDiscovery({
+     host: {
+       totalRamBytes: 24e9,
+       liveBudgetBytes: 12e9,
+       runtimes: [ProviderKind.Ollama],
+     },
+     sources: [
+       {
+         name: 's',
+         appliesTo: () => true,
+         listCandidates: async () => [
+-          c('hf.co/a:Q4_K_M', 10, 7),
+-          c('hf.co/b:Q4_K_M', 99, 9),
++          makeCandidate('hf.co/a:Q4_K_M', 10, 7),
++          makeCandidate('hf.co/b:Q4_K_M', 99, 9),
+         ],
+       },
+     ],
+     writeCatalog: () => {},
+     pullTop: async (m) => {
+       pulled.push(m);
+     },
+     catalogPathStr: '/tmp/catalog.json',
+   });
+   expect(out.found).toBe(2);
+   expect(pulled).toEqual(['hf.co/b:Q4_K_M']); // highest downloads, pre-pulled
+ });
++
++test('failing pullTop populates pullFailed', async () => {
++  const out = await runDiscovery({
++    host: {
++      totalRamBytes: 24e9,
++      liveBudgetBytes: 12e9,
++      runtimes: [ProviderKind.Ollama],
++    },
++    sources: [
++      {
++        name: 's',
++        appliesTo: () => true,
++        listCandidates: async () => [
++          makeCandidate('hf.co/good:Q4_K_M', 99, 7),
++          makeCandidate('hf.co/bad:Q4_K_M', 50, 7),
++        ],
++      },
++    ],
++    writeCatalog: () => {},
++    pullTop: async (m) => {
++      if (m === 'hf.co/good:Q4_K_M') return;
++      throw new Error('connection refused');
++    },
++    catalogPathStr: '/tmp/catalog.json',
++    prePullCount: 2,
++  });
++  expect(out.pulled).toContain('hf.co/good:Q4_K_M');
++  expect(out.pulled).not.toContain('hf.co/bad:Q4_K_M');
++  expect(out.pullFailed).toHaveLength(1);
++  const failure = out.pullFailed[0];
++  if (!failure) throw new Error('expected a failure entry');
++  expect(failure.model).toBe('hf.co/bad:Q4_K_M');
++  expect(failure.reason.length).toBeGreaterThan(0);
++});
+diff --git a/tests/discovery/huggingface-gguf.test.ts b/tests/discovery/huggingface-gguf.test.ts
+index 032b3cb..f35328a 100644
+--- a/tests/discovery/huggingface-gguf.test.ts
++++ b/tests/discovery/huggingface-gguf.test.ts
+@@ -44,10 +44,95 @@ test('builds a fitting tool-capable GGUF candidate', async () => {
+     hostTotalRamBytes: 24e9,
+   });
+   expect(cands.length).toBe(1);
+   const cand = cands[0];
+   if (!cand) throw new Error('expected a candidate');
+   expect(cand.provider).toBe(ProviderKind.Ollama);
+   expect(cand.model).toBe('hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M');
+   expect(cand.capabilities).toContain(Capability.Tools);
+   expect(cand.quant).toBe('Q4_K_M');
+ });
++
++test('shard-aware: sums multi-shard Q4_K_M, excludes F16 and mmproj', async () => {
++  const routes: Record<string, unknown> = {
++    '/api/models?filter=gguf&author=bartowski&sort=downloads&direction=-1&limit=20':
++      [{ id: 'bartowski/big-model-GGUF', downloads: 5000 }],
++    '/api/models/bartowski/big-model-GGUF': {
++      gguf: { chat_template: 'tool_call', context_length: 16384 },
++    },
++    '/api/models/bartowski/big-model-GGUF/tree/main': [
++      {
++        path: 'big-model-Q4_K_M-00001-of-00003.gguf',
++        lfs: { size: 1_500_000_000 },
++      },
++      {
++        path: 'big-model-Q4_K_M-00002-of-00003.gguf',
++        lfs: { size: 1_500_000_000 },
++      },
++      {
++        path: 'big-model-Q4_K_M-00003-of-00003.gguf',
++        lfs: { size: 1_500_000_000 },
++      },
++      { path: 'big-model-F16.gguf', size: 1_200_000_000 },
++      { path: 'mmproj-big-model-F16.gguf', size: 500_000_000 },
++    ],
++  };
++  globalThis.fetch = (async (u: string) => {
++    const path = u.replace('https://huggingface.co', '');
++    const body = routes[path] ?? routes[decodeURIComponent(path)];
++    return new Response(JSON.stringify(body ?? null), {
++      status: body ? 200 : 404,
++    });
++  }) as unknown as typeof fetch;
++
++  const cands = await hfGgufSource.listCandidates({
++    budgetBytes: 16e9,
++    requires: [Capability.Tools],
++    hostTotalRamBytes: 32e9,
++  });
++  expect(cands.length).toBe(1);
++  const cand = cands[0];
++  if (!cand) throw new Error('expected a candidate');
++  expect(cand.quant).toBe('Q4_K_M');
++  expect(cand.fileSizeBytes).toBe(4_500_000_000);
++  expect(cand.model).toBe('hf.co/bartowski/big-model-GGUF:Q4_K_M');
++});
++
++test('budget-too-small: no candidate returned when footprint exceeds budget', async () => {
++  const routes: Record<string, unknown> = {
++    '/api/models?filter=gguf&author=bartowski&sort=downloads&direction=-1&limit=20':
++      [{ id: 'bartowski/big-model-GGUF', downloads: 5000 }],
++    '/api/models/bartowski/big-model-GGUF': {
++      gguf: { chat_template: 'tool_call', context_length: 16384 },
++    },
++    '/api/models/bartowski/big-model-GGUF/tree/main': [
++      {
++        path: 'big-model-Q4_K_M-00001-of-00003.gguf',
++        lfs: { size: 1_500_000_000 },
++      },
++      {
++        path: 'big-model-Q4_K_M-00002-of-00003.gguf',
++        lfs: { size: 1_500_000_000 },
++      },
++      {
++        path: 'big-model-Q4_K_M-00003-of-00003.gguf',
++        lfs: { size: 1_500_000_000 },
++      },
++      { path: 'big-model-F16.gguf', size: 1_200_000_000 },
++      { path: 'mmproj-big-model-F16.gguf', size: 500_000_000 },
++    ],
++  };
++  globalThis.fetch = (async (u: string) => {
++    const path = u.replace('https://huggingface.co', '');
++    const body = routes[path] ?? routes[decodeURIComponent(path)];
++    return new Response(JSON.stringify(body ?? null), {
++      status: body ? 200 : 404,
++    });
++  }) as unknown as typeof fetch;
++
++  const cands = await hfGgufSource.listCandidates({
++    budgetBytes: 1e9,
++    requires: [Capability.Tools],
++    hostTotalRamBytes: 8e9,
++  });
++  expect(cands.length).toBe(0);
++});

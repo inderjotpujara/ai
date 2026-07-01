@@ -1,0 +1,229 @@
+# Review package: 0f2470d..3858e80
+
+## Commits
+3858e80 fix: stream:false on warm/unload + raise MaxStepsError on step-ceiling exhaustion
+
+## Files changed
+ src/core/agent.ts                     |  9 ++++++-
+ src/resource/ollama-control.ts        |  8 ++++--
+ tests/core/agent.test.ts              | 47 +++++++++++++++++++++++++++++++++++
+ tests/resource/ollama-control.test.ts | 29 +++++++++++++++++++++
+ 4 files changed, 90 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/core/agent.ts b/src/core/agent.ts
+index 8c9f616..96072ee 100644
+--- a/src/core/agent.ts
++++ b/src/core/agent.ts
+@@ -1,35 +1,42 @@
+ import type { ProviderOptions } from '@ai-sdk/provider-utils';
+ import {
+   generateText,
+   type LanguageModel,
+   stepCountIs,
+   type ToolSet,
+ } from 'ai';
++import { MaxStepsError } from './errors.ts';
+ 
+ const DEFAULT_MAX_STEPS = 10;
+ 
+ export type RunAgentInput = {
+   model: LanguageModel;
+   systemPrompt: string;
+   prompt: string;
+   tools: ToolSet;
+   maxSteps?: number;
+   temperature?: number;
+   providerOptions?: ProviderOptions;
+ };
+ 
+ /** Run one agent turn: model + tools loop, bounded by a step guard. */
+ export async function runAgent(
+   input: RunAgentInput,
+ ): Promise<{ text: string }> {
+-  const { text } = await generateText({
++  const result = await generateText({
+     model: input.model,
+     system: input.systemPrompt,
+     prompt: input.prompt,
+     tools: input.tools,
+     temperature: input.temperature,
+     providerOptions: input.providerOptions,
+     stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
+   });
++  const { text, finishReason, steps } = result;
++  if (text.trim() === '' && finishReason !== 'stop') {
++    throw new MaxStepsError(
++      `Agent exhausted step ceiling (${steps.length} steps) without producing a final answer.`,
++    );
++  }
+   return { text };
+ }
+diff --git a/src/resource/ollama-control.ts b/src/resource/ollama-control.ts
+index 8a4aca9..2d49bb8 100644
+--- a/src/resource/ollama-control.ts
++++ b/src/resource/ollama-control.ts
+@@ -48,20 +48,24 @@ export function pullModel(
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/pull', { model, stream: false });
+ }
+ 
+ /** Warm/preload a model into memory with an empty-prompt generate. */
+ export function warmModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+-  return postJson(baseUrl, '/api/generate', { model });
++  return postJson(baseUrl, '/api/generate', { model, stream: false });
+ }
+ 
+ /** Unload a model from memory immediately (keep_alive: 0). */
+ export function unloadModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+-  return postJson(baseUrl, '/api/generate', { model, keep_alive: 0 });
++  return postJson(baseUrl, '/api/generate', {
++    model,
++    keep_alive: 0,
++    stream: false,
++  });
+ }
+diff --git a/tests/core/agent.test.ts b/tests/core/agent.test.ts
+index 65cd76e..0d4eb62 100644
+--- a/tests/core/agent.test.ts
++++ b/tests/core/agent.test.ts
+@@ -1,15 +1,16 @@
+ import { expect, mock, test } from 'bun:test';
+ import { tool } from 'ai';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import { z } from 'zod';
+ import { runAgent } from '../../src/core/agent.ts';
++import { MaxStepsError } from '../../src/core/errors.ts';
+ 
+ test('agent calls the tool then returns the final answer', async () => {
+   const execute = mock(async ({ path }: { path: string }) => ({
+     text: `contents of ${path}`,
+   }));
+ 
+   let call = 0;
+   const model = new MockLanguageModelV3({
+     doGenerate: async () => {
+       call += 1;
+@@ -67,10 +68,56 @@ test('agent calls the tool then returns the final answer', async () => {
+     prompt: 'What does /tmp/x.txt say?',
+     tools,
+   });
+ 
+   expect(execute).toHaveBeenCalledWith(
+     { path: '/tmp/x.txt' },
+     expect.anything(),
+   );
+   expect(text).toBe('The file says hello.');
+ });
++
++test('runAgent throws MaxStepsError when step ceiling is hit without a final answer', async () => {
++  // A model that always returns a tool-call (never produces final text), so the
++  // loop exhausts maxSteps and generateText stops with finishReason != 'stop'.
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [
++        {
++          type: 'tool-call',
++          toolCallId: 'c1',
++          toolName: 'noop_tool',
++          input: JSON.stringify({}),
++        },
++      ],
++      finishReason: { unified: 'tool-calls', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++
++  const tools = {
++    noop_tool: tool({
++      description: 'does nothing',
++      inputSchema: z.object({}),
++      execute: async () => ({ result: 'ok' }),
++    }),
++  };
++
++  await expect(
++    runAgent({
++      model,
++      systemPrompt: 'You are a test agent.',
++      prompt: 'Run forever.',
++      tools,
++      maxSteps: 2,
++    }),
++  ).rejects.toBeInstanceOf(MaxStepsError);
++});
+diff --git a/tests/resource/ollama-control.test.ts b/tests/resource/ollama-control.test.ts
+index 9a4029d..902b47d 100644
+--- a/tests/resource/ollama-control.test.ts
++++ b/tests/resource/ollama-control.test.ts
+@@ -1,14 +1,16 @@
+ import { afterEach, expect, spyOn, test } from 'bun:test';
+ import {
+   isModelInstalled,
+   pullModel,
++  unloadModel,
++  warmModel,
+ } from '../../src/resource/ollama-control.ts';
+ 
+ afterEach(() => {
+   (globalThis.fetch as unknown as { mockRestore?: () => void }).mockRestore?.();
+ });
+ 
+ test('isModelInstalled returns true when /api/tags lists the model by name', async () => {
+   // biome-ignore lint/suspicious/noExplicitAny: spyOn requires dynamic property access
+   spyOn(globalThis, 'fetch' as any).mockImplementation(() =>
+     Promise.resolve(
+@@ -26,10 +28,37 @@ test('pullModel POSTs the model field and resolves on 200', async () => {
+     new Response(JSON.stringify({ status: 'success' }), { status: 200 }),
+   );
+   await pullModel('qwen3:8b');
+   const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+   expect(url).toBe('http://localhost:11434/api/pull');
+   expect(JSON.parse(init.body as string)).toEqual({
+     model: 'qwen3:8b',
+     stream: false,
+   });
+ });
++
++test('warmModel POSTs to /api/generate with stream: false', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({}), { status: 200 }),
++  );
++  await warmModel('qwen3:8b');
++  const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
++  expect(url).toBe('http://localhost:11434/api/generate');
++  expect(JSON.parse(init.body as string)).toEqual({
++    model: 'qwen3:8b',
++    stream: false,
++  });
++});
++
++test('unloadModel POSTs to /api/generate with keep_alive: 0 and stream: false', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({}), { status: 200 }),
++  );
++  await unloadModel('qwen3:8b');
++  const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
++  expect(url).toBe('http://localhost:11434/api/generate');
++  expect(JSON.parse(init.body as string)).toEqual({
++    model: 'qwen3:8b',
++    keep_alive: 0,
++    stream: false,
++  });
++});

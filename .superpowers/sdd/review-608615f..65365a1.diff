@@ -1,0 +1,170 @@
+# Review package: 608615f..65365a1
+
+## Commits
+65365a1 feat(core): extend capability/runtime taxonomy + content-policy selector filter
+
+## Files changed
+ src/core/types.ts                      | 19 ++++++++++++++++---
+ src/resource/selector.ts               | 12 +++++++-----
+ tests/resource/selector-policy.test.ts | 28 ++++++++++++++++++++++++++++
+ 3 files changed, 51 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/src/core/types.ts b/src/core/types.ts
+index ad8f1bd..1adb2b1 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -1,54 +1,67 @@
+ /** Which local runtime backs a model. String enum per project style. */
+ export enum ProviderKind {
+-  Ollama = 'Ollama',
++  Ollama = 'Ollama',         // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
++  MlxServer = 'MlxServer',   // MLX via a local OpenAI-compatible server (LM Studio / vllm-mlx)
+ }
+ 
+-/** A capability a model advertises and an agent can require. String enum (extensible). */
++/** A capability a model advertises and an agent can require. Selector hard-filters on these. */
+ export enum Capability {
+   Tools = 'tools',
+-  // future: Vision = 'vision', LongContext = 'long-context', Coding = 'coding'
++  Vision = 'vision', // image input (Slice 8)
++  Audio = 'audio',   // speech in/out (Slice 9)
++  Video = 'video',   // frames/clips (Slice 10)
++}
++
++/** Content moderation posture. Uncensored is gated behind a future mode (Slice 11). */
++export enum ContentPolicy {
++  Default = 'default',
++  Uncensored = 'uncensored',
+ }
+ 
+ /** How the selector ranks the candidates that survive the hard filter. */
+ export enum PreferPolicy {
+   LargestThatFits = 'largest-that-fits',
+   // future: SmallestThatFits, QualityRanked, GlobalSchedule
+ }
+ 
+ /** What a requirement-driven agent declares instead of a concrete model name. */
+ export type ModelRequirement = {
+   /** Human description of the role. */
+   role: string;
+   /** HARD filter — every listed capability must be present on the model. */
+   requires: Capability[];
+   /** SOFT rank over the survivors. */
+   prefer: PreferPolicy;
++  /** If true, uncensored models are eligible. Absent/false = filtered out. */
++  allowUncensored?: boolean;
+ };
+ 
+ /** Tunable inference parameters carried by a model declaration. */
+ export type ModelParams = {
+   temperature?: number;
+   numCtx?: number;
+ };
+ 
+ /**
+  * A model declaration is DATA, not logic. Slice 1 pins a concrete model name;
+  * later slices can resolve a capability/role to a discovered model.
+  */
+ export type ModelDeclaration = {
+   provider: ProviderKind;
+   model: string;
+   params: ModelParams;
+   role: string;
+   /** Capabilities this model provides; selector hard-filters on these. Missing = none. */
+   capabilities?: Capability[];
++  /** Moderation posture; absent = Default. */
++  contentPolicy?: ContentPolicy;
+   /** Pre-load sizing hint for the model manager. */
+   footprint: {
+     approxParamsBillions: number;
+     bytesPerWeight: number;
+     /** Bytes of KV cache per token (per-model; defaults to 131072 if omitted). */
+     kvBytesPerToken?: number;
+   };
+   /**
+    * Optional cap on the context window. The true max is detected live from
+    * Ollama; set this only to deliberately cap below it or as a probe fallback.
+diff --git a/src/resource/selector.ts b/src/resource/selector.ts
+index d9387f9..4f2807f 100644
+--- a/src/resource/selector.ts
++++ b/src/resource/selector.ts
+@@ -1,15 +1,13 @@
+ import { ResourceError } from '../core/errors.ts';
+-import type {
+-  Capability,
+-  ModelDeclaration,
+-  ModelRequirement,
++import {
++  type Capability, ContentPolicy, type ModelDeclaration, type ModelRequirement,
+ } from '../core/types.ts';
+ import { weightsBytes } from './footprint.ts';
+ import type { EnsureOpts } from './model-manager.ts';
+ import type { LoadedModel } from './ollama-control.ts';
+ 
+ function hasAll(decl: ModelDeclaration, requires: Capability[]): boolean {
+   const caps = new Set(decl.capabilities ?? []);
+   return requires.every((c) => caps.has(c));
+ }
+ 
+@@ -17,21 +15,25 @@ function hasAll(decl: ModelDeclaration, requires: Capability[]): boolean {
+  * PURE. Hard-filter by `requires`, then rank by `prefer`.
+  * LargestThatFits: most params first; tie-break smaller footprint; then a
+  * warm-aware bias (resident wins among otherwise-equal candidates) to avoid
+  * needless reload churn. The fits check itself is the manager's job, not here.
+  */
+ export function selectCandidates(
+   req: ModelRequirement,
+   registry: ModelDeclaration[],
+   loaded?: ReadonlySet<string>,
+ ): ModelDeclaration[] {
+-  const capable = registry.filter((d) => hasAll(d, req.requires));
++  const capable = registry.filter(
++    (d) =>
++      hasAll(d, req.requires) &&
++      (req.allowUncensored === true || d.contentPolicy !== ContentPolicy.Uncensored),
++  );
+   return [...capable].sort((a, b) => {
+     const pa = a.footprint.approxParamsBillions;
+     const pb = b.footprint.approxParamsBillions;
+     if (pb !== pa) return pb - pa; // largest params first
+     const fa = weightsBytes(pa, a.footprint.bytesPerWeight);
+     const fb = weightsBytes(pb, b.footprint.bytesPerWeight);
+     if (fa !== fb) return fa - fb; // smaller footprint first
+     if (loaded) {
+       const la = loaded.has(a.model) ? 0 : 1;
+       const lb = loaded.has(b.model) ? 0 : 1;
+diff --git a/tests/resource/selector-policy.test.ts b/tests/resource/selector-policy.test.ts
+new file mode 100644
+index 0000000..52676d2
+--- /dev/null
++++ b/tests/resource/selector-policy.test.ts
+@@ -0,0 +1,28 @@
++import { expect, test } from 'bun:test';
++import {
++  Capability, ContentPolicy, type ModelDeclaration, PreferPolicy, ProviderKind,
++} from '../../src/core/types.ts';
++import { selectCandidates } from '../../src/resource/selector.ts';
++
++function m(model: string, caps: Capability[], policy?: ContentPolicy): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama, model, params: {}, role: 'r',
++    capabilities: caps, contentPolicy: policy,
++    footprint: { approxParamsBillions: 7, bytesPerWeight: 0.56 },
++  };
++}
++const tools = { role: 'r', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits };
++
++test('uncensored models excluded by default', () => {
++  const reg = [m('safe', [Capability.Tools]), m('unc', [Capability.Tools], ContentPolicy.Uncensored)];
++  expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual(['safe']);
++});
++test('uncensored included when allowUncensored', () => {
++  const reg = [m('safe', [Capability.Tools]), m('unc', [Capability.Tools], ContentPolicy.Uncensored)];
++  const out = selectCandidates({ ...tools, allowUncensored: true }, reg).map((d) => d.model);
++  expect(out.sort()).toEqual(['safe', 'unc']);
++});
++test('vision-only model excluded for a tools requirement', () => {
++  const reg = [m('vis', [Capability.Vision]), m('tool', [Capability.Tools])];
++  expect(selectCandidates(tools, reg).map((d) => d.model)).toEqual(['tool']);
++});

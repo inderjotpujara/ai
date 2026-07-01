@@ -1,0 +1,385 @@
+# Review package: a11e7e3..a1468db
+
+## Commits
+a1468db test(discovery): live discover + MLX verify + Slice 6 docs
+
+## Files changed
+ README.md                               | 21 ++++++----
+ docs/ROADMAP.md                         | 30 +++++++++++---
+ docs/architecture.md                    | 73 +++++++++++++++++++++++++++++++--
+ tests/integration/discover.live.test.ts | 35 ++++++++++++++++
+ tests/integration/mlx.live.test.ts      | 11 +++++
+ 5 files changed, 152 insertions(+), 18 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index b13953d..44bc58f 100644
+--- a/README.md
++++ b/README.md
+@@ -1,23 +1,23 @@
+ # Local Agents
+ 
+ A **local-first, multi-agent framework** for Apple Silicon. Build and run AI
+ agents against **local models** (no API keys), orchestrated by a super-agent,
+ on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
+ Mini.
+ 
+-> **Status:** Slice 5 complete — **dynamic model selection**. Specialists declare
+-> a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`)
+-> rather than a fixed model; a selector picks the largest registry model that fits
+-> the live RAM budget (degrading 9b→4b under pressure). Built on Slice 4's
+-> hardware-aware Model Manager (live free-RAM budget via `vm_stat`, dynamic
+-> `num_ctx`, best-effort pinning). See [Roadmap](#roadmap).
++> **Status:** Slice 6 complete — **model discovery**. `bun run discover` fetches
++> the latest tool-capable GGUF/MLX models from Hugging Face, writes a per-machine
++> catalog, and pre-pulls the top fit. Normal `chat` runs merge the bootstrap rungs +
++> locally-installed models + the cached catalog — no network needed at inference time.
++> Built on Slice 5's dynamic model selection (capability requirements + largest-that-fits
++> selector). See [Roadmap](#roadmap).
+ 
+ ---
+ 
+ ## What it does (today)
+ 
+ ```sh
+ # Ask a question about a local file. The agent reads the file via a tool and answers.
+ bun run src/cli/chat.ts "What animal is mentioned in /tmp/sample.txt?"
+ ```
+ 
+@@ -30,21 +30,23 @@ Under the hood, one CLI run autonomously:
+    `qwen3.5:9b`) if it isn't installed (no hardcoded download step you have to run).
+ 3. **Warms the model** into memory.
+ 4. **Runs the agent loop** — the model calls a `read_file` tool (exposed over
+    **MCP**) and composes an answer.
+ 5. **Records the run** — writes the answer and an append-only journal to
+    `runs/<id>/`.
+ 6. **Unloads the model** to free memory.
+ 
+ No manual steps. No API keys. Everything runs locally.
+ 
+-**Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder that Slice 6 discovery will populate at runtime.
++**Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder populated at runtime by Slice 6 discovery.
++
++**Model discovery (Slice 6).** `bun run discover` fetches the latest tool-capable GGUF models from Hugging Face (trusted publishers, sized to your live RAM budget), writes a per-machine `model-images/catalog.json`, and pre-pulls the top fitting model. Normal `chat` runs read an **offline** merge of the bootstrap rungs + locally-installed models + the cached catalog — no network needed. A local MLX server (LM Studio / vllm-mlx at `MLX_BASE_URL`) is discovered + used automatically when running. Vision/audio/video and an uncensored mode are typed-in seams shipped in later slices.
+ 
+ ---
+ 
+ ## Quick start
+ 
+ **Prerequisites:** [Bun](https://bun.com) ≥ 1.3, [Ollama](https://ollama.com)
+ (running locally), an Apple Silicon Mac, and [`uvx`](https://docs.astral.sh/uv/)
+ (for the keyless web-fetch agent — `uvx mcp-server-fetch`). The unit/mock test
+ suite needs none of these; only the CLI and opt-in live tests do.
+ 
+@@ -158,22 +160,23 @@ interface — no agent code changes. See
+ 
+ ## Roadmap
+ 
+ | Slice | Scope | Status |
+ |---|---|---|
+ | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
+ | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
+ | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
+ | **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation) · best-effort pin (pinned evicted only as last resort) · dynamic `num_ctx` sized from headroom, clamped by live model max, floored at 4096 | ✅ Done |
+ | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
+-| **Next** | **Slice 6 — model discovery** (auto-fetch latest models from Hugging Face, pull on demand, keep registry current — no hardcoded list) | Planned |
+-| **Later** | Agent-builder ⭐ (self-extend on a capability gap) · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
++| **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline merge of bootstrap + local + catalog at chat time; Ollama + MLX-server runtimes; four-axis taxonomy (capability/modality, runtime, source, content-policy) | ✅ Done |
++| **Next** | **Slice 7 — KV-cache quantization** (q8_0 default, q4_0 opt-in with high-GQA guard, global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION`) | Planned |
++| **Later** | Agent-builder ⭐ (self-extend on a capability gap) · Vision · Audio · Video · Uncensored mode · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
+ 
+ **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
+ daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
+ implementation plans live in [`docs/superpowers/`](docs/superpowers/).
+ 
+ ---
+ 
+ ## Development
+ 
+ ```sh
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index f9c74a1..afa113a 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -12,45 +12,63 @@ cycle (the same flow used for Slices 1–5). Order is a recommendation driven by
+ 
+ ## Shipped
+ 
+ | Slice | Capability | Status |
+ |---|---|---|
+ | **1** | Local file-Q&A agent · model warm-up/unload · MCP `read_file` · run store | ✅ shipped + live-verified |
+ | **2** | Orchestrator (agents-as-tools) — route to a specialist or report a capability gap | ✅ shipped + live-verified |
+ | **3** | `mountMcpServer` (mount any MCP server) · web-fetch agent (`uvx mcp-server-fetch`) | ✅ shipped + live-verified |
+ | **4** | **Model Manager** — multi-model, hardware-aware: live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation); load/evict/pin within budget; best-effort pin (pinned evicted only as last resort); dynamic `num_ctx` sized from headroom, clamped by live model max (`POST /api/show`), floored at 4096; orchestrator on pinned `qwen3.5:4b`, specialists on `qwen3.5:9b` on demand | ✅ shipped + live-verified |
+ | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; a bootstrap registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` and a non-zero exit instead of a hallucinated answer | ✅ shipped + live-verified |
++| **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline `buildRegistry` merges bootstrap + local + catalog at chat time; Ollama + MLX-server runtime ports; four-axis taxonomy (capability/modality, runtime, source, content-policy); `hf-gguf` + `hf-mlx` catalog sources; host detector; live discover + MLX verify tests. See spec §11 for committed follow-ons. | ✅ shipped + live-verified |
+ 
+-## Near-term — finish the resource-manager line
++## Near-term — resource-manager & model quality line
+ 
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+-| **6** | **Model discovery** — auto-fetch the latest models from Hugging Face, pull on demand, keep declarations current (no hardcoded list); feeds the Slice-5 registry | Slice 5 | "Always on the latest models" becomes runtime behavior |
++| **7** | **KV-cache quantization** — `q8_0` as the default KV-cache type, `q4_0` opt-in with a high-GQA guard (safe only when GQA count is high enough to absorb the quality drop); global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION` env wiring. (See spec §11.) | Slice 6 | Cuts KV-cache RAM by 4× vs fp16 on q4_0; q8_0 default is lossless in practice |
+ | **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
+ 
+ ### Future Work (from Slice 5 brainstorm)
+ 
+ The following items were identified during Slice 5 design (see spec §8) as valuable but deliberately deferred. They are committed for future slices — none are blocking:
+ 
+ - **Global / lookahead scheduler** — today selection is greedy and per-delegation; a planner-aware scheduler with a task DAG could pre-warm models and schedule concurrent delegations globally rather than locally. Depends on a task planner / DAG component.
+ - **Parallel fan-out memory arbitration** — when multiple specialists run concurrently, their combined footprints must be co-scheduled within the live budget. Requires an explicit `maxLoaded` cap on the Model Manager (today the only count ceiling is Ollama's `OLLAMA_MAX_LOADED_MODELS` env default) so concurrency is governed by both RAM headroom and a first-class model-count limit.
+ - **Interactive resource arbitration** ("user takes calls") — when memory is genuinely exhausted and degradation has already bottomed out, surface a user-visible ask before killing non-essential processes. Overlaps with Reclaim (Slice 4.5); design together.
+ - **Quality-ranked selection** — once Slice 6 populates the registry with richer metadata (benchmark scores, eval results), the selector can rank by quality-within-budget rather than pure size. This is the Slice 6 signal.
+ - **Richer registry + discovery** — the current registry is a static bootstrap ladder; Slice 6 replaces it with a per-machine runtime fetch from Hugging Face. Includes per-machine capability metadata, pulled-model tracking, and multi-quantization awareness.
+ - **Router-as-selected** — today the router (`qwen3.5:4b`) is pinned and hardcoded. A future slice could run it through the selector too, so even the routing model is capability-declared and hardware-adaptive.
+ - **Fuller anti-churn / hysteresis** — the warm-aware tie-break in `selectCandidates` is a lightweight first step. A proper hysteresis policy (e.g. don't evict a resident model unless the challenger is significantly better, or a cooldown window after a recent load) would reduce unnecessary model thrashing under oscillating load.
+ 
++## Committed follow-ons from Slice 6 (spec §11)
++
++These items were identified during Slice 6 design as the natural continuation of the four-axis taxonomy. The `Capability`, `ProviderKind`, and `ContentPolicy` seams are already typed; each slice activates a seam.
++
++| Slice | Capability | Depends on | Notes |
++|---|---|---|---|
++| **7** | **KV-cache quantization** — `q8_0` default KV-cache type; `q4_0` opt-in with a high-GQA guard; global `OLLAMA_KV_CACHE_TYPE` + `OLLAMA_FLASH_ATTENTION` env wiring | Slice 6 | Cuts KV-cache RAM 2–4× vs fp16; guard prevents quality regression on low-GQA models |
++| **8** | **Vision** — activate the `Capability.Vision` seam; wire a local multimodal model (e.g. Gemma 4, LLaVA) as a specialist; add `hf-gguf` + `hf-mlx` catalog sources filtered by vision capability | Slice 6 | `Capability.Vision` is already declared in `src/core/types.ts` |
++| **9** | **Audio** — activate `Capability.Audio`; local Whisper STT + TTS specialist; audio agent exposes a `transcribe`/`speak` tool | Slice 8 | Pairs with voice-in/out UX item |
++| **10** | **Video** — activate `Capability.Video`; local video-description specialist (frame sampling + vision model) | Slice 9 | Resumable long jobs (run store already supports it) |
++| **11** | **Uncensored mode** — activate `ContentPolicy.Uncensored` seam; add an opt-in uncensored catalog source (trusted publishers, explicit user flag); never the default | Slice 6 | `ContentPolicy` enum is already typed; activation requires explicit opt-in |
++
++Additional committed items (no fixed slice yet):
++
++- **Ollama-native MLX on Mac Mini** — Ollama 0.19+ uses the MLX backend on 32 GB+ Apple Silicon automatically; no code change required; the runtime port means larger MLX-backed Ollama models (e.g. `qwen3.5:14b+`) are picked up by discovery automatically.
++- **BFCL offline ranking** — integrate Berkeley Function-Calling Leaderboard offline scores as a quality signal in the catalog; the selector then ranks by quality-within-budget rather than pure downloads/size. Depends on Slice 6's richer catalog metadata.
++
+ ## Headline next — self-extension
+ 
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+-| **7** | **Agent-builder** ⭐ — on `report_capability_gap`, generate a new agent definition file (+ suggest an MCP server to mount) so the system *grows a capability* on demand. The `report_capability_gap` seam is already in place. | Slices 2, 3, (5/6 help) | **Highest-leverage future feature** — makes "describe a need → the system extends itself" real |
++| **Agent-builder** ⭐ | On `report_capability_gap`, generate a new agent definition file (+ suggest an MCP server to mount) so the system *grows a capability* on demand. The `report_capability_gap` seam is already in place. | Slices 2, 3, (5/6 help) | **Highest-leverage future feature** — makes "describe a need → the system extends itself" real |
+ 
+ ## Orchestration & intelligence
+ 
+ - **Deeper agent graphs** — a "researcher" agent that itself delegates to `web_fetch` + `file_qa` (composability already exists via agents-as-tools), with the **hardware/context-aware guardrails**: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns.
+ - **Parallel fan-out** — when sub-tasks are independent, run specialists **concurrently** within the memory budget the Model Manager enforces.
+   - **Explicit `maxLoaded` cap on the Model Manager** — today the manager has **no count limit** on co-resident models; it loads until the live free-RAM headroom is exhausted (now tracked accurately via `vm_stat`), and the only count cap is Ollama's `OLLAMA_MAX_LOADED_MODELS` (default **3** on single-GPU Metal) acting as an implicit backstop. For deterministic parallel fan-out we should add a first-class `maxLoaded` to the manager (bound concurrency in our own scheduler rather than relying on Ollama's env default), so concurrency is governed by both the RAM headroom **and** an explicit model-count ceiling.
+ - **Response-format tooling** — shape answers into JSON / markdown / tables on request (user-confirmed needed).
+ - **Memory / RAG** — a local vector store + local embeddings model so agents recall past runs and indexed docs.
+ - **Image/vision agent** — a local multimodal model (e.g. Gemma 4) describing screenshots/images.
+ 
+@@ -75,23 +93,23 @@ The following items were identified during Slice 5 design (see spec §8) as valu
+ ## Bigger leaps — the Mac Mini era
+ 
+ - **MLX backend + bigger models** — the Mac Mini (>32 GB unified memory) engages Ollama's MLX backend (Ollama 0.19+) and can host larger specialists (e.g. `qwen3.5:14b`+, `llama4:scout` long-context) that don't fit the 24 GB laptop budget — the Model Manager already budgets to the host, so this is mostly a declaration change.
+ - **Always-on daemon** — the orchestrator as a background service with a task **queue**: fire tasks, collect results later.
+ - **Scheduled / triggered agents** — cron- or event-driven (file added → process it) — the n8n "trigger" concept.
+ - **Multi-machine** — laptop delegates heavy work to the Mac Mini over the network.
+ - **A2A interop** — expose this orchestrator as an agent other tools can call, and consume external agents (Agent2Agent protocol).
+ 
+ ## Recommended priority next
+ 
+-1. **Agent-builder (Slice 7)** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
+-2. **Model discovery (Slice 6)** — keeps the system on the latest models automatically.
++1. **KV-cache quantization (Slice 7)** — immediate RAM savings with no new capabilities required; q8_0 default is safe, q4_0 opt-in with the GQA guard.
++2. **Agent-builder** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
+ 3. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
+ 
+-(Slice 6 is the natural continuation of the resource line; the agent-builder can also be pulled forward if it's the exciting one.)
++(Slices 8–11 [Vision/Audio/Video/Uncensored] follow naturally once KV-cache quant lands; each is a seam activation.)
+ 
+ ## Deferred technical items (cross-cutting, fold in opportunistically)
+ 
+ - Declarative **`mcp.json` mount registry** (list servers + which agents get them, loaded at startup) — generalizes Slice 3's in-code mounts.
+ - **Codex** heavy-lifting backup (`@openai/codex-sdk`, personal plan) as an opt-in delegate agent.
+ - Migrate `biome.json` off the deprecated `recommended` field.
+ - **Per-slice Minor review findings** are recorded in `.superpowers/sdd/progress.md` (the SDD ledger) as each slice completes — e.g. run-journal O(n²) append, `runAgent.providerOptions` cross-package type, gap `message` hardcoded English, `ensureReady` post-pull comment. ~~hardcoded `kvBytesPerToken`~~ — **resolved**: `footprint.kvBytesPerToken` is now an optional per-model declaration field with default fallback. Sweep remaining items opportunistically; none are blocking.
+ - **Hardware/context-aware guardrails for deeper composition** (recorded constraint): the agent-graph/parallel-fan-out slices MUST bound delegation depth, add cross-agent cycle detection, reuse warm models (shared-model agents = one resident copy), keep returned answers concise, and schedule concurrency within the Model Manager's budget. Cost compounds ~15× for naive orchestrator-workers, so depth/fan-out are bounded deliberately.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index dc99436..086186f 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -161,55 +161,122 @@ no-fit (all candidates exhausted) → ResourceCapture → runOrchestrator { kind
+ ```
+ liveBudgetBytes()
+   → POST /api/show  (getModelMaxContext)
+   → choose chosenCtx  (min of desired / modelMax / headroom-fit, floor 4096)
+   → warm with options.num_ctx = chosenCtx
+   → inference reuses chosenCtx via providerOptions.ollama.options.num_ctx
+ ```
+ 
+ ---
+ 
+-## 5. Why Ollama
++## 5. Discovery & runtimes (Slice 6)
++
++Slice 6 adds the machinery that keeps the model registry current without any code change — model freshness becomes runtime behavior.
++
++### Runtime port
++
++The `Runtime` interface (`src/runtime/runtime.ts`) abstracts everything the Model Manager drives: `isAvailable`, `createModel`, and a `RuntimeControl` object (`isInstalled`/`pull`/`warm`/`unload`/`listLoaded`/`getModelMax`). Two adapters ship:
++
++- **Ollama** (`src/runtime/ollama.ts`) — the Tier-1 adapter; wraps the Ollama HTTP API already used by the resource layer.
++- **MLX server** (`src/runtime/mlx-server.ts`) — an OpenAI-compatible local server (LM Studio, vllm-mlx). Discovered automatically when `MLX_BASE_URL` is reachable (default `http://localhost:1234/v1`). `pull`/`warm`/`unload` are best-effort; the server owns model lifecycle. `listLoaded` returns the `/v1/models` list.
++
++### CatalogSource port
++
++`CatalogSource` (`src/discovery/catalog-source.ts`) is the interface for model catalogs: `appliesTo(host)` gates the source on host capabilities; `listCandidates(query)` returns `Candidate[]` ranked by downloads. Two sources ship:
++
++- **hf-gguf** (`src/discovery/huggingface-gguf.ts`) — queries the Hugging Face API for GGUF models from trusted publishers; filters by capability (tool-calling), picks the best-fitting quantization via `pickBestQuantThatFits` (`src/discovery/quant.ts`), and gates on `host.runtimes` including Ollama.
++- **hf-mlx** (`src/discovery/huggingface-mlx.ts`) — same flow for MLX-format models; gates on the MLX-server runtime being in the host's runtime list.
++
++### Host detector
++
++`detectHost` (`src/discovery/host.ts`) probes the machine at discovery time: reads live budget from `liveBudgetBytes()`, probes each registered runtime's `isAvailable()`, and returns a `HostCapabilities` object (`totalRamBytes`, `liveBudgetBytes`, `runtimes: ProviderKind[]`). The runtimes list controls which `CatalogSource`s fire.
++
++### Offline `buildRegistry`
++
++`buildRegistry` (`src/discovery/build-registry.ts`) merges three layers into a single `ModelDeclaration[]` without any network call:
++
++1. **Bootstrap rungs** — the static `BOOTSTRAP` ladder from `models/registry.ts` (always available).
++2. **Locally-installed models** — queried from each available runtime's `control.listLoaded()`.
++3. **Cached catalog** — `readCatalog()` from `model-images/catalog.json` (written by the last `discover` run; absent on a fresh machine → degraded gracefully).
++
++This is the registry `resolveModel` uses at chat time — no network needed.
++
++### `discover` pipeline + pre-pull
++
++`runDiscovery` (`src/discovery/discover.ts`) orchestrates the online path:
++
++1. Detect host (or accept an injected `HostCapabilities` for tests).
++2. For each applicable `CatalogSource`, call `listCandidates`; skip failing sources (degrade, not throw).
++3. Deduplicate by `(provider, repo)`, keep the highest-download entry per repo.
++4. Rank by downloads, then by `approxParamsBillions` descending.
++5. Write the ranked list to `model-images/catalog.json` via `writeCatalog`.
++6. Pre-pull the top `prePullCount` candidates (default 1) via the runtime's `pull`; skips on error.
++
++Accepts injected `deps` (`host`, `sources`, `writeCatalog`, `pullTop`, `prePullCount`) so the live test can run without touching disk or pulling multi-GB weights.
++
++### Four axes
++
++The catalog and registry use four orthogonal axes to classify every model entry:
++
++| Axis | Values | Where declared |
++|---|---|---|
++| **Capability / modality** | `Tools`, `Vision`, `Audio`, `Video` | `Capability` enum (`src/core/types.ts`) |
++| **Runtime** | `Ollama`, `MlxServer` | `ProviderKind` enum (`src/core/types.ts`) |
++| **Source** | `hf-gguf`, `hf-mlx` | `CatalogSource.name` |
++| **Content policy** | *(typed seam; `Uncensored` planned for Slice 11)* | `ContentPolicy` enum (`src/core/types.ts`) |
++
++Capability and content-policy filtering happen in `selectCandidates`; runtime filtering happens in `appliesTo`; source is informational.
++
++---
++
++## 7. Why Ollama
+ 
+ We are using **llama.cpp — through Ollama.** Ollama wraps the llama.cpp engine
+ (and Apple's MLX on 32 GB+ Macs) and adds the parts an agent system needs:
+ model management (`pull`/`list`/`ps`, auto-quantization), an HTTP control API
+ (warm/`keep_alive`/unload/`ps`) that the **autonomous resource manager** drives,
+ first-class tool-calling, and a clean AI SDK provider. Building those on raw
+ llama.cpp would mean hand-rolling model management and an HTTP layer — more code,
+ exactly the kind we avoid.
+ 
+ Because the model layer is runtime-agnostic (AI SDK `LanguageModel`), Ollama is
+ just the default **Tier-1 adapter**. A raw **llama.cpp-server** adapter or a
+ dedicated **MLX-server** (omlx / vMLX, for persistent KV-cache or high
+ concurrency) can be added behind the same interface later — no agent code
+ changes. MLX is not a separate "later" item for the common path: on 32 GB+
+ Apple Silicon, Ollama 0.19+ already runs on an MLX backend.
+ 
+ ---
+ 
+-## 6. Testing strategy
++## 8. Testing strategy
+ 
+ - **Agent loop** — tested against AI SDK 6's `MockLanguageModelV3`: scripts a
+   tool-call turn then a final-text turn, asserting the tool executed with parsed
+   args and the final text returned; plus a step-ceiling test asserting
+   `MaxStepsError`. No model required.
+ - **Resource / Ollama control** — `fetch` is mocked; request bodies/URLs asserted.
+ - **Run store / journal / tool** — real temp dirs and files (real I/O).
+ - **MCP** — a **real round-trip**: spawns `mcp/server.ts` as a subprocess over
+   stdio, discovers `read_file` through the AI SDK MCP client, reads a real file.
++- **Live discovery** (`tests/integration/discover.live.test.ts`) — skips if
++  `https://huggingface.co` is unreachable; otherwise calls `runDiscovery` with an
++  injected host + no-op `pullTop`/`prePullCount:0`, and asserts ≥1 fitting
++  candidate + catalog written. No multi-GB download.
++- **Live MLX** (`tests/integration/mlx.live.test.ts`) — skips unless
++  `mlxServerRuntime.isAvailable()` returns true; asserts `listLoaded()` returns
++  an array. Requires a running LM Studio / vllm-mlx server.
+ - Tests need **no Ollama**; the only step that does is the manual end-to-end CLI
+   run.
+ 
+ ---
+ 
+-## 7. Glossary
++## 9. Glossary
+ 
+ - **Declaration** — a small data file describing a model (provider + name +
+   params + role) or an agent. Not weights, not logic.
+ - **Model image** — the on-disk model blob/weights (GGUF). Lives in
+   `model-images/` (git-ignored) or `~/.ollama`.
+ - **Agents-as-tools** — the orchestration pattern (**Slice 2, built**): the
+   super-agent (`agents/super.ts`) is an `Agent` (`src/core/orchestrator.ts`)
+   whose tools are `delegate_to_<name>(task)` wrappers around sub-agents plus a
+   `report_capability_gap` tool. Routing = the orchestrator model's tool
+   selection. `runOrchestrator` returns `{kind:'answer'}`, `{kind:'gap'}`, or
+diff --git a/tests/integration/discover.live.test.ts b/tests/integration/discover.live.test.ts
+new file mode 100644
+index 0000000..ef3116c
+--- /dev/null
++++ b/tests/integration/discover.live.test.ts
+@@ -0,0 +1,35 @@
++import { describe, expect, test } from 'bun:test';
++
++async function online(): Promise<boolean> {
++  try {
++    return (
++      await fetch('https://huggingface.co/api/models?filter=gguf&limit=1', {
++        signal: AbortSignal.timeout(3000),
++      })
++    ).ok;
++  } catch {
++    return false;
++  }
++}
++const ready = await online();
++
++describe.skipIf(!ready)('live HF discovery', () => {
++  test('returns ≥1 tool-capable GGUF candidate that fits', async () => {
++    const { runDiscovery } = await import('../../src/discovery/discover.ts');
++    let written = 0;
++    const r = await runDiscovery({
++      host: {
++        totalRamBytes: 24e9,
++        liveBudgetBytes: 12e9,
++        runtimes: [] as never[],
++      },
++      writeCatalog: (c) => {
++        written = c.length;
++      },
++      pullTop: async () => {}, // don't actually pull multi-GB in a test
++      prePullCount: 0,
++    });
++    expect(r.fits).toBeGreaterThan(0);
++    expect(written).toBeGreaterThan(0);
++  }, 60_000);
++});
+diff --git a/tests/integration/mlx.live.test.ts b/tests/integration/mlx.live.test.ts
+new file mode 100644
+index 0000000..5723644
+--- /dev/null
++++ b/tests/integration/mlx.live.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, test } from 'bun:test';
++import { mlxServerRuntime } from '../../src/runtime/mlx-server.ts';
++
++const ready = await mlxServerRuntime.isAvailable();
++
++describe.skipIf(!ready)('live MLX server', () => {
++  test('lists at least one loaded model', async () => {
++    const loaded = await mlxServerRuntime.control.listLoaded();
++    expect(Array.isArray(loaded)).toBe(true);
++  }, 30_000);
++});

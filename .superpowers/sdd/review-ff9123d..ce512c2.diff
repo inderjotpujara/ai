@@ -1,0 +1,65 @@
+# Review package: ff9123d..ce512c2
+
+## Commits
+ce512c2 feat(resource): add gpu memory budget detection
+
+## Files changed
+ src/resource/hardware.ts        | 23 +++++++++++++++++++++++
+ tests/resource/hardware.test.ts | 19 +++++++++++++++++++
+ 2 files changed, 42 insertions(+)
+
+## Diff
+diff --git a/src/resource/hardware.ts b/src/resource/hardware.ts
+new file mode 100644
+index 0000000..bfc5aa1
+--- /dev/null
++++ b/src/resource/hardware.ts
+@@ -0,0 +1,23 @@
++import os from 'node:os';
++
++/**
++ * Apple Silicon caps the Metal GPU working set at ~75% of unified memory.
++ * That fraction — not os.freemem() (unreliable on macOS) — is the real ceiling
++ * for accelerated inference.
++ */
++export const GPU_BUDGET_FRACTION = 0.75;
++
++/** GPU-usable bytes for a given total-RAM figure. */
++export function gpuBudgetBytes(totalRamBytes: number): number {
++  return Math.floor(totalRamBytes * GPU_BUDGET_FRACTION);
++}
++
++/** GPU-usable bytes for the current machine. */
++export function machineBudgetBytes(): number {
++  return gpuBudgetBytes(os.totalmem());
++}
++
++/** Does a model of `modelBytes` fit within `budgetBytes`? */
++export function fitsBudget(modelBytes: number, budgetBytes: number): boolean {
++  return modelBytes <= budgetBytes;
++}
+diff --git a/tests/resource/hardware.test.ts b/tests/resource/hardware.test.ts
+new file mode 100644
+index 0000000..6a7d918
+--- /dev/null
++++ b/tests/resource/hardware.test.ts
+@@ -0,0 +1,19 @@
++import { expect, test } from 'bun:test';
++import {
++  fitsBudget,
++  gpuBudgetBytes,
++  machineBudgetBytes,
++} from '../../src/resource/hardware.ts';
++
++test('gpu budget is 75% of total ram, floored', () => {
++  expect(gpuBudgetBytes(24 * 1024 ** 3)).toBe(Math.floor(24 * 1024 ** 3 * 0.75));
++});
++
++test('fitsBudget compares model size to budget', () => {
++  expect(fitsBudget(5_000_000_000, 18_000_000_000)).toBe(true);
++  expect(fitsBudget(20_000_000_000, 18_000_000_000)).toBe(false);
++});
++
++test('machineBudgetBytes returns a positive number for this machine', () => {
++  expect(machineBudgetBytes()).toBeGreaterThan(0);
++});

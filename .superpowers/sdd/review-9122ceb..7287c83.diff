@@ -1,0 +1,1112 @@
+# Review package: 9122ceb50dcc12d67c2f4005ce5996a5270bd153..7287c83
+
+## Commits
+7287c83 test(integration): opt-in live tests for fetch mount + web routing (auto-skip)
+427acb6 feat(cli): mount file + fetch MCP servers; route across both specialists
+bd9f8cb feat(agents): register web_fetch on the orchestrator (file_qa + web_fetch routing)
+964718a feat(agents): add web_fetch agent backed by the fetch MCP tool
+a5517dc feat(mcp): add mountMcpServer primitive; createFileTools/createFetchTools as presets
+f682970 docs: add Slice 3 implementation plan (mount MCP server + web-fetch)
+cf85c87 docs: add Slice 3 design spec (mount any MCP server + web-fetch agent)
+
+## Files changed
+ agents/super.ts                                    |  11 +-
+ agents/web-fetch.ts                                |  19 +
+ .../plans/2026-06-29-slice-3-mcp-integration.md    | 525 +++++++++++++++++++++
+ .../2026-06-29-slice-3-mcp-integration-design.md   | 135 ++++++
+ src/cli/chat.ts                                    |  10 +-
+ src/mcp/client.ts                                  |  34 +-
+ tests/agents/super.test.ts                         |  13 +-
+ tests/agents/web-fetch.test.ts                     |  11 +
+ tests/core/orchestrator.test.ts                    |  21 +
+ tests/integration/fetch-mount.live.test.ts         |  24 +
+ tests/integration/orchestrator-web.live.test.ts    |  36 ++
+ tests/integration/orchestrator.live.test.ts        |   4 +-
+ tests/integration/uvx-available.ts                 |  15 +
+ tests/mcp/mount.test.ts                            |  16 +
+ 14 files changed, 851 insertions(+), 23 deletions(-)
+
+## Diff
+diff --git a/agents/super.ts b/agents/super.ts
+index dcb0efc..2b2945b 100644
+--- a/agents/super.ts
++++ b/agents/super.ts
+@@ -1,20 +1,25 @@
+ import type { ToolSet } from 'ai';
+ import qwenFast from '../models/qwen-fast.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
+ import { createOrchestrator } from '../src/core/orchestrator.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ import { createFileQaAgent } from './file-qa.ts';
++import { createWebFetchAgent } from './web-fetch.ts';
+ 
+ const BASE_PROMPT =
+   'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
+ 
+-/** Build the super-agent (orchestrator) with the file-Q&A agent registered. */
+-export function createSuperAgent(fileQaTools: ToolSet): Agent {
++/** Build the super-agent (orchestrator) with file-Q&A and web-fetch registered. */
++export function createSuperAgent(
++  fileQaTools: ToolSet,
++  fetchTools: ToolSet,
++): Agent {
+   const fileQa = createFileQaAgent(fileQaTools);
++  const webFetch = createWebFetchAgent(fetchTools);
+   return createOrchestrator({
+     name: 'super',
+     model: createOllamaModel(qwenFast),
+     systemPrompt: BASE_PROMPT,
+-    agents: [fileQa],
++    agents: [fileQa, webFetch],
+   });
+ }
+diff --git a/agents/web-fetch.ts b/agents/web-fetch.ts
+new file mode 100644
+index 0000000..b473068
+--- /dev/null
++++ b/agents/web-fetch.ts
+@@ -0,0 +1,19 @@
++import type { ToolSet } from 'ai';
++import qwenFast from '../models/qwen-fast.ts';
++import type { Agent } from '../src/core/agent-def.ts';
++import { createOllamaModel } from '../src/providers/ollama.ts';
++
++const SYSTEM_PROMPT =
++  'You answer questions about web pages. Use the fetch tool to retrieve the given URL, then answer or summarize concisely based on the page content.';
++
++/** Build the web-fetch agent with an injected tool set (the mounted `fetch` tool). */
++export function createWebFetchAgent(tools: ToolSet): Agent {
++  return {
++    name: 'web_fetch',
++    description:
++      'Fetches a URL and answers questions about or summarizes the content of a web page.',
++    model: createOllamaModel(qwenFast),
++    systemPrompt: SYSTEM_PROMPT,
++    tools,
++  };
++}
+diff --git a/docs/superpowers/plans/2026-06-29-slice-3-mcp-integration.md b/docs/superpowers/plans/2026-06-29-slice-3-mcp-integration.md
+new file mode 100644
+index 0000000..b8447c6
+--- /dev/null
++++ b/docs/superpowers/plans/2026-06-29-slice-3-mcp-integration.md
+@@ -0,0 +1,525 @@
++# Slice 3: Mount Any MCP Server + Web-Fetch Specialist — Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** A `mountMcpServer(spec)` primitive that connects to any stdio MCP server, proven by mounting the keyless `uvx mcp-server-fetch` as a second `web_fetch` specialist the orchestrator routes to.
++
++**Architecture:** Generalize the existing MCP client into `mountMcpServer({command,args,env?})`; `createFileTools`/`createFetchTools` become presets. Add a `web_fetch` agent that holds the mounted `fetch` tool, register it on the orchestrator beside `file_qa`, and have the CLI mount both servers. No engine changes — agents-as-tools from Slice 2 already routes.
++
++**Tech Stack:** Bun + TypeScript + Vercel AI SDK 6 (`ai@^6`), `@ai-sdk/mcp@^1`, `zod@^4`; external server `uvx mcp-server-fetch` (Python, via uvx 0.11.19). Tests: `bun test` with `MockLanguageModelV3` + opt-in live tests auto-skipped via `uvxReady()`/`ollamaReady()`.
++
++## Global Constraints
++
++- Stack: Bun + TS, ESM. Pins unchanged: `ai@^6`, `@ai-sdk/mcp@^1` (1.0.55), `ollama-ai-provider-v2@^3`, `@modelcontextprotocol/sdk@^1`, `zod@^4`. **No dependency bumps.**
++- Code style: `type` over `interface`; string enums for finite sets; early returns; small single-responsibility files; plain self-explanatory code; **no `!` non-null assertions** (use optional chaining); typed errors.
++- **MCP mount API (verified against installed `@ai-sdk/mcp@1.0.55`):** `createMCPClient({ transport: new Experimental_StdioMCPTransport({ command, args?, env?, cwd?, stderr? }) })`; `await client.tools()` returns a `ToolSet` keyed by the server's **raw tool names** (un-prefixed); `await client.close()` stops the subprocess. `StdioConfig` accepts `env` (confirmed in the dist types).
++- **Fetch server:** `uvx mcp-server-fetch` (official, keyless, respects robots.txt by default). Exposes ONE tool named exactly **`fetch`**, input `{ url: string, max_length?: number (default 5000), start_index?: number, raw?: boolean }`, returns markdown text. First `uvx` run downloads ~2–5s.
++- **uvx is now a prerequisite for the real CLI** (the web_fetch agent needs it). Unit/mock tests do NOT need uvx or network; only the opt-in live tests do. `bun test` stays green without uvx/Ollama/network.
++- Tests: `bun run test:file -- ./path`; `bun run typecheck`; `bun run lint` (a `biome.json` deprecation NOTICE is acceptable — no errors). Mirror the proven mock-model shape from `tests/core/agent.test.ts` (`finishReason:{unified,raw}`, nested `usage`, tool-call `input: JSON.stringify({...})`).
++- git is initialized; you are on branch `slice-3-mcp-integration`. Commit each task; do NOT `git init`.
++
++---
++
++### Task 1: `mountMcpServer` primitive + presets
++
++**Files:**
++- Modify: `src/mcp/client.ts`
++- Test: `tests/mcp/mount.test.ts`
++
++**Interfaces:**
++- Consumes: `createMCPClient` (`@ai-sdk/mcp`), `Experimental_StdioMCPTransport` (`@ai-sdk/mcp/mcp-stdio`), `ToolSet` (ai).
++- Produces:
++  - `type McpServerSpec = { command: string; args?: string[]; env?: Record<string, string> }`
++  - `type MountedServer = { tools: ToolSet; close: () => Promise<void> }`
++  - `mountMcpServer(spec: McpServerSpec): Promise<MountedServer>`
++  - `createFileTools(): Promise<MountedServer>` (preset — unchanged behavior, now via mountMcpServer)
++  - `createFetchTools(): Promise<MountedServer>` (preset — `uvx mcp-server-fetch`)
++
++- [ ] **Step 1: Write the failing test** — `tests/mcp/mount.test.ts`
++
++```ts
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mountMcpServer } from '../../src/mcp/client.ts';
++
++// Proves mountMcpServer is generic (not hardcoded to one server) by mounting our
++// OWN read_file server through it. Real subprocess; needs bun, no network.
++test('mountMcpServer mounts an arbitrary stdio server and exposes its tools', async () => {
++  const { tools, close } = await mountMcpServer({
++    command: 'bun',
++    args: ['run', 'src/mcp/server.ts'],
++  });
++  try {
++    expect(tools.read_file).toBeDefined();
++  } finally {
++    await close();
++  }
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun run test:file -- ./tests/mcp/mount.test.ts`
++Expected: FAIL — `mountMcpServer` not exported from client.ts.
++
++- [ ] **Step 3: Rewrite `src/mcp/client.ts`**
++
++```ts
++import { createMCPClient } from '@ai-sdk/mcp';
++import { Experimental_StdioMCPTransport as StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
++import type { ToolSet } from 'ai';
++
++/** How to launch a stdio MCP server. */
++export type McpServerSpec = {
++  command: string;
++  args?: string[];
++  env?: Record<string, string>;
++};
++
++/** A mounted server's tools plus a handle to stop its subprocess. */
++export type MountedServer = { tools: ToolSet; close: () => Promise<void> };
++
++/** Connect to ANY stdio MCP server and expose its tools. The integration primitive. */
++export async function mountMcpServer(spec: McpServerSpec): Promise<MountedServer> {
++  const client = await createMCPClient({
++    transport: new StdioMCPTransport(spec),
++  });
++  const tools = await client.tools();
++  return { tools, close: () => client.close() };
++}
++
++/** Our local read_file MCP server. */
++export function createFileTools(): Promise<MountedServer> {
++  return mountMcpServer({ command: 'bun', args: ['run', 'src/mcp/server.ts'] });
++}
++
++/** The official keyless web-fetch MCP server (requires uvx). Tool: `fetch`. */
++export function createFetchTools(): Promise<MountedServer> {
++  return mountMcpServer({ command: 'uvx', args: ['mcp-server-fetch'] });
++}
++```
++
++- [ ] **Step 4: Run tests to verify they pass**
++
++Run: `bun run test:file -- ./tests/mcp/mount.test.ts` then `bun run test:file -- ./tests/mcp/server.test.ts` then `bun run typecheck`
++Expected: both test files PASS (the existing read_file MCP test still passes — `createFileTools` behavior is unchanged); typecheck 0.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/mcp/client.ts tests/mcp/mount.test.ts
++git commit -m "feat(mcp): add mountMcpServer primitive; createFileTools/createFetchTools as presets"
++```
++
++---
++
++### Task 2: `web_fetch` agent definition
++
++**Files:**
++- Create: `agents/web-fetch.ts`
++- Test: `tests/agents/web-fetch.test.ts`
++
++**Interfaces:**
++- Consumes: `Agent` (`src/core/agent-def.ts`), `createOllamaModel` (`src/providers/ollama.ts`), `qwenFast` (`models/qwen-fast.ts`), `ToolSet` (ai).
++- Produces: `createWebFetchAgent(tools: ToolSet): Agent` — name `'web_fetch'`, a web/URL description, model from `qwenFast`, a prompt instructing use of the `fetch` tool, injected `tools`.
++
++- [ ] **Step 1: Write the failing test** — `tests/agents/web-fetch.test.ts`
++
++```ts
++import { expect, test } from 'bun:test';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++
++test('web-fetch agent has the expected identity and injected tools', () => {
++  const tools = { fetch: { description: 'x' } } as never;
++  const agent = createWebFetchAgent(tools);
++  expect(agent.name).toBe('web_fetch');
++  expect(agent.description.toLowerCase()).toContain('url');
++  expect(agent.tools).toBe(tools);
++  expect(agent.model).toBeTruthy();
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun run test:file -- ./tests/agents/web-fetch.test.ts`
++Expected: FAIL — cannot resolve `agents/web-fetch.ts`.
++
++- [ ] **Step 3: Create `agents/web-fetch.ts`**
++
++```ts
++import type { ToolSet } from 'ai';
++import qwenFast from '../models/qwen-fast.ts';
++import type { Agent } from '../src/core/agent-def.ts';
++import { createOllamaModel } from '../src/providers/ollama.ts';
++
++const SYSTEM_PROMPT =
++  'You answer questions about web pages. Use the fetch tool to retrieve the given URL, then answer or summarize concisely based on the page content.';
++
++/** Build the web-fetch agent with an injected tool set (the mounted `fetch` tool). */
++export function createWebFetchAgent(tools: ToolSet): Agent {
++  return {
++    name: 'web_fetch',
++    description:
++      'Fetches a URL and answers questions about or summarizes the content of a web page.',
++    model: createOllamaModel(qwenFast),
++    systemPrompt: SYSTEM_PROMPT,
++    tools,
++  };
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun run test:file -- ./tests/agents/web-fetch.test.ts` then `bun run typecheck`
++Expected: PASS; typecheck 0.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add agents/web-fetch.ts tests/agents/web-fetch.test.ts
++git commit -m "feat(agents): add web_fetch agent backed by the fetch MCP tool"
++```
++
++---
++
++### Task 3: Register `web_fetch` on the orchestrator
++
++**Files:**
++- Modify: `agents/super.ts`
++- Modify: `tests/agents/super.test.ts`
++- Modify: `tests/core/orchestrator.test.ts` (add a 2-specialist routing test)
++
++**Interfaces:**
++- Consumes: `createOrchestrator` (`src/core/orchestrator.ts`), `createFileQaAgent` (`agents/file-qa.ts`), `createWebFetchAgent` (`agents/web-fetch.ts`), `createOllamaModel`, `qwenFast`, `ToolSet`.
++- Produces: **`createSuperAgent(fileQaTools: ToolSet, fetchTools: ToolSet): Agent`** (signature now takes both tool sets) returning an orchestrator over `[fileQa, webFetch]`.
++
++- [ ] **Step 1: Update the failing test** — replace the body of `tests/agents/super.test.ts`
++
++```ts
++import { expect, test } from 'bun:test';
++import { createSuperAgent } from '../../agents/super.ts';
++import { CAPABILITY_GAP_TOOL } from '../../src/core/capability-gap.ts';
++
++test('super agent exposes delegate tools for both specialists and the gap tool', () => {
++  const fileTools = { read_file: { description: 'x' } } as never;
++  const fetchTools = { fetch: { description: 'x' } } as never;
++  const sup = createSuperAgent(fileTools, fetchTools);
++  const toolNames = Object.keys(sup.tools);
++  expect(toolNames).toContain('delegate_to_file_qa');
++  expect(toolNames).toContain('delegate_to_web_fetch');
++  expect(toolNames).toContain(CAPABILITY_GAP_TOOL);
++  expect(sup.model).toBeTruthy();
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun run test:file -- ./tests/agents/super.test.ts`
++Expected: FAIL — `createSuperAgent` currently takes one arg / lacks `delegate_to_web_fetch`.
++
++- [ ] **Step 3: Rewrite `agents/super.ts`**
++
++```ts
++import type { ToolSet } from 'ai';
++import qwenFast from '../models/qwen-fast.ts';
++import type { Agent } from '../src/core/agent-def.ts';
++import { createOrchestrator } from '../src/core/orchestrator.ts';
++import { createOllamaModel } from '../src/providers/ollama.ts';
++import { createFileQaAgent } from './file-qa.ts';
++import { createWebFetchAgent } from './web-fetch.ts';
++
++const BASE_PROMPT =
++  'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
++
++/** Build the super-agent (orchestrator) with file-Q&A and web-fetch registered. */
++export function createSuperAgent(
++  fileQaTools: ToolSet,
++  fetchTools: ToolSet,
++): Agent {
++  const fileQa = createFileQaAgent(fileQaTools);
++  const webFetch = createWebFetchAgent(fetchTools);
++  return createOrchestrator({
++    name: 'super',
++    model: createOllamaModel(qwenFast),
++    systemPrompt: BASE_PROMPT,
++    agents: [fileQa, webFetch],
++  });
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun run test:file -- ./tests/agents/super.test.ts` then `bun run typecheck`
++Expected: PASS; typecheck 0.
++
++- [ ] **Step 5: Add a 2-specialist routing test** — append to `tests/core/orchestrator.test.ts`
++
++```ts
++test('routes a URL task to web_fetch and a file task to file_qa', async () => {
++  const fileQa = subAgent('file_qa', 'file answer');
++  const webFetch = subAgent('web_fetch', 'web answer');
++
++  // model that picks delegate_to_web_fetch
++  const orchWeb = createOrchestrator({
++    model: orchModel('delegate_to_web_fetch', { task: 'summarize https://example.com' }),
++    systemPrompt: 'route',
++    agents: [fileQa.agent, webFetch.agent],
++  });
++  const webResult = await runOrchestrator(orchWeb, 'summarize https://example.com');
++  expect(webResult.kind).toBe('answer');
++  expect(fileQa.ran()).toBe(0);
++  expect(webFetch.ran()).toBe(1);
++});
++```
++
++(This reuses the existing `subAgent` and `orchModel` helpers already defined at the top of `orchestrator.test.ts`. Place this test after the existing `multi-agent selection` test.)
++
++- [ ] **Step 6: Run tests + full suite**
++
++Run: `bun run test:file -- ./tests/core/orchestrator.test.ts` then `bun test` then `bun run lint`
++Expected: orchestrator tests PASS; full suite PASS; lint 0 errors.
++
++- [ ] **Step 7: Commit**
++
++```bash
++git add agents/super.ts tests/agents/super.test.ts tests/core/orchestrator.test.ts
++git commit -m "feat(agents): register web_fetch on the orchestrator (file_qa + web_fetch routing)"
++```
++
++---
++
++### Task 4: CLI mounts both servers
++
++**Files:**
++- Modify: `src/cli/chat.ts`
++- Test: (none new — covered by `run-chat` tests + the live test in Task 5; verified by typecheck/lint/full-suite)
++
++**Interfaces:**
++- Consumes: `createFileTools`, `createFetchTools` (`src/mcp/client.ts`), `createSuperAgent(fileQaTools, fetchTools)` (`agents/super.ts`), the existing resource + `runChat` wiring.
++- Produces: a CLI that mounts BOTH servers, builds the orchestrator over both specialists, and closes BOTH in `finally`.
++
++- [ ] **Step 1: Read the current `src/cli/chat.ts`** so you preserve the resource/budget/warm/unload logic exactly, then change only the mounting + agent construction.
++
++- [ ] **Step 2: Replace `src/cli/chat.ts`** with (full file):
++
++```ts
++import qwenFast from '../../models/qwen-fast.ts';
++import { createSuperAgent } from '../../agents/super.ts';
++import { ResourceError } from '../core/errors.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { estimateModelBytes } from '../resource/footprint.ts';
++import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
++import { isProjectStoreActive } from '../resource/model-store.ts';
++import {
++  isModelInstalled,
++  pullModel,
++  unloadModel,
++  warmModel,
++} from '../resource/ollama-control.ts';
++import { runChat } from './run-chat.ts';
++
++const FOOTPRINT = estimateModelBytes({
++  paramsBillions: 8,
++  bytesPerWeight: 0.56,
++  contextTokens: qwenFast.params.numCtx ?? 8192,
++  kvBytesPerToken: 131072,
++});
++
++async function main(): Promise<void> {
++  const task = process.argv.slice(2).join(' ').trim();
++  if (task.length === 0) {
++    console.error('Usage: bun run src/cli/chat.ts "<your request>"');
++    process.exit(1);
++  }
++
++  const budget = machineBudgetBytes();
++  if (!fitsBudget(FOOTPRINT, budget)) {
++    throw new ResourceError(
++      `${qwenFast.model} (~${Math.round(FOOTPRINT / 1e9)}GB) exceeds the GPU budget (~${Math.round(budget / 1e9)}GB)`,
++    );
++  }
++
++  if (!(await isModelInstalled(qwenFast.model))) {
++    console.error(`Pulling ${qwenFast.model} (first run only)...`);
++    await pullModel(qwenFast.model);
++  }
++  await warmModel(qwenFast.model);
++  console.error(
++    isProjectStoreActive()
++      ? 'Using project-local models from ./model-images'
++      : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
++  );
++
++  const fileServer = await createFileTools();
++  const fetchServer = await createFetchTools();
++  try {
++    const orchestrator = createSuperAgent(fileServer.tools, fetchServer.tools);
++    const result = await runChat({
++      orchestrator,
++      task,
++      runsRoot: 'runs',
++      runId: `run-${process.pid}`,
++    });
++    console.log(result.kind === 'answer' ? result.text : result.message);
++  } finally {
++    await fileServer.close();
++    await fetchServer.close();
++    await unloadModel(qwenFast.model);
++  }
++}
++
++main().catch((err) => {
++  console.error(err);
++  process.exit(1);
++});
++```
++
++- [ ] **Step 3: Typecheck, lint, full suite**
++
++Run: `bun run typecheck && bun run lint && bun test`
++Expected: typecheck 0; lint 0 (only the biome.json NOTICE); all tests pass (the mock/unit suite needs no uvx).
++
++- [ ] **Step 4: Commit**
++
++```bash
++git add src/cli/chat.ts
++git commit -m "feat(cli): mount file + fetch MCP servers; route across both specialists"
++```
++
++---
++
++### Task 5: Opt-in live integration tests (uvx fetch + live orchestrator)
++
++**Files:**
++- Create: `tests/integration/uvx-available.ts`
++- Create: `tests/integration/fetch-mount.live.test.ts`
++- Create: `tests/integration/orchestrator-web.live.test.ts`
++
++**Interfaces:**
++- Consumes: `mountMcpServer`, `createFileTools`, `createFetchTools` (`src/mcp/client.ts`); `createSuperAgent` (`agents/super.ts`); `runOrchestrator` (`src/core/orchestrator.ts`); `ollamaReady` (`tests/integration/ollama-available.ts`); `warmModel`, `unloadModel` (`src/resource/ollama-control.ts`).
++- Produces: `uvxReady(): Promise<boolean>` (true iff `uvx mcp-server-fetch --help` exits 0 within a timeout). Two `describe.skipIf`-gated live test files. `bun test` stays green when uvx/Ollama/network are absent.
++
++- [ ] **Step 1: Create the probe** — `tests/integration/uvx-available.ts`
++
++```ts
++/** True iff `uvx mcp-server-fetch` can start (probes with --help, killed on timeout). */
++export async function uvxReady(timeoutMs = 15000): Promise<boolean> {
++  try {
++    const proc = Bun.spawn(['uvx', 'mcp-server-fetch', '--help'], {
++      stdout: 'ignore',
++      stderr: 'ignore',
++    });
++    const timer = setTimeout(() => proc.kill(), timeoutMs);
++    const code = await proc.exited;
++    clearTimeout(timer);
++    return code === 0;
++  } catch {
++    return false;
++  }
++}
++```
++
++- [ ] **Step 2: Create the fetch-mount live test** — `tests/integration/fetch-mount.live.test.ts`
++
++```ts
++import { describe, expect, test } from 'bun:test';
++import { createFetchTools } from '../../src/mcp/client.ts';
++import { uvxReady } from './uvx-available.ts';
++
++const ready = await uvxReady();
++
++describe.skipIf(!ready)('live: uvx mcp-server-fetch mount', () => {
++  test('exposes a fetch tool and retrieves a URL', async () => {
++    const { tools, close } = await createFetchTools();
++    try {
++      expect(tools.fetch).toBeDefined();
++      const result = await tools.fetch.execute?.(
++        { url: 'https://example.com', max_length: 500 },
++        {} as never,
++      );
++      expect(JSON.stringify(result).toLowerCase()).toContain('example');
++    } finally {
++      await close();
++    }
++  }, 60_000);
++});
++```
++
++- [ ] **Step 3: Create the live orchestrator web test** — `tests/integration/orchestrator-web.live.test.ts`
++
++```ts
++import { afterAll, describe, expect, test } from 'bun:test';
++import { createSuperAgent } from '../../agents/super.ts';
++import { runOrchestrator } from '../../src/core/orchestrator.ts';
++import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
++import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++import { uvxReady } from './uvx-available.ts';
++
++const MODEL = 'qwen3:8b';
++const ready = (await uvxReady()) && (await ollamaReady(MODEL));
++
++describe.skipIf(!ready)('live orchestrator: web routing (real Ollama + uvx)', () => {
++  afterAll(async () => {
++    await unloadModel(MODEL);
++  });
++
++  test('routes a URL request to web_fetch and answers', async () => {
++    await warmModel(MODEL);
++    const fileServer = await createFileTools();
++    const fetchServer = await createFetchTools();
++    try {
++      const orch = createSuperAgent(fileServer.tools, fetchServer.tools);
++      const result = await runOrchestrator(
++        orch,
++        'Summarize the page at https://example.com in one sentence.',
++      );
++      expect(result.kind).toBe('answer');
++    } finally {
++      await fileServer.close();
++      await fetchServer.close();
++    }
++  }, 180_000);
++});
++```
++
++- [ ] **Step 4: Run the suite (live blocks auto-skip without uvx/Ollama)**
++
++Run: `bun test` then `bun run typecheck && bun run lint`
++Expected: all tests pass; the two live blocks either run (if uvx + Ollama present) or skip — `bun test` stays green either way. typecheck + lint clean.
++
++- [ ] **Step 5: (Optional) manual live confirmation**
++
++```bash
++# Terminal 1 (quit the menu-bar Ollama first):
++bun run serve
++# Terminal 2:
++bun test ./tests/integration/fetch-mount.live.test.ts ./tests/integration/orchestrator-web.live.test.ts
++```
++Expected: fetch-mount test fetches example.com; orchestrator test routes the URL to web_fetch and returns `kind:'answer'`. (First run downloads `mcp-server-fetch` via uvx.)
++
++- [ ] **Step 6: Commit**
++
++```bash
++git add tests/integration/uvx-available.ts tests/integration/fetch-mount.live.test.ts tests/integration/orchestrator-web.live.test.ts
++git commit -m "test(integration): opt-in live tests for fetch mount + web routing (auto-skip)"
++```
++
++---
++
++## Self-Review
++
++**1. Spec coverage:**
++- `mountMcpServer({command,args,env?})` primitive → Task 1. ✓
++- `createFileTools` preset unchanged + `createFetchTools` → Task 1. ✓
++- `web_fetch` agent using the `fetch` tool → Task 2. ✓
++- Register `web_fetch` beside `file_qa` on the orchestrator → Task 3. ✓
++- CLI mounts both servers, closes both in finally → Task 4. ✓
++- Tests: mount genericity (Task 1), web_fetch agent-def (Task 2), 2-specialist routing mock (Task 3), opt-in live fetch-mount + live orchestrator web (Task 5). ✓
++- `bun test` green without uvx/Ollama; typecheck + lint clean → every task's verify step. ✓
++- Deferred (declarative mount registry, agent-builder, response-format) → correctly absent. ✓
++
++**2. Placeholder scan:** No TBD/TODO; every code step has complete code; every run step has the command + expected result.
++
++**3. Type consistency:** `McpServerSpec`/`MountedServer` (Task 1) consumed by Task 4's CLI and Task 5's tests. `createSuperAgent(fileQaTools, fetchTools)` new 2-arg signature (Task 3) is matched by the Task 4 CLI call and the Task 5 live test. `createWebFetchAgent(tools)` (Task 2) consumed by `super.ts` (Task 3). Tool key `fetch` (un-prefixed, verified) used in the web_fetch agent prompt + the live tests. `uvxReady()` (Task 5) mirrors the existing `ollamaReady()`. Mock helpers `subAgent`/`orchModel` reused from the existing orchestrator test (Task 3 Step 5).
++
++**One carried note:** Task 4 makes `uvx` a prerequisite for the *real* CLI (the fetch agent needs it). This is intentional and documented in Global Constraints; graceful degradation when uvx is absent is deferred (a declarative mount registry slice). The mock/unit suite remains uvx-free.
+diff --git a/docs/superpowers/specs/2026-06-29-slice-3-mcp-integration-design.md b/docs/superpowers/specs/2026-06-29-slice-3-mcp-integration-design.md
+new file mode 100644
+index 0000000..cfe8055
+--- /dev/null
++++ b/docs/superpowers/specs/2026-06-29-slice-3-mcp-integration-design.md
+@@ -0,0 +1,135 @@
++# Slice 3: Mount Any MCP Server + Web-Fetch Specialist — Design
++
++**Date:** 2026-06-29
++**Status:** Approved (design) — pending implementation plan
++**Builds on:** Slice 2 (orchestrator / agents-as-tools / capability gap). Repo: `inderjotpujara/ai`, branch `slice-3-mcp-integration`.
++
++## 1. Vision
++
++This is the **integration-library** slice — the n8n moment. After it, *adding a
++capability stops being "write tool code" and becomes "point at an MCP server
++(`command` + `args`)."* We generalize our MCP wiring into a single
++`mountMcpServer(spec)` primitive, then prove it by mounting a **keyless external
++server** (`uvx mcp-server-fetch`) as a second specialist agent. The orchestrator
++now routes among **two real specialists** — file-Q&A and web-fetch — or reports
++a capability gap.
++
++## 2. Scope
++
++### In scope (Slice 3)
++- **`mountMcpServer({ command, args?, env? })`** — connect to ANY stdio MCP server and return its `{ tools, close }`. The reusable integration primitive.
++- Keep `createFileTools()` working (thin preset over `mountMcpServer`); add `createFetchTools()` preset for `uvx mcp-server-fetch`.
++- **`web_fetch` agent** (`agents/web-fetch.ts`) — uses the mounted `fetch` tool to retrieve a URL and answer/summarize.
++- Register `web_fetch` alongside `file_qa` in the orchestrator (`agents/super.ts`) — first multi-real-specialist routing.
++- CLI (`chat.ts`) mounts BOTH servers, builds both agents, closes both in `finally`.
++- Tests: `mountMcpServer` proven generic; `web_fetch` agent-def unit test; orchestrator mock routing test (URL→web_fetch, file→file_qa); opt-in auto-skipping integration tests for the real fetch server + a live orchestrator URL run.
++
++### Out of scope — deferred (with their own future work)
++- **Declarative mount registry** (an `mcp.json`-style config listing servers to mount): Slice 3 wires mounts in code; a config-driven registry is a later refinement.
++- **Agent-builder** and **response-format tooling** (still deferred to their own brainstorms).
++- Non-keyless / API-key MCP servers (search, SaaS) — excluded by the no-keys rule.
++- A dynamic resource scheduler / model discovery (the *other* Slice-3 candidate from the original roadmap) — explicitly NOT this slice; this slice is the integrations path.
++
++## 3. Architecture
++
++The orchestrator backbone is unchanged. Slice 3 adds an **integration primitive**
++and a second agent that consumes an external MCP server's tools.
++
++```
++src/mcp/
++  client.ts   # MODIFY: add mountMcpServer({command,args,env}); createFileTools + createFetchTools become presets
++  server.ts   # unchanged (our read_file server)
++agents/
++  web-fetch.ts # NEW: createWebFetchAgent(tools) — name 'web_fetch', uses the `fetch` tool
++  super.ts     # MODIFY: register [file_qa, web_fetch] on the orchestrator
++  file-qa.ts   # unchanged
++src/cli/
++  chat.ts      # MODIFY: mount both servers, build both agents, close both in finally
++tests/
++  mcp/mount.test.ts                       # NEW: mountMcpServer mounts our own server, exposes read_file (real subprocess)
++  agents/web-fetch.test.ts                # NEW: web_fetch agent-def unit test (mock)
++  core/orchestrator.test.ts               # MODIFY: add a 2-specialist routing test (mock)
++  integration/uvx-available.ts            # NEW: uvxReady() probe
++  integration/fetch-mount.live.test.ts    # NEW: mount uvx mcp-server-fetch → exposes `fetch` (+ fetch example.com); auto-skip
++  integration/orchestrator-web.live.test.ts # NEW: live orchestrator "summarize <url>" → delegates to web_fetch; auto-skip (uvx + Ollama)
++```
++
++### 3.1 The mount primitive — `src/mcp/client.ts`
++```
++export type McpServerSpec = { command: string; args?: string[]; env?: Record<string, string> };
++
++export async function mountMcpServer(spec: McpServerSpec): Promise<{ tools: ToolSet; close: () => Promise<void> }> {
++  const client = await createMCPClient({ transport: new Experimental_StdioMCPTransport(spec) });
++  const tools = await client.tools();
++  return { tools, close: () => client.close() };
++}
++
++export function createFileTools()  { return mountMcpServer({ command: 'bun', args: ['run', 'src/mcp/server.ts'] }); }
++export function createFetchTools() { return mountMcpServer({ command: 'uvx', args: ['mcp-server-fetch'] }); }
++```
++- Uses the SAME `@ai-sdk/mcp@^1` API we already run — no dependency bump.
++- External tools come back **un-prefixed**: `uvx mcp-server-fetch` yields `{ fetch }`.
++- `close()` terminates the subprocess (each mount is its own process).
++- **Implementation caveat:** confirm the installed `@ai-sdk/mcp@^1` (1.0.55)
++  `Experimental_StdioMCPTransport` config type accepts `env`. Our current
++  `createFileTools` only passes `{ command, args }`. If `env` is not in the v1
++  type, keep `env` in `McpServerSpec` (forward-compat) but pass only the fields
++  the transport accepts — `env` is optional and unneeded for our file/fetch
++  servers (PATH is inherited, so `uvx` resolves).
++
++### 3.2 Web-fetch agent — `agents/web-fetch.ts`
++```
++createWebFetchAgent(tools: ToolSet): Agent
++// name: 'web_fetch'
++// description: 'Fetches a URL and answers questions about or summarizes the content of a web page.'
++// model: createOllamaModel(qwenFast); systemPrompt instructs: use the `fetch` tool to get the URL, then answer concisely.
++// tools: the mounted fetch toolset (contains `fetch`)
++```
++
++### 3.3 Orchestrator registration — `agents/super.ts`
++`createSuperAgent(fileQaTools, fetchTools)` builds `file_qa` + `web_fetch` and
++returns `createOrchestrator({ model, systemPrompt, agents: [fileQa, webFetch] })`.
++The routing prompt (Slice 2's `buildRoutingPrompt`, already names concrete
++`delegate_to_*` tools) now lists both specialists.
++
++## 4. Data flow
++```
++CLI (chat.ts)
++  -> mount read_file server (bun)  -> fileTools
++  -> mount fetch server (uvx)      -> fetchTools
++  -> createSuperAgent(fileTools, fetchTools)  [orchestrator over file_qa + web_fetch + gap]
++  -> runOrchestrator(task)
++       - "what's in /tmp/x.txt?"        -> delegate_to_file_qa  -> read_file -> answer
++       - "summarize https://example.com"-> delegate_to_web_fetch -> fetch     -> answer
++       - "book a flight"                -> report_capability_gap -> gap
++  -> print answer/gap; journal; finally: close both MCP clients + unload model
++```
++
++## 5. Error handling
++- Keyless throughout; the `fetch` server respects robots.txt by default and makes
++  outbound HTTP only to the requested URL.
++- A failed fetch (network/robots/timeout) returns as a tool result — the agent
++  loop already feeds tool errors back to the model; no crash.
++- Both MCP subprocesses are closed in the CLI's `finally` (even on throw).
++- `mountMcpServer` surfaces a connect failure as a thrown error the CLI reports.
++
++## 6. Testing strategy
++- **Unit/mock (always run, no uvx/Ollama):**
++  - `mountMcpServer` generality: mount our OWN server through it, assert `read_file` present (real subprocess, no network — proves the primitive isn't file-server-specific).
++  - `web_fetch` agent-def: identity + injected tools (mock model).
++  - Orchestrator routing with two specialists: mock model picks `delegate_to_web_fetch` for a URL task and `delegate_to_file_qa` for a file task; assert only the chosen one runs.
++- **Opt-in integration (auto-skip via `uvxReady()` = `uvx mcp-server-fetch --version` succeeds):**
++  - `fetch-mount.live`: mount `uvx mcp-server-fetch`, assert `fetch` tool exists; fetch `https://example.com` returns text (needs network; runs only when uvx present).
++  - `orchestrator-web.live`: gated by uvx **and** Ollama (`ollamaReady`) — "summarize https://example.com" → `kind:'answer'`; auto-skips otherwise.
++- `bun test` stays green on any machine (integration blocks skip when uvx/Ollama/network absent). `bun run typecheck` + `bun run lint` clean.
++
++## 7. Definition of done
++`mountMcpServer` mounts any stdio MCP server; the orchestrator routes a file
++question to `file_qa` and a URL request to `web_fetch` (and reports a gap for
++neither). Unit/mock suite green with no external deps; the opt-in live tests pass
++when uvx + Ollama are present (verified manually at least once). `bun run
++typecheck` + `bun run lint` clean.
++
++## 8. Future seams recorded
++- `mountMcpServer` → (future) a **declarative mount registry** (`mcp.json`): list servers + which agents get them, loaded at startup.
++- Every future integration (GitHub, Postgres, Slack, …) is a new `create<X>Tools()` preset + an agent that holds those tools — no engine change.
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 6b7817a..cef0fc2 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,14 +1,14 @@
+ import { createSuperAgent } from '../../agents/super.ts';
+ import qwenFast from '../../models/qwen-fast.ts';
+ import { ResourceError } from '../core/errors.ts';
+-import { createFileTools } from '../mcp/client.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
+ import { estimateModelBytes } from '../resource/footprint.ts';
+ import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
+ import { isProjectStoreActive } from '../resource/model-store.ts';
+ import {
+   isModelInstalled,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../resource/ollama-control.ts';
+ import { runChat } from './run-chat.ts';
+@@ -38,30 +38,32 @@ async function main(): Promise<void> {
+     console.error(`Pulling ${qwenFast.model} (first run only)...`);
+     await pullModel(qwenFast.model);
+   }
+   await warmModel(qwenFast.model);
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
+-  const { tools, close } = await createFileTools();
++  const fileServer = await createFileTools();
++  const fetchServer = await createFetchTools();
+   try {
+-    const orchestrator = createSuperAgent(tools);
++    const orchestrator = createSuperAgent(fileServer.tools, fetchServer.tools);
+     const result = await runChat({
+       orchestrator,
+       task,
+       runsRoot: 'runs',
+       runId: `run-${process.pid}`,
+     });
+     console.log(result.kind === 'answer' ? result.text : result.message);
+   } finally {
+-    await close();
++    await fileServer.close();
++    await fetchServer.close();
+     await unloadModel(qwenFast.model);
+   }
+ }
+ 
+ main().catch((err) => {
+   console.error(err);
+   process.exit(1);
+ });
+diff --git a/src/mcp/client.ts b/src/mcp/client.ts
+index 668bef5..6ede837 100644
+--- a/src/mcp/client.ts
++++ b/src/mcp/client.ts
+@@ -1,18 +1,34 @@
+ import { createMCPClient } from '@ai-sdk/mcp';
+ import { Experimental_StdioMCPTransport as StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
+ import type { ToolSet } from 'ai';
+ 
+-/** Launch the file-tools MCP server and expose its tools to the agent. */
+-export async function createFileTools(): Promise<{
+-  tools: ToolSet;
+-  close: () => Promise<void>;
+-}> {
++/** How to launch a stdio MCP server. */
++export type McpServerSpec = {
++  command: string;
++  args?: string[];
++  env?: Record<string, string>;
++};
++
++/** A mounted server's tools plus a handle to stop its subprocess. */
++export type MountedServer = { tools: ToolSet; close: () => Promise<void> };
++
++/** Connect to ANY stdio MCP server and expose its tools. The integration primitive. */
++export async function mountMcpServer(
++  spec: McpServerSpec,
++): Promise<MountedServer> {
+   const client = await createMCPClient({
+-    transport: new StdioMCPTransport({
+-      command: 'bun',
+-      args: ['run', 'src/mcp/server.ts'],
+-    }),
++    transport: new StdioMCPTransport(spec),
+   });
+   const tools = await client.tools();
+   return { tools, close: () => client.close() };
+ }
++
++/** Our local read_file MCP server. */
++export function createFileTools(): Promise<MountedServer> {
++  return mountMcpServer({ command: 'bun', args: ['run', 'src/mcp/server.ts'] });
++}
++
++/** The official keyless web-fetch MCP server (requires uvx). Tool: `fetch`. */
++export function createFetchTools(): Promise<MountedServer> {
++  return mountMcpServer({ command: 'uvx', args: ['mcp-server-fetch'] });
++}
+diff --git a/tests/agents/super.test.ts b/tests/agents/super.test.ts
+index 99d6550..57d24c2 100644
+--- a/tests/agents/super.test.ts
++++ b/tests/agents/super.test.ts
+@@ -1,11 +1,14 @@
+ import { expect, test } from 'bun:test';
+ import { createSuperAgent } from '../../agents/super.ts';
+ import { CAPABILITY_GAP_TOOL } from '../../src/core/capability-gap.ts';
+ 
+-test('super agent exposes a delegate_to_file_qa tool and the gap tool', () => {
+-  const tools = { read_file: { description: 'x' } } as never;
+-  const sup = createSuperAgent(tools);
+-  expect(Object.keys(sup.tools)).toContain('delegate_to_file_qa');
+-  expect(Object.keys(sup.tools)).toContain(CAPABILITY_GAP_TOOL);
++test('super agent exposes delegate tools for both specialists and the gap tool', () => {
++  const fileTools = { read_file: { description: 'x' } } as never;
++  const fetchTools = { fetch: { description: 'x' } } as never;
++  const sup = createSuperAgent(fileTools, fetchTools);
++  const toolNames = Object.keys(sup.tools);
++  expect(toolNames).toContain('delegate_to_file_qa');
++  expect(toolNames).toContain('delegate_to_web_fetch');
++  expect(toolNames).toContain(CAPABILITY_GAP_TOOL);
+   expect(sup.model).toBeTruthy();
+ });
+diff --git a/tests/agents/web-fetch.test.ts b/tests/agents/web-fetch.test.ts
+new file mode 100644
+index 0000000..14f5d4a
+--- /dev/null
++++ b/tests/agents/web-fetch.test.ts
+@@ -0,0 +1,11 @@
++import { expect, test } from 'bun:test';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++
++test('web-fetch agent has the expected identity and injected tools', () => {
++  const tools = { fetch: { description: 'x' } } as never;
++  const agent = createWebFetchAgent(tools);
++  expect(agent.name).toBe('web_fetch');
++  expect(agent.description.toLowerCase()).toContain('url');
++  expect(agent.tools).toBe(tools);
++  expect(agent.model).toBeTruthy();
++});
+diff --git a/tests/core/orchestrator.test.ts b/tests/core/orchestrator.test.ts
+index bd972ef..8eb0d35 100644
+--- a/tests/core/orchestrator.test.ts
++++ b/tests/core/orchestrator.test.ts
+@@ -124,20 +124,41 @@ test('multi-agent selection: only the chosen delegate runs', async () => {
+     model: orchModel('delegate_to_calc', { task: '2+2' }),
+     systemPrompt: 'route',
+     agents: [a.agent, b.agent],
+   });
+   const result = await runOrchestrator(orch, 'compute 2+2');
+   expect(result.kind).toBe('answer');
+   expect(a.ran()).toBe(0);
+   expect(b.ran()).toBe(1);
+ });
+ 
++test('routes a URL task to web_fetch and a file task to file_qa', async () => {
++  const fileQa = subAgent('file_qa', 'file answer');
++  const webFetch = subAgent('web_fetch', 'web answer');
++
++  // model that picks delegate_to_web_fetch
++  const orchWeb = createOrchestrator({
++    model: orchModel('delegate_to_web_fetch', {
++      task: 'summarize https://example.com',
++    }),
++    systemPrompt: 'route',
++    agents: [fileQa.agent, webFetch.agent],
++  });
++  const webResult = await runOrchestrator(
++    orchWeb,
++    'summarize https://example.com',
++  );
++  expect(webResult.kind).toBe('answer');
++  expect(fileQa.ran()).toBe(0);
++  expect(webFetch.ran()).toBe(1);
++});
++
+ test('gap detected from MaxStepsError: orchestrator resolves kind:gap when runAgent throws after report_capability_gap', async () => {
+   // A model that ALWAYS returns a report_capability_gap tool-call and never
+   // produces final text. The loop hits the step ceiling (MaxStepsError is thrown
+   // with steps attached), and runOrchestrator must detect the gap from those steps.
+   const gapOnlyModel = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [
+         {
+           type: 'tool-call',
+           toolCallId: 'c1',
+diff --git a/tests/integration/fetch-mount.live.test.ts b/tests/integration/fetch-mount.live.test.ts
+new file mode 100644
+index 0000000..03a059f
+--- /dev/null
++++ b/tests/integration/fetch-mount.live.test.ts
+@@ -0,0 +1,24 @@
++import { describe, expect, test } from 'bun:test';
++import { createFetchTools } from '../../src/mcp/client.ts';
++import { uvxReady } from './uvx-available.ts';
++
++const ready = await uvxReady();
++
++describe.skipIf(!ready)('live: uvx mcp-server-fetch mount', () => {
++  test('exposes a fetch tool and retrieves a URL', async () => {
++    const { tools, close } = await createFetchTools();
++    try {
++      const fetchTool = tools.fetch;
++      expect(fetchTool).toBeDefined();
++      if (fetchTool) {
++        const result = await fetchTool.execute?.(
++          { url: 'https://example.com', max_length: 500 },
++          {} as never,
++        );
++        expect(JSON.stringify(result).toLowerCase()).toContain('example');
++      }
++    } finally {
++      await close();
++    }
++  }, 60_000);
++});
+diff --git a/tests/integration/orchestrator-web.live.test.ts b/tests/integration/orchestrator-web.live.test.ts
+new file mode 100644
+index 0000000..d7fb08f
+--- /dev/null
++++ b/tests/integration/orchestrator-web.live.test.ts
+@@ -0,0 +1,36 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import { createSuperAgent } from '../../agents/super.ts';
++import { runOrchestrator } from '../../src/core/orchestrator.ts';
++import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
++import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++import { uvxReady } from './uvx-available.ts';
++
++const MODEL = 'qwen3:8b';
++const ready = (await uvxReady()) && (await ollamaReady(MODEL));
++
++describe.skipIf(!ready)(
++  'live orchestrator: web routing (real Ollama + uvx)',
++  () => {
++    afterAll(async () => {
++      await unloadModel(MODEL);
++    });
++
++    test('routes a URL request to web_fetch and answers', async () => {
++      await warmModel(MODEL);
++      const fileServer = await createFileTools();
++      const fetchServer = await createFetchTools();
++      try {
++        const orch = createSuperAgent(fileServer.tools, fetchServer.tools);
++        const result = await runOrchestrator(
++          orch,
++          'Summarize the page at https://example.com in one sentence.',
++        );
++        expect(result.kind).toBe('answer');
++      } finally {
++        await fileServer.close();
++        await fetchServer.close();
++      }
++    }, 180_000);
++  },
++);
+diff --git a/tests/integration/orchestrator.live.test.ts b/tests/integration/orchestrator.live.test.ts
+index dc46525..1802244 100644
+--- a/tests/integration/orchestrator.live.test.ts
++++ b/tests/integration/orchestrator.live.test.ts
+@@ -16,40 +16,40 @@ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
+     await unloadModel(MODEL);
+   });
+ 
+   test('delegates a file question to file-qa and answers', async () => {
+     await warmModel(MODEL);
+     const dir = await mkdtemp(join(tmpdir(), 'live-'));
+     const path = join(dir, 'animals.txt');
+     await writeFile(path, 'The fox and the dog are friends.');
+     const { tools, close } = await createFileTools();
+     try {
+-      const orch = createSuperAgent(tools);
++      const orch = createSuperAgent(tools, {});
+       const result = await runOrchestrator(
+         orch,
+         `What animals are in ${path}?`,
+       );
+       expect(result.kind).toBe('answer');
+       if (result.kind === 'answer') {
+         expect(result.text.toLowerCase()).toMatch(/fox|dog/);
+       }
+     } finally {
+       await close();
+       await rm(dir, { recursive: true, force: true });
+     }
+   }, 120_000);
+ 
+   test('reports a capability gap for an out-of-scope request', async () => {
+     await warmModel(MODEL);
+     const { tools, close } = await createFileTools();
+     try {
+-      const orch = createSuperAgent(tools);
++      const orch = createSuperAgent(tools, {});
+       const result = await runOrchestrator(
+         orch,
+         'Book me a flight to Tokyo for next Tuesday.',
+       );
+       expect(result.kind).toBe('gap');
+     } finally {
+       await close();
+     }
+   }, 120_000);
+ });
+diff --git a/tests/integration/uvx-available.ts b/tests/integration/uvx-available.ts
+new file mode 100644
+index 0000000..76e947f
+--- /dev/null
++++ b/tests/integration/uvx-available.ts
+@@ -0,0 +1,15 @@
++/** True iff `uvx mcp-server-fetch` can start (probes with --help, killed on timeout). */
++export async function uvxReady(timeoutMs = 15000): Promise<boolean> {
++  try {
++    const proc = Bun.spawn(['uvx', 'mcp-server-fetch', '--help'], {
++      stdout: 'ignore',
++      stderr: 'ignore',
++    });
++    const timer = setTimeout(() => proc.kill(), timeoutMs);
++    const code = await proc.exited;
++    clearTimeout(timer);
++    return code === 0;
++  } catch {
++    return false;
++  }
++}
+diff --git a/tests/mcp/mount.test.ts b/tests/mcp/mount.test.ts
+new file mode 100644
+index 0000000..cdceff3
+--- /dev/null
++++ b/tests/mcp/mount.test.ts
+@@ -0,0 +1,16 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mountMcpServer } from '../../src/mcp/client.ts';
++
++// Proves mountMcpServer is generic (not hardcoded to one server) by mounting our
++// OWN read_file server through it. Real subprocess; needs bun, no network.
++test('mountMcpServer mounts an arbitrary stdio server and exposes its tools', async () => {
++  const { tools, close } = await mountMcpServer({
++    command: 'bun',
++    args: ['run', 'src/mcp/server.ts'],
++  });
++  try {
++    expect(tools.read_file).toBeDefined();
++  } finally {
++    await close();
++  }
++});

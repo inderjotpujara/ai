@@ -1,0 +1,77 @@
+# Review package: 2248b62..7a140d1
+
+## Commits
+7a140d1 feat(core): add Agent definition and runDefinedAgent
+
+## Files changed
+ src/core/agent-def.ts        | 24 ++++++++++++++++++++++++
+ tests/core/agent-def.test.ts | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 54 insertions(+)
+
+## Diff
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+new file mode 100644
+index 0000000..b7c1241
+--- /dev/null
++++ b/src/core/agent-def.ts
+@@ -0,0 +1,24 @@
++import type { LanguageModel, ToolSet } from 'ai';
++import { runAgent } from './agent.ts';
++
++/** A reusable agent: its own model + system prompt + tools, plus a routing description. */
++export type Agent = {
++  name: string; // stable id used in delegate tool names, e.g. 'file_qa'
++  description: string; // capability description the orchestrator routes on
++  model: LanguageModel;
++  systemPrompt: string;
++  tools: ToolSet;
++};
++
++/** Run an agent definition against a task. */
++export function runDefinedAgent(
++  agent: Agent,
++  task: string,
++): ReturnType<typeof runAgent> {
++  return runAgent({
++    model: agent.model,
++    systemPrompt: agent.systemPrompt,
++    prompt: task,
++    tools: agent.tools,
++  });
++}
+diff --git a/tests/core/agent-def.test.ts b/tests/core/agent-def.test.ts
+new file mode 100644
+index 0000000..b126d59
+--- /dev/null
++++ b/tests/core/agent-def.test.ts
+@@ -0,0 +1,30 @@
++import { expect, mock, test } from 'bun:test';
++import { tool } from 'ai';
++import { MockLanguageModelV3 } from 'ai/test';
++import { z } from 'zod';
++import { type Agent, runDefinedAgent } from '../../src/core/agent-def.ts';
++
++test('runDefinedAgent runs the agent on the task and returns text', async () => {
++  const execute = mock(async () => ({ value: 42 }));
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'done' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const agent: Agent = {
++    name: 'calc',
++    description: 'does math',
++    model,
++    systemPrompt: 'You do math.',
++    tools: { add: tool({ description: 'add', inputSchema: z.object({}), execute }) },
++  };
++
++  const { text } = await runDefinedAgent(agent, 'what is 40+2?');
++  expect(text).toBe('done');
++});

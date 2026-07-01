@@ -1,0 +1,240 @@
+# Review package: a046181..b5e6225
+
+## Commits
+b5e6225 feat(cli): warm+pin router model, load specialists on demand via the manager
+
+## Files changed
+ src/cli/chat.ts                                 | 46 +++++++++----------------
+ tests/integration/model-manager.live.test.ts    | 24 +++++++++++++
+ tests/integration/orchestrator-web.live.test.ts |  8 ++---
+ tests/integration/orchestrator.live.test.ts     | 10 +++---
+ 4 files changed, 49 insertions(+), 39 deletions(-)
+
+## Diff
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 6e3afa7..623b310 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,75 +1,61 @@
+ import { createSuperAgent } from '../../agents/super.ts';
+-import qwenFast from '../../models/qwen-fast.ts';
+-import { ResourceError } from '../core/errors.ts';
++import qwenRouter from '../../models/qwen-router.ts';
+ import { createFetchTools, createFileTools } from '../mcp/client.ts';
+-import { estimateModelBytes } from '../resource/footprint.ts';
+-import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
++import { createModelManager } from '../resource/model-manager.ts';
+ import { isProjectStoreActive } from '../resource/model-store.ts';
+-import {
+-  isModelInstalled,
+-  pullModel,
+-  unloadModel,
+-  warmModel,
+-} from '../resource/ollama-control.ts';
+ import { runChat } from './run-chat.ts';
+ 
+-const FOOTPRINT = estimateModelBytes({
+-  paramsBillions: 8,
+-  bytesPerWeight: 0.56,
+-  contextTokens: qwenFast.params.numCtx ?? 8192,
+-  kvBytesPerToken: 131072,
+-});
+-
+ async function main(): Promise<void> {
+   const task = process.argv.slice(2).join(' ').trim();
+   if (task.length === 0) {
+     console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+     process.exit(1);
+   }
+ 
+-  const budget = machineBudgetBytes();
+-  if (!fitsBudget(FOOTPRINT, budget)) {
+-    throw new ResourceError(
+-      `${qwenFast.model} (~${Math.round(FOOTPRINT / 1e9)}GB) exceeds the GPU budget (~${Math.round(budget / 1e9)}GB)`,
+-    );
+-  }
+-
+-  if (!(await isModelInstalled(qwenFast.model))) {
+-    console.error(`Pulling ${qwenFast.model} (first run only)...`);
+-    await pullModel(qwenFast.model);
+-  }
+-  await warmModel(qwenFast.model);
++  const manager = createModelManager();
++  // Warm + pin the small router model the orchestrator runs on.
++  console.error(`Preparing router model ${qwenRouter.model}...`);
++  await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
++  // Specialists' models are loaded on demand, keeping the router pinned-resident.
++  const onBeforeDelegate = (agent: {
++    modelDecl?: import('../core/types.ts').ModelDeclaration;
++  }) =>
++    agent.modelDecl
++      ? manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] })
++      : Promise.resolve();
++
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+       const orchestrator = createSuperAgent(
+         fileServer.tools,
+         fetchServer.tools,
++        onBeforeDelegate,
+       );
+       const result = await runChat({
+         orchestrator,
+         task,
+         runsRoot: 'runs',
+         runId: `run-${process.pid}`,
+       });
+       console.log(result.kind === 'answer' ? result.text : result.message);
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+-    await unloadModel(qwenFast.model);
++    await manager.unloadAll();
+   }
+ }
+ 
+ main().catch((err) => {
+   console.error(err);
+   process.exit(1);
+ });
+diff --git a/tests/integration/model-manager.live.test.ts b/tests/integration/model-manager.live.test.ts
+new file mode 100644
+index 0000000..62194ba
+--- /dev/null
++++ b/tests/integration/model-manager.live.test.ts
+@@ -0,0 +1,24 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import qwenFast from '../../models/qwen-fast.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++import { listLoadedModels } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready =
++  (await ollamaReady(qwenRouter.model)) && (await ollamaReady(qwenFast.model));
++
++describe.skipIf(!ready)('live model manager: co-residency + pinning', () => {
++  const manager = createModelManager();
++  afterAll(async () => {
++    await manager.unloadAll();
++  });
++
++  test('router stays pinned-resident while a specialist loads', async () => {
++    await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
++    await manager.ensureReady(qwenFast, { pinned: [qwenRouter.model] });
++    const loaded = (await listLoadedModels()).map((m) => m.name);
++    expect(loaded).toContain(qwenRouter.model); // pinned survived
++    expect(loaded).toContain(qwenFast.model); // specialist co-resident
++  }, 180_000);
++});
+diff --git a/tests/integration/orchestrator-web.live.test.ts b/tests/integration/orchestrator-web.live.test.ts
+index d7fb08f..87f6325 100644
+--- a/tests/integration/orchestrator-web.live.test.ts
++++ b/tests/integration/orchestrator-web.live.test.ts
+@@ -1,30 +1,30 @@
+ import { afterAll, describe, expect, test } from 'bun:test';
+ import { createSuperAgent } from '../../agents/super.ts';
++import qwenFast from '../../models/qwen-fast.ts';
+ import { runOrchestrator } from '../../src/core/orchestrator.ts';
+ import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
+ import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
+ import { ollamaReady } from './ollama-available.ts';
+ import { uvxReady } from './uvx-available.ts';
+ 
+-const MODEL = 'qwen3:8b';
+-const ready = (await uvxReady()) && (await ollamaReady(MODEL));
++const ready = (await uvxReady()) && (await ollamaReady(qwenFast.model));
+ 
+ describe.skipIf(!ready)(
+   'live orchestrator: web routing (real Ollama + uvx)',
+   () => {
+     afterAll(async () => {
+-      await unloadModel(MODEL);
++      await unloadModel(qwenFast.model);
+     });
+ 
+     test('routes a URL request to web_fetch and answers', async () => {
+-      await warmModel(MODEL);
++      await warmModel(qwenFast.model);
+       const fileServer = await createFileTools();
+       const fetchServer = await createFetchTools();
+       try {
+         const orch = createSuperAgent(fileServer.tools, fetchServer.tools);
+         const result = await runOrchestrator(
+           orch,
+           'Summarize the page at https://example.com in one sentence.',
+         );
+         expect(result.kind).toBe('answer');
+       } finally {
+diff --git a/tests/integration/orchestrator.live.test.ts b/tests/integration/orchestrator.live.test.ts
+index 1802244..8a2883a 100644
+--- a/tests/integration/orchestrator.live.test.ts
++++ b/tests/integration/orchestrator.live.test.ts
+@@ -1,30 +1,30 @@
+ import { afterAll, describe, expect, test } from 'bun:test';
+ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { createSuperAgent } from '../../agents/super.ts';
++import qwenFast from '../../models/qwen-fast.ts';
+ import { runOrchestrator } from '../../src/core/orchestrator.ts';
+ import { createFileTools } from '../../src/mcp/client.ts';
+ import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
+ import { ollamaReady } from './ollama-available.ts';
+ 
+-const MODEL = 'qwen3:8b';
+-const ready = await ollamaReady(MODEL);
++const ready = await ollamaReady(qwenFast.model);
+ 
+ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
+   afterAll(async () => {
+-    await unloadModel(MODEL);
++    await unloadModel(qwenFast.model);
+   });
+ 
+   test('delegates a file question to file-qa and answers', async () => {
+-    await warmModel(MODEL);
++    await warmModel(qwenFast.model);
+     const dir = await mkdtemp(join(tmpdir(), 'live-'));
+     const path = join(dir, 'animals.txt');
+     await writeFile(path, 'The fox and the dog are friends.');
+     const { tools, close } = await createFileTools();
+     try {
+       const orch = createSuperAgent(tools, {});
+       const result = await runOrchestrator(
+         orch,
+         `What animals are in ${path}?`,
+       );
+@@ -32,21 +32,21 @@ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
+       if (result.kind === 'answer') {
+         expect(result.text.toLowerCase()).toMatch(/fox|dog/);
+       }
+     } finally {
+       await close();
+       await rm(dir, { recursive: true, force: true });
+     }
+   }, 120_000);
+ 
+   test('reports a capability gap for an out-of-scope request', async () => {
+-    await warmModel(MODEL);
++    await warmModel(qwenFast.model);
+     const { tools, close } = await createFileTools();
+     try {
+       const orch = createSuperAgent(tools, {});
+       const result = await runOrchestrator(
+         orch,
+         'Book me a flight to Tokyo for next Tuesday.',
+       );
+       expect(result.kind).toBe('gap');
+     } finally {
+       await close();

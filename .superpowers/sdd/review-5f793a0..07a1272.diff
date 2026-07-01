@@ -1,0 +1,121 @@
+# Review package: 5f793a0..07a1272
+
+## Commits
+07a1272 feat(cli): apply router + specialist chosen num_ctx at inference
+
+## Files changed
+ src/cli/chat.ts     | 23 ++++++++++++++---------
+ src/cli/run-chat.ts |  7 ++++++-
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 9bf006a..ea60263 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -8,52 +8,57 @@ import { runChat } from './run-chat.ts';
+ async function main(): Promise<void> {
+   const task = process.argv.slice(2).join(' ').trim();
+   if (task.length === 0) {
+     console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+     process.exit(1);
+   }
+ 
+   const manager = createModelManager();
+   // Warm + pin the small router model the orchestrator runs on.
+   console.error(`Preparing router model ${qwenRouter.model}...`);
+-  await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
++  const routerNumCtx = await manager.ensureReady(qwenRouter, {
++    pinned: [qwenRouter.model],
++  });
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
+-  // Specialists' models are loaded on demand, keeping the router pinned-resident.
++  // Specialists' models are loaded on demand at a budget-clamped context size,
++  // keeping the router pinned-resident.
+   const onBeforeDelegate = async (agent: {
+     modelDecl?: import('../core/types.ts').ModelDeclaration;
+-  }): Promise<void> => {
+-    if (agent.modelDecl) {
+-      await manager.ensureReady(agent.modelDecl, {
+-        pinned: [qwenRouter.model],
+-      });
+-    }
+-  };
++  }): Promise<{ numCtx?: number }> =>
++    agent.modelDecl
++      ? {
++          numCtx: await manager.ensureReady(agent.modelDecl, {
++            pinned: [qwenRouter.model],
++          }),
++        }
++      : {};
+ 
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+       const orchestrator = createSuperAgent(
+         fileServer.tools,
+         fetchServer.tools,
+         onBeforeDelegate,
+       );
+       const result = await runChat({
+         orchestrator,
+         task,
+         runsRoot: 'runs',
+         runId: `run-${process.pid}`,
++        routerNumCtx,
+       });
+       console.log(result.kind === 'answer' ? result.text : result.message);
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+     await manager.unloadAll();
+   }
+ }
+diff --git a/src/cli/run-chat.ts b/src/cli/run-chat.ts
+index 3685a77..eb59c46 100644
+--- a/src/cli/run-chat.ts
++++ b/src/cli/run-chat.ts
+@@ -4,28 +4,33 @@ import {
+   runOrchestrator,
+ } from '../core/orchestrator.ts';
+ import { appendJournal } from '../run/journal.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
+ 
+ export type ChatDeps = {
+   orchestrator: Agent;
+   task: string;
+   runsRoot: string;
+   runId: string;
++  routerNumCtx?: number;
+ };
+ 
+ /** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
+ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+   await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
+ 
+-  const result = await runOrchestrator(deps.orchestrator, deps.task);
++  const result = await runOrchestrator(
++    deps.orchestrator,
++    deps.task,
++    deps.routerNumCtx,
++  );
+ 
+   if (result.kind === 'answer') {
+     await writeArtifact(run, 'answer.txt', result.text);
+     await appendJournal(run.dir, {
+       step: 'answer',
+       data: { text: result.text },
+     });
+   } else {
+     await writeArtifact(run, 'gap.txt', result.message);
+     await appendJournal(run.dir, {

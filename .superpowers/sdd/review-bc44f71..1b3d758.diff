@@ -1,0 +1,83 @@
+# Review package: bc44f71..1b3d758
+
+## Commits
+1b3d758 feat(tools): add read_file tool with structured error result
+
+## Files changed
+ src/tools/read-file.ts        | 26 ++++++++++++++++++++++++++
+ tests/tools/read-file.test.ts | 34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 60 insertions(+)
+
+## Diff
+diff --git a/src/tools/read-file.ts b/src/tools/read-file.ts
+new file mode 100644
+index 0000000..338feae
+--- /dev/null
++++ b/src/tools/read-file.ts
+@@ -0,0 +1,26 @@
++import { readFile } from 'node:fs/promises';
++import { tool } from 'ai';
++import { z } from 'zod';
++
++/** Pure helper: read a UTF-8 file's contents. */
++export function readFileText(path: string): Promise<string> {
++  return readFile(path, 'utf8');
++}
++
++/**
++ * The `read_file` tool. On failure it RETURNS an error object (rather than
++ * throwing) so the model sees it as a tool result and can recover.
++ */
++export const readFileTool = tool({
++  description: 'Read a UTF-8 text file from disk and return its contents.',
++  inputSchema: z.object({
++    path: z.string().describe('Absolute or relative path to the file to read'),
++  }),
++  execute: async ({ path }) => {
++    try {
++      return { text: await readFileText(path) };
++    } catch (cause) {
++      return { error: `Could not read ${path}: ${(cause as Error).message}` };
++    }
++  },
++});
+diff --git a/tests/tools/read-file.test.ts b/tests/tools/read-file.test.ts
+new file mode 100644
+index 0000000..ee90045
+--- /dev/null
++++ b/tests/tools/read-file.test.ts
+@@ -0,0 +1,34 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { readFileText, readFileTool } from '../../src/tools/read-file.ts';
++
++let dir: string;
++beforeEach(async () => {
++  dir = await mkdtemp(join(tmpdir(), 'readfile-'));
++});
++afterEach(async () => {
++  await rm(dir, { recursive: true, force: true });
++});
++
++test('readFileText returns file contents', async () => {
++  const p = join(dir, 'note.txt');
++  await writeFile(p, 'hello file');
++  expect(await readFileText(p)).toBe('hello file');
++});
++
++test('tool execute returns text on success', async () => {
++  const p = join(dir, 'note.txt');
++  await writeFile(p, 'tool content');
++  const result = await readFileTool.execute!({ path: p }, {} as never);
++  expect(result).toEqual({ text: 'tool content' });
++});
++
++test('tool execute returns a structured error for a missing file', async () => {
++  const result = await readFileTool.execute!(
++    { path: join(dir, 'missing.txt') },
++    {} as never,
++  );
++  expect(result).toHaveProperty('error');
++});

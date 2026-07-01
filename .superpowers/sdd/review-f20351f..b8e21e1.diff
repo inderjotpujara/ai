@@ -1,0 +1,88 @@
+# Review package: f20351f..b8e21e1
+
+## Commits
+b8e21e1 feat(telemetry): crew.run span + crew ATTR keys
+
+## Files changed
+ src/telemetry/spans.ts             | 17 +++++++++++++++++
+ tests/telemetry/crew-spans.test.ts | 18 ++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+## Diff
+diff --git a/src/telemetry/spans.ts b/src/telemetry/spans.ts
+index 75b8403..fd39257 100644
+--- a/src/telemetry/spans.ts
++++ b/src/telemetry/spans.ts
+@@ -25,20 +25,23 @@ export const ATTR = {
+   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
+   GUARDRAIL_TYPE: 'agent.guardrail.type',
+   DELEGATION_DEPTH: 'agent.delegation.depth',
+   DELEGATION_ANCESTORS: 'agent.delegation.ancestors',
+   WORKFLOW_ID: 'workflow.id',
+   WORKFLOW_OUTCOME: 'workflow.outcome',
+   STEP_ID: 'workflow.step.id',
+   STEP_KIND: 'workflow.step.kind',
+   STEP_BRANCH_TAKEN: 'workflow.step.branch.taken',
+   STEP_MAP_COUNT: 'workflow.step.map.count',
++  CREW_ID: 'crew.id',
++  CREW_PROCESS: 'crew.process',
++  CREW_TASK_MEMBER: 'crew.task.member',
+ } as const;
+ 
+ export type ModelSelectInfo = {
+   modelId: string;
+   provider: string;
+   numCtx: number;
+   paramsBillions?: number;
+ };
+ 
+ export type ModelLoadInfo = {
+@@ -202,10 +205,24 @@ export function withStepSpan<T>(
+     return fn();
+   });
+ }
+ 
+ /** Set extra attributes on the active step span (branch decision, map count). */
+ export function annotateStep(attrs: Record<string, string | number>): void {
+   const span = trace.getActiveSpan();
+   if (!span) return;
+   for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
+ }
++
++/** Root span for a crew run. The nested workflow.run/workflow.step (sequential)
++ *  or agent.delegation (hierarchical) spans attach beneath it via active context. */
++export function withCrewSpan<T>(
++  crewId: string,
++  process: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('crew.run', async (span) => {
++    span.setAttribute(ATTR.CREW_ID, crewId);
++    span.setAttribute(ATTR.CREW_PROCESS, process);
++    return fn();
++  });
++}
+diff --git a/tests/telemetry/crew-spans.test.ts b/tests/telemetry/crew-spans.test.ts
+new file mode 100644
+index 0000000..bc23892
+--- /dev/null
++++ b/tests/telemetry/crew-spans.test.ts
+@@ -0,0 +1,18 @@
++import { describe, expect, it } from 'bun:test';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++import { ATTR, withCrewSpan, withStepSpan } from '../../src/telemetry/spans.ts';
++
++describe('crew spans', () => {
++  it('opens crew.run with id + process and nests child spans under it', async () => {
++    const { exporter } = registerTestProvider();
++    await withCrewSpan('research-crew', 'sequential', async () => {
++      await withStepSpan('t1', 'agent', async () => {});
++    });
++    const spans = exporter.getFinishedSpans();
++    const crew = spans.find((s) => s.name === 'crew.run');
++    const step = spans.find((s) => s.name === 'workflow.step');
++    expect(crew?.attributes[ATTR.CREW_ID]).toBe('research-crew');
++    expect(crew?.attributes[ATTR.CREW_PROCESS]).toBe('sequential');
++    expect(step?.parentSpanContext?.spanId).toBe(crew?.spanContext().spanId);
++  });
++});

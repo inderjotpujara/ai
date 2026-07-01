@@ -1,0 +1,282 @@
+# Review package: d4ae9a5..146dd0e
+
+## Commits
+146dd0e feat(core): enforce depth + live return cap at the delegation chokepoint
+
+## Files changed
+ src/core/delegate.ts        | 26 ++++++++++++++-----
+ src/core/orchestrator.ts    |  5 +++-
+ tests/core/delegate.test.ts | 63 ++++++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 86 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 3dbdbd4..2321713 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,15 +1,24 @@
+ import type { LanguageModel } from 'ai';
+ import { tool } from 'ai';
+ import { z } from 'zod';
+-import { withDelegationSpan } from '../telemetry/spans.ts';
++import {
++  recordGuardrailViolation,
++  withDelegationSpan,
++} from '../telemetry/spans.ts';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
++import {
++  checkDelegation,
++  concise,
++  currentDelegationContext,
++  runInDelegationContext,
++} from './guardrails.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
+ /**
+  * A hook run just before a delegated agent executes. May return a chosen context
+  * size, a model to bind for this call, and/or an `abort` message that skips the
+  * delegation entirely (returned to the orchestrator as a soft tool error).
+@@ -27,32 +36,37 @@ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+     execute: async ({ task }) =>
+       withDelegationSpan(agent.name, async () => {
++        const check = checkDelegation(agent.name);
++        if (!check.ok) {
++          recordGuardrailViolation(check.kind, check.reason);
++          return { error: check.reason };
++        }
++        const callerNumCtx = currentDelegationContext().numCtx;
+         try {
+           const pre = onBeforeDelegate
+             ? await onBeforeDelegate(agent)
+             : undefined;
+           if (pre?.abort) {
+             return { error: pre.abort };
+           }
+-          const { text } = await runDefinedAgent(
+-            agent,
+-            task,
++          const { text } = await runInDelegationContext(
++            agent.name,
+             pre?.numCtx,
+-            pre?.model,
++            () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
+           );
+-          return { text };
++          return { text: concise(text, callerNumCtx) };
+         } catch (cause) {
+           return {
+             error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+           };
+         }
+       }),
+   });
+ }
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+index 710e121..d9b19a5 100644
+--- a/src/core/orchestrator.ts
++++ b/src/core/orchestrator.ts
+@@ -4,20 +4,21 @@ import {
+   CAPABILITY_GAP_TOOL,
+   capabilityGapTool,
+   findCapabilityGap,
+ } from './capability-gap.ts';
+ import {
+   asDelegateTool,
+   type BeforeDelegate,
+   delegateToolName,
+ } from './delegate.ts';
+ import { MaxStepsError } from './errors.ts';
++import { withRootDelegationContext } from './guardrails.ts';
+ import type { ResourceCapture } from './resource-capture.ts';
+ 
+ export type OrchestratorResult =
+   | { kind: 'answer'; text: string }
+   | { kind: 'gap'; missingCapability: string; message: string }
+   | { kind: 'resource'; message: string };
+ 
+ /** Build the orchestrator's system prompt: routing rules + the agent catalog. */
+ export function buildRoutingPrompt(
+   basePrompt: string,
+@@ -67,21 +68,23 @@ export function createOrchestrator(opts: {
+ export async function runOrchestrator(
+   orchestrator: Agent,
+   task: string,
+   numCtx?: number,
+   capture?: ResourceCapture,
+ ): Promise<OrchestratorResult> {
+   let text: string;
+   let steps: Parameters<typeof findCapabilityGap>[0];
+ 
+   try {
+-    const result = await runDefinedAgent(orchestrator, task, numCtx);
++    const result = await withRootDelegationContext(numCtx, () =>
++      runDefinedAgent(orchestrator, task, numCtx),
++    );
+     text = result.text;
+     steps = result.steps;
+   } catch (err) {
+     // A genuine resource failure during delegation takes precedence over anything else.
+     if (capture?.error) {
+       return { kind: 'resource', message: capture.error.message };
+     }
+     if (err instanceof MaxStepsError) {
+       const gap = findCapabilityGap(
+         err.steps as Parameters<typeof findCapabilityGap>[0],
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index 18e5e6d..3d740c7 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -1,14 +1,18 @@
+ import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
++import {
++  runInDelegationContext,
++  withRootDelegationContext,
++} from '../../src/core/guardrails.ts';
+ import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ function cannedAgent(name: string, answer: string): Agent {
+   return {
+     name,
+     description: `agent ${name}`,
+     model: new MockLanguageModelV3({
+       doGenerate: async () => ({
+         content: [{ type: 'text', text: answer }],
+         finishReason: { unified: 'stop', raw: undefined },
+@@ -75,20 +79,30 @@ function textModel(label: string) {
+ function agent(): Agent {
+   return {
+     name: 'spec',
+     description: 'a specialist',
+     model: textModel('DEFAULT MODEL'),
+     systemPrompt: 'sp',
+     tools: {},
+   };
+ }
+ 
++function leaf(name: string, text: string): Agent {
++  return {
++    name,
++    description: `${name} agent`,
++    model: textModel(text),
++    systemPrompt: 's',
++    tools: {},
++  };
++}
++
+ test('uses the model override returned by onBeforeDelegate', async () => {
+   const t = asDelegateTool(agent(), async () => ({
+     model: textModel('OVERRIDE MODEL'),
+   }));
+   const out = await t.execute?.(
+     { task: 'hi' },
+     { toolCallId: 't', messages: [] },
+   );
+   expect(out).toEqual({ text: 'OVERRIDE MODEL' });
+ });
+@@ -104,32 +118,33 @@ test('abort short-circuits: agent never runs, returns soft error', async () => {
+   });
+   const t = asDelegateTool(a, async () => ({ abort: 'no fit' }));
+   const out = await t.execute?.(
+     { task: 'hi' },
+     { toolCallId: 't', messages: [] },
+   );
+   expect(out).toEqual({ error: 'no fit' });
+   expect(ran).toBe(false);
+ });
+ 
+-// --- delegation span tests ---
++// --- delegation span + guardrails tests ---
+ 
+ let spanExporter: ReturnType<typeof registerTestProvider>['exporter'];
+ let spanProvider: ReturnType<typeof registerTestProvider>['provider'];
+ 
+ beforeEach(() => {
+   ({ exporter: spanExporter, provider: spanProvider } = registerTestProvider());
+ });
+ 
+ afterEach(async () => {
+   await spanProvider.shutdown();
+   spanExporter.reset();
++  delete process.env.AGENT_MAX_DELEGATION_DEPTH;
+ });
+ 
+ test('asDelegateTool opens an agent.delegation span tagged with the target', async () => {
+   const model = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [{ type: 'text', text: 'done' }],
+       finishReason: { unified: 'stop', raw: undefined },
+       usage: {
+         inputTokens: {
+           total: 1,
+@@ -150,10 +165,56 @@ test('asDelegateTool opens an agent.delegation span tagged with the target', asy
+     tools: {},
+   };
+   const tool = asDelegateTool(delegateAgent);
+   await tool.execute?.({ task: 'go' }, { toolCallId: 't', messages: [] });
+   const del = spanExporter
+     .getFinishedSpans()
+     .find((s) => s.name === 'agent.delegation');
+   expect(del).toBeDefined();
+   expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
+ });
++
++test('over-depth delegation returns a soft error and records a guardrail event', async () => {
++  process.env.AGENT_MAX_DELEGATION_DEPTH = '1'; // allow depth 1 only
++  const target = leaf('deep', 'answer');
++  const t = asDelegateTool(target);
++  // simulate already being at depth 1 (one delegation deep) → this call would be depth 2 → rejected
++  const result = await runInDelegationContext(
++    'parent',
++    8192,
++    async () =>
++      await t.execute?.({ task: 'go' }, { toolCallId: 'c', messages: [] }),
++  );
++  expect(result).toEqual({ error: expect.stringContaining('depth limit') });
++});
++
++test('long delegated return is truncated to the caller live cap', async () => {
++  const big = 'y'.repeat(9000);
++  const t = asDelegateTool(leaf('big', big));
++  // caller num_ctx 8192 → cap = 0.25*8192*4 = 8192
++  const result = await withRootDelegationContext(
++    8192,
++    async () =>
++      await t.execute?.({ task: 'go' }, { toolCallId: 'c', messages: [] }),
++  );
++  if (
++    result == null ||
++    typeof result !== 'object' ||
++    !('text' in result) ||
++    typeof result.text !== 'string'
++  ) {
++    throw new Error('expected text result');
++  }
++  expect(result.text.length).toBeLessThan(9000);
++  expect(result.text).toContain('…[truncated');
++});
++
++test('within-depth recursive re-entry of the same agent name is allowed', async () => {
++  const t = asDelegateTool(leaf('rec', 'ok'));
++  const result = await runInDelegationContext(
++    'rec',
++    8192,
++    async () =>
++      await t.execute?.({ task: 'again' }, { toolCallId: 'c', messages: [] }),
++  );
++  expect(result).toEqual({ text: 'ok' }); // same name 'rec' re-entered, not rejected
++});

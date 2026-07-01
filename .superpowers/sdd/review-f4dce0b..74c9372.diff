@@ -1,0 +1,463 @@
+# Review package: f4dce0b..74c93723f63eee0c6283791afee00b3baccaffc6
+
+## Commits
+74c9372 style(workflow): organize imports in workflow test files (biome)
+80adaef feat(workflow): bun run flow CLI + registry + fetch-then-summarize example
+
+## Files changed
+ docs/architecture.md                    |   8 ++-
+ package.json                            |   1 +
+ src/cli/flow.ts                         | 118 ++++++++++++++++++++++++++++++++
+ tests/cli/flow.test.ts                  |  91 ++++++++++++++++++++++++
+ tests/integration/workflow.live.test.ts |  44 ++++++++++++
+ tests/telemetry/workflow-spans.test.ts  |   2 +-
+ tests/workflow/run-step.test.ts         |   2 +-
+ workflows/fetch-then-summarize.ts       |  29 ++++++++
+ workflows/index.ts                      |  11 +++
+ 9 files changed, 303 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/docs/architecture.md b/docs/architecture.md
+index fedb7ec..56f08a4 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -266,37 +266,43 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
+   - `effectiveDeps(step, index, steps)` — helper: explicit `dependsOn` or implicit previous-step deps
+ 
+ - **Error class** (`src/core/errors.ts`): `WorkflowError extends FrameworkError` for workflow-specific failures (bad definition, step failure, context mismatch)
+ 
+ - **Telemetry** (`src/telemetry/spans.ts`) — extended per the standing rule (§7): `withWorkflowSpan(workflowId, fn)` opens the root `workflow.run` span (`ATTR.WORKFLOW_ID`); `withStepSpan(stepId, kind, fn)` opens a nested `workflow.step` span per step (`ATTR.STEP_ID` / `ATTR.STEP_KIND`); `annotateStep(attrs)` tags the active step span with extra attributes (`ATTR.STEP_BRANCH_TAKEN` for the branch taken, `ATTR.STEP_MAP_COUNT` for map fan-out size); `ATTR.WORKFLOW_OUTCOME` records the terminal `WorkflowOutcome`. These are the spans/attrs the execution engine (Task 6) and CLI (Task 7) emit into — transport untouched, so the run-viewer and any OTLP backend get workflow signal for free.
+ 
+ - **Step runner** (`src/workflow/run-step.ts`): `runStepByKind(step, ctx, deps)` dispatches a step to its kind (agent/tool/branch/map) and returns the *raw*, unvalidated result; `WorkflowDeps` (`runAgentStep`, `tools`, `maxParallel`) is the injected boundary the engine and CLI provide; `mapWithConcurrency` bounds fan-out concurrency for `MapStep` (default cap `DEFAULT_MAX_PARALLEL`, overridable via `AGENT_WORKFLOW_MAX_PARALLEL` or per-map `maxParallel`).
+ 
+ - **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready.
+ 
++- **Definition + validation** (`src/workflow/define.ts`): `defineWorkflow(def)` validates a `WorkflowDef` at construction time — unique step ids, every `dependsOn`/branch target resolves to a real step, and the dependency graph is acyclic (Kahn's algorithm) — throwing `WorkflowError` on any violation, so a malformed workflow fails fast at import time rather than mid-run.
++
++- **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
++
++- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, and prints the last step's output (or the failure) to stdout/stderr — closing the fetch then file server in `finally`, mirroring `chat.ts`'s mount/close order.
++
+ ---
+ 
+ ## 10. On-disk stores
+ 
+ - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
+ - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
+ 
+ ---
+ 
+ ## 11. Testing strategy
+ 
+ - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
+ - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
+ - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
+ - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
+ - **MCP** — real stdio round-trip (subprocess server).
+-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
++- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+ 
+ ---
+ 
+ ## 12. Glossary
+ 
+ - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
+ - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
+ - **Span / trace** — OpenTelemetry units. A run = a root `agent.run` span; delegations, model loads, and AI-SDK `generateText`/tool calls nest beneath it via the active async context. `bun run runs` renders the tree.
+ - **Delegation context** — the `AsyncLocalStorage` `{depth, ancestors, numCtx}` threaded through every hop; basis for the depth guard, the live return cap (off the parent's `numCtx`), and the `delegation.depth`/`ancestors` span attrs.
+ - **Live budget** — `min(0.75 × total RAM, 0.8 × availableRamBytes())` (first term = the Metal cap), recomputed per delegation; `availableRamBytes()` parses `vm_stat`.
+diff --git a/package.json b/package.json
+index cf20b5a..ba0cbf3 100644
+--- a/package.json
++++ b/package.json
+@@ -8,20 +8,21 @@
+     "typecheck": "tsc --noEmit",
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+     "lint:file": "biome check",
+     "lint:claude": "bun run lint",
+     "docs:check": "bun run scripts/docs-check.ts",
+     "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
+     "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
+     "discover": "bun run src/cli/discover.ts",
++    "flow": "bun run src/cli/flow.ts",
+     "runs": "bun run src/cli/runs.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/mcp": "^1.0.56",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/context-async-hooks": "^2.8.0",
+     "@opentelemetry/core": "^2.8.0",
+     "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
+diff --git a/src/cli/flow.ts b/src/cli/flow.ts
+new file mode 100644
+index 0000000..38a69fa
+--- /dev/null
++++ b/src/cli/flow.ts
+@@ -0,0 +1,118 @@
++import type { ToolSet } from 'ai';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++import { getWorkflow } from '../../workflows/index.ts';
++import type { Agent } from '../core/agent-def.ts';
++import { WorkflowError } from '../core/errors.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
++import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
++import type {
++  WorkflowContext,
++  WorkflowDef,
++  WorkflowOutcome,
++} from '../workflow/types.ts';
++
++export type FlowDeps = {
++  def: WorkflowDef;
++  input: unknown;
++  runsRoot: string;
++  runId: string;
++  agents: Record<string, Agent>;
++  tools: ToolSet;
++};
++
++/** The last step's validated output, rendered as text (as-is if string, else pretty JSON). */
++function lastStepOutputText(def: WorkflowDef, output: WorkflowContext): string {
++  const last = def.steps.at(-1);
++  if (!last) throw new WorkflowError(`workflow ${def.id} has no steps`);
++  const value = output[last.id];
++  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
++}
++
++/** Run a workflow with telemetry + artifact persistence (mirrors runChat). */
++export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  const tel = initRunTelemetry(run.dir);
++  try {
++    return await withWorkflowSpan(deps.def.id, async () => {
++      const outcome = await runWorkflow(deps.def, deps.input, {
++        runAgentStep: defaultRunAgentStep(deps.agents),
++        tools: deps.tools,
++      });
++      annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
++      if (outcome.kind === 'done') {
++        await writeArtifact(
++          run,
++          'result.txt',
++          lastStepOutputText(deps.def, outcome.output),
++        );
++      } else {
++        await writeArtifact(
++          run,
++          'failed.txt',
++          `step ${outcome.failedStep}: ${outcome.message}`,
++        );
++      }
++      return outcome;
++    });
++  } finally {
++    await tel.shutdown();
++  }
++}
++
++async function main(): Promise<void> {
++  const [name, ...rest] = process.argv.slice(2);
++  if (!name) {
++    console.error('Usage: bun run flow <name> [input...]');
++    process.exit(1);
++  }
++  const def = getWorkflow(name);
++  if (!def) {
++    console.error(`Unknown workflow: ${name}`);
++    process.exit(1);
++  }
++
++  const fileServer = await createFileTools();
++  try {
++    const fetchServer = await createFetchTools();
++    try {
++      const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
++      const agents: Record<string, Agent> = {};
++      const fileQa = createFileQaAgent(fileServer.tools);
++      const webFetch = createWebFetchAgent(fetchServer.tools);
++      agents[fileQa.name] = fileQa;
++      agents[webFetch.name] = webFetch;
++
++      const outcome = await runFlow({
++        def,
++        input: rest.join(' ').trim(),
++        runsRoot: 'runs',
++        runId: `flow-${process.pid}`,
++        agents,
++        tools,
++      });
++      if (outcome.kind === 'done') {
++        console.log(lastStepOutputText(def, outcome.output));
++      } else {
++        console.error(
++          `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
++        );
++        process.exitCode = 1;
++      }
++    } finally {
++      await fetchServer.close();
++    }
++  } finally {
++    await fileServer.close();
++  }
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
+diff --git a/tests/cli/flow.test.ts b/tests/cli/flow.test.ts
+new file mode 100644
+index 0000000..930a3d0
+--- /dev/null
++++ b/tests/cli/flow.test.ts
+@@ -0,0 +1,91 @@
++import { describe, expect, it } from 'bun:test';
++import { mkdtemp, readFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { MockLanguageModelV3 } from 'ai/test';
++import { z } from 'zod';
++import { runFlow } from '../../src/cli/flow.ts';
++import { defineWorkflow } from '../../src/workflow/define.ts';
++import { StepKind } from '../../src/workflow/types.ts';
++
++const cannedAgent = (name: string) => ({
++  name,
++  description: name,
++  model: new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'summary text' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  }),
++  systemPrompt: 'x',
++  tools: {},
++});
++
++describe('runFlow', () => {
++  it('writes spans.jsonl with workflow spans + result.txt on success', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'flow-'));
++    const def = defineWorkflow({
++      id: 'demo',
++      steps: [
++        {
++          id: 'sum',
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: () => 'do it',
++          output: z.string(),
++        },
++      ],
++    });
++    const outcome = await runFlow({
++      def,
++      input: 'hello',
++      runsRoot,
++      runId: 'r1',
++      agents: { web_fetch: cannedAgent('web_fetch') },
++      tools: {},
++    });
++    expect(outcome.kind).toBe('done');
++    const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
++    expect(spans).toContain('workflow.run');
++    expect(spans).toContain('workflow.step');
++    const result = await readFile(join(runsRoot, 'r1', 'result.txt'), 'utf8');
++    expect(result).toContain('summary text');
++  });
++
++  it('writes failed.txt and returns failed on a failing step', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'flow-'));
++    const def = defineWorkflow({
++      id: 'demo',
++      steps: [
++        {
++          id: 'sum',
++          kind: StepKind.Agent,
++          agent: 'web_fetch',
++          input: () => 'do it',
++          output: z.number(), // string result → validation failure
++        },
++      ],
++    });
++    const outcome = await runFlow({
++      def,
++      input: null,
++      runsRoot,
++      runId: 'r2',
++      agents: { web_fetch: cannedAgent('web_fetch') },
++      tools: {},
++    });
++    expect(outcome.kind).toBe('failed');
++    const failed = await readFile(join(runsRoot, 'r2', 'failed.txt'), 'utf8');
++    expect(failed).toContain('sum');
++  });
++});
+diff --git a/tests/integration/workflow.live.test.ts b/tests/integration/workflow.live.test.ts
+new file mode 100644
+index 0000000..e2fe27f
+--- /dev/null
++++ b/tests/integration/workflow.live.test.ts
+@@ -0,0 +1,44 @@
++import { describe, expect, test } from 'bun:test';
++import { mkdtemp } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++import qwenFast from '../../models/qwen-fast.ts';
++import { runFlow } from '../../src/cli/flow.ts';
++import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
++import { unloadModel } from '../../src/resource/ollama-control.ts';
++import { getWorkflow } from '../../workflows/index.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenFast.model);
++
++describe.skipIf(!ready)('workflow.live', () => {
++  test('runs fetch-then-summarize end-to-end against real Ollama', async () => {
++    const def = getWorkflow('fetch-then-summarize');
++    if (!def) throw new Error('fetch-then-summarize workflow not registered');
++    const fileServer = await createFileTools();
++    try {
++      const fetchServer = await createFetchTools();
++      try {
++        const runsRoot = await mkdtemp(join(tmpdir(), 'flowlive-'));
++        const fileQa = createFileQaAgent(fileServer.tools);
++        const webFetch = createWebFetchAgent(fetchServer.tools);
++        const outcome = await runFlow({
++          def,
++          input: 'https://example.com',
++          runsRoot,
++          runId: 'live',
++          agents: { [fileQa.name]: fileQa, [webFetch.name]: webFetch },
++          tools: { ...fileServer.tools, ...fetchServer.tools },
++        });
++        expect(outcome.kind).toBe('done');
++      } finally {
++        await fetchServer.close();
++      }
++    } finally {
++      await fileServer.close();
++      await unloadModel(qwenFast.model);
++    }
++  }, 120_000);
++});
+diff --git a/tests/telemetry/workflow-spans.test.ts b/tests/telemetry/workflow-spans.test.ts
+index b6d6153..4eac5b1 100644
+--- a/tests/telemetry/workflow-spans.test.ts
++++ b/tests/telemetry/workflow-spans.test.ts
+@@ -1,18 +1,18 @@
+ import { describe, expect, it } from 'bun:test';
+-import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ import {
+   ATTR,
+   annotateStep,
+   withStepSpan,
+   withWorkflowSpan,
+ } from '../../src/telemetry/spans.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ describe('workflow spans', () => {
+   it('nests workflow.step under workflow.run with id/kind attrs', async () => {
+     const { exporter } = registerTestProvider();
+     await withWorkflowSpan('wf-demo', async () => {
+       await withStepSpan('s1', 'agent', async () => {
+         annotateStep({ [ATTR.STEP_MAP_COUNT]: 3 });
+       });
+     });
+     const spans = exporter.getFinishedSpans();
+diff --git a/tests/workflow/run-step.test.ts b/tests/workflow/run-step.test.ts
+index ed16e25..c1946bd 100644
+--- a/tests/workflow/run-step.test.ts
++++ b/tests/workflow/run-step.test.ts
+@@ -1,16 +1,16 @@
+ import { describe, expect, it } from 'bun:test';
+ import { z } from 'zod';
+ import {
+   DEFAULT_MAX_PARALLEL,
+-  type WorkflowDeps,
+   runStepByKind,
++  type WorkflowDeps,
+ } from '../../src/workflow/run-step.ts';
+ import { StepKind } from '../../src/workflow/types.ts';
+ 
+ const baseDeps = (over: Partial<WorkflowDeps> = {}): WorkflowDeps => ({
+   runAgentStep: async (_a, task) => `ran:${task}`,
+   tools: {},
+   ...over,
+ });
+ 
+ describe('runStepByKind', () => {
+diff --git a/workflows/fetch-then-summarize.ts b/workflows/fetch-then-summarize.ts
+new file mode 100644
+index 0000000..ee870fa
+--- /dev/null
++++ b/workflows/fetch-then-summarize.ts
+@@ -0,0 +1,29 @@
++import { z } from 'zod';
++import { defineWorkflow } from '../src/workflow/define.ts';
++import { StepKind } from '../src/workflow/types.ts';
++
++/** tool(fetch) → agent(summarize): fetch a URL's content, then summarize it.
++ *  The workflow input is the URL string. */
++export default defineWorkflow({
++  id: 'fetch-then-summarize',
++  description: 'Fetch a URL with the fetch tool, then summarize via an agent.',
++  steps: [
++    {
++      id: 'fetch',
++      kind: StepKind.Tool,
++      dependsOn: [],
++      tool: 'fetch', // provided by mcp-server-fetch
++      input: (ctx) => ({ url: String(ctx.input) }),
++      output: z.unknown(),
++    },
++    {
++      id: 'summarize',
++      kind: StepKind.Agent,
++      dependsOn: ['fetch'],
++      agent: 'web_fetch',
++      input: (ctx) =>
++        `Summarize the following web page content in 3 concise bullet points:\n\n${JSON.stringify(ctx.fetch).slice(0, 8000)}`,
++      output: z.string(),
++    },
++  ],
++});
+diff --git a/workflows/index.ts b/workflows/index.ts
+new file mode 100644
+index 0000000..44e0b07
+--- /dev/null
++++ b/workflows/index.ts
+@@ -0,0 +1,11 @@
++import type { WorkflowDef } from '../src/workflow/types.ts';
++import fetchThenSummarize from './fetch-then-summarize.ts';
++
++/** name → workflow definition (mirrors models/registry.ts). */
++export const WORKFLOWS: Record<string, WorkflowDef> = {
++  [fetchThenSummarize.id]: fetchThenSummarize,
++};
++
++export function getWorkflow(name: string): WorkflowDef | undefined {
++  return WORKFLOWS[name];
++}

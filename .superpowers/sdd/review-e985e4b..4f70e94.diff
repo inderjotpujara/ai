@@ -1,0 +1,122 @@
+# Review package: e985e4b..4f70e94
+
+## Commits
+4f70e94 feat(discovery): Hugging Face MLX catalog source (config.json + chat_template)
+
+## Files changed
+ src/discovery/huggingface-mlx.ts        | 63 +++++++++++++++++++++++++++++++++
+ tests/discovery/huggingface-mlx.test.ts | 36 +++++++++++++++++++
+ 2 files changed, 99 insertions(+)
+
+## Diff
+diff --git a/src/discovery/huggingface-mlx.ts b/src/discovery/huggingface-mlx.ts
+new file mode 100644
+index 0000000..0e95845
+--- /dev/null
++++ b/src/discovery/huggingface-mlx.ts
+@@ -0,0 +1,63 @@
++import { Capability, ContentPolicy, type ModelDeclaration, ProviderKind } from '../core/types.ts';
++import type { Candidate, CatalogSource, DiscoveryQuery, HostCapabilities } from './catalog-source.ts';
++import { detectTools } from './huggingface-gguf.ts';
++import { hfGet } from './hf-client.ts';
++
++const TRUSTED = ['mlx-community'];
++const LIMIT = 20;
++const UNCENSORED_RE = /(abliterated|uncensored|dolphin)/i;
++
++type ListItem = { id: string; downloads?: number };
++type TreeEntry = { path: string; size?: number; lfs?: { size?: number } };
++type TokCfg = { chat_template?: string };
++type Cfg = { num_parameters?: number };
++
++async function candidateFor(item: ListItem, q: DiscoveryQuery): Promise<Candidate | undefined> {
++  const repo = item.id;
++  let tok: TokCfg;
++  try { tok = (await hfGet(`/${repo}/resolve/main/tokenizer_config.json`)) as TokCfg; } catch { return undefined; }
++  const tmpl = tok.chat_template ?? '';
++  if (q.requires?.includes(Capability.Tools) && !detectTools(tmpl)) return undefined;
++
++  let cfg: Cfg = {};
++  try { cfg = (await hfGet(`/${repo}/resolve/main/config.json`)) as Cfg; } catch { /* params optional */ }
++
++  let tree: TreeEntry[];
++  try { tree = (await hfGet(`/api/models/${repo}/tree/main`)) as TreeEntry[]; } catch { return undefined; }
++  const total = tree
++    .filter((e) => e.path.endsWith('.safetensors'))
++    .reduce((s, e) => s + (e.lfs?.size ?? e.size ?? 0), 0);
++  if (total === 0 || total > q.budgetBytes) return undefined;
++
++  const params = (cfg.num_parameters ?? 0) / 1e9;
++  const bpw = params > 0 ? total / 1e9 / params : 0.55;
++  const decl: ModelDeclaration = {
++    provider: ProviderKind.MlxServer,
++    model: repo,
++    params: {},
++    role: 'discovered MLX general reasoning + tool use',
++    capabilities: [Capability.Tools],
++    contentPolicy: UNCENSORED_RE.test(repo) ? ContentPolicy.Uncensored : ContentPolicy.Default,
++    footprint: { approxParamsBillions: params > 0 ? params : total / 1e9 / 0.55, bytesPerWeight: bpw },
++  };
++  return { ...decl, repo, quant: '4bit', fileSizeBytes: total, downloads: item.downloads ?? 0, installed: false };
++}
++
++export const hfMlxSource: CatalogSource = {
++  name: 'hf-mlx',
++  appliesTo: (host: HostCapabilities) => host.runtimes.includes(ProviderKind.MlxServer),
++  async listCandidates(q: DiscoveryQuery): Promise<Candidate[]> {
++    const items: ListItem[] = [];
++    for (const author of TRUSTED) {
++      try {
++        const page = (await hfGet(
++          `/api/models?filter=mlx&author=${author}&sort=downloads&direction=-1&limit=${LIMIT}`,
++        )) as ListItem[];
++        items.push(...page);
++      } catch { /* degrade */ }
++    }
++    const out: Candidate[] = [];
++    for (const item of items) { const c = await candidateFor(item, q); if (c) out.push(c); }
++    return out;
++  },
++};
+diff --git a/tests/discovery/huggingface-mlx.test.ts b/tests/discovery/huggingface-mlx.test.ts
+new file mode 100644
+index 0000000..6faf495
+--- /dev/null
++++ b/tests/discovery/huggingface-mlx.test.ts
+@@ -0,0 +1,36 @@
++import { afterEach, expect, test } from 'bun:test';
++import { Capability, ProviderKind } from '../../src/core/types.ts';
++import { hfMlxSource } from '../../src/discovery/huggingface-mlx.ts';
++
++test('applies only when an MLX runtime is present on the host', () => {
++  const base = { totalRamBytes: 24e9, liveBudgetBytes: 12e9 };
++  expect(hfMlxSource.appliesTo({ ...base, runtimes: [ProviderKind.Ollama] })).toBe(false);
++  expect(hfMlxSource.appliesTo({ ...base, runtimes: [ProviderKind.Ollama, ProviderKind.MlxServer] })).toBe(true);
++});
++
++const orig = globalThis.fetch;
++afterEach(() => { globalThis.fetch = orig; });
++
++test('builds an MLX candidate from config.json + chat_template + tree', async () => {
++  const routes: Record<string, unknown> = {
++    '/api/models?filter=mlx&author=mlx-community&sort=downloads&direction=-1&limit=20':
++      [{ id: 'mlx-community/Qwen2.5-7B-Instruct-4bit', downloads: 500 }],
++    '/resolve/main/config.json': { num_parameters: 7_600_000_000 },
++    '/resolve/main/tokenizer_config.json': { chat_template: '{%- if tools %} tool_call' },
++    '/api/models/mlx-community/Qwen2.5-7B-Instruct-4bit/tree/main':
++      [{ path: 'model.safetensors', size: 4_300_000_000 }],
++  };
++  globalThis.fetch = (async (u: string) => {
++    const key = Object.keys(routes).find((k) => u.includes(k));
++    const body = key ? routes[key] : null;
++    return new Response(JSON.stringify(body), { status: body ? 200 : 404 });
++  }) as unknown as typeof fetch;
++
++  const cands = await hfMlxSource.listCandidates({
++    budgetBytes: 12e9, requires: [Capability.Tools], hostTotalRamBytes: 24e9,
++  });
++  expect(cands.length).toBe(1);
++  expect(cands[0]!.provider).toBe(ProviderKind.MlxServer);
++  expect(cands[0]!.model).toBe('mlx-community/Qwen2.5-7B-Instruct-4bit');
++  expect(cands[0]!.capabilities).toContain(Capability.Tools);
++});

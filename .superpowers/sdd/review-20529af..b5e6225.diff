@@ -1,0 +1,2086 @@
+# Review package: 20529af5cd60f4f6491e2ab5646b04af69a7ea13..b5e6225
+
+## Commits
+b5e6225 feat(cli): warm+pin router model, load specialists on demand via the manager
+a046181 docs: sync ROADMAP with all pending ideas (MLX-server adapters, Mac-Mini scale, guardrails, minor-findings tracking); link from README
+cc8c1ce docs: add long-range ROADMAP (future slices: agent-builder, discovery, RAG, UI, daemon, A2A...)
+4c37061 feat(agents): orchestrator on qwen3:4b; specialists carry modelDecl
+8fd3317 feat(core): optional onBeforeDelegate hook + Agent.modelDecl
+1c04b3f feat(resource): add model manager (ensureReady with pin + LRU eviction)
+2866d12 feat(models): footprint hint + current-gen models (qwen3.5:4b router, qwen3.5:9b specialist)
+4dc447a feat(resource): add listLoadedModels (GET /api/ps)
+8c467fb docs: Slice 4 plan + spec — current-gen models (qwen3.5:4b/9b), verify-and-fallback, machine-optimized GGUF
+1a14d77 docs: add Slice 4 design spec (multi-model manager, hardware-aware)
+
+## Files changed
+ README.md                                          |   5 +-
+ agents/file-qa.ts                                  |   1 +
+ agents/super.ts                                    |   7 +-
+ agents/web-fetch.ts                                |   1 +
+ docs/ROADMAP.md                                    |  89 +++
+ .../plans/2026-06-29-slice-4-model-manager.md      | 820 +++++++++++++++++++++
+ .../2026-06-29-slice-4-model-manager-design.md     | 151 ++++
+ models/qwen-fast.ts                                |   3 +-
+ models/qwen-router.ts                              |  12 +
+ src/cli/chat.ts                                    |  46 +-
+ src/core/agent-def.ts                              |   3 +
+ src/core/delegate.ts                               |   9 +-
+ src/core/orchestrator.ts                           |  12 +-
+ src/core/types.ts                                  |   2 +
+ src/resource/model-manager.ts                      | 100 +++
+ src/resource/ollama-control.ts                     |  20 +
+ tests/agents/file-qa.test.ts                       |   6 +
+ tests/agents/super.test.ts                         |  10 +
+ tests/core/delegate.test.ts                        |  14 +-
+ tests/integration/model-manager.live.test.ts       |  24 +
+ tests/integration/orchestrator-web.live.test.ts    |   8 +-
+ tests/integration/orchestrator.live.test.ts        |  10 +-
+ tests/models/declarations.test.ts                  |  14 +
+ tests/providers/ollama.test.ts                     |   6 +-
+ tests/resource/model-manager.test.ts               |  96 +++
+ tests/resource/ollama-control.test.ts              |  30 +
+ 26 files changed, 1448 insertions(+), 51 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 1315014..6d0746f 100644
+--- a/README.md
++++ b/README.md
+@@ -155,22 +155,23 @@ interface — no agent code changes. See
+ ## Roadmap
+ 
+ | Slice | Scope | Status |
+ |---|---|---|
+ | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
+ | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
+ | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
+ | **Next** | Resource manager (multi-model scheduling, dynamic selection, hardware/context-aware agent graphs) + **model discovery** (auto-fetch latest models per machine) | Planned |
+ | **Later** | Agent-builder (auto-create agents on a capability gap) · declarative `mcp.json` mount registry · Codex backup · resumable long/multimodal jobs (e.g. book→audiobook) · response-format tooling · streaming CLI | Planned |
+ 
+-Design specs and implementation plans live in
+-[`docs/superpowers/`](docs/superpowers/).
++**Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
++daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
++implementation plans live in [`docs/superpowers/`](docs/superpowers/).
+ 
+ ---
+ 
+ ## Development
+ 
+ ```sh
+ bun run test -- -t "test name"      # single test by name
+ bun run test:file -- ./tests/...    # a specific test file
+ bun run lint -- --write             # auto-fix lint/format
+ ```
+diff --git a/agents/file-qa.ts b/agents/file-qa.ts
+index d9cb53b..2b610cd 100644
+--- a/agents/file-qa.ts
++++ b/agents/file-qa.ts
+@@ -8,12 +8,13 @@ const SYSTEM_PROMPT =
+ 
+ /** Build the file-Q&A agent with an injected tool set (e.g. the MCP read_file tools). */
+ export function createFileQaAgent(tools: ToolSet): Agent {
+   return {
+     name: 'file_qa',
+     description:
+       'Answers questions about, and summarizes, the contents of a specific local file using read_file.',
+     model: createOllamaModel(qwenFast),
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
++    modelDecl: qwenFast,
+   };
+ }
+diff --git a/agents/super.ts b/agents/super.ts
+index 2b2945b..1210d94 100644
+--- a/agents/super.ts
++++ b/agents/super.ts
+@@ -1,25 +1,28 @@
+ import type { ToolSet } from 'ai';
+-import qwenFast from '../models/qwen-fast.ts';
++import qwenRouter from '../models/qwen-router.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
++import type { BeforeDelegate } from '../src/core/delegate.ts';
+ import { createOrchestrator } from '../src/core/orchestrator.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ import { createFileQaAgent } from './file-qa.ts';
+ import { createWebFetchAgent } from './web-fetch.ts';
+ 
+ const BASE_PROMPT =
+   'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
+ 
+ /** Build the super-agent (orchestrator) with file-Q&A and web-fetch registered. */
+ export function createSuperAgent(
+   fileQaTools: ToolSet,
+   fetchTools: ToolSet,
++  onBeforeDelegate?: BeforeDelegate,
+ ): Agent {
+   const fileQa = createFileQaAgent(fileQaTools);
+   const webFetch = createWebFetchAgent(fetchTools);
+   return createOrchestrator({
+     name: 'super',
+-    model: createOllamaModel(qwenFast),
++    model: createOllamaModel(qwenRouter),
+     systemPrompt: BASE_PROMPT,
+     agents: [fileQa, webFetch],
++    onBeforeDelegate,
+   });
+ }
+diff --git a/agents/web-fetch.ts b/agents/web-fetch.ts
+index b473068..3cc7c3b 100644
+--- a/agents/web-fetch.ts
++++ b/agents/web-fetch.ts
+@@ -8,12 +8,13 @@ const SYSTEM_PROMPT =
+ 
+ /** Build the web-fetch agent with an injected tool set (the mounted `fetch` tool). */
+ export function createWebFetchAgent(tools: ToolSet): Agent {
+   return {
+     name: 'web_fetch',
+     description:
+       'Fetches a URL and answers questions about or summarizes the content of a web page.',
+     model: createOllamaModel(qwenFast),
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
++    modelDecl: qwenFast,
+   };
+ }
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+new file mode 100644
+index 0000000..3bdb7c1
+--- /dev/null
++++ b/docs/ROADMAP.md
+@@ -0,0 +1,89 @@
++# Roadmap
++
++The long-range plan for this local-first, self-owned multi-agent platform. Each
++item below becomes its own **brainstorm → spec → plan → subagent-driven build**
++cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
++**dependencies + leverage**, not a contract — reprioritize freely.
++
++> **North stars:** local-first & self-owned (no API keys) · one orchestrator
++> routing to a growing fleet of specialists · capabilities are pluggable (mount
++> an MCP server) · self-extending (build new agents on demand) · autonomous &
++> **hardware/context-aware** on Apple Silicon.
++
++## Shipped
++
++| Slice | Capability | Status |
++|---|---|---|
++| **1** | Local file-Q&A agent · model warm-up/unload · MCP `read_file` · run store | ✅ shipped + live-verified |
++| **2** | Orchestrator (agents-as-tools) — route to a specialist or report a capability gap | ✅ shipped + live-verified |
++| **3** | `mountMcpServer` (mount any MCP server) · web-fetch agent (`uvx mcp-server-fetch`) | ✅ shipped + live-verified |
++
++## In progress
++
++| Slice | Capability | Status |
++|---|---|---|
++| **4** | **Model Manager** — multi-model, hardware-aware: load/evict/pin within the GPU budget; orchestrator on a small pinned `qwen3.5:4b`, specialists on `qwen3.5:9b` loaded on demand | 🔨 building |
++
++## Near-term — finish the resource-manager line
++
++| Slice | Capability | Depends on | Notes |
++|---|---|---|---|
++| **5** | **Dynamic model selection** — an agent declares a *role/requirements* (`requires:['tools'], prefer:'fits-budget'`); a model **registry** + selector picks the best model that fits; the manager loads it | Slice 4 | Turns model choice from hardcoded into capability-driven |
++| **6** | **Model discovery** — auto-fetch the latest models from Hugging Face, pull on demand, keep declarations current (no hardcoded list); feeds the Slice-5 registry | Slice 5 | "Always on the latest models" becomes runtime behavior |
++| **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
++
++## Headline next — self-extension
++
++| Slice | Capability | Depends on | Notes |
++|---|---|---|---|
++| **7** | **Agent-builder** ⭐ — on `report_capability_gap`, generate a new agent definition file (+ suggest an MCP server to mount) so the system *grows a capability* on demand. The `report_capability_gap` seam is already in place. | Slices 2, 3, (5/6 help) | **Highest-leverage future feature** — makes "describe a need → the system extends itself" real |
++
++## Orchestration & intelligence
++
++- **Deeper agent graphs** — a "researcher" agent that itself delegates to `web_fetch` + `file_qa` (composability already exists via agents-as-tools), with the **hardware/context-aware guardrails**: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns.
++- **Parallel fan-out** — when sub-tasks are independent, run specialists **concurrently** within the memory budget the Model Manager enforces.
++- **Response-format tooling** — shape answers into JSON / markdown / tables on request (user-confirmed needed).
++- **Memory / RAG** — a local vector store + local embeddings model so agents recall past runs and indexed docs.
++- **Image/vision agent** — a local multimodal model (e.g. Gemma 4) describing screenshots/images.
++
++## UX & interface
++
++- **Run-viewer (`/runs`)** ⭐ — replay the JSONL journals already written: timeline of delegations, gaps, artifacts. Makes everything built so far **visible & demoable** (user-noted high value).
++- **Streaming CLI** — token-by-token output instead of waiting (already deferred).
++- **TUI / local web UI** — chat window + live "which agent is running / which model is loaded" panel + run-history browser.
++- **Voice in/out** — local Whisper (STT) + a local TTS model → generalizes the book→audiobook idea into a voice agent.
++
++## Reliability & ops (the hardware-aware north star)
++
++- **Graceful degradation** — if `uvx`/an MCP server/a model is down, **drop that agent and tell the user**, rather than failing the whole CLI.
++- **Telemetry / eval** — log per-agent latency, tokens, tool-call success rate; a small **eval harness** scoring routing accuracy (did the orchestrator pick the right specialist?).
++- **Resumable long jobs** — the run store + journal already support replay; wire `--resume <run-id>` for multi-hour multimodal jobs.
++
++## Runtimes & scale (alternate model backends)
++
++- **LM Studio / dedicated MLX-server adapters** (deferred since Slice 1) — behind the same AI SDK `LanguageModel` interface: a dedicated MLX server with **persistent KV-cache (omlx)** or **high concurrency (vMLX / LM Studio)** for heavy agent loops, when Ollama's sequential serving + idle-unload isn't enough.
++- **Raw `llama.cpp`-server adapter** — for low-level control (custom sampling/flags) if ever needed; Ollama remains the default.
++
++## Bigger leaps — the Mac Mini era
++
++- **MLX backend + bigger models** — the Mac Mini (>32 GB unified memory) engages Ollama's MLX backend (Ollama 0.19+) and can host larger specialists (e.g. `qwen3.5:14b`+, `llama4:scout` long-context) that don't fit the 24 GB laptop budget — the Model Manager already budgets to the host, so this is mostly a declaration change.
++- **Always-on daemon** — the orchestrator as a background service with a task **queue**: fire tasks, collect results later.
++- **Scheduled / triggered agents** — cron- or event-driven (file added → process it) — the n8n "trigger" concept.
++- **Multi-machine** — laptop delegates heavy work to the Mac Mini over the network.
++- **A2A interop** — expose this orchestrator as an agent other tools can call, and consume external agents (Agent2Agent protocol).
++
++## Recommended priority after Slice 4
++
++1. **Agent-builder (Slice 7)** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
++2. **Model discovery (Slice 6)** — keeps the system on the latest models automatically.
++3. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
++
++(Slices 5 → 6 are the natural continuation of the resource line currently being built; the agent-builder can also be pulled forward if it's the exciting one.)
++
++## Deferred technical items (cross-cutting, fold in opportunistically)
++
++- Declarative **`mcp.json` mount registry** (list servers + which agents get them, loaded at startup) — generalizes Slice 3's in-code mounts.
++- **Codex** heavy-lifting backup (`@openai/codex-sdk`, personal plan) as an opt-in delegate agent.
++- Migrate `biome.json` off the deprecated `recommended` field.
++- **Per-slice Minor review findings** are recorded in `.superpowers/sdd/progress.md` (the SDD ledger) as each slice completes — e.g. run-journal O(n²) append, `runAgent.providerOptions` cross-package type, gap `message` hardcoded English, `ensureReady` post-pull comment, hardcoded `kvBytesPerToken`. Sweep them opportunistically; none are blocking.
++- **Hardware/context-aware guardrails for deeper composition** (recorded constraint): the agent-graph/parallel-fan-out slices MUST bound delegation depth, add cross-agent cycle detection, reuse warm models (shared-model agents = one resident copy), keep returned answers concise, and schedule concurrency within the Model Manager's budget. Cost compounds ~15× for naive orchestrator-workers, so depth/fan-out are bounded deliberately.
+diff --git a/docs/superpowers/plans/2026-06-29-slice-4-model-manager.md b/docs/superpowers/plans/2026-06-29-slice-4-model-manager.md
+new file mode 100644
+index 0000000..ddd085e
+--- /dev/null
++++ b/docs/superpowers/plans/2026-06-29-slice-4-model-manager.md
+@@ -0,0 +1,820 @@
++# Slice 4: Model Manager (multi-model, hardware-aware) — Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** A Model Manager that loads an agent's model when it runs, keeps the orchestrator's small model pinned-resident, and evicts non-pinned models to stay within the GPU budget — so agents can safely use different local models.
++
++**Architecture:** `ensureReady(decl,{pinned})` is the one entry point: install→estimate footprint→read `/api/ps` resident set→evict LRU non-pinned to fit→warm; throws `ResourceError` if a model can't fit alongside pinned. The orchestrator runs a small pinned model (`qwen3:4b`); specialists (`qwen3:8b`) load on demand via an injected `onBeforeDelegate` hook (so `core/` stays decoupled from `resource/`).
++
++**Tech Stack:** Bun + TypeScript + Vercel AI SDK 6 (`ai@^6`); Ollama HTTP (`/api/ps`, `/api/pull`, `/api/generate`). Tests: `bun test` with injected fakes + `MockLanguageModelV3`; opt-in live test auto-skips via `ollamaReady()`.
++
++## Global Constraints
++
++- Stack: Bun + TS, ESM. Pins unchanged: `ai@^6`, `@ai-sdk/mcp@^1`, `ollama-ai-provider-v2@^3`, `zod@^4`. No dependency bumps.
++- Code style: `type` over `interface`; string enums; early returns; small single-responsibility files; plain code; **no `!` non-null assertions** (the project's `noUncheckedIndexedAccess` makes array access `T | undefined` — guard with `if (x === undefined)`, never `!`); typed errors.
++- **Ollama HTTP:** base `http://localhost:11434`. `GET /api/ps` → `{ models: [{ name, size, ... }] }` (`size` is bytes resident). Write requests use `model`; `/api/tags` & `/api/ps` report `name`.
++- **Footprint formula (verified):** `estimateModelBytes({ paramsBillions, bytesPerWeight, contextTokens, kvBytesPerToken })` = `paramsBillions*1e9*bytesPerWeight*1.2 + contextTokens*kvBytesPerToken`. Use `bytesPerWeight: 0.56` (Q4_K_M), `kvBytesPerToken: 131072`, `contextTokens: decl.params.numCtx ?? 8192`.
++- **Models (current-gen, verified mid-2026):** orchestrator → `qwen3.5:4b` (small, pinned); specialists → `qwen3.5:9b`. Use **standard GGUF tags, NOT `-mlx`** — Ollama's MLX backend needs >32 GB unified memory; this 24 GB M4 Pro runs llama.cpp Metal, where the `-mlx` tags are bigger and don't engage the MLX engine. Budget ≈ `0.75 × totalmem` (~18 GB).
++- **Verify-and-fallback (do this once, live):** before relying on the new tags, confirm `ollama pull qwen3.5:4b` / `qwen3.5:9b` succeed AND `ollama show <tag>` lists `tools` under Capabilities. If a tag is missing or lacks `tools`, fall back to the proven `qwen3:4b` / `qwen3:8b` in the declaration (one-line change; the mock suite is unaffected either way). Note: `ornith:9b` (DeepReinforce, June 2026) is a strong *coding* model but its native Ollama tool-calling is unconfirmed — reserve it for a future coding sub-agent, not the router/general path.
++- **Nested-delegation rule:** the orchestrator's model is **pinned** and must never be evicted by `ensureReady`.
++- Tests: `bun run test:file -- ./path`; `bun run typecheck`; `bun run lint` (biome.json NOTICE acceptable). Mock-model shape mirrors `tests/core/agent.test.ts`.
++- git initialized; on branch `slice-4-model-manager`. Commit each task; no `git init`.
++
++---
++
++### Task 1: `listLoadedModels()` on the Ollama control client
++
++**Files:**
++- Modify: `src/resource/ollama-control.ts`
++- Test: `tests/resource/ollama-control.test.ts`
++
++**Interfaces:**
++- Produces: `type LoadedModel = { name: string; sizeBytes: number }`; `listLoadedModels(baseUrl?): Promise<LoadedModel[]>` — `GET /api/ps`, maps `models[].name` + `models[].size`.
++
++- [ ] **Step 1: Write the failing test** — append to `tests/resource/ollama-control.test.ts`:
++
++```ts
++import { listLoadedModels } from '../../src/resource/ollama-control.ts';
++
++test('listLoadedModels maps /api/ps name + size to LoadedModel[]', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(
++      JSON.stringify({ models: [{ name: 'qwen3:8b', size: 6_000_000_000 }, { name: 'qwen3:4b', size: 3_500_000_000 }] }),
++      { status: 200 },
++    ),
++  );
++  const loaded = await listLoadedModels();
++  expect(loaded).toEqual([
++    { name: 'qwen3:8b', sizeBytes: 6_000_000_000 },
++    { name: 'qwen3:4b', sizeBytes: 3_500_000_000 },
++  ]);
++  expect((fetchSpy.mock.calls[0] as [string])[0]).toBe('http://localhost:11434/api/ps');
++});
++
++test('listLoadedModels returns [] when nothing is loaded', async () => {
++  spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({ models: [] }), { status: 200 }),
++  );
++  expect(await listLoadedModels()).toEqual([]);
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun run test:file -- ./tests/resource/ollama-control.test.ts`
++Expected: FAIL — `listLoadedModels` not exported.
++
++- [ ] **Step 3: Add to `src/resource/ollama-control.ts`** (after the existing exports; reuse the module's `DEFAULT_BASE_URL` and `ProviderError`):
++
++```ts
++/** A model currently resident in Ollama, with its memory footprint. */
++export type LoadedModel = { name: string; sizeBytes: number };
++
++type PsResponse = { models?: Array<{ name: string; size: number }> };
++
++/** Models currently loaded in memory, from `GET /api/ps`. */
++export async function listLoadedModels(
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<LoadedModel[]> {
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/ps`);
++  } catch (cause) {
++    throw new ProviderError('Ollama /api/ps failed', { cause });
++  }
++  if (!res.ok) throw new ProviderError(`Ollama /api/ps returned ${res.status}`);
++  const data = (await res.json()) as PsResponse;
++  return (data.models ?? []).map((m) => ({ name: m.name, sizeBytes: m.size }));
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun run test:file -- ./tests/resource/ollama-control.test.ts` then `bun run typecheck`
++Expected: PASS (existing + 2 new); typecheck 0.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/resource/ollama-control.ts tests/resource/ollama-control.test.ts
++git commit -m "feat(resource): add listLoadedModels (GET /api/ps)"
++```
++
++---
++
++### Task 2: `ModelDeclaration` footprint hint + model declarations
++
++**Files:**
++- Modify: `src/core/types.ts`
++- Modify: `models/qwen-fast.ts`
++- Create: `models/qwen-router.ts`
++- Test: `tests/models/declarations.test.ts`
++
++**Interfaces:**
++- Produces: `ModelDeclaration` gains `footprint: { approxParamsBillions: number; bytesPerWeight: number }`. `models/qwen-router.ts` default-exports a `ModelDeclaration` for `qwen3:4b`. `qwen-fast.ts` gains its footprint.
++
++- [ ] **Step 1: Write the failing test** — `tests/models/declarations.test.ts`:
++
++```ts
++import { expect, test } from 'bun:test';
++import qwenFast from '../../models/qwen-fast.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++
++test('qwen-fast is qwen3.5:9b with a ~9B footprint', () => {
++  expect(qwenFast.model).toBe('qwen3.5:9b');
++  expect(qwenFast.footprint.approxParamsBillions).toBe(9);
++  expect(qwenFast.footprint.bytesPerWeight).toBeGreaterThan(0);
++});
++
++test('qwen-router is qwen3.5:4b with a ~4B footprint', () => {
++  expect(qwenRouter.model).toBe('qwen3.5:4b');
++  expect(qwenRouter.footprint.approxParamsBillions).toBe(4);
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun run test:file -- ./tests/models/declarations.test.ts`
++Expected: FAIL — cannot resolve `qwen-router.ts` / `footprint` missing.
++
++- [ ] **Step 3: Update `src/core/types.ts`** — add `footprint` to `ModelDeclaration`:
++
++```ts
++export type ModelDeclaration = {
++  provider: ProviderKind;
++  model: string;
++  params: ModelParams;
++  role: string;
++  /** Pre-load sizing hint for the model manager. */
++  footprint: { approxParamsBillions: number; bytesPerWeight: number };
++};
++```
++
++- [ ] **Step 4: Update `models/qwen-fast.ts`** — add the footprint:
++
++```ts
++import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
++
++/** Fast general-purpose local model with reliable tool-calling. */
++const qwenFast: ModelDeclaration = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3.5:9b',
++  params: { temperature: 0.2, numCtx: 8192 },
++  role: 'general reasoning + tool use',
++  footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
++};
++
++export default qwenFast;
++```
++
++Also update the Slice-1 provider test that hardcodes the old tag: in `tests/providers/ollama.test.ts`, change the assertion `expect(model.modelId).toBe('qwen3:8b')` (and any `'qwen3:8b'` literal there) to `'qwen3.5:9b'`, and the declaration-name assertion likewise. (Add `tests/providers/ollama.test.ts` to this task's Files.)
++
++- [ ] **Step 5: Create `models/qwen-router.ts`**:
++
++```ts
++import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
++
++/** Small, fast model for the orchestrator's routing decisions (stays pinned-resident). */
++const qwenRouter: ModelDeclaration = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3.5:4b',
++  params: { temperature: 0.1, numCtx: 8192 },
++  role: 'routing / orchestration',
++  footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
++};
++
++export default qwenRouter;
++```
++
++- [ ] **Step 6: Run tests + typecheck**
++
++Run: `bun run test:file -- ./tests/models/declarations.test.ts` then `bun run typecheck`
++Expected: PASS; typecheck 0 (confirms no other ModelDeclaration literal is missing `footprint`).
++
++- [ ] **Step 7: Commit**
++
++```bash
++git add src/core/types.ts models/qwen-fast.ts models/qwen-router.ts tests/models/declarations.test.ts tests/providers/ollama.test.ts
++git commit -m "feat(models): footprint hint + current-gen models (qwen3.5:4b router, qwen3.5:9b specialist)"
++```
++
++---
++
++### Task 3: Model Manager (`ensureReady` + `unloadAll`)
++
++**Files:**
++- Create: `src/resource/model-manager.ts`
++- Test: `tests/resource/model-manager.test.ts`
++
++**Interfaces:**
++- Consumes: `estimateModelBytes` (footprint.ts), `machineBudgetBytes` (hardware.ts), `isModelInstalled`/`listLoadedModels`/`pullModel`/`warmModel`/`unloadModel`/`LoadedModel` (ollama-control.ts), `ResourceError` (core/errors.ts), `ModelDeclaration` (core/types.ts).
++- Produces:
++  - `type ManagerDeps` (injectable) + `type EnsureOpts = { pinned?: string[] }`.
++  - `declBytes(decl): number`.
++  - `createModelManager(deps?: Partial<ManagerDeps>): { ensureReady(decl, opts?): Promise<void>; unloadAll(): Promise<void> }`.
++
++- [ ] **Step 1: Write the failing tests** — `tests/resource/model-manager.test.ts`:
++
++```ts
++import { expect, mock, test } from 'bun:test';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++import { ResourceError } from '../../src/core/errors.ts';
++import { ProviderKind, type ModelDeclaration } from '../../src/core/types.ts';
++
++function decl(model: string, b: number): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: { numCtx: 0 }, // numCtx 0 → KV term 0, so bytes == params*1e9*bpw*1.2
++    role: 'test',
++    footprint: { approxParamsBillions: b, bytesPerWeight: 1 }, // bytes = b*1e9*1.2
++  };
++}
++// declBytes(decl(_, b)) === b*1e9*1.2
++
++function fakes(overrides: Partial<Parameters<typeof createModelManager>[0]> = {}) {
++  return {
++    isInstalled: mock(async () => true),
++    listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
++    pull: mock(async () => {}),
++    warm: mock(async () => {}),
++    unload: mock(async () => {}),
++    ...overrides,
++  };
++}
++
++test('already-loaded model: no pull/warm/unload', async () => {
++  const f = fakes({ listLoaded: mock(async () => [{ name: 'm8', sizeBytes: 1 }]) });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('m8', 8));
++  expect(f.warm).not.toHaveBeenCalled();
++  expect(f.pull).not.toHaveBeenCalled();
++  expect(f.unload).not.toHaveBeenCalled();
++});
++
++test('not installed: pulls then warms', async () => {
++  const f = fakes({ isInstalled: mock(async () => false) });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('m8', 8));
++  expect(f.pull).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8');
++});
++
++test('fits alongside pinned: warms, no eviction', async () => {
++  // pinned router (4*1.2=4.8e9) loaded; target 8*1.2=9.6e9; budget 20e9 → fits
++  const f = fakes({ listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]) });
++  const mgr = createModelManager({ budgetBytes: 20e9, ...f });
++  await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
++  expect(f.unload).not.toHaveBeenCalled();
++  expect(f.warm).toHaveBeenCalledWith('m8');
++});
++
++test('over budget: evicts non-pinned, keeps pinned, then warms', async () => {
++  // resident: r4 (pinned 4.8e9) + old8 (9.6e9) = 14.4e9; target new8 9.6e9; budget 16e9
++  // must evict old8 (non-pinned); after evict resident 4.8 + 9.6 = 14.4 <= 16 → warm
++  const f = fakes({
++    listLoaded: mock(async () => [
++      { name: 'r4', sizeBytes: 4.8e9 },
++      { name: 'old8', sizeBytes: 9.6e9 },
++    ]),
++  });
++  const mgr = createModelManager({ budgetBytes: 16e9, ...f });
++  await mgr.ensureReady(decl('new8', 8), { pinned: ['r4'] });
++  expect(f.unload).toHaveBeenCalledWith('old8');
++  expect(f.unload).not.toHaveBeenCalledWith('r4');
++  expect(f.warm).toHaveBeenCalledWith('new8');
++});
++
++test('cannot fit with pinned: throws ResourceError, warms nothing', async () => {
++  // pinned r8 resident 9.6e9; target big 9.6e9; budget 12e9 → 9.6+9.6 > 12 and only pinned remains
++  const f = fakes({ listLoaded: mock(async () => [{ name: 'r8', sizeBytes: 9.6e9 }]) });
++  const mgr = createModelManager({ budgetBytes: 12e9, ...f });
++  await expect(mgr.ensureReady(decl('big', 8), { pinned: ['r8'] })).rejects.toBeInstanceOf(ResourceError);
++  expect(f.warm).not.toHaveBeenCalled();
++});
++
++test('unloadAll unloads every warmed model', async () => {
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('a', 1));
++  await mgr.ensureReady(decl('b', 1));
++  await mgr.unloadAll();
++  expect(f.unload).toHaveBeenCalledWith('a');
++  expect(f.unload).toHaveBeenCalledWith('b');
++});
++```
++
++- [ ] **Step 2: Run tests to verify they fail**
++
++Run: `bun run test:file -- ./tests/resource/model-manager.test.ts`
++Expected: FAIL — cannot resolve `model-manager.ts`.
++
++- [ ] **Step 3: Create `src/resource/model-manager.ts`**:
++
++```ts
++import { ResourceError } from '../core/errors.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { estimateModelBytes } from './footprint.ts';
++import { machineBudgetBytes } from './hardware.ts';
++import {
++  isModelInstalled,
++  listLoadedModels,
++  type LoadedModel,
++  pullModel,
++  unloadModel,
++  warmModel,
++} from './ollama-control.ts';
++
++export type EnsureOpts = { pinned?: string[] };
++
++/** Injectable dependencies (real Ollama by default; fakes in tests). */
++export type ManagerDeps = {
++  budgetBytes: number;
++  isInstalled: (model: string) => Promise<boolean>;
++  listLoaded: () => Promise<LoadedModel[]>;
++  pull: (model: string) => Promise<void>;
++  warm: (model: string) => Promise<void>;
++  unload: (model: string) => Promise<void>;
++};
++
++/** Estimated resident bytes of a model from its declaration. */
++export function declBytes(decl: ModelDeclaration): number {
++  return estimateModelBytes({
++    paramsBillions: decl.footprint.approxParamsBillions,
++    bytesPerWeight: decl.footprint.bytesPerWeight,
++    contextTokens: decl.params.numCtx ?? 8192,
++    kvBytesPerToken: 131072,
++  });
++}
++
++function defaultDeps(): ManagerDeps {
++  return {
++    budgetBytes: machineBudgetBytes(),
++    isInstalled: (m) => isModelInstalled(m),
++    listLoaded: () => listLoadedModels(),
++    pull: (m) => pullModel(m),
++    warm: (m) => warmModel(m),
++    unload: (m) => unloadModel(m),
++  };
++}
++
++/** Loads/unloads models to keep the active + pinned set within the GPU budget. */
++export function createModelManager(deps: Partial<ManagerDeps> = {}) {
++  const d: ManagerDeps = { ...defaultDeps(), ...deps };
++  const lastUsed = new Map<string, number>();
++  let tick = 0;
++
++  async function ensureReady(
++    decl: ModelDeclaration,
++    opts: EnsureOpts = {},
++  ): Promise<void> {
++    const pinned = new Set(opts.pinned ?? []);
++    const target = decl.model;
++
++    if (!(await d.isInstalled(target))) await d.pull(target);
++
++    let loaded = await d.listLoaded();
++    if (loaded.some((m) => m.name === target)) {
++      lastUsed.set(target, ++tick);
++      return;
++    }
++
++    const needed = declBytes(decl);
++    const resident = () => loaded.reduce((sum, m) => sum + m.sizeBytes, 0);
++
++    while (resident() + needed > d.budgetBytes) {
++      const candidates = loaded
++        .filter((m) => !pinned.has(m.name) && m.name !== target)
++        .sort((a, b) => (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1));
++      const evict = candidates[0];
++      if (evict === undefined) {
++        throw new ResourceError(
++          `Cannot load ${target} (~${Math.round(needed / 1e9)}GB): only pinned models remain and the budget (~${Math.round(d.budgetBytes / 1e9)}GB) is exceeded.`,
++        );
++      }
++      await d.unload(evict.name);
++      lastUsed.delete(evict.name);
++      loaded = loaded.filter((m) => m.name !== evict.name);
++    }
++
++    await d.warm(target);
++    lastUsed.set(target, ++tick);
++  }
++
++  async function unloadAll(): Promise<void> {
++    for (const model of [...lastUsed.keys()]) {
++      await d.unload(model);
++    }
++    lastUsed.clear();
++  }
++
++  return { ensureReady, unloadAll };
++}
++```
++
++- [ ] **Step 4: Run tests + typecheck + lint**
++
++Run: `bun run test:file -- ./tests/resource/model-manager.test.ts` then `bun run typecheck && bun run lint`
++Expected: PASS (6 tests); typecheck 0; lint 0.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/resource/model-manager.ts tests/resource/model-manager.test.ts
++git commit -m "feat(resource): add model manager (ensureReady with pin + LRU eviction)"
++```
++
++---
++
++### Task 4: `onBeforeDelegate` hook plumbing (core)
++
++**Files:**
++- Modify: `src/core/agent-def.ts` (Agent gains `modelDecl?`)
++- Modify: `src/core/delegate.ts` (asDelegateTool accepts hook)
++- Modify: `src/core/orchestrator.ts` (createOrchestrator threads hook)
++- Test: `tests/core/delegate.test.ts`
++
++**Interfaces:**
++- Consumes: `ModelDeclaration` (core/types.ts).
++- Produces:
++  - `Agent` gains `modelDecl?: ModelDeclaration`.
++  - `type BeforeDelegate = (agent: Agent) => Promise<void>` (exported from delegate.ts).
++  - `asDelegateTool(agent: Agent, onBeforeDelegate?: BeforeDelegate)`.
++  - `createOrchestrator({ ..., onBeforeDelegate?: BeforeDelegate })` passes the hook into every delegate tool.
++
++- [ ] **Step 1: Write the failing test** — append to `tests/core/delegate.test.ts`:
++
++```ts
++import { mock } from 'bun:test';
++
++test('asDelegateTool runs onBeforeDelegate before the agent runs', async () => {
++  const order: string[] = [];
++  const agent = cannedAgent('file_qa', 'answer'); // existing helper in this file
++  const hook = mock(async (a: typeof agent) => { order.push(`hook:${a.name}`); });
++  const t = asDelegateTool(agent, hook);
++  await t.execute?.({ task: 'go' }, {} as never);
++  expect(hook).toHaveBeenCalledTimes(1);
++  expect(order).toEqual(['hook:file_qa']); // hook ran (before the agent's own run)
++});
++```
++
++(`cannedAgent` and `asDelegateTool` are already imported/defined in this test file from Slice 2.)
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun run test:file -- ./tests/core/delegate.test.ts`
++Expected: FAIL — `asDelegateTool` takes only one arg / hook not invoked.
++
++- [ ] **Step 3: Update `src/core/agent-def.ts`** — add `modelDecl` to the `Agent` type (keep everything else):
++
++```ts
++import type { LanguageModel, ToolSet } from 'ai';
++import type { ModelDeclaration } from './types.ts';
++import { runAgent } from './agent.ts';
++
++export type Agent = {
++  name: string;
++  description: string;
++  model: LanguageModel;
++  systemPrompt: string;
++  tools: ToolSet;
++  /** Declaration of the agent's model, for the resource manager (optional; mock agents omit it). */
++  modelDecl?: ModelDeclaration;
++};
++
++export function runDefinedAgent(agent: Agent, task: string): ReturnType<typeof runAgent> {
++  return runAgent({
++    model: agent.model,
++    systemPrompt: agent.systemPrompt,
++    prompt: task,
++    tools: agent.tools,
++  });
++}
++```
++
++- [ ] **Step 4: Update `src/core/delegate.ts`** — accept the optional hook:
++
++```ts
++import { tool } from 'ai';
++import { z } from 'zod';
++import { type Agent, runDefinedAgent } from './agent-def.ts';
++
++export function delegateToolName(agent: Agent): string {
++  return `delegate_to_${agent.name}`;
++}
++
++/** A hook run just before a delegated agent executes (e.g. ensure its model is loaded). */
++export type BeforeDelegate = (agent: Agent) => Promise<void>;
++
++export function asDelegateTool(agent: Agent, onBeforeDelegate?: BeforeDelegate) {
++  return tool({
++    description: agent.description,
++    inputSchema: z.object({ task: z.string().describe('The task for this agent') }),
++    execute: async ({ task }) => {
++      try {
++        if (onBeforeDelegate) await onBeforeDelegate(agent);
++        const { text } = await runDefinedAgent(agent, task);
++        return { text };
++      } catch (cause) {
++        return { error: `Agent ${agent.name} failed: ${(cause as Error).message}` };
++      }
++    },
++  });
++}
++```
++
++- [ ] **Step 5: Update `src/core/orchestrator.ts`** — thread the hook through `createOrchestrator`. Change the options type and the tool-wiring loop:
++
++```ts
++import { asDelegateTool, type BeforeDelegate, delegateToolName } from './delegate.ts';
++// ... existing imports ...
++
++export function createOrchestrator(opts: {
++  name?: string;
++  model: LanguageModel;
++  systemPrompt: string;
++  agents: Agent[];
++  onBeforeDelegate?: BeforeDelegate;
++}): Agent {
++  const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
++  for (const agent of opts.agents) {
++    tools[delegateToolName(agent)] = asDelegateTool(agent, opts.onBeforeDelegate);
++  }
++  return {
++    name: opts.name ?? 'orchestrator',
++    description: 'Routes tasks to specialized agents or reports a capability gap.',
++    model: opts.model,
++    systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
++    tools,
++  };
++}
++```
++
++(Leave `buildRoutingPrompt`, `runOrchestrator`, and `OrchestratorResult` unchanged.)
++
++- [ ] **Step 6: Run tests + typecheck + lint**
++
++Run: `bun run test:file -- ./tests/core/delegate.test.ts` then `bun run test:file -- ./tests/core/orchestrator.test.ts` then `bun run typecheck && bun run lint`
++Expected: PASS (delegate incl. new test; orchestrator unchanged tests still pass — hook is optional); typecheck 0; lint 0.
++
++- [ ] **Step 7: Commit**
++
++```bash
++git add src/core/agent-def.ts src/core/delegate.ts src/core/orchestrator.ts tests/core/delegate.test.ts
++git commit -m "feat(core): optional onBeforeDelegate hook + Agent.modelDecl"
++```
++
++---
++
++### Task 5: Wire production agents (router orchestrator + specialist modelDecls)
++
++**Files:**
++- Modify: `agents/file-qa.ts` (set `modelDecl: qwenFast`)
++- Modify: `agents/web-fetch.ts` (set `modelDecl: qwenFast`)
++- Modify: `agents/super.ts` (orchestrator on `qwenRouter`; accept + forward `onBeforeDelegate`)
++- Test: `tests/agents/file-qa.test.ts`, `tests/agents/super.test.ts`
++
++**Interfaces:**
++- Consumes: `qwenRouter` (models/qwen-router.ts), `qwenFast`, `BeforeDelegate` (core/delegate.ts).
++- Produces: `createFileQaAgent`/`createWebFetchAgent` now set `modelDecl`. `createSuperAgent(fileQaTools, fetchTools, onBeforeDelegate?)` — orchestrator model is `createOllamaModel(qwenRouter)`, forwards the hook.
++
++- [ ] **Step 1: Write the failing tests** — extend `tests/agents/file-qa.test.ts`:
++
++```ts
++import qwenFast from '../../models/qwen-fast.ts';
++test('file-qa agent carries its model declaration', () => {
++  const agent = createFileQaAgent({ read_file: { description: 'x' } } as never);
++  expect(agent.modelDecl).toBe(qwenFast);
++});
++```
++
++And extend `tests/agents/super.test.ts`:
++
++```ts
++import qwenRouter from '../../models/qwen-router.ts';
++test('super agent uses the small router model', () => {
++  const sup = createSuperAgent({ read_file: {} } as never, { fetch: {} } as never);
++  // model is a resolved LanguageModel for qwen3:4b
++  expect((sup.model as { modelId?: string }).modelId).toBe(qwenRouter.model);
++});
++```
++
++- [ ] **Step 2: Run tests to verify they fail**
++
++Run: `bun run test:file -- ./tests/agents/file-qa.test.ts` then `bun run test:file -- ./tests/agents/super.test.ts`
++Expected: FAIL — `modelDecl` undefined / orchestrator still on qwen3:8b.
++
++- [ ] **Step 3: Update `agents/file-qa.ts`** — add `modelDecl: qwenFast` to the returned object:
++
++```ts
++  return {
++    name: 'file_qa',
++    description:
++      'Answers questions about, and summarizes, the contents of a specific local file using read_file.',
++    model: createOllamaModel(qwenFast),
++    systemPrompt: SYSTEM_PROMPT,
++    tools,
++    modelDecl: qwenFast,
++  };
++```
++
++- [ ] **Step 4: Update `agents/web-fetch.ts`** — likewise add `modelDecl: qwenFast` to the returned object (keep name `web_fetch`, description, model `createOllamaModel(qwenFast)`, prompt, tools).
++
++- [ ] **Step 5: Update `agents/super.ts`**:
++
++```ts
++import type { ToolSet } from 'ai';
++import qwenRouter from '../models/qwen-router.ts';
++import type { Agent } from '../src/core/agent-def.ts';
++import type { BeforeDelegate } from '../src/core/delegate.ts';
++import { createOrchestrator } from '../src/core/orchestrator.ts';
++import { createOllamaModel } from '../src/providers/ollama.ts';
++import { createFileQaAgent } from './file-qa.ts';
++import { createWebFetchAgent } from './web-fetch.ts';
++
++const BASE_PROMPT =
++  'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
++
++export function createSuperAgent(
++  fileQaTools: ToolSet,
++  fetchTools: ToolSet,
++  onBeforeDelegate?: BeforeDelegate,
++): Agent {
++  const fileQa = createFileQaAgent(fileQaTools);
++  const webFetch = createWebFetchAgent(fetchTools);
++  return createOrchestrator({
++    name: 'super',
++    model: createOllamaModel(qwenRouter),
++    systemPrompt: BASE_PROMPT,
++    agents: [fileQa, webFetch],
++    onBeforeDelegate,
++  });
++}
++```
++
++- [ ] **Step 6: Run tests + full suite + typecheck + lint**
++
++Run: `bun run test:file -- ./tests/agents/file-qa.test.ts` then `bun run test:file -- ./tests/agents/super.test.ts` then `bun test` then `bun run typecheck && bun run lint`
++Expected: all PASS (the 3rd `createSuperAgent` arg is optional, so `chat.ts` and the live tests still compile); typecheck 0; lint 0. If `sup.model.modelId` is undefined on this provider version, assert via `expect((sup.model as {modelId?:string}).modelId ?? 'qwen3:4b').toBe('qwen3:4b')` is wrong — instead, if undefined, the model was still built from qwenRouter; change the assertion to compare against the provider's actual id field as in Slice 1's ollama provider test (it used `model.modelId === 'qwen3:8b'`), so `modelId` is expected to be `'qwen3:4b'`.
++
++- [ ] **Step 7: Commit**
++
++```bash
++git add agents/file-qa.ts agents/web-fetch.ts agents/super.ts tests/agents/file-qa.test.ts tests/agents/super.test.ts
++git commit -m "feat(agents): orchestrator on qwen3:4b; specialists carry modelDecl"
++```
++
++---
++
++### Task 6: CLI wiring + opt-in live test
++
++**Files:**
++- Modify: `src/cli/chat.ts`
++- Create: `tests/integration/model-manager.live.test.ts`
++
++**Interfaces:**
++- Consumes: `createModelManager` (resource/model-manager.ts), `qwenRouter` (models), `createSuperAgent` (agents/super.ts), existing MCP/run wiring, `ollamaReady`/`isModelInstalled`/`listLoadedModels`.
++- Produces: a CLI that warms+pins the router model, loads specialist models on demand via the manager hook, and unloads all on exit.
++
++- [ ] **Step 1: Replace `src/cli/chat.ts`** with (full file):
++
++```ts
++import { createSuperAgent } from '../../agents/super.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++import { createFetchTools, createFileTools } from '../mcp/client.ts';
++import { isProjectStoreActive } from '../resource/model-store.ts';
++import { createModelManager } from '../resource/model-manager.ts';
++import { runChat } from './run-chat.ts';
++
++async function main(): Promise<void> {
++  const task = process.argv.slice(2).join(' ').trim();
++  if (task.length === 0) {
++    console.error('Usage: bun run src/cli/chat.ts "<your request>"');
++    process.exit(1);
++  }
++
++  const manager = createModelManager();
++  // Warm + pin the small router model the orchestrator runs on.
++  console.error(`Preparing router model ${qwenRouter.model}...`);
++  await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
++  console.error(
++    isProjectStoreActive()
++      ? 'Using project-local models from ./model-images'
++      : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
++  );
++
++  // Specialists' models are loaded on demand, keeping the router pinned-resident.
++  const onBeforeDelegate = (agent: { modelDecl?: import('../core/types.ts').ModelDeclaration }) =>
++    agent.modelDecl
++      ? manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] })
++      : Promise.resolve();
++
++  const fileServer = await createFileTools();
++  try {
++    const fetchServer = await createFetchTools();
++    try {
++      const orchestrator = createSuperAgent(
++        fileServer.tools,
++        fetchServer.tools,
++        onBeforeDelegate,
++      );
++      const result = await runChat({
++        orchestrator,
++        task,
++        runsRoot: 'runs',
++        runId: `run-${process.pid}`,
++      });
++      console.log(result.kind === 'answer' ? result.text : result.message);
++    } finally {
++      await fetchServer.close();
++    }
++  } finally {
++    await fileServer.close();
++    await manager.unloadAll();
++  }
++}
++
++main().catch((err) => {
++  console.error(err);
++  process.exit(1);
++});
++```
++
++(Note: the `onBeforeDelegate` parameter type is structural — it only needs `modelDecl`. If biome/TS prefers, import `Agent` from `../core/agent-def.ts` and type the param as `Agent`; both compile.)
++
++- [ ] **Step 2: Create `tests/integration/model-manager.live.test.ts`**:
++
++```ts
++import { afterAll, describe, expect, test } from 'bun:test';
++import qwenFast from '../../models/qwen-fast.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++import { listLoadedModels } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = (await ollamaReady(qwenRouter.model)) && (await ollamaReady(qwenFast.model));
++
++describe.skipIf(!ready)('live model manager: co-residency + pinning', () => {
++  const manager = createModelManager();
++  afterAll(async () => {
++    await manager.unloadAll();
++  });
++
++  test('router stays pinned-resident while a specialist loads', async () => {
++    await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
++    await manager.ensureReady(qwenFast, { pinned: [qwenRouter.model] });
++    const loaded = (await listLoadedModels()).map((m) => m.name);
++    expect(loaded).toContain(qwenRouter.model); // pinned survived
++    expect(loaded).toContain(qwenFast.model); // specialist co-resident
++  }, 180_000);
++});
++```
++
++- [ ] **Step 2b: Point the pre-existing live tests at the current models**
++
++The Slice-2/3 live tests hardcode the old tag and now gate on a model nothing uses. In BOTH `tests/integration/orchestrator.live.test.ts` and `tests/integration/orchestrator-web.live.test.ts`, replace the `const MODEL = 'qwen3:8b'` usage so the gate/warm/unload reference the current specialist model — import `qwenFast` and use `qwenFast.model` (i.e. `qwen3.5:9b`). Keep the rest of each test unchanged. (These remain opt-in/auto-skip; this just stops them from gating on an unused tag.)
++
++- [ ] **Step 3: Run full suite + typecheck + lint**
++
++Run: `bun test` then `bun run typecheck && bun run lint`
++Expected: all pass; the new live block auto-skips unless both `qwen3.5:4b` and `qwen3.5:9b` are installed + Ollama up. typecheck 0; lint 0.
++
++- [ ] **Step 4: (Optional) manual live confirmation**
++
++```bash
++# Terminal 1 (quit menu-bar Ollama first):
++bun run serve
++# Terminal 2 — first run pulls qwen3.5:4b + qwen3.5:9b:
++bun test ./tests/integration/model-manager.live.test.ts
++# and the real CLI now routes on qwen3:4b, loads qwen3:8b for specialists:
++bun run src/cli/chat.ts "What animals are in /tmp/sample.txt?"
++```
++Expected: live test shows both models resident; CLI answers (router routes, specialist runs).
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add src/cli/chat.ts tests/integration/model-manager.live.test.ts tests/integration/orchestrator.live.test.ts tests/integration/orchestrator-web.live.test.ts
++git commit -m "feat(cli): warm+pin router model, load specialists on demand via the manager"
++```
++
++---
++
++## Self-Review
++
++**1. Spec coverage:**
++- `listLoadedModels` (/api/ps) → Task 1. ✓
++- `ModelDeclaration` footprint hint + qwen-router → Task 2. ✓
++- `model-manager.ts` `ensureReady` (install/estimate/budget/evict-LRU-non-pinned/warm) + `ResourceError` + `unloadAll` → Task 3. ✓
++- `Agent.modelDecl` + `onBeforeDelegate` hook (delegate + orchestrator) → Task 4. ✓
++- Orchestrator on `qwen3:4b`; specialists carry `modelDecl` → Task 5. ✓
++- CLI warms+pins router, loads specialists on demand, unloads all on exit → Task 6. ✓
++- Tests: unit eviction/pin/budget (Task 3), hook fires (Task 4), live co-residency (Task 6). ✓
++- Pinned never evicted; `ResourceError` when impossible → Task 3 tests. ✓
++- Deferred (selection/discovery/reclaim) → correctly absent. ✓
++
++**2. Placeholder scan:** No TBD/TODO; every code step has complete code; every run step has the command + expected result.
++
++**3. Type consistency:** `LoadedModel` (Task 1) consumed by `ManagerDeps.listLoaded` (Task 3). `ModelDeclaration.footprint` (Task 2) read by `declBytes` (Task 3). `BeforeDelegate` (Task 4, delegate.ts) consumed by `createOrchestrator` (Task 4) and `createSuperAgent` (Task 5) and the CLI hook (Task 6). `Agent.modelDecl` (Task 4) set in Task 5, read by the CLI hook (Task 6). `createSuperAgent` 3rd optional arg (Task 5) matches the CLI call (Task 6) and leaves Slice-2/3 callers (live tests) compiling. `createModelManager(deps?)` injectable shape (Task 3) used by the live test + CLI with no deps (real Ollama).
++
++**One carried note:** Task 5's `sup.model.modelId` assertion depends on the Ollama provider exposing `modelId` (it did in Slice 1's provider test for qwen3:8b); if a provider version doesn't, assert the model is truthy instead. Flagged in Task 5 Step 6.
+diff --git a/docs/superpowers/specs/2026-06-29-slice-4-model-manager-design.md b/docs/superpowers/specs/2026-06-29-slice-4-model-manager-design.md
+new file mode 100644
+index 0000000..db4b3e2
+--- /dev/null
++++ b/docs/superpowers/specs/2026-06-29-slice-4-model-manager-design.md
+@@ -0,0 +1,151 @@
++# Slice 4: Model Manager (multi-model, hardware-aware) — Design
++
++**Date:** 2026-06-29
++**Status:** Approved (design) — pending implementation plan
++**Builds on:** Slice 3 (mountMcpServer + web_fetch). Repo: `inderjotpujara/ai`, branch `slice-4-model-manager`.
++
++## 1. Vision
++
++Make multi-model agents safe on local hardware. Today every agent uses one model
++(`qwen3:8b`), so nothing is ever scheduled. This slice introduces a **Model
++Manager** that loads the model an agent needs *when it runs*, evicts others to
++stay within the GPU budget (~18 GB on the M4 Pro), and **never evicts the model
++of an agent that is mid-delegation**. It is the foundation that dynamic
++selection (Slice 5) and discovery (Slice 6) build on.
++
++### The driving constraint
++Nested delegation keeps **two models resident at once**: the orchestrator's
++model stays loaded (paused, awaiting the sub-agent's result) *while* the
++sub-agent's model runs. The manager must fit **pinned (orchestrator) + active
++specialist** together, and must not unload the orchestrator mid-delegation.
++Design response: the orchestrator runs a **small** model (`qwen3:4b`), pinned
++resident; specialists use their own (possibly larger) models, loaded on demand.
++
++## 2. Scope
++
++### In scope (Slice 4)
++- `listLoadedModels()` on the Ollama control client (`GET /api/ps`) — what is resident + its size.
++- A footprint hint on `ModelDeclaration` so the manager can size a model before loading.
++- `model-manager.ts`: `ensureReady(decl, { pinned })` — install→estimate→check budget vs resident→evict non-pinned LRU to fit→warm. `ResourceError` if impossible.
++- `Agent` gains optional `modelDecl?: ModelDeclaration` (production agents set it; mock agents omit it → manager no-op).
++- An `onBeforeDelegate(agent)` hook on the orchestrator, wired by the CLI to the manager (keeps `core/` decoupled from `resource/`).
++- New `models/qwen-router.ts` (`qwen3:4b`) for the orchestrator; file_qa/web_fetch keep `qwen3:8b`.
++- CLI warms the pinned router model at startup; specialists load on demand.
++- Tests: deterministic unit tests of the eviction/pin/budget logic (mocked Ollama); opt-in live test with router+specialist co-resident.
++
++### Out of scope — deferred (their own slices, see roadmap)
++- **Slice 5 — dynamic selection** (role/requirements → registry → pick best model that fits).
++- **Slice 6 — model discovery** (HF fetch latest, pull on demand, no hardcoded list).
++- **Reclaim** (degrade → ask → kill apps) — a later escalation once memory pressure is real.
++- Concurrent execution of multiple specialists (delegation stays sequential — one specialist active at a time).
++
++## 3. Architecture
++
++```
++src/resource/
++  ollama-control.ts  # MODIFY: add listLoadedModels() -> [{ name, sizeBytes }] (GET /api/ps)
++  model-manager.ts   # NEW: createModelManager() -> { ensureReady }
++  hardware.ts        # unchanged (machineBudgetBytes / fitsBudget)
++  footprint.ts       # unchanged (estimateModelBytes)
++src/core/
++  types.ts           # MODIFY: ModelDeclaration gains footprint hint
++  agent-def.ts       # MODIFY: Agent gains optional modelDecl
++  orchestrator.ts    # MODIFY: createOrchestrator accepts optional onBeforeDelegate; runs it before each delegate
++  delegate.ts        # MODIFY: asDelegateTool runs the before-delegate hook before runDefinedAgent
++models/
++  qwen-router.ts     # NEW: qwen3:4b declaration for the orchestrator (with footprint hint)
++  qwen-fast.ts       # MODIFY: add the required `footprint` hint (≈8B, 0.56 B/weight)
++agents/
++  super.ts           # MODIFY: orchestrator uses qwen-router; pass modelDecl on each sub-agent
++  file-qa.ts         # MODIFY: set modelDecl: qwenFast on the agent
++  web-fetch.ts       # MODIFY: set modelDecl: qwenFast on the agent
++src/cli/
++  chat.ts            # MODIFY: build manager, warm+pin router, wire onBeforeDelegate
++tests/
++  resource/model-manager.test.ts          # NEW (mock)
++  resource/ollama-control.test.ts          # MODIFY: add listLoadedModels test
++  integration/model-manager.live.test.ts   # NEW (opt-in, auto-skip)
++```
++
++### 3.1 ModelDeclaration footprint hint — `src/core/types.ts`
++```
++type ModelDeclaration = {
++  provider: ProviderKind;
++  model: string;
++  params: ModelParams;
++  role: string;
++  footprint: { approxParamsBillions: number; bytesPerWeight: number }; // NEW — for pre-load sizing
++};
++```
++The manager computes bytes via `estimateModelBytes({ paramsBillions: footprint.approxParamsBillions, bytesPerWeight: footprint.bytesPerWeight, contextTokens: params.numCtx ?? 8192, kvBytesPerToken: 131072 })`.
++
++### 3.2 `listLoadedModels` — `src/resource/ollama-control.ts`
++```
++type LoadedModel = { name: string; sizeBytes: number };
++listLoadedModels(baseUrl?): Promise<LoadedModel[]>
++// GET /api/ps -> { models: [{ name, size, ... }] } ; map name + size (bytes).
++```
++
++### 3.3 Model Manager — `src/resource/model-manager.ts`
++```
++type EnsureOpts = { pinned?: string[] };  // model names that must NOT be evicted
++createModelManager(opts?: { baseUrl?: string; budgetBytes?: number }) -> {
++  ensureReady(decl: ModelDeclaration, opts?: EnsureOpts): Promise<void>
++}
++```
++`ensureReady` algorithm:
++1. If `decl.model` not installed → `pullModel`.
++2. `loaded = listLoadedModels()`. If `decl.model` already loaded → mark used, return (it's resident).
++3. `needed = estimateModelBytes(decl)`; `budget = budgetBytes ?? machineBudgetBytes()`.
++4. Compute resident bytes of models we'd keep: pinned models + `decl.model`. If `keptBytes + needed` (excluding any already counted) ≤ budget after keeping pinned, we can load without eviction.
++5. While `pinnedResident + needed + otherResident > budget`: unload the **least-recently-used non-pinned** loaded model (never a pinned one; never `decl.model`). Track last-used timestamps in the manager.
++6. If, with all non-pinned evicted, `pinnedResident + needed > budget` → throw `ResourceError` (the model cannot fit alongside pinned).
++7. `warmModel(decl.model)`; stamp last-used.
++
++The manager keeps an in-memory `Map<modelName, lastUsedTick>` for LRU. (A monotonic counter, not wall-clock, to stay deterministic/testable.)
++
++### 3.4 Agent + hook wiring
++- `Agent` gains `modelDecl?: ModelDeclaration`.
++- `asDelegateTool(agent, onBeforeDelegate?)`: if `onBeforeDelegate` is provided, `await onBeforeDelegate(agent)` before `runDefinedAgent`. (Hook is optional → existing tests unaffected.)
++- `createOrchestrator({ ..., onBeforeDelegate? })` threads the hook into each `asDelegateTool`.
++- **CLI** builds the manager and passes `onBeforeDelegate: (agent) => agent.modelDecl ? manager.ensureReady(agent.modelDecl, { pinned: [routerDecl.model] }) : Promise.resolve()`.
++
++## 4. Data flow
++```
++CLI startup: manager.ensureReady(router=qwen3:4b, {pinned:[qwen3:4b]}) -> warm (resident, pinned)
++user task -> orchestrator(qwen3:4b) decides delegate_to_<X>
++  -> onBeforeDelegate(X): manager.ensureReady(X.modelDecl, {pinned:[qwen3:4b]})
++        - X.model resident? return
++        - else fits with pinned? warm
++        - else evict LRU non-pinned (never qwen3:4b) until fits -> warm  (ResourceError if impossible)
++  -> sub-agent runs on X.model (qwen3:8b) ; qwen3:4b stays pinned
++  -> answer bubbles up
++```
++
++## 5. Error handling
++- `ResourceError` only when a model cannot fit even after evicting all non-pinned models (clear message: model + needed vs budget + pinned).
++- The orchestrator's pinned model is never unloaded by `ensureReady`.
++- Pull/warm/unload failures surface as `ProviderError` (existing).
++- Manager is injected via the hook; `core/` does not import `resource/` (no layering violation).
++
++## 6. Testing strategy
++- **Unit/mock (always, no Ollama):** inject fakes for `listLoadedModels`/`pullModel`/`warmModel`/`unloadModel` (the manager takes these as deps, or `mock.module`). Cover:
++  - already-loaded → no pull/warm/unload beyond a no-op.
++  - not installed → pulls, then warms.
++  - fits alongside pinned → warms, no eviction.
++  - over budget → evicts the LRU **non-pinned** model(s), keeps pinned, then warms.
++  - pinned never evicted (even if it's the LRU).
++  - cannot fit with pinned → throws `ResourceError`, warms nothing.
++- **ollama-control:** `listLoadedModels` parses `/api/ps` (mock fetch).
++- **Opt-in live (`model-manager.live.test.ts`, auto-skip via `ollamaReady`):** ensure router (qwen3:4b) + a specialist (qwen3:8b); assert `/api/ps` shows BOTH resident and pinned router survived. (Needs qwen3:4b pulled.)
++- `bun test` green without Ollama; `bun run typecheck` + `bun run lint` clean.
++
++## 7. Definition of done
++Agents can declare different models; the manager loads an agent's model when it runs, keeps the orchestrator's small model pinned-resident, evicts non-pinned models to stay within budget, and raises `ResourceError` when something cannot fit. The orchestrator runs on `qwen3:4b`; file_qa/web_fetch on `qwen3:8b`; co-residency verified by the live test. Unit suite green with no external deps; typecheck + lint clean.
++
++## 8. Notes / future seams
++- LRU uses a monotonic counter (testable); good enough for sequential delegation.
++- `ensureReady`'s signature (decl + pinned) is exactly what Slice 5's selector will call after it picks a model, and what Slice 6's discovery will call after a pull — the manager is the shared sink.
++- Reclaim (ask→kill) will extend step 6: instead of immediately throwing `ResourceError`, offer to free OS memory first.
++
++**Model choice update (mid-2026 research, 2026-06-29):** the concrete model tags are **current-gen Qwen3.5** — orchestrator `qwen3.5:4b`, specialists `qwen3.5:9b` (this doc's earlier `qwen3:4b`/`qwen3:8b` mentions were the pre-research placeholders; "today every agent uses `qwen3:8b`" remains accurate for the pre-Slice-4 state). Use **standard GGUF tags, not `-mlx`** (Ollama's MLX backend needs >32 GB; this 24 GB box runs llama.cpp Metal). Build-time verify-and-fallback: if `qwen3.5:*` tags are missing or lack the `tools` capability (`ollama show`), fall back to `qwen3:4b`/`qwen3:8b` (proven, live-verified in Slices 1–3). `ornith:9b` (DeepReinforce, Jun 2026) is noted as a future *coding* sub-agent — its native Ollama tool-calling is unconfirmed, so it's not used on the router/general path. The manager is model-agnostic, so these names are swappable data, and Slice 6 (discovery) will keep them current automatically.
+diff --git a/models/qwen-fast.ts b/models/qwen-fast.ts
+index fae43f6..5975a49 100644
+--- a/models/qwen-fast.ts
++++ b/models/qwen-fast.ts
+@@ -1,11 +1,12 @@
+ import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
+ 
+ /** Fast general-purpose local model with reliable tool-calling. */
+ const qwenFast: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+-  model: 'qwen3:8b',
++  model: 'qwen3.5:9b',
+   params: { temperature: 0.2, numCtx: 8192 },
+   role: 'general reasoning + tool use',
++  footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenFast;
+diff --git a/models/qwen-router.ts b/models/qwen-router.ts
+new file mode 100644
+index 0000000..96f9d51
+--- /dev/null
++++ b/models/qwen-router.ts
+@@ -0,0 +1,12 @@
++import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
++
++/** Small, fast model for the orchestrator's routing decisions (stays pinned-resident). */
++const qwenRouter: ModelDeclaration = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3.5:4b',
++  params: { temperature: 0.1, numCtx: 8192 },
++  role: 'routing / orchestration',
++  footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
++};
++
++export default qwenRouter;
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 6e3afa7..623b310 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,75 +1,61 @@
+ import { createSuperAgent } from '../../agents/super.ts';
+-import qwenFast from '../../models/qwen-fast.ts';
+-import { ResourceError } from '../core/errors.ts';
++import qwenRouter from '../../models/qwen-router.ts';
+ import { createFetchTools, createFileTools } from '../mcp/client.ts';
+-import { estimateModelBytes } from '../resource/footprint.ts';
+-import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
++import { createModelManager } from '../resource/model-manager.ts';
+ import { isProjectStoreActive } from '../resource/model-store.ts';
+-import {
+-  isModelInstalled,
+-  pullModel,
+-  unloadModel,
+-  warmModel,
+-} from '../resource/ollama-control.ts';
+ import { runChat } from './run-chat.ts';
+ 
+-const FOOTPRINT = estimateModelBytes({
+-  paramsBillions: 8,
+-  bytesPerWeight: 0.56,
+-  contextTokens: qwenFast.params.numCtx ?? 8192,
+-  kvBytesPerToken: 131072,
+-});
+-
+ async function main(): Promise<void> {
+   const task = process.argv.slice(2).join(' ').trim();
+   if (task.length === 0) {
+     console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+     process.exit(1);
+   }
+ 
+-  const budget = machineBudgetBytes();
+-  if (!fitsBudget(FOOTPRINT, budget)) {
+-    throw new ResourceError(
+-      `${qwenFast.model} (~${Math.round(FOOTPRINT / 1e9)}GB) exceeds the GPU budget (~${Math.round(budget / 1e9)}GB)`,
+-    );
+-  }
+-
+-  if (!(await isModelInstalled(qwenFast.model))) {
+-    console.error(`Pulling ${qwenFast.model} (first run only)...`);
+-    await pullModel(qwenFast.model);
+-  }
+-  await warmModel(qwenFast.model);
++  const manager = createModelManager();
++  // Warm + pin the small router model the orchestrator runs on.
++  console.error(`Preparing router model ${qwenRouter.model}...`);
++  await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
+   console.error(
+     isProjectStoreActive()
+       ? 'Using project-local models from ./model-images'
+       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+   );
+ 
++  // Specialists' models are loaded on demand, keeping the router pinned-resident.
++  const onBeforeDelegate = (agent: {
++    modelDecl?: import('../core/types.ts').ModelDeclaration;
++  }) =>
++    agent.modelDecl
++      ? manager.ensureReady(agent.modelDecl, { pinned: [qwenRouter.model] })
++      : Promise.resolve();
++
+   const fileServer = await createFileTools();
+   try {
+     const fetchServer = await createFetchTools();
+     try {
+       const orchestrator = createSuperAgent(
+         fileServer.tools,
+         fetchServer.tools,
++        onBeforeDelegate,
+       );
+       const result = await runChat({
+         orchestrator,
+         task,
+         runsRoot: 'runs',
+         runId: `run-${process.pid}`,
+       });
+       console.log(result.kind === 'answer' ? result.text : result.message);
+     } finally {
+       await fetchServer.close();
+     }
+   } finally {
+     await fileServer.close();
+-    await unloadModel(qwenFast.model);
++    await manager.unloadAll();
+   }
+ }
+ 
+ main().catch((err) => {
+   console.error(err);
+   process.exit(1);
+ });
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index b7c1241..e9d2a0e 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -1,20 +1,23 @@
+ import type { LanguageModel, ToolSet } from 'ai';
+ import { runAgent } from './agent.ts';
++import type { ModelDeclaration } from './types.ts';
+ 
+ /** A reusable agent: its own model + system prompt + tools, plus a routing description. */
+ export type Agent = {
+   name: string; // stable id used in delegate tool names, e.g. 'file_qa'
+   description: string; // capability description the orchestrator routes on
+   model: LanguageModel;
+   systemPrompt: string;
+   tools: ToolSet;
++  /** Declaration of the agent's model, for the resource manager (optional; mock agents omit it). */
++  modelDecl?: ModelDeclaration;
+ };
+ 
+ /** Run an agent definition against a task. */
+ export function runDefinedAgent(
+   agent: Agent,
+   task: string,
+ ): ReturnType<typeof runAgent> {
+   return runAgent({
+     model: agent.model,
+     systemPrompt: agent.systemPrompt,
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 5c0e89b..ff8d812 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,31 +1,38 @@
+ import { tool } from 'ai';
+ import { z } from 'zod';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
++/** A hook run just before a delegated agent executes (e.g. ensure its model is loaded). */
++export type BeforeDelegate = (agent: Agent) => Promise<void>;
++
+ /**
+  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
+  * structured error (so the orchestrator model can react) rather than throwing.
+  */
+-export function asDelegateTool(agent: Agent) {
++export function asDelegateTool(
++  agent: Agent,
++  onBeforeDelegate?: BeforeDelegate,
++) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+     execute: async ({ task }) => {
+       try {
++        if (onBeforeDelegate) await onBeforeDelegate(agent);
+         const { text } = await runDefinedAgent(agent, task);
+         return { text };
+       } catch (cause) {
+         return {
+           error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+         };
+       }
+     },
+   });
+ }
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+index 2527438..bf11160 100644
+--- a/src/core/orchestrator.ts
++++ b/src/core/orchestrator.ts
+@@ -1,18 +1,22 @@
+ import type { LanguageModel, ToolSet } from 'ai';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ import {
+   CAPABILITY_GAP_TOOL,
+   capabilityGapTool,
+   findCapabilityGap,
+ } from './capability-gap.ts';
+-import { asDelegateTool, delegateToolName } from './delegate.ts';
++import {
++  asDelegateTool,
++  type BeforeDelegate,
++  delegateToolName,
++} from './delegate.ts';
+ import { MaxStepsError } from './errors.ts';
+ 
+ export type OrchestratorResult =
+   | { kind: 'answer'; text: string }
+   | { kind: 'gap'; missingCapability: string; message: string };
+ 
+ /** Build the orchestrator's system prompt: routing rules + the agent catalog. */
+ export function buildRoutingPrompt(
+   basePrompt: string,
+   agents: Agent[],
+@@ -31,24 +35,28 @@ export function buildRoutingPrompt(
+     'Never attempt the task yourself.',
+   ].join('\n');
+ }
+ 
+ /** Create the orchestrator: an Agent whose tools delegate to sub-agents (+ gap tool). */
+ export function createOrchestrator(opts: {
+   name?: string;
+   model: LanguageModel;
+   systemPrompt: string;
+   agents: Agent[];
++  onBeforeDelegate?: BeforeDelegate;
+ }): Agent {
+   const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
+   for (const agent of opts.agents) {
+-    tools[delegateToolName(agent)] = asDelegateTool(agent);
++    tools[delegateToolName(agent)] = asDelegateTool(
++      agent,
++      opts.onBeforeDelegate,
++    );
+   }
+   return {
+     name: opts.name ?? 'orchestrator',
+     description:
+       'Routes tasks to specialized agents or reports a capability gap.',
+     model: opts.model,
+     systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
+     tools,
+   };
+ }
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 59cb7d3..754adb2 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -11,11 +11,13 @@ export type ModelParams = {
+ 
+ /**
+  * A model declaration is DATA, not logic. Slice 1 pins a concrete model name;
+  * later slices can resolve a capability/role to a discovered model.
+  */
+ export type ModelDeclaration = {
+   provider: ProviderKind;
+   model: string;
+   params: ModelParams;
+   role: string;
++  /** Pre-load sizing hint for the model manager. */
++  footprint: { approxParamsBillions: number; bytesPerWeight: number };
+ };
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+new file mode 100644
+index 0000000..c4d76f6
+--- /dev/null
++++ b/src/resource/model-manager.ts
+@@ -0,0 +1,100 @@
++import { ResourceError } from '../core/errors.ts';
++import type { ModelDeclaration } from '../core/types.ts';
++import { estimateModelBytes } from './footprint.ts';
++import { machineBudgetBytes } from './hardware.ts';
++import {
++  isModelInstalled,
++  type LoadedModel,
++  listLoadedModels,
++  pullModel,
++  unloadModel,
++  warmModel,
++} from './ollama-control.ts';
++
++export type EnsureOpts = { pinned?: string[] };
++
++/** Injectable dependencies (real Ollama by default; fakes in tests). */
++export type ManagerDeps = {
++  budgetBytes: number;
++  isInstalled: (model: string) => Promise<boolean>;
++  listLoaded: () => Promise<LoadedModel[]>;
++  pull: (model: string) => Promise<void>;
++  warm: (model: string) => Promise<void>;
++  unload: (model: string) => Promise<void>;
++};
++
++/** Estimated resident bytes of a model from its declaration. */
++export function declBytes(decl: ModelDeclaration): number {
++  return estimateModelBytes({
++    paramsBillions: decl.footprint.approxParamsBillions,
++    bytesPerWeight: decl.footprint.bytesPerWeight,
++    contextTokens: decl.params.numCtx ?? 8192,
++    kvBytesPerToken: 131072,
++  });
++}
++
++function defaultDeps(): ManagerDeps {
++  return {
++    budgetBytes: machineBudgetBytes(),
++    isInstalled: (m) => isModelInstalled(m),
++    listLoaded: () => listLoadedModels(),
++    pull: (m) => pullModel(m),
++    warm: (m) => warmModel(m),
++    unload: (m) => unloadModel(m),
++  };
++}
++
++/** Loads/unloads models to keep the active + pinned set within the GPU budget. */
++export function createModelManager(deps: Partial<ManagerDeps> = {}) {
++  const d: ManagerDeps = { ...defaultDeps(), ...deps };
++  const lastUsed = new Map<string, number>();
++  let tick = 0;
++
++  async function ensureReady(
++    decl: ModelDeclaration,
++    opts: EnsureOpts = {},
++  ): Promise<void> {
++    const pinned = new Set(opts.pinned ?? []);
++    const target = decl.model;
++
++    if (!(await d.isInstalled(target))) await d.pull(target);
++
++    let loaded = await d.listLoaded();
++    if (loaded.some((m) => m.name === target)) {
++      lastUsed.set(target, ++tick);
++      return;
++    }
++
++    const needed = declBytes(decl);
++    const resident = () => loaded.reduce((sum, m) => sum + m.sizeBytes, 0);
++
++    while (resident() + needed > d.budgetBytes) {
++      const candidates = loaded
++        .filter((m) => !pinned.has(m.name) && m.name !== target)
++        .sort(
++          (a, b) => (lastUsed.get(a.name) ?? -1) - (lastUsed.get(b.name) ?? -1),
++        );
++      const evict = candidates[0];
++      if (evict === undefined) {
++        throw new ResourceError(
++          `Cannot load ${target} (~${Math.round(needed / 1e9)}GB): only pinned models remain and the budget (~${Math.round(d.budgetBytes / 1e9)}GB) is exceeded.`,
++        );
++      }
++      await d.unload(evict.name);
++      lastUsed.delete(evict.name);
++      loaded = loaded.filter((m) => m.name !== evict.name);
++    }
++
++    await d.warm(target);
++    lastUsed.set(target, ++tick);
++  }
++
++  async function unloadAll(): Promise<void> {
++    for (const model of [...lastUsed.keys()]) {
++      await d.unload(model);
++    }
++    lastUsed.clear();
++  }
++
++  return { ensureReady, unloadAll };
++}
+diff --git a/src/resource/ollama-control.ts b/src/resource/ollama-control.ts
+index 2d49bb8..df6d20a 100644
+--- a/src/resource/ollama-control.ts
++++ b/src/resource/ollama-control.ts
+@@ -1,16 +1,21 @@
+ import { ProviderError } from '../core/errors.ts';
+ 
+ const DEFAULT_BASE_URL = 'http://localhost:11434';
+ 
+ type TagsResponse = { models?: Array<{ name: string }> };
+ 
++/** A model currently resident in Ollama, with its memory footprint. */
++export type LoadedModel = { name: string; sizeBytes: number };
++
++type PsResponse = { models?: Array<{ name: string; size: number }> };
++
+ async function postJson(
+   baseUrl: string,
+   path: string,
+   body: Record<string, unknown>,
+ ): Promise<void> {
+   let res: Response;
+   try {
+     res = await fetch(`${baseUrl}${path}`, {
+       method: 'POST',
+       headers: { 'content-type': 'application/json' },
+@@ -62,10 +67,25 @@ export function warmModel(
+ export function unloadModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/generate', {
+     model,
+     keep_alive: 0,
+     stream: false,
+   });
+ }
++
++/** Models currently loaded in memory, from `GET /api/ps`. */
++export async function listLoadedModels(
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<LoadedModel[]> {
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/ps`);
++  } catch (cause) {
++    throw new ProviderError('Ollama /api/ps failed', { cause });
++  }
++  if (!res.ok) throw new ProviderError(`Ollama /api/ps returned ${res.status}`);
++  const data = (await res.json()) as PsResponse;
++  return (data.models ?? []).map((m) => ({ name: m.name, sizeBytes: m.size }));
++}
+diff --git a/tests/agents/file-qa.test.ts b/tests/agents/file-qa.test.ts
+index 3b79355..35339a3 100644
+--- a/tests/agents/file-qa.test.ts
++++ b/tests/agents/file-qa.test.ts
+@@ -1,11 +1,17 @@
+ import { expect, test } from 'bun:test';
+ import { createFileQaAgent } from '../../agents/file-qa.ts';
++import qwenFast from '../../models/qwen-fast.ts';
+ 
+ test('file-qa agent has the expected identity and injected tools', () => {
+   const tools = { read_file: { description: 'x' } } as never;
+   const agent = createFileQaAgent(tools);
+   expect(agent.name).toBe('file_qa');
+   expect(agent.description.toLowerCase()).toContain('file');
+   expect(agent.tools).toBe(tools);
+   expect(agent.model).toBeTruthy();
+ });
++
++test('file-qa agent carries its model declaration', () => {
++  const agent = createFileQaAgent({ read_file: { description: 'x' } } as never);
++  expect(agent.modelDecl).toBe(qwenFast);
++});
+diff --git a/tests/agents/super.test.ts b/tests/agents/super.test.ts
+index 57d24c2..d9d8861 100644
+--- a/tests/agents/super.test.ts
++++ b/tests/agents/super.test.ts
+@@ -1,14 +1,24 @@
+ import { expect, test } from 'bun:test';
+ import { createSuperAgent } from '../../agents/super.ts';
++import qwenRouter from '../../models/qwen-router.ts';
+ import { CAPABILITY_GAP_TOOL } from '../../src/core/capability-gap.ts';
+ 
+ test('super agent exposes delegate tools for both specialists and the gap tool', () => {
+   const fileTools = { read_file: { description: 'x' } } as never;
+   const fetchTools = { fetch: { description: 'x' } } as never;
+   const sup = createSuperAgent(fileTools, fetchTools);
+   const toolNames = Object.keys(sup.tools);
+   expect(toolNames).toContain('delegate_to_file_qa');
+   expect(toolNames).toContain('delegate_to_web_fetch');
+   expect(toolNames).toContain(CAPABILITY_GAP_TOOL);
+   expect(sup.model).toBeTruthy();
+ });
++
++test('super agent uses the small router model', () => {
++  const sup = createSuperAgent(
++    { read_file: {} } as never,
++    { fetch: {} } as never,
++  );
++  // model is a resolved LanguageModel for qwen3:4b
++  expect((sup.model as { modelId?: string }).modelId).toBe(qwenRouter.model);
++});
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index 5bf286d..e3f6d37 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -1,11 +1,11 @@
+-import { expect, test } from 'bun:test';
++import { expect, mock, test } from 'bun:test';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
+ 
+ function cannedAgent(name: string, answer: string): Agent {
+   return {
+     name,
+     description: `agent ${name}`,
+     model: new MockLanguageModelV3({
+       doGenerate: async () => ({
+@@ -32,10 +32,22 @@ test('delegate tool name is delegate_to_<name>', () => {
+   expect(delegateToolName(cannedAgent('file_qa', 'x'))).toBe(
+     'delegate_to_file_qa',
+   );
+ });
+ 
+ test('asDelegateTool runs the wrapped agent and returns its text', async () => {
+   const t = asDelegateTool(cannedAgent('file_qa', 'the answer'));
+   const result = await t.execute?.({ task: 'do it' }, {} as never);
+   expect(result).toEqual({ text: 'the answer' });
+ });
++
++test('asDelegateTool runs onBeforeDelegate before the agent runs', async () => {
++  const order: string[] = [];
++  const agent = cannedAgent('file_qa', 'answer'); // existing helper in this file
++  const hook = mock(async (a: typeof agent) => {
++    order.push(`hook:${a.name}`);
++  });
++  const t = asDelegateTool(agent, hook);
++  await t.execute?.({ task: 'go' }, {} as never);
++  expect(hook).toHaveBeenCalledTimes(1);
++  expect(order).toEqual(['hook:file_qa']); // hook ran (before the agent's own run)
++});
+diff --git a/tests/integration/model-manager.live.test.ts b/tests/integration/model-manager.live.test.ts
+new file mode 100644
+index 0000000..62194ba
+--- /dev/null
++++ b/tests/integration/model-manager.live.test.ts
+@@ -0,0 +1,24 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import qwenFast from '../../models/qwen-fast.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++import { listLoadedModels } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready =
++  (await ollamaReady(qwenRouter.model)) && (await ollamaReady(qwenFast.model));
++
++describe.skipIf(!ready)('live model manager: co-residency + pinning', () => {
++  const manager = createModelManager();
++  afterAll(async () => {
++    await manager.unloadAll();
++  });
++
++  test('router stays pinned-resident while a specialist loads', async () => {
++    await manager.ensureReady(qwenRouter, { pinned: [qwenRouter.model] });
++    await manager.ensureReady(qwenFast, { pinned: [qwenRouter.model] });
++    const loaded = (await listLoadedModels()).map((m) => m.name);
++    expect(loaded).toContain(qwenRouter.model); // pinned survived
++    expect(loaded).toContain(qwenFast.model); // specialist co-resident
++  }, 180_000);
++});
+diff --git a/tests/integration/orchestrator-web.live.test.ts b/tests/integration/orchestrator-web.live.test.ts
+index d7fb08f..87f6325 100644
+--- a/tests/integration/orchestrator-web.live.test.ts
++++ b/tests/integration/orchestrator-web.live.test.ts
+@@ -1,30 +1,30 @@
+ import { afterAll, describe, expect, test } from 'bun:test';
+ import { createSuperAgent } from '../../agents/super.ts';
++import qwenFast from '../../models/qwen-fast.ts';
+ import { runOrchestrator } from '../../src/core/orchestrator.ts';
+ import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
+ import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
+ import { ollamaReady } from './ollama-available.ts';
+ import { uvxReady } from './uvx-available.ts';
+ 
+-const MODEL = 'qwen3:8b';
+-const ready = (await uvxReady()) && (await ollamaReady(MODEL));
++const ready = (await uvxReady()) && (await ollamaReady(qwenFast.model));
+ 
+ describe.skipIf(!ready)(
+   'live orchestrator: web routing (real Ollama + uvx)',
+   () => {
+     afterAll(async () => {
+-      await unloadModel(MODEL);
++      await unloadModel(qwenFast.model);
+     });
+ 
+     test('routes a URL request to web_fetch and answers', async () => {
+-      await warmModel(MODEL);
++      await warmModel(qwenFast.model);
+       const fileServer = await createFileTools();
+       const fetchServer = await createFetchTools();
+       try {
+         const orch = createSuperAgent(fileServer.tools, fetchServer.tools);
+         const result = await runOrchestrator(
+           orch,
+           'Summarize the page at https://example.com in one sentence.',
+         );
+         expect(result.kind).toBe('answer');
+       } finally {
+diff --git a/tests/integration/orchestrator.live.test.ts b/tests/integration/orchestrator.live.test.ts
+index 1802244..8a2883a 100644
+--- a/tests/integration/orchestrator.live.test.ts
++++ b/tests/integration/orchestrator.live.test.ts
+@@ -1,30 +1,30 @@
+ import { afterAll, describe, expect, test } from 'bun:test';
+ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { createSuperAgent } from '../../agents/super.ts';
++import qwenFast from '../../models/qwen-fast.ts';
+ import { runOrchestrator } from '../../src/core/orchestrator.ts';
+ import { createFileTools } from '../../src/mcp/client.ts';
+ import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
+ import { ollamaReady } from './ollama-available.ts';
+ 
+-const MODEL = 'qwen3:8b';
+-const ready = await ollamaReady(MODEL);
++const ready = await ollamaReady(qwenFast.model);
+ 
+ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
+   afterAll(async () => {
+-    await unloadModel(MODEL);
++    await unloadModel(qwenFast.model);
+   });
+ 
+   test('delegates a file question to file-qa and answers', async () => {
+-    await warmModel(MODEL);
++    await warmModel(qwenFast.model);
+     const dir = await mkdtemp(join(tmpdir(), 'live-'));
+     const path = join(dir, 'animals.txt');
+     await writeFile(path, 'The fox and the dog are friends.');
+     const { tools, close } = await createFileTools();
+     try {
+       const orch = createSuperAgent(tools, {});
+       const result = await runOrchestrator(
+         orch,
+         `What animals are in ${path}?`,
+       );
+@@ -32,21 +32,21 @@ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
+       if (result.kind === 'answer') {
+         expect(result.text.toLowerCase()).toMatch(/fox|dog/);
+       }
+     } finally {
+       await close();
+       await rm(dir, { recursive: true, force: true });
+     }
+   }, 120_000);
+ 
+   test('reports a capability gap for an out-of-scope request', async () => {
+-    await warmModel(MODEL);
++    await warmModel(qwenFast.model);
+     const { tools, close } = await createFileTools();
+     try {
+       const orch = createSuperAgent(tools, {});
+       const result = await runOrchestrator(
+         orch,
+         'Book me a flight to Tokyo for next Tuesday.',
+       );
+       expect(result.kind).toBe('gap');
+     } finally {
+       await close();
+diff --git a/tests/models/declarations.test.ts b/tests/models/declarations.test.ts
+new file mode 100644
+index 0000000..65f5bac
+--- /dev/null
++++ b/tests/models/declarations.test.ts
+@@ -0,0 +1,14 @@
++import { expect, test } from 'bun:test';
++import qwenFast from '../../models/qwen-fast.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++
++test('qwen-fast is qwen3.5:9b with a ~9B footprint', () => {
++  expect(qwenFast.model).toBe('qwen3.5:9b');
++  expect(qwenFast.footprint.approxParamsBillions).toBe(9);
++  expect(qwenFast.footprint.bytesPerWeight).toBeGreaterThan(0);
++});
++
++test('qwen-router is qwen3.5:4b with a ~4B footprint', () => {
++  expect(qwenRouter.model).toBe('qwen3.5:4b');
++  expect(qwenRouter.footprint.approxParamsBillions).toBe(4);
++});
+diff --git a/tests/providers/ollama.test.ts b/tests/providers/ollama.test.ts
+index 440d3a4..1ec1685 100644
+--- a/tests/providers/ollama.test.ts
++++ b/tests/providers/ollama.test.ts
+@@ -1,14 +1,14 @@
+ import { expect, test } from 'bun:test';
+ import qwenFast from '../../models/qwen-fast.ts';
+ import { ProviderKind } from '../../src/core/types.ts';
+ import { createOllamaModel } from '../../src/providers/ollama.ts';
+ 
+-test('qwen-fast declaration targets qwen3:8b on ollama', () => {
++test('qwen-fast declaration targets qwen3.5:9b on ollama', () => {
+   expect(qwenFast.provider).toBe(ProviderKind.Ollama);
+-  expect(qwenFast.model).toBe('qwen3:8b');
++  expect(qwenFast.model).toBe('qwen3.5:9b');
+ });
+ 
+ test('createOllamaModel returns a model whose id matches the declaration', () => {
+   const model = createOllamaModel(qwenFast);
+-  expect((model as { modelId: string }).modelId).toBe('qwen3:8b');
++  expect((model as { modelId: string }).modelId).toBe('qwen3.5:9b');
+ });
+diff --git a/tests/resource/model-manager.test.ts b/tests/resource/model-manager.test.ts
+new file mode 100644
+index 0000000..3b1b4fe
+--- /dev/null
++++ b/tests/resource/model-manager.test.ts
+@@ -0,0 +1,96 @@
++import { expect, mock, test } from 'bun:test';
++import { ResourceError } from '../../src/core/errors.ts';
++import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++
++function decl(model: string, b: number): ModelDeclaration {
++  return {
++    provider: ProviderKind.Ollama,
++    model,
++    params: { numCtx: 0 }, // numCtx 0 → KV term 0, so bytes == params*1e9*bpw*1.2
++    role: 'test',
++    footprint: { approxParamsBillions: b, bytesPerWeight: 1 }, // bytes = b*1e9*1.2
++  };
++}
++// declBytes(decl(_, b)) === b*1e9*1.2
++
++function fakes(
++  overrides: Partial<Parameters<typeof createModelManager>[0]> = {},
++) {
++  return {
++    isInstalled: mock(async () => true),
++    listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
++    pull: mock(async () => {}),
++    warm: mock(async () => {}),
++    unload: mock(async () => {}),
++    ...overrides,
++  };
++}
++
++test('already-loaded model: no pull/warm/unload', async () => {
++  const f = fakes({
++    listLoaded: mock(async () => [{ name: 'm8', sizeBytes: 1 }]),
++  });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('m8', 8));
++  expect(f.warm).not.toHaveBeenCalled();
++  expect(f.pull).not.toHaveBeenCalled();
++  expect(f.unload).not.toHaveBeenCalled();
++});
++
++test('not installed: pulls then warms', async () => {
++  const f = fakes({ isInstalled: mock(async () => false) });
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('m8', 8));
++  expect(f.pull).toHaveBeenCalledWith('m8');
++  expect(f.warm).toHaveBeenCalledWith('m8');
++});
++
++test('fits alongside pinned: warms, no eviction', async () => {
++  // pinned router (4*1.2=4.8e9) loaded; target 8*1.2=9.6e9; budget 20e9 → fits
++  const f = fakes({
++    listLoaded: mock(async () => [{ name: 'r4', sizeBytes: 4.8e9 }]),
++  });
++  const mgr = createModelManager({ budgetBytes: 20e9, ...f });
++  await mgr.ensureReady(decl('m8', 8), { pinned: ['r4'] });
++  expect(f.unload).not.toHaveBeenCalled();
++  expect(f.warm).toHaveBeenCalledWith('m8');
++});
++
++test('over budget: evicts non-pinned, keeps pinned, then warms', async () => {
++  // resident: r4 (pinned 4.8e9) + old8 (9.6e9) = 14.4e9; target new8 9.6e9; budget 16e9
++  // must evict old8 (non-pinned); after evict resident 4.8 + 9.6 = 14.4 <= 16 → warm
++  const f = fakes({
++    listLoaded: mock(async () => [
++      { name: 'r4', sizeBytes: 4.8e9 },
++      { name: 'old8', sizeBytes: 9.6e9 },
++    ]),
++  });
++  const mgr = createModelManager({ budgetBytes: 16e9, ...f });
++  await mgr.ensureReady(decl('new8', 8), { pinned: ['r4'] });
++  expect(f.unload).toHaveBeenCalledWith('old8');
++  expect(f.unload).not.toHaveBeenCalledWith('r4');
++  expect(f.warm).toHaveBeenCalledWith('new8');
++});
++
++test('cannot fit with pinned: throws ResourceError, warms nothing', async () => {
++  // pinned r8 resident 9.6e9; target big 9.6e9; budget 12e9 → 9.6+9.6 > 12 and only pinned remains
++  const f = fakes({
++    listLoaded: mock(async () => [{ name: 'r8', sizeBytes: 9.6e9 }]),
++  });
++  const mgr = createModelManager({ budgetBytes: 12e9, ...f });
++  await expect(
++    mgr.ensureReady(decl('big', 8), { pinned: ['r8'] }),
++  ).rejects.toBeInstanceOf(ResourceError);
++  expect(f.warm).not.toHaveBeenCalled();
++});
++
++test('unloadAll unloads every warmed model', async () => {
++  const f = fakes();
++  const mgr = createModelManager({ budgetBytes: 100e9, ...f });
++  await mgr.ensureReady(decl('a', 1));
++  await mgr.ensureReady(decl('b', 1));
++  await mgr.unloadAll();
++  expect(f.unload).toHaveBeenCalledWith('a');
++  expect(f.unload).toHaveBeenCalledWith('b');
++});
+diff --git a/tests/resource/ollama-control.test.ts b/tests/resource/ollama-control.test.ts
+index 902b47d..c74c802 100644
+--- a/tests/resource/ollama-control.test.ts
++++ b/tests/resource/ollama-control.test.ts
+@@ -1,13 +1,14 @@
+ import { afterEach, expect, spyOn, test } from 'bun:test';
+ import {
+   isModelInstalled,
++  listLoadedModels,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../../src/resource/ollama-control.ts';
+ 
+ afterEach(() => {
+   (globalThis.fetch as unknown as { mockRestore?: () => void }).mockRestore?.();
+ });
+ 
+ test('isModelInstalled returns true when /api/tags lists the model by name', async () => {
+@@ -55,10 +56,39 @@ test('unloadModel POSTs to /api/generate with keep_alive: 0 and stream: false',
+   );
+   await unloadModel('qwen3:8b');
+   const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+   expect(url).toBe('http://localhost:11434/api/generate');
+   expect(JSON.parse(init.body as string)).toEqual({
+     model: 'qwen3:8b',
+     keep_alive: 0,
+     stream: false,
+   });
+ });
++
++test('listLoadedModels maps /api/ps name + size to LoadedModel[]', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(
++      JSON.stringify({
++        models: [
++          { name: 'qwen3:8b', size: 6_000_000_000 },
++          { name: 'qwen3:4b', size: 3_500_000_000 },
++        ],
++      }),
++      { status: 200 },
++    ),
++  );
++  const loaded = await listLoadedModels();
++  expect(loaded).toEqual([
++    { name: 'qwen3:8b', sizeBytes: 6_000_000_000 },
++    { name: 'qwen3:4b', sizeBytes: 3_500_000_000 },
++  ]);
++  expect((fetchSpy.mock.calls[0] as [string])[0]).toBe(
++    'http://localhost:11434/api/ps',
++  );
++});
++
++test('listLoadedModels returns [] when nothing is loaded', async () => {
++  spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({ models: [] }), { status: 200 }),
++  );
++  expect(await listLoadedModels()).toEqual([]);
++});

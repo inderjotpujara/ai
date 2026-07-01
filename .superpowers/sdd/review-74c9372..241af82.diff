@@ -1,0 +1,124 @@
+# Review package: 74c9372..241af82
+
+## Commits
+241af82 docs(slice-10): document the workflow engine in architecture.md
+
+## Files changed
+ docs/architecture.md | 26 +++++++++++++++++++++++---
+ 1 file changed, 23 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 56f08a4..8b1e155 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -32,20 +32,21 @@ The engine is **Vercel AI SDK 6** (runtime-agnostic `LanguageModel`, the
+ tool-calling loop, MCP client, mock model, and `experimental_telemetry`). We
+ write only the thin layers on top.
+ 
+ ```mermaid
+ graph TD
+     subgraph CLI["CLI · src/cli"]
+         chat["chat.ts (entry)"]
+         runchat["run-chat.ts"]
+         selhook["select-hook.ts"]
+         runscli["runs.ts · bun run runs"]
++        flow["flow.ts · bun run flow"]
+     end
+     subgraph CORE["Core · src/core"]
+         orch["orchestrator.ts"]
+         delegate["delegate.ts"]
+         agent["agent.ts · runAgent loop"]
+         guard["guardrails.ts · ALS depth+budget"]
+         types["types.ts · 4-axis taxonomy"]
+     end
+     subgraph RES["Resource · src/resource"]
+         mgr["model-manager.ts"]
+@@ -66,29 +67,37 @@ graph TD
+     end
+     subgraph MCP["MCP · src/mcp"]
+         mcpclient["client.ts · mountMcpServer"]
+     end
+     subgraph TEL["Telemetry · src/telemetry"]
+         spans["spans.ts · ATTR + helpers"]
+         provider["provider.ts · OTel provider"]
+         exporter["jsonl-exporter.ts"]
+     end
+     subgraph RUN["Run store · src/run"]
++        runstore["run-store.ts"]
+         runtrace["run-trace.ts"]
+     end
++    subgraph WF["Workflow · src/workflow"]
++        wftypes["types.ts · StepKind"]
++        wfdefine["define.ts · defineWorkflow"]
++        wfengine["engine.ts · runWorkflow"]
++        wfrunstep["run-step.ts · runStepByKind"]
++    end
+     subgraph DATA["On-disk · git-ignored"]
+         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
+         images[("model-images/ + catalog.json")]
+     end
+     subgraph DECL["Declarations (pure data)"]
+         agents["agents/*"]
+         models["models/* · BOOTSTRAP"]
++        workflows["workflows/* · WORKFLOWS"]
+     end
+ 
+     chat --> runchat
+     chat --> selhook
+     chat --> buildreg
+     chat --> agents
+     chat -. mounts .-> mcpclient
+     runchat --> orch
+     runchat --> provider
+     orch --> delegate
+@@ -110,35 +119,46 @@ graph TD
+     discover --> hfsrc
+     discover --> reg
+     discover --> images
+     agents -. hold tools .-> mcpclient
+     spans --> provider
+     provider --> exporter
+     exporter --> spansfile
+     octl --> images
+     runscli --> runtrace
+     runtrace --> spansfile
++    flow --> wfengine
++    flow --> runstore
++    flow -. mounts .-> mcpclient
++    flow --> agents
++    flow --> workflows
++    wfengine --> wfrunstep
++    wfrunstep --> delegate
++    wfengine --> spans
++    wfrunstep --> spans
++    wfdefine --> wftypes
++    runstore --> spansfile
+ ```
+ 
+ | Layer | Files | Responsibility | Knows about |
+ |---|---|---|---|
+-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer | everything below |
++| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
+ | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+-| **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
+-| **Workflow / DAG** | `src/workflow/` | Pure types + error class for deterministic multi-step workflows (Slice 10) — step model, context-threading, failure policies, DAG validation | Zod (I/O schemas) |
++| **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
++| **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+ ## 3. Runtime data flow (one `chat` run, current)
+ 
+ ```mermaid
+ sequenceDiagram
+     actor User

@@ -1,0 +1,186 @@
+# Review package: 787c8b3..319de07
+
+## Commits
+319de07 feat(core): thread chosen num_ctx through delegation to inference
+
+## Files changed
+ src/core/agent-def.ts        | 12 +++++++++++-
+ src/core/delegate.ts         | 12 ++++++++----
+ src/core/orchestrator.ts     |  3 ++-
+ tests/core/agent-def.test.ts | 16 +++++++++++++++-
+ 4 files changed, 36 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index e9d2a0e..54efe8b 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -1,27 +1,37 @@
++import type { ProviderOptions } from '@ai-sdk/provider-utils';
+ import type { LanguageModel, ToolSet } from 'ai';
+ import { runAgent } from './agent.ts';
+ import type { ModelDeclaration } from './types.ts';
+ 
+ /** A reusable agent: its own model + system prompt + tools, plus a routing description. */
+ export type Agent = {
+   name: string; // stable id used in delegate tool names, e.g. 'file_qa'
+   description: string; // capability description the orchestrator routes on
+   model: LanguageModel;
+   systemPrompt: string;
+   tools: ToolSet;
+   /** Declaration of the agent's model, for the resource manager (optional; mock agents omit it). */
+   modelDecl?: ModelDeclaration;
+ };
+ 
+-/** Run an agent definition against a task. */
++/** Build provider options that set Ollama's context window for this call. */
++export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
++  return numCtx === undefined
++    ? undefined
++    : { ollama: { options: { num_ctx: numCtx } } };
++}
++
++/** Run an agent definition against a task, optionally at a chosen context size. */
+ export function runDefinedAgent(
+   agent: Agent,
+   task: string,
++  numCtx?: number,
+ ): ReturnType<typeof runAgent> {
+   return runAgent({
+     model: agent.model,
+     systemPrompt: agent.systemPrompt,
+     prompt: task,
+     tools: agent.tools,
++    providerOptions: ollamaCtxOptions(numCtx),
+   });
+ }
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index ff8d812..af19f60 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,38 +1,42 @@
+ import { tool } from 'ai';
+ import { z } from 'zod';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
+-/** A hook run just before a delegated agent executes (e.g. ensure its model is loaded). */
+-export type BeforeDelegate = (agent: Agent) => Promise<void>;
++/** A hook run just before a delegated agent executes; may return a chosen context size. */
++export type BeforeDelegate = (
++  agent: Agent,
++) => Promise<{ numCtx?: number } | void>;
+ 
+ /**
+  * Wrap an agent as a tool the orchestrator can call. On failure it RETURNS a
+  * structured error (so the orchestrator model can react) rather than throwing.
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+     execute: async ({ task }) => {
+       try {
+-        if (onBeforeDelegate) await onBeforeDelegate(agent);
+-        const { text } = await runDefinedAgent(agent, task);
++        const pre = onBeforeDelegate
++          ? await onBeforeDelegate(agent)
++          : undefined;
++        const { text } = await runDefinedAgent(agent, task, pre?.numCtx);
+         return { text };
+       } catch (cause) {
+         return {
+           error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+         };
+       }
+     },
+   });
+ }
+diff --git a/src/core/orchestrator.ts b/src/core/orchestrator.ts
+index bf11160..3a98003 100644
+--- a/src/core/orchestrator.ts
++++ b/src/core/orchestrator.ts
+@@ -58,26 +58,27 @@ export function createOrchestrator(opts: {
+     model: opts.model,
+     systemPrompt: buildRoutingPrompt(opts.systemPrompt, opts.agents),
+     tools,
+   };
+ }
+ 
+ /** Run the orchestrator; return either the answer or a reported capability gap. */
+ export async function runOrchestrator(
+   orchestrator: Agent,
+   task: string,
++  numCtx?: number,
+ ): Promise<OrchestratorResult> {
+   let text: string;
+   let steps: Parameters<typeof findCapabilityGap>[0];
+ 
+   try {
+-    const result = await runDefinedAgent(orchestrator, task);
++    const result = await runDefinedAgent(orchestrator, task, numCtx);
+     text = result.text;
+     steps = result.steps;
+   } catch (err) {
+     if (err instanceof MaxStepsError) {
+       // Intentional: if report_capability_gap was called during the run, the
+       // result is classified as kind:'gap' (gap takes precedence) regardless of
+       // whether the agent produced any delegate output or final text.
+       const gap = findCapabilityGap(
+         err.steps as Parameters<typeof findCapabilityGap>[0],
+       );
+diff --git a/tests/core/agent-def.test.ts b/tests/core/agent-def.test.ts
+index 2929dc6..da9b7c7 100644
+--- a/tests/core/agent-def.test.ts
++++ b/tests/core/agent-def.test.ts
+@@ -1,15 +1,19 @@
+ import { expect, mock, test } from 'bun:test';
+ import { tool } from 'ai';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import { z } from 'zod';
+-import { type Agent, runDefinedAgent } from '../../src/core/agent-def.ts';
++import {
++  type Agent,
++  ollamaCtxOptions,
++  runDefinedAgent,
++} from '../../src/core/agent-def.ts';
+ 
+ test('runDefinedAgent runs the agent on the task and returns text', async () => {
+   const execute = mock(async () => ({ value: 42 }));
+   const model = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [{ type: 'text', text: 'done' }],
+       finishReason: { unified: 'stop', raw: undefined },
+       usage: {
+         inputTokens: {
+           total: 1,
+@@ -28,10 +32,20 @@ test('runDefinedAgent runs the agent on the task and returns text', async () =>
+     model,
+     systemPrompt: 'You do math.',
+     tools: {
+       add: tool({ description: 'add', inputSchema: z.object({}), execute }),
+     },
+   };
+ 
+   const { text } = await runDefinedAgent(agent, 'what is 40+2?');
+   expect(text).toBe('done');
+ });
++
++test('ollamaCtxOptions nests num_ctx under ollama.options', () => {
++  expect(ollamaCtxOptions(8192)).toEqual({
++    ollama: { options: { num_ctx: 8192 } },
++  });
++});
++
++test('ollamaCtxOptions returns undefined when no context is given', () => {
++  expect(ollamaCtxOptions()).toBeUndefined();
++});

@@ -1,0 +1,86 @@
+# Review package: 8db10b5..a8a02c3
+
+## Commits
+a8a02c3 feat(core): add shared model types and typed errors
+
+## Files changed
+ src/core/errors.ts        | 19 +++++++++++++++++++
+ src/core/types.ts         | 21 +++++++++++++++++++++
+ tests/core/errors.test.ts | 16 ++++++++++++++++
+ 3 files changed, 56 insertions(+)
+
+## Diff
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+new file mode 100644
+index 0000000..aea4620
+--- /dev/null
++++ b/src/core/errors.ts
+@@ -0,0 +1,19 @@
++/** Base for all framework errors; sets `name` to the concrete class name. */
++class FrameworkError extends Error {
++  constructor(message: string, options?: { cause?: unknown }) {
++    super(message, options);
++    this.name = new.target.name;
++  }
++}
++
++/** A model provider/runtime failed (e.g. Ollama unreachable). */
++export class ProviderError extends FrameworkError {}
++
++/** A tool failed in a way the loop could not recover from. */
++export class ToolError extends FrameworkError {}
++
++/** The agent loop hit its step ceiling without finishing. */
++export class MaxStepsError extends FrameworkError {}
++
++/** A model cannot fit the machine's memory budget. */
++export class ResourceError extends FrameworkError {}
+diff --git a/src/core/types.ts b/src/core/types.ts
+new file mode 100644
+index 0000000..59cb7d3
+--- /dev/null
++++ b/src/core/types.ts
+@@ -0,0 +1,21 @@
++/** Which local runtime backs a model. String enum per project style. */
++export enum ProviderKind {
++  Ollama = 'Ollama',
++}
++
++/** Tunable inference parameters carried by a model declaration. */
++export type ModelParams = {
++  temperature?: number;
++  numCtx?: number;
++};
++
++/**
++ * A model declaration is DATA, not logic. Slice 1 pins a concrete model name;
++ * later slices can resolve a capability/role to a discovered model.
++ */
++export type ModelDeclaration = {
++  provider: ProviderKind;
++  model: string;
++  params: ModelParams;
++  role: string;
++};
+diff --git a/tests/core/errors.test.ts b/tests/core/errors.test.ts
+new file mode 100644
+index 0000000..2a18c52
+--- /dev/null
++++ b/tests/core/errors.test.ts
+@@ -0,0 +1,16 @@
++import { expect, test } from 'bun:test';
++import { ProviderError, ResourceError } from '../../src/core/errors.ts';
++
++test('typed errors carry their class name and message', () => {
++  const err = new ResourceError('model does not fit budget');
++  expect(err).toBeInstanceOf(Error);
++  expect(err.name).toBe('ResourceError');
++  expect(err.message).toBe('model does not fit budget');
++});
++
++test('ProviderError preserves an optional cause', () => {
++  const cause = new Error('connection refused');
++  const err = new ProviderError('ollama unreachable', { cause });
++  expect(err.name).toBe('ProviderError');
++  expect(err.cause).toBe(cause);
++});

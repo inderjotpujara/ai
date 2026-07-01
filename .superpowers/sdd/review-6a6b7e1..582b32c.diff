@@ -1,0 +1,133 @@
+# Review package: 6a6b7e1..582b32c
+
+## Commits
+582b32c feat(cli): notify when using project-local model store (./model-images)
+
+## Files changed
+ src/cli/chat.ts                    |  9 +++++++++
+ src/resource/model-store.ts        | 20 ++++++++++++++++++++
+ tests/resource/model-store.test.ts | 38 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 67 insertions(+)
+
+## Diff
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 0863675..270c4df 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,16 +1,17 @@
+ import qwenFast from '../../models/qwen-fast.ts';
+ import { ResourceError } from '../core/errors.ts';
+ import { createFileTools } from '../mcp/client.ts';
+ import { createOllamaModel } from '../providers/ollama.ts';
+ import { estimateModelBytes } from '../resource/footprint.ts';
+ import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
++import { isProjectStoreActive } from '../resource/model-store.ts';
+ import {
+   isModelInstalled,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../resource/ollama-control.ts';
+ import { answerFileQuestion } from './answer-file-question.ts';
+ 
+ // qwen3:8b @ Q4_K_M, 8k context — rough footprint for the budget check.
+ const FOOTPRINT = estimateModelBytes({
+@@ -33,20 +34,28 @@ async function main(): Promise<void> {
+       `${qwenFast.model} (~${Math.round(FOOTPRINT / 1e9)}GB) exceeds the GPU budget (~${Math.round(budget / 1e9)}GB)`,
+     );
+   }
+ 
+   if (!(await isModelInstalled(qwenFast.model))) {
+     console.error(`Pulling ${qwenFast.model} (first run only)...`);
+     await pullModel(qwenFast.model);
+   }
+   await warmModel(qwenFast.model);
+ 
++  if (isProjectStoreActive()) {
++    console.error('Using project-local models from ./model-images');
++  } else {
++    console.error(
++      '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
++    );
++  }
++
+   const model = createOllamaModel(qwenFast);
+   const { tools, close } = await createFileTools();
+   try {
+     const answer = await answerFileQuestion({
+       model,
+       tools,
+       question,
+       runsRoot: 'runs',
+       runId: `run-${process.pid}`,
+     });
+diff --git a/src/resource/model-store.ts b/src/resource/model-store.ts
+new file mode 100644
+index 0000000..5f3b033
+--- /dev/null
++++ b/src/resource/model-store.ts
+@@ -0,0 +1,20 @@
++import { existsSync } from 'node:fs';
++import { join } from 'node:path';
++
++/** Absolute path to this project's local Ollama model store. */
++export function projectStorePath(): string {
++  return join(process.cwd(), 'model-images');
++}
++
++/**
++ * Returns true if the Ollama server is serving from the project-local store.
++ * Reliable signal: the store directory contains a `blobs` or `manifests` subdir,
++ * which Ollama only creates when it has stored data there.
++ */
++export function isProjectStoreActive(
++  storePath: string = projectStorePath(),
++): boolean {
++  if (existsSync(join(storePath, 'blobs'))) return true;
++  if (existsSync(join(storePath, 'manifests'))) return true;
++  return false;
++}
+diff --git a/tests/resource/model-store.test.ts b/tests/resource/model-store.test.ts
+new file mode 100644
+index 0000000..c2bbf0c
+--- /dev/null
++++ b/tests/resource/model-store.test.ts
+@@ -0,0 +1,38 @@
++import { afterEach, expect, test } from 'bun:test';
++import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import {
++  isProjectStoreActive,
++  projectStorePath,
++} from '../../src/resource/model-store.ts';
++
++let tempDir: string | undefined;
++
++afterEach(() => {
++  if (tempDir !== undefined) {
++    rmSync(tempDir, { recursive: true, force: true });
++    tempDir = undefined;
++  }
++});
++
++test('empty dir → isProjectStoreActive returns false', () => {
++  tempDir = mkdtempSync(join(tmpdir(), 'model-store-test-'));
++  expect(isProjectStoreActive(tempDir)).toBe(false);
++});
++
++test('dir with blobs subdir → isProjectStoreActive returns true', () => {
++  tempDir = mkdtempSync(join(tmpdir(), 'model-store-test-'));
++  mkdirSync(join(tempDir, 'blobs'));
++  expect(isProjectStoreActive(tempDir)).toBe(true);
++});
++
++test('dir with manifests subdir → isProjectStoreActive returns true', () => {
++  tempDir = mkdtempSync(join(tmpdir(), 'model-store-test-'));
++  mkdirSync(join(tempDir, 'manifests'));
++  expect(isProjectStoreActive(tempDir)).toBe(true);
++});
++
++test('projectStorePath ends with model-images', () => {
++  expect(projectStorePath().endsWith('model-images')).toBe(true);
++});

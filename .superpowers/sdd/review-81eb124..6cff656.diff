@@ -1,0 +1,370 @@
+# Review package: 81eb124..6cff656
+
+## Commits
+6cff656 feat(crew): runCrew dispatches sequential/hierarchical under crew.run
+
+## Files changed
+ docs/architecture.md            | 17 +++++----
+ src/crew/engine.ts              | 71 ++++++++++++++++++++++++++++++++++++++
+ src/workflow/run-step.ts        |  5 +--
+ tests/crew/engine.test.ts       | 76 +++++++++++++++++++++++++++++++++++++++++
+ tests/workflow/run-step.test.ts | 38 +++++++++++++++++++++
+ 5 files changed, 199 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 35992a6..a70c620 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -78,22 +78,24 @@ graph TD
+         runtrace["run-trace.ts"]
+     end
+     subgraph WF["Workflow · src/workflow"]
+         wftypes["types.ts · StepKind"]
+         wfdefine["define.ts · defineWorkflow"]
+         wfengine["engine.ts · runWorkflow"]
+         wfrunstep["run-step.ts · runStepByKind"]
+     end
+     subgraph CREW["Crew · src/crew"]
+         crewtypes["types.ts · CrewMember/Task/CrewProcess"]
++        crewdefine["define.ts · defineCrew"]
++        crewmember["member-agent.ts · buildCrewAgent"]
++        crewcompile["compile.ts · compileToWorkflow/buildHierarchicalOrchestrator"]
+         crewengine["engine.ts · runCrew"]
+-        crewrunner["runner.ts · roleDispatch"]
+     end
+     subgraph DATA["On-disk · git-ignored"]
+         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
+         images[("model-images/ + catalog.json")]
+     end
+     subgraph DECL["Declarations (pure data)"]
+         agents["agents/*"]
+         models["models/* · BOOTSTRAP"]
+         workflows["workflows/* · WORKFLOWS"]
+     end
+@@ -134,43 +136,46 @@ graph TD
+     flow --> wfengine
+     flow --> runstore
+     flow -. mounts .-> mcpclient
+     flow --> agents
+     flow --> workflows
+     wfengine --> wfrunstep
+     wfrunstep --> delegate
+     wfengine --> spans
+     wfrunstep --> spans
+     wfdefine --> wftypes
+-    crewengine --> crewrunner
+-    crewrunner --> sel
++    crewengine --> crewcompile
++    crewcompile --> crewmember
++    crewcompile --> wfdefine
++    crewmember --> sel
++    crewengine --> wfengine
++    crewengine --> orch
+     crewengine --> spans
+-    crewrunner --> spans
+-    crewengine --> delegate
++    crewdefine --> crewtypes
+     crewtypes --> wftypes
+     runstore --> spansfile
+ ```
+ 
+ | Layer | Files | Responsibility | Knows about |
+ |---|---|---|---|
+ | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
+ | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+ | **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
+ | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
+-| **Crew / Roles** | `src/crew/` | Team-of-agents orchestration layer (Slice 11): typed crew model + process definition (`types.ts`), execution engine for sequential/hierarchical teams (`engine.ts`), role-based agent selection and task dispatch (`runner.ts`) | `core/delegate.ts` + `workflow/engine.ts` + `resource/selector.ts` |
++| **Crew / Roles** | `src/crew/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`) | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+ ## 3. Runtime data flow (one `chat` run, current)
+ 
+ ```mermaid
+ sequenceDiagram
+     actor User
+diff --git a/src/crew/engine.ts b/src/crew/engine.ts
+new file mode 100644
+index 0000000..3077a56
+--- /dev/null
++++ b/src/crew/engine.ts
+@@ -0,0 +1,71 @@
++import type { ToolSet } from 'ai';
++import type { Agent } from '../core/agent-def.ts';
++import type { BeforeDelegate } from '../core/delegate.ts';
++import { runOrchestrator } from '../core/orchestrator.ts';
++import { withCrewSpan } from '../telemetry/spans.ts';
++import {
++  defaultRunAgentStep,
++  runWorkflow,
++  type WorkflowDeps,
++} from '../workflow/engine.ts';
++import { buildHierarchicalOrchestrator, compileToWorkflow } from './compile.ts';
++import { buildCrewAgent } from './member-agent.ts';
++import { type CrewDef, type CrewOutcome, CrewProcess } from './types.ts';
++
++export type CrewDeps = {
++  runAgentStep?: WorkflowDeps['runAgentStep'];
++  tools: ToolSet;
++  maxParallel?: number;
++  onBeforeDelegate?: BeforeDelegate;
++};
++
++/** Build the crew's member agents keyed by name (for the sequential agent map). */
++export function crewAgentMap(
++  crew: CrewDef,
++  tools: ToolSet,
++): Record<string, Agent> {
++  const map: Record<string, Agent> = {};
++  for (const member of crew.members) {
++    map[member.name] = buildCrewAgent(member, member.tools ?? tools);
++  }
++  return map;
++}
++
++/** Run a crew: sequential -> the Slice-10 workflow engine; hierarchical -> the
++ *  orchestrator. Wrapped in a crew.run span; never throws into the caller. */
++export function runCrew(
++  def: CrewDef,
++  input: unknown,
++  deps: CrewDeps,
++): Promise<CrewOutcome> {
++  return withCrewSpan(def.id, def.process, async () => {
++    if (def.process === CrewProcess.Sequential) {
++      const wf = compileToWorkflow(def);
++      const runAgentStep =
++        deps.runAgentStep ??
++        defaultRunAgentStep(
++          crewAgentMap(def, deps.tools),
++          deps.onBeforeDelegate,
++        );
++      const outcome = await runWorkflow(wf, input, {
++        runAgentStep,
++        tools: deps.tools,
++        maxParallel: deps.maxParallel,
++      });
++      if (outcome.kind === 'done')
++        return { kind: 'done', output: outcome.output };
++      return {
++        kind: 'failed',
++        failedTask: outcome.failedStep,
++        message: outcome.message,
++      };
++    }
++
++    // Hierarchical: the orchestrator is the manager.
++    const orch = buildHierarchicalOrchestrator(def, deps.onBeforeDelegate);
++    const task = `${String(input)}\n\nComplete the crew's tasks by delegating to your members.`;
++    const result = await runOrchestrator(orch, task);
++    if (result.kind === 'answer') return { kind: 'done', output: result.text };
++    return { kind: 'failed', message: result.message };
++  });
++}
+diff --git a/src/workflow/run-step.ts b/src/workflow/run-step.ts
+index 0794108..41092f1 100644
+--- a/src/workflow/run-step.ts
++++ b/src/workflow/run-step.ts
+@@ -1,13 +1,13 @@
+ import type { ToolSet } from 'ai';
+ import type { Agent } from '../core/agent-def.ts';
+-import { runGuardedAgent } from '../core/delegate.ts';
++import { type BeforeDelegate, runGuardedAgent } from '../core/delegate.ts';
+ import { WorkflowError } from '../core/errors.ts';
+ import { ATTR, annotateStep } from '../telemetry/spans.ts';
+ import {
+   type MapSubStep,
+   type Step,
+   StepKind,
+   type WorkflowContext,
+ } from './types.ts';
+ 
+ /** Conservative thrash-avoidance hint; the model manager's live-RAM budget is the
+@@ -24,25 +24,26 @@ export type WorkflowDeps = {
+   tools: ToolSet;
+   /** Engine-wide concurrency cap; defaults to DEFAULT_MAX_PARALLEL. */
+   maxParallel?: number;
+ };
+ 
+ /** Default runAgentStep: resolve the agent by name, run it through the shared
+  *  guarded path; a guard/agent error becomes a thrown WorkflowError (the engine
+  *  then applies the step's onError policy). */
+ export function defaultRunAgentStep(
+   agents: Record<string, Agent>,
++  onBeforeDelegate?: BeforeDelegate,
+ ): WorkflowDeps['runAgentStep'] {
+   return async (agentName, task) => {
+     const agent = agents[agentName];
+     if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
+-    const result = await runGuardedAgent(agent, task);
++    const result = await runGuardedAgent(agent, task, onBeforeDelegate);
+     if ('error' in result) throw new WorkflowError(result.error);
+     return result.text;
+   };
+ }
+ 
+ /** Bounded-concurrency map preserving input order. */
+ export async function mapWithConcurrency<T, R>(
+   items: T[],
+   limit: number,
+   fn: (item: T, i: number) => Promise<R>,
+diff --git a/tests/crew/engine.test.ts b/tests/crew/engine.test.ts
+new file mode 100644
+index 0000000..eb77b03
+--- /dev/null
++++ b/tests/crew/engine.test.ts
+@@ -0,0 +1,76 @@
++import { describe, expect, it } from 'bun:test';
++import { z } from 'zod';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { runCrew } from '../../src/crew/engine.ts';
++import { type CrewDef, CrewProcess } from '../../src/crew/types.ts';
++
++const seqCrew: CrewDef = {
++  id: 'c',
++  process: CrewProcess.Sequential,
++  members: [
++    {
++      name: 'a',
++      role: 'A',
++      goal: 'g',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++    {
++      name: 'b',
++      role: 'B',
++      goal: 'g',
++      backstory: 'b',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
++  ],
++  tasks: [
++    {
++      id: 't1',
++      description: 'do first',
++      expectedOutput: 'x',
++      member: 'a',
++      output: z.string(),
++    },
++    {
++      id: 't2',
++      description: 'do second',
++      expectedOutput: 'y',
++      member: 'b',
++      output: z.string(),
++    },
++  ],
++};
++
++describe('runCrew (sequential)', () => {
++  it('threads task output as context to the next task', async () => {
++    const seen: string[] = [];
++    const outcome = await runCrew(seqCrew, 'topic', {
++      tools: {},
++      // stub the agent runner: echo which member + whether it saw upstream context
++      runAgentStep: async (member, task) => {
++        seen.push(member);
++        return `${member}:${task.includes('t1') ? 'saw-t1' : 'root'}`;
++      },
++    });
++    expect(outcome.kind).toBe('done');
++    if (outcome.kind === 'done') {
++      const out = outcome.output as Record<string, unknown>;
++      expect(out.t1).toBe('a:root');
++      expect(out.t2).toBe('b:saw-t1'); // t2's prompt embedded t1's output under "Context from \"t1\""
++    }
++    expect(seen).toEqual(['a', 'b']);
++  });
++
++  it('reports a failed task via the outcome', async () => {
++    const outcome = await runCrew(seqCrew, 'topic', {
++      tools: {},
++      runAgentStep: async (member) => {
++        if (member === 'b') throw new Error('boom');
++        return 'ok';
++      },
++    });
++    expect(outcome).toMatchObject({ kind: 'failed', failedTask: 't2' });
++  });
++});
+diff --git a/tests/workflow/run-step.test.ts b/tests/workflow/run-step.test.ts
+index c1946bd..98b87a2 100644
+--- a/tests/workflow/run-step.test.ts
++++ b/tests/workflow/run-step.test.ts
+@@ -1,14 +1,17 @@
+ import { describe, expect, it } from 'bun:test';
++import { MockLanguageModelV3 } from 'ai/test';
+ import { z } from 'zod';
++import type { Agent } from '../../src/core/agent-def.ts';
+ import {
+   DEFAULT_MAX_PARALLEL,
++  defaultRunAgentStep,
+   runStepByKind,
+   type WorkflowDeps,
+ } from '../../src/workflow/run-step.ts';
+ import { StepKind } from '../../src/workflow/types.ts';
+ 
+ const baseDeps = (over: Partial<WorkflowDeps> = {}): WorkflowDeps => ({
+   runAgentStep: async (_a, task) => `ran:${task}`,
+   tools: {},
+   ...over,
+ });
+@@ -85,10 +88,45 @@ describe('runStepByKind', () => {
+       {},
+       baseDeps(),
+     );
+     expect(out).toEqual(['ran:n=1', 'ran:n=2', 'ran:n=3']);
+   });
+ 
+   it('exposes a conservative default concurrency cap', () => {
+     expect(DEFAULT_MAX_PARALLEL).toBeGreaterThanOrEqual(1);
+   });
+ });
++
++describe('defaultRunAgentStep', () => {
++  it('threads onBeforeDelegate into the guarded agent run', async () => {
++    const seen: string[] = [];
++    const agent: Agent = {
++      name: 'web_fetch',
++      description: 'fetches',
++      model: new MockLanguageModelV3({
++        doGenerate: async () => ({
++          content: [{ type: 'text', text: 'done' }],
++          finishReason: { unified: 'stop', raw: undefined },
++          usage: {
++            inputTokens: {
++              total: 1,
++              noCache: undefined,
++              cacheRead: undefined,
++              cacheWrite: undefined,
++            },
++            outputTokens: { total: 1, text: undefined, reasoning: undefined },
++          },
++          warnings: [],
++        }),
++      }),
++      systemPrompt: 's',
++      tools: {},
++    };
++    const onBeforeDelegate = async (a: Agent) => {
++      seen.push(a.name);
++    };
++    const run = defaultRunAgentStep({ web_fetch: agent }, onBeforeDelegate);
++    const out = await run('web_fetch', 'do it');
++    expect(out).toBe('done');
++    expect(seen).toEqual(['web_fetch']);
++  });
++});

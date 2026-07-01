@@ -1,0 +1,424 @@
+# Review package: a729106..9600aa4
+
+## Commits
+9600aa4 fix(telemetry): flush spans on shutdown + re-init-safe provider swap
+99fb1d7 feat(telemetry): semantic span helpers + ATTR keys (run/delegation/model)
+
+## Files changed
+ src/telemetry/jsonl-exporter.ts        |  21 +++--
+ src/telemetry/provider.ts              |   1 +
+ src/telemetry/spans.ts                 | 150 +++++++++++++++++++++++++++++++++
+ tests/helpers/otel-test-provider.ts    |  29 +++++++
+ tests/telemetry/jsonl-exporter.test.ts |  14 +++
+ tests/telemetry/provider.test.ts       |  15 +++-
+ tests/telemetry/spans.test.ts          |  50 +++++++++++
+ 7 files changed, 272 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/src/telemetry/jsonl-exporter.ts b/src/telemetry/jsonl-exporter.ts
+index 8e162ce..872ddad 100644
+--- a/src/telemetry/jsonl-exporter.ts
++++ b/src/telemetry/jsonl-exporter.ts
+@@ -41,26 +41,37 @@ function toRecord(span: ReadableSpan): SpanRecord {
+     events: span.events.map((e) => ({
+       name: e.name,
+       timeUnixNano: hrTimeToMicroseconds(e.time) * 1000,
+       attributes: e.attributes ? { ...e.attributes } : undefined,
+     })),
+   };
+ }
+ 
+ /** Best-effort local span sink. Never throws into the run. */
+ export class JsonlFileExporter implements SpanExporter {
++  private writeChain: Promise<void> = Promise.resolve();
++
+   constructor(private readonly filePath: string) {}
+ 
+   export(
+     spans: ReadableSpan[],
+     resultCallback: (result: ExportResult) => void,
+   ): void {
+     const payload = `${spans.map((s) => JSON.stringify(toRecord(s))).join('\n')}\n`;
+-    appendFile(this.filePath, payload)
+-      .then(() => resultCallback({ code: ExportResultCode.SUCCESS }))
+-      .catch((error: Error) =>
++    this.writeChain = this.writeChain.then(() =>
++      appendFile(this.filePath, payload),
++    );
++    this.writeChain.then(
++      () => resultCallback({ code: ExportResultCode.SUCCESS }),
++      (error: Error) =>
+         resultCallback({ code: ExportResultCode.FAILED, error }),
+-      );
++    );
++  }
++
++  async forceFlush(): Promise<void> {
++    await this.writeChain.catch(() => {});
+   }
+ 
+-  async shutdown(): Promise<void> {}
++  async shutdown(): Promise<void> {
++    await this.writeChain.catch(() => {});
++  }
+ }
+diff --git a/src/telemetry/provider.ts b/src/telemetry/provider.ts
+index 1da9a57..f4f06d3 100644
+--- a/src/telemetry/provider.ts
++++ b/src/telemetry/provider.ts
+@@ -42,17 +42,18 @@ export function initRunTelemetry(runDir: string): {
+       [ATTR_SERVICE_NAME]: 'local-agent-framework',
+     }),
+     spanProcessors: buildProcessors(join(runDir, 'spans.jsonl')),
+   });
+   if (!contextManagerSet) {
+     context.setGlobalContextManager(
+       new AsyncLocalStorageContextManager().enable(),
+     );
+     contextManagerSet = true;
+   }
++  trace.disable();
+   trace.setGlobalTracerProvider(provider);
+   return {
+     shutdown: async () => {
+       await provider.shutdown();
+     },
+   };
+ }
+diff --git a/src/telemetry/spans.ts b/src/telemetry/spans.ts
+new file mode 100644
+index 0000000..8147ba6
+--- /dev/null
++++ b/src/telemetry/spans.ts
+@@ -0,0 +1,150 @@
++import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
++import { recordIoEnabled } from './provider.ts';
++
++export const ATTR = {
++  RUN_ID: 'agent.run.id',
++  TASK: 'agent.task',
++  OUTCOME: 'agent.outcome',
++  GAP_MISSING: 'agent.gap.missing_capability',
++  DELEGATION_TARGET: 'agent.delegation.target',
++  MODEL_ID: 'gen_ai.request.model',
++  MODEL_PROVIDER: 'gen_ai.provider.name',
++  MODEL_PARAMS_B: 'model.params_billions',
++  MODEL_NUM_CTX: 'model.num_ctx',
++  MODEL_REQUESTED_CTX: 'model.requested_num_ctx',
++  MODEL_WEIGHTS_BYTES: 'model.weights_bytes',
++  MODEL_KV_F16_PER_TOKEN: 'model.kv_f16_bytes_per_token',
++  MODEL_KV_BYTES_PER_TOKEN: 'model.kv_bytes_per_token',
++  MODEL_KV_CACHE_TYPE: 'model.kv_cache_type',
++  MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
++  MODEL_BUDGET_BYTES: 'model.budget_bytes',
++  MODEL_SIZE_BYTES: 'model.size_bytes',
++  EVICT_REASON: 'model.evict.reason',
++} as const;
++
++export type ModelSelectInfo = {
++  modelId: string;
++  provider: string;
++  numCtx: number;
++  paramsBillions?: number;
++};
++
++export type ModelLoadInfo = {
++  weightsBytes: number;
++  kvF16PerToken: number;
++  kvEffectivePerToken: number;
++  kvCacheType: string;
++  chosenCtx: number;
++  requestedCtx: number;
++  footprintBytes: number;
++  budgetBytes: number;
++};
++
++const tracer = () => trace.getTracer('agent');
++
++async function inSpan<T>(
++  name: string,
++  fn: (span: Span) => Promise<T>,
++): Promise<T> {
++  return tracer().startActiveSpan(name, async (span) => {
++    try {
++      return await fn(span);
++    } catch (err) {
++      span.setStatus({
++        code: SpanStatusCode.ERROR,
++        message: (err as Error).message,
++      });
++      throw err;
++    } finally {
++      span.end();
++    }
++  });
++}
++
++export function withRunSpan<T>(
++  runId: string,
++  task: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('agent.run', async (span) => {
++    span.setAttribute(ATTR.RUN_ID, runId);
++    if (recordIoEnabled()) span.setAttribute(ATTR.TASK, task);
++    return fn();
++  });
++}
++
++export function setRunOutcome(result: {
++  kind: string;
++  message?: string;
++  missingCapability?: string;
++}): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.setAttribute(ATTR.OUTCOME, result.kind);
++  if (result.kind === 'gap' && result.missingCapability) {
++    span.setAttribute(ATTR.GAP_MISSING, result.missingCapability);
++  }
++  if (result.kind === 'resource') {
++    span.setStatus({
++      code: SpanStatusCode.ERROR,
++      message: result.message ?? 'resource error',
++    });
++  }
++}
++
++export function withDelegationSpan<T>(
++  target: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('agent.delegation', async (span) => {
++    span.setAttribute(ATTR.DELEGATION_TARGET, target);
++    return fn();
++  });
++}
++
++export function recordModelSelect(info: ModelSelectInfo): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.addEvent('agent.model.select', {
++    [ATTR.MODEL_ID]: info.modelId,
++    [ATTR.MODEL_PROVIDER]: info.provider,
++    'gen_ai.system': info.provider,
++    [ATTR.MODEL_NUM_CTX]: info.numCtx,
++    ...(info.paramsBillions !== undefined
++      ? { [ATTR.MODEL_PARAMS_B]: info.paramsBillions }
++      : {}),
++  });
++}
++
++export function withModelLoadSpan<T>(
++  modelId: string,
++  info: ModelLoadInfo,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('agent.model.load', async (span) => {
++    span.setAttribute(ATTR.MODEL_ID, modelId);
++    span.setAttribute(ATTR.MODEL_WEIGHTS_BYTES, info.weightsBytes);
++    span.setAttribute(ATTR.MODEL_KV_F16_PER_TOKEN, info.kvF16PerToken);
++    span.setAttribute(ATTR.MODEL_KV_BYTES_PER_TOKEN, info.kvEffectivePerToken);
++    span.setAttribute(ATTR.MODEL_KV_CACHE_TYPE, info.kvCacheType);
++    span.setAttribute(ATTR.MODEL_NUM_CTX, info.chosenCtx);
++    span.setAttribute(ATTR.MODEL_REQUESTED_CTX, info.requestedCtx);
++    span.setAttribute(ATTR.MODEL_FOOTPRINT_BYTES, info.footprintBytes);
++    span.setAttribute(ATTR.MODEL_BUDGET_BYTES, info.budgetBytes);
++    return fn();
++  });
++}
++
++export function recordEvict(
++  modelId: string,
++  sizeBytes: number,
++  reason: string,
++): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.addEvent('agent.model.evict', {
++    [ATTR.MODEL_ID]: modelId,
++    [ATTR.MODEL_SIZE_BYTES]: sizeBytes,
++    [ATTR.EVICT_REASON]: reason,
++  });
++}
+diff --git a/tests/helpers/otel-test-provider.ts b/tests/helpers/otel-test-provider.ts
+new file mode 100644
+index 0000000..ed277d9
+--- /dev/null
++++ b/tests/helpers/otel-test-provider.ts
+@@ -0,0 +1,29 @@
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++
++let contextManagerSet = false;
++
++/** Register a fresh InMemory-backed global provider for a test (public API, swappable). */
++export function registerTestProvider(): {
++  exporter: InMemorySpanExporter;
++  provider: BasicTracerProvider;
++} {
++  const exporter = new InMemorySpanExporter();
++  const provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(exporter)],
++  });
++  if (!contextManagerSet) {
++    context.setGlobalContextManager(
++      new AsyncLocalStorageContextManager().enable(),
++    );
++    contextManagerSet = true;
++  }
++  trace.disable();
++  trace.setGlobalTracerProvider(provider);
++  return { exporter, provider };
++}
+diff --git a/tests/telemetry/jsonl-exporter.test.ts b/tests/telemetry/jsonl-exporter.test.ts
+index bce9f07..8ef1e01 100644
+--- a/tests/telemetry/jsonl-exporter.test.ts
++++ b/tests/telemetry/jsonl-exporter.test.ts
+@@ -33,10 +33,24 @@ test('writes one JSON line per ended span with parent linkage', async () => {
+     .filter((l) => l.length > 0);
+   expect(lines.length).toBe(1);
+   const rec = JSON.parse(lines[0] as string) as SpanRecord;
+   expect(rec.name).toBe('parent');
+   expect(rec.parentSpanId).toBeNull();
+   expect(rec.traceId).toHaveLength(32);
+   expect(rec.spanId).toHaveLength(16);
+   expect(rec.attributes.k).toBe('v');
+   expect(typeof rec.durationMs).toBe('number');
+ });
++
++test('shutdown flushes in-flight writes before returning', async () => {
++  const file = join(dir, 'spans.jsonl');
++  const provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(new JsonlFileExporter(file))],
++  });
++  const tracer = provider.getTracer('test');
++  const span = tracer.startSpan('flush-check');
++  span.end();
++  // Do NOT sleep — shutdown must await the pending write
++  await provider.shutdown();
++  const raw = await readFile(file, 'utf8');
++  expect(raw).toContain('"name":"flush-check"');
++});
+diff --git a/tests/telemetry/provider.test.ts b/tests/telemetry/provider.test.ts
+index ec3a45e..b5d7d55 100644
+--- a/tests/telemetry/provider.test.ts
++++ b/tests/telemetry/provider.test.ts
+@@ -3,44 +3,53 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { trace } from '@opentelemetry/api';
+ import {
+   buildProcessors,
+   initRunTelemetry,
+   recordIoEnabled,
+ } from '../../src/telemetry/provider.ts';
+ 
+ let dir: string;
++let dir2: string;
+ beforeEach(async () => {
+   dir = await mkdtemp(join(tmpdir(), 'prov-'));
++  dir2 = await mkdtemp(join(tmpdir(), 'prov2-'));
+ });
+ afterEach(async () => {
+   delete process.env.AGENT_OTLP_ENDPOINT;
+   delete process.env.AGENT_TELEMETRY_RECORD_IO;
+   await rm(dir, { recursive: true, force: true });
++  await rm(dir2, { recursive: true, force: true });
+ });
+ 
+ test('initRunTelemetry registers a provider that writes spans.jsonl', async () => {
+   const tel = initRunTelemetry(dir);
+   const span = trace.getTracer('t').startSpan('hello');
+   span.end();
+   await tel.shutdown();
+   const raw = await readFile(join(dir, 'spans.jsonl'), 'utf8');
+   expect(raw).toContain('"name":"hello"');
+ });
+ 
+-test('initRunTelemetry is idempotent across runs (re-register ok)', async () => {
++test('initRunTelemetry re-init swaps the provider so second run writes to its own file', async () => {
+   const a = initRunTelemetry(dir);
+   await a.shutdown();
+-  const b = initRunTelemetry(dir);
++
++  const b = initRunTelemetry(dir2);
++  const span = trace.getTracer('t').startSpan('second-run-span');
++  span.end();
+   await b.shutdown();
+-  expect(true).toBe(true); // no throw on second context-manager registration
++
++  // The span must appear in dir2's file (the re-init swapped the provider)
++  const raw = await readFile(join(dir2, 'spans.jsonl'), 'utf8');
++  expect(raw).toContain('"name":"second-run-span"');
+ });
+ 
+ test('buildProcessors adds OTLP only when AGENT_OTLP_ENDPOINT is set', () => {
+   expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(1);
+   process.env.AGENT_OTLP_ENDPOINT = 'http://localhost:4318/v1/traces';
+   expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(2);
+ });
+ 
+ test('recordIoEnabled defaults true, off when set to 0', () => {
+   expect(recordIoEnabled()).toBe(true);
+diff --git a/tests/telemetry/spans.test.ts b/tests/telemetry/spans.test.ts
+new file mode 100644
+index 0000000..6b86701
+--- /dev/null
++++ b/tests/telemetry/spans.test.ts
+@@ -0,0 +1,50 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import type {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++} from '@opentelemetry/sdk-trace-base';
++import {
++  ATTR,
++  recordEvict,
++  setRunOutcome,
++  withDelegationSpan,
++  withRunSpan,
++} from '../../src/telemetry/spans.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++
++let exporter: InMemorySpanExporter;
++let provider: BasicTracerProvider;
++beforeEach(() => {
++  ({ exporter, provider } = registerTestProvider());
++});
++afterEach(async () => {
++  await provider.shutdown();
++  exporter.reset();
++});
++
++test('delegation span nests under the run span (Bun ALS context propagation)', async () => {
++  await withRunSpan('run-x', 'do a thing', async () => {
++    setRunOutcome({ kind: 'answer' });
++    await withDelegationSpan('file_qa', async () => {
++      recordEvict('old:model', 123, 'lru-fit');
++    });
++  });
++  const spans = exporter.getFinishedSpans();
++  const run = spans.find((s) => s.name === 'agent.run');
++  const del = spans.find((s) => s.name === 'agent.delegation');
++  expect(run).toBeDefined();
++  expect(del).toBeDefined();
++  expect(del?.parentSpanContext?.spanId).toBe(run?.spanContext().spanId);
++  expect(run?.attributes[ATTR.RUN_ID]).toBe('run-x');
++  expect(run?.attributes[ATTR.OUTCOME]).toBe('answer');
++  expect(del?.attributes[ATTR.DELEGATION_TARGET]).toBe('file_qa');
++  expect(del?.events.find((e) => e.name === 'agent.model.evict')).toBeDefined();
++});
++
++test('resource outcome sets ERROR status on the run span', async () => {
++  await withRunSpan('run-y', 'x', async () => {
++    setRunOutcome({ kind: 'resource', message: 'no fit' });
++  });
++  const run = exporter.getFinishedSpans().find((s) => s.name === 'agent.run');
++  expect(run?.status.code).toBe(2); // SpanStatusCode.ERROR
++});

@@ -1,0 +1,174 @@
+# Review package: 3bd5472..ec84973
+
+## Commits
+ec84973 feat(resource): warm with num_ctx + live getModelMaxContext probe
+
+## Files changed
+ src/resource/ollama-control.ts        | 38 ++++++++++++++++++++++++++--
+ tests/resource/ollama-control.test.ts | 47 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 83 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/resource/ollama-control.ts b/src/resource/ollama-control.ts
+index df6d20a..5103990 100644
+--- a/src/resource/ollama-control.ts
++++ b/src/resource/ollama-control.ts
+@@ -2,20 +2,22 @@ import { ProviderError } from '../core/errors.ts';
+ 
+ const DEFAULT_BASE_URL = 'http://localhost:11434';
+ 
+ type TagsResponse = { models?: Array<{ name: string }> };
+ 
+ /** A model currently resident in Ollama, with its memory footprint. */
+ export type LoadedModel = { name: string; sizeBytes: number };
+ 
+ type PsResponse = { models?: Array<{ name: string; size: number }> };
+ 
++type ShowResponse = { model_info?: Record<string, unknown> };
++
+ async function postJson(
+   baseUrl: string,
+   path: string,
+   body: Record<string, unknown>,
+ ): Promise<void> {
+   let res: Response;
+   try {
+     res = await fetch(`${baseUrl}${path}`, {
+       method: 'POST',
+       headers: { 'content-type': 'application/json' },
+@@ -48,26 +50,58 @@ export async function isModelInstalled(
+ }
+ 
+ /** Pull a model (blocking, non-streamed). Write field is `model`. */
+ export function pullModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/pull', { model, stream: false });
+ }
+ 
+-/** Warm/preload a model into memory with an empty-prompt generate. */
++/** Warm/preload a model into memory, optionally reserving a context window. */
+ export function warmModel(
+   model: string,
++  numCtx?: number,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+-  return postJson(baseUrl, '/api/generate', { model, stream: false });
++  const body: Record<string, unknown> = { model, stream: false };
++  if (numCtx !== undefined) body.options = { num_ctx: numCtx };
++  return postJson(baseUrl, '/api/generate', body);
++}
++
++/**
++ * The model's true maximum context window, read live from `POST /api/show`
++ * (`model_info["<arch>.context_length"]`). Returns undefined if not reported.
++ */
++export async function getModelMaxContext(
++  model: string,
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<number | undefined> {
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/show`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ model }),
++    });
++  } catch (cause) {
++    throw new ProviderError('Ollama /api/show failed', { cause });
++  }
++  if (!res.ok) {
++    throw new ProviderError(`Ollama /api/show returned ${res.status}`);
++  }
++  const data = (await res.json()) as ShowResponse;
++  const info = data.model_info ?? {};
++  const arch = info['general.architecture'];
++  if (typeof arch !== 'string') return undefined;
++  const ctx = info[`${arch}.context_length`];
++  return typeof ctx === 'number' ? ctx : undefined;
+ }
+ 
+ /** Unload a model from memory immediately (keep_alive: 0). */
+ export function unloadModel(
+   model: string,
+   baseUrl: string = DEFAULT_BASE_URL,
+ ): Promise<void> {
+   return postJson(baseUrl, '/api/generate', {
+     model,
+     keep_alive: 0,
+diff --git a/tests/resource/ollama-control.test.ts b/tests/resource/ollama-control.test.ts
+index c74c802..04a0c9e 100644
+--- a/tests/resource/ollama-control.test.ts
++++ b/tests/resource/ollama-control.test.ts
+@@ -1,12 +1,13 @@
+ import { afterEach, expect, spyOn, test } from 'bun:test';
+ import {
++  getModelMaxContext,
+   isModelInstalled,
+   listLoadedModels,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../../src/resource/ollama-control.ts';
+ 
+ afterEach(() => {
+   (globalThis.fetch as unknown as { mockRestore?: () => void }).mockRestore?.();
+ });
+@@ -85,10 +86,56 @@ test('listLoadedModels maps /api/ps name + size to LoadedModel[]', async () => {
+     'http://localhost:11434/api/ps',
+   );
+ });
+ 
+ test('listLoadedModels returns [] when nothing is loaded', async () => {
+   spyOn(globalThis, 'fetch').mockResolvedValue(
+     new Response(JSON.stringify({ models: [] }), { status: 200 }),
+   );
+   expect(await listLoadedModels()).toEqual([]);
+ });
++
++test('warmModel includes options.num_ctx when a context is given', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({}), { status: 200 }),
++  );
++  await warmModel('m', 8192);
++  const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
++  const body = JSON.parse(init.body as string) as Record<string, unknown>;
++  expect(body).toMatchObject({ model: 'm', stream: false });
++  expect((body.options as { num_ctx: number }).num_ctx).toBe(8192);
++});
++
++test('warmModel omits options when no context is given', async () => {
++  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(JSON.stringify({}), { status: 200 }),
++  );
++  await warmModel('m');
++  const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
++  const body = JSON.parse(init.body as string) as Record<string, unknown>;
++  expect(body.options).toBeUndefined();
++});
++
++test('getModelMaxContext reads model_info architecture context_length', async () => {
++  spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(
++      JSON.stringify({
++        model_info: {
++          'general.architecture': 'qwen35',
++          'qwen35.context_length': 262144,
++        },
++      }),
++      { status: 200 },
++    ),
++  );
++  expect(await getModelMaxContext('qwen3.5:4b')).toBe(262144);
++});
++
++test('getModelMaxContext returns undefined when the field is absent', async () => {
++  spyOn(globalThis, 'fetch').mockResolvedValue(
++    new Response(
++      JSON.stringify({ model_info: { 'general.architecture': 'qwen35' } }),
++      { status: 200 },
++    ),
++  );
++  expect(await getModelMaxContext('qwen3.5:4b')).toBeUndefined();
++});

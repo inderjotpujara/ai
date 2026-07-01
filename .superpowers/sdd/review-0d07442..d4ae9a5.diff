@@ -1,0 +1,170 @@
+# Review package: 0d07442..d4ae9a5
+
+## Commits
+d4ae9a5 feat(telemetry): guardrail violation event + delegation depth/ancestors attrs
+
+## Files changed
+ src/telemetry/spans.ts        | 22 ++++++++++++++++++++++
+ tests/telemetry/spans.test.ts | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+
+## Diff
+diff --git a/src/telemetry/spans.ts b/src/telemetry/spans.ts
+index 319c875..8536c56 100644
+--- a/src/telemetry/spans.ts
++++ b/src/telemetry/spans.ts
+@@ -1,11 +1,12 @@
+ import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
++import { currentDelegationContext } from '../core/guardrails.ts';
+ import { recordIoEnabled } from './provider.ts';
+ 
+ export const ATTR = {
+   RUN_ID: 'agent.run.id',
+   TASK: 'agent.task',
+   OUTCOME: 'agent.outcome',
+   GAP_MISSING: 'agent.gap.missing_capability',
+   DELEGATION_TARGET: 'agent.delegation.target',
+   MODEL_ID: 'gen_ai.request.model',
+   MODEL_PROVIDER: 'gen_ai.provider.name',
+@@ -15,20 +16,23 @@ export const ATTR = {
+   MODEL_WEIGHTS_BYTES: 'model.weights_bytes',
+   MODEL_KV_F16_PER_TOKEN: 'model.kv_f16_bytes_per_token',
+   MODEL_KV_BYTES_PER_TOKEN: 'model.kv_bytes_per_token',
+   MODEL_KV_CACHE_TYPE: 'model.kv_cache_type',
+   MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
+   MODEL_BUDGET_BYTES: 'model.budget_bytes',
+   MODEL_SIZE_BYTES: 'model.size_bytes',
+   EVICT_REASON: 'model.evict.reason',
+   USAGE_INPUT_TOKENS: 'gen_ai.usage.input_tokens',
+   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
++  GUARDRAIL_TYPE: 'agent.guardrail.type',
++  DELEGATION_DEPTH: 'agent.delegation.depth',
++  DELEGATION_ANCESTORS: 'agent.delegation.ancestors',
+ } as const;
+ 
+ export type ModelSelectInfo = {
+   modelId: string;
+   provider: string;
+   numCtx: number;
+   paramsBillions?: number;
+ };
+ 
+ export type ModelLoadInfo = {
+@@ -92,21 +96,27 @@ export function setRunOutcome(result: {
+       message: result.message ?? 'resource error',
+     });
+   }
+ }
+ 
+ export function withDelegationSpan<T>(
+   target: string,
+   fn: () => Promise<T>,
+ ): Promise<T> {
+   return inSpan('agent.delegation', async (span) => {
++    const { depth, ancestors } = currentDelegationContext();
+     span.setAttribute(ATTR.DELEGATION_TARGET, target);
++    span.setAttribute(ATTR.DELEGATION_DEPTH, depth + 1);
++    span.setAttribute(
++      ATTR.DELEGATION_ANCESTORS,
++      [...ancestors, target].join(' → '),
++    );
+     return fn();
+   });
+ }
+ 
+ export function recordModelSelect(info: ModelSelectInfo): void {
+   const span = trace.getActiveSpan();
+   if (!span) return;
+   span.addEvent('agent.model.select', {
+     [ATTR.MODEL_ID]: info.modelId,
+     [ATTR.MODEL_PROVIDER]: info.provider,
+@@ -143,10 +153,22 @@ export function recordEvict(
+   reason: string,
+ ): void {
+   const span = trace.getActiveSpan();
+   if (!span) return;
+   span.addEvent('agent.model.evict', {
+     [ATTR.MODEL_ID]: modelId,
+     [ATTR.MODEL_SIZE_BYTES]: sizeBytes,
+     [ATTR.EVICT_REASON]: reason,
+   });
+ }
++
++export function recordGuardrailViolation(
++  type: 'depth_exceeded',
++  detail: string,
++): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.addEvent('agent.guardrail.violation', {
++    [ATTR.GUARDRAIL_TYPE]: type,
++    'agent.guardrail.detail': detail,
++  });
++}
+diff --git a/tests/telemetry/spans.test.ts b/tests/telemetry/spans.test.ts
+index 6b86701..f40ae9d 100644
+--- a/tests/telemetry/spans.test.ts
++++ b/tests/telemetry/spans.test.ts
+@@ -1,18 +1,20 @@
+ import { afterEach, beforeEach, expect, test } from 'bun:test';
+ import type {
+   BasicTracerProvider,
+   InMemorySpanExporter,
+ } from '@opentelemetry/sdk-trace-base';
++import { runInDelegationContext } from '../../src/core/guardrails.ts';
+ import {
+   ATTR,
+   recordEvict,
++  recordGuardrailViolation,
+   setRunOutcome,
+   withDelegationSpan,
+   withRunSpan,
+ } from '../../src/telemetry/spans.ts';
+ import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ let exporter: InMemorySpanExporter;
+ let provider: BasicTracerProvider;
+ beforeEach(() => {
+   ({ exporter, provider } = registerTestProvider());
+@@ -41,10 +43,41 @@ test('delegation span nests under the run span (Bun ALS context propagation)', a
+   expect(del?.events.find((e) => e.name === 'agent.model.evict')).toBeDefined();
+ });
+ 
+ test('resource outcome sets ERROR status on the run span', async () => {
+   await withRunSpan('run-y', 'x', async () => {
+     setRunOutcome({ kind: 'resource', message: 'no fit' });
+   });
+   const run = exporter.getFinishedSpans().find((s) => s.name === 'agent.run');
+   expect(run?.status.code).toBe(2); // SpanStatusCode.ERROR
+ });
++
++test('withDelegationSpan tags delegation depth and ancestors', async () => {
++  const { exporter: localExporter, provider: localProvider } =
++    registerTestProvider();
++  await runInDelegationContext('A', undefined, () =>
++    withDelegationSpan('B', async () => {}),
++  );
++  const span = localExporter
++    .getFinishedSpans()
++    .find((s) => s.name === 'agent.delegation');
++  expect(span?.attributes['agent.delegation.depth']).toBe(2); // inside A (depth1) → entering B → depth 2
++  expect(span?.attributes['agent.delegation.ancestors']).toBe('A → B');
++  localExporter.reset();
++  await localProvider.shutdown();
++});
++
++test('recordGuardrailViolation adds a guardrail event to the active span', async () => {
++  const { exporter: localExporter, provider: localProvider } =
++    registerTestProvider();
++  await withDelegationSpan('X', async () => {
++    recordGuardrailViolation('depth_exceeded', 'too deep');
++  });
++  const span = localExporter
++    .getFinishedSpans()
++    .find((s) => s.name === 'agent.delegation');
++  const ev = span?.events.find((e) => e.name === 'agent.guardrail.violation');
++  expect(ev).toBeDefined();
++  expect(ev?.attributes?.['agent.guardrail.type']).toBe('depth_exceeded');
++  localExporter.reset();
++  await localProvider.shutdown();
++});

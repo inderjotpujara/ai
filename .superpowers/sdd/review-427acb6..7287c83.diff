@@ -1,0 +1,105 @@
+# Review package: 427acb6..7287c83
+
+## Commits
+7287c83 test(integration): opt-in live tests for fetch mount + web routing (auto-skip)
+
+## Files changed
+ tests/integration/fetch-mount.live.test.ts      | 24 +++++++++++++++++
+ tests/integration/orchestrator-web.live.test.ts | 36 +++++++++++++++++++++++++
+ tests/integration/uvx-available.ts              | 15 +++++++++++
+ 3 files changed, 75 insertions(+)
+
+## Diff
+diff --git a/tests/integration/fetch-mount.live.test.ts b/tests/integration/fetch-mount.live.test.ts
+new file mode 100644
+index 0000000..03a059f
+--- /dev/null
++++ b/tests/integration/fetch-mount.live.test.ts
+@@ -0,0 +1,24 @@
++import { describe, expect, test } from 'bun:test';
++import { createFetchTools } from '../../src/mcp/client.ts';
++import { uvxReady } from './uvx-available.ts';
++
++const ready = await uvxReady();
++
++describe.skipIf(!ready)('live: uvx mcp-server-fetch mount', () => {
++  test('exposes a fetch tool and retrieves a URL', async () => {
++    const { tools, close } = await createFetchTools();
++    try {
++      const fetchTool = tools.fetch;
++      expect(fetchTool).toBeDefined();
++      if (fetchTool) {
++        const result = await fetchTool.execute?.(
++          { url: 'https://example.com', max_length: 500 },
++          {} as never,
++        );
++        expect(JSON.stringify(result).toLowerCase()).toContain('example');
++      }
++    } finally {
++      await close();
++    }
++  }, 60_000);
++});
+diff --git a/tests/integration/orchestrator-web.live.test.ts b/tests/integration/orchestrator-web.live.test.ts
+new file mode 100644
+index 0000000..d7fb08f
+--- /dev/null
++++ b/tests/integration/orchestrator-web.live.test.ts
+@@ -0,0 +1,36 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import { createSuperAgent } from '../../agents/super.ts';
++import { runOrchestrator } from '../../src/core/orchestrator.ts';
++import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
++import { unloadModel, warmModel } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++import { uvxReady } from './uvx-available.ts';
++
++const MODEL = 'qwen3:8b';
++const ready = (await uvxReady()) && (await ollamaReady(MODEL));
++
++describe.skipIf(!ready)(
++  'live orchestrator: web routing (real Ollama + uvx)',
++  () => {
++    afterAll(async () => {
++      await unloadModel(MODEL);
++    });
++
++    test('routes a URL request to web_fetch and answers', async () => {
++      await warmModel(MODEL);
++      const fileServer = await createFileTools();
++      const fetchServer = await createFetchTools();
++      try {
++        const orch = createSuperAgent(fileServer.tools, fetchServer.tools);
++        const result = await runOrchestrator(
++          orch,
++          'Summarize the page at https://example.com in one sentence.',
++        );
++        expect(result.kind).toBe('answer');
++      } finally {
++        await fileServer.close();
++        await fetchServer.close();
++      }
++    }, 180_000);
++  },
++);
+diff --git a/tests/integration/uvx-available.ts b/tests/integration/uvx-available.ts
+new file mode 100644
+index 0000000..76e947f
+--- /dev/null
++++ b/tests/integration/uvx-available.ts
+@@ -0,0 +1,15 @@
++/** True iff `uvx mcp-server-fetch` can start (probes with --help, killed on timeout). */
++export async function uvxReady(timeoutMs = 15000): Promise<boolean> {
++  try {
++    const proc = Bun.spawn(['uvx', 'mcp-server-fetch', '--help'], {
++      stdout: 'ignore',
++      stderr: 'ignore',
++    });
++    const timer = setTimeout(() => proc.kill(), timeoutMs);
++    const code = await proc.exited;
++    clearTimeout(timer);
++    return code === 0;
++  } catch {
++    return false;
++  }
++}

@@ -1,0 +1,53 @@
+# Review package: a5517dc..964718a
+
+## Commits
+964718a feat(agents): add web_fetch agent backed by the fetch MCP tool
+
+## Files changed
+ agents/web-fetch.ts            | 19 +++++++++++++++++++
+ tests/agents/web-fetch.test.ts | 11 +++++++++++
+ 2 files changed, 30 insertions(+)
+
+## Diff
+diff --git a/agents/web-fetch.ts b/agents/web-fetch.ts
+new file mode 100644
+index 0000000..b473068
+--- /dev/null
++++ b/agents/web-fetch.ts
+@@ -0,0 +1,19 @@
++import type { ToolSet } from 'ai';
++import qwenFast from '../models/qwen-fast.ts';
++import type { Agent } from '../src/core/agent-def.ts';
++import { createOllamaModel } from '../src/providers/ollama.ts';
++
++const SYSTEM_PROMPT =
++  'You answer questions about web pages. Use the fetch tool to retrieve the given URL, then answer or summarize concisely based on the page content.';
++
++/** Build the web-fetch agent with an injected tool set (the mounted `fetch` tool). */
++export function createWebFetchAgent(tools: ToolSet): Agent {
++  return {
++    name: 'web_fetch',
++    description:
++      'Fetches a URL and answers questions about or summarizes the content of a web page.',
++    model: createOllamaModel(qwenFast),
++    systemPrompt: SYSTEM_PROMPT,
++    tools,
++  };
++}
+diff --git a/tests/agents/web-fetch.test.ts b/tests/agents/web-fetch.test.ts
+new file mode 100644
+index 0000000..14f5d4a
+--- /dev/null
++++ b/tests/agents/web-fetch.test.ts
+@@ -0,0 +1,11 @@
++import { expect, test } from 'bun:test';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++
++test('web-fetch agent has the expected identity and injected tools', () => {
++  const tools = { fetch: { description: 'x' } } as never;
++  const agent = createWebFetchAgent(tools);
++  expect(agent.name).toBe('web_fetch');
++  expect(agent.description.toLowerCase()).toContain('url');
++  expect(agent.tools).toBe(tools);
++  expect(agent.model).toBeTruthy();
++});

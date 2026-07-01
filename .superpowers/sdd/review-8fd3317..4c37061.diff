@@ -1,0 +1,136 @@
+# Review package: 8fd3317..4c37061
+
+## Commits
+4c37061 feat(agents): orchestrator on qwen3:4b; specialists carry modelDecl
+
+## Files changed
+ agents/file-qa.ts            |  1 +
+ agents/super.ts              |  7 +++++--
+ agents/web-fetch.ts          |  1 +
+ tests/agents/file-qa.test.ts |  6 ++++++
+ tests/agents/super.test.ts   | 10 ++++++++++
+ 5 files changed, 23 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/agents/file-qa.ts b/agents/file-qa.ts
+index d9cb53b..2b610cd 100644
+--- a/agents/file-qa.ts
++++ b/agents/file-qa.ts
+@@ -8,12 +8,13 @@ const SYSTEM_PROMPT =
+ 
+ /** Build the file-Q&A agent with an injected tool set (e.g. the MCP read_file tools). */
+ export function createFileQaAgent(tools: ToolSet): Agent {
+   return {
+     name: 'file_qa',
+     description:
+       'Answers questions about, and summarizes, the contents of a specific local file using read_file.',
+     model: createOllamaModel(qwenFast),
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
++    modelDecl: qwenFast,
+   };
+ }
+diff --git a/agents/super.ts b/agents/super.ts
+index 2b2945b..1210d94 100644
+--- a/agents/super.ts
++++ b/agents/super.ts
+@@ -1,25 +1,28 @@
+ import type { ToolSet } from 'ai';
+-import qwenFast from '../models/qwen-fast.ts';
++import qwenRouter from '../models/qwen-router.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
++import type { BeforeDelegate } from '../src/core/delegate.ts';
+ import { createOrchestrator } from '../src/core/orchestrator.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ import { createFileQaAgent } from './file-qa.ts';
+ import { createWebFetchAgent } from './web-fetch.ts';
+ 
+ const BASE_PROMPT =
+   'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
+ 
+ /** Build the super-agent (orchestrator) with file-Q&A and web-fetch registered. */
+ export function createSuperAgent(
+   fileQaTools: ToolSet,
+   fetchTools: ToolSet,
++  onBeforeDelegate?: BeforeDelegate,
+ ): Agent {
+   const fileQa = createFileQaAgent(fileQaTools);
+   const webFetch = createWebFetchAgent(fetchTools);
+   return createOrchestrator({
+     name: 'super',
+-    model: createOllamaModel(qwenFast),
++    model: createOllamaModel(qwenRouter),
+     systemPrompt: BASE_PROMPT,
+     agents: [fileQa, webFetch],
++    onBeforeDelegate,
+   });
+ }
+diff --git a/agents/web-fetch.ts b/agents/web-fetch.ts
+index b473068..3cc7c3b 100644
+--- a/agents/web-fetch.ts
++++ b/agents/web-fetch.ts
+@@ -8,12 +8,13 @@ const SYSTEM_PROMPT =
+ 
+ /** Build the web-fetch agent with an injected tool set (the mounted `fetch` tool). */
+ export function createWebFetchAgent(tools: ToolSet): Agent {
+   return {
+     name: 'web_fetch',
+     description:
+       'Fetches a URL and answers questions about or summarizes the content of a web page.',
+     model: createOllamaModel(qwenFast),
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
++    modelDecl: qwenFast,
+   };
+ }
+diff --git a/tests/agents/file-qa.test.ts b/tests/agents/file-qa.test.ts
+index 3b79355..35339a3 100644
+--- a/tests/agents/file-qa.test.ts
++++ b/tests/agents/file-qa.test.ts
+@@ -1,11 +1,17 @@
+ import { expect, test } from 'bun:test';
+ import { createFileQaAgent } from '../../agents/file-qa.ts';
++import qwenFast from '../../models/qwen-fast.ts';
+ 
+ test('file-qa agent has the expected identity and injected tools', () => {
+   const tools = { read_file: { description: 'x' } } as never;
+   const agent = createFileQaAgent(tools);
+   expect(agent.name).toBe('file_qa');
+   expect(agent.description.toLowerCase()).toContain('file');
+   expect(agent.tools).toBe(tools);
+   expect(agent.model).toBeTruthy();
+ });
++
++test('file-qa agent carries its model declaration', () => {
++  const agent = createFileQaAgent({ read_file: { description: 'x' } } as never);
++  expect(agent.modelDecl).toBe(qwenFast);
++});
+diff --git a/tests/agents/super.test.ts b/tests/agents/super.test.ts
+index 57d24c2..d9d8861 100644
+--- a/tests/agents/super.test.ts
++++ b/tests/agents/super.test.ts
+@@ -1,14 +1,24 @@
+ import { expect, test } from 'bun:test';
+ import { createSuperAgent } from '../../agents/super.ts';
++import qwenRouter from '../../models/qwen-router.ts';
+ import { CAPABILITY_GAP_TOOL } from '../../src/core/capability-gap.ts';
+ 
+ test('super agent exposes delegate tools for both specialists and the gap tool', () => {
+   const fileTools = { read_file: { description: 'x' } } as never;
+   const fetchTools = { fetch: { description: 'x' } } as never;
+   const sup = createSuperAgent(fileTools, fetchTools);
+   const toolNames = Object.keys(sup.tools);
+   expect(toolNames).toContain('delegate_to_file_qa');
+   expect(toolNames).toContain('delegate_to_web_fetch');
+   expect(toolNames).toContain(CAPABILITY_GAP_TOOL);
+   expect(sup.model).toBeTruthy();
+ });
++
++test('super agent uses the small router model', () => {
++  const sup = createSuperAgent(
++    { read_file: {} } as never,
++    { fetch: {} } as never,
++  );
++  // model is a resolved LanguageModel for qwen3:4b
++  expect((sup.model as { modelId?: string }).modelId).toBe(qwenRouter.model);
++});

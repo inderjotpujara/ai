@@ -1,0 +1,132 @@
+# Review package: aa112dc..3fed188
+
+## Commits
+3fed188 feat(agents): specialists declare a capability requirement (modelReq)
+
+## Files changed
+ agents/file-qa.ts                   |  8 +++++++-
+ agents/web-fetch.ts                 |  8 +++++++-
+ src/core/agent-def.ts               |  6 ++++--
+ tests/agents/specialist-req.test.ts | 16 ++++++++++++++++
+ 4 files changed, 34 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/agents/file-qa.ts b/agents/file-qa.ts
+index 2b610cd..06c3433 100644
+--- a/agents/file-qa.ts
++++ b/agents/file-qa.ts
+@@ -1,20 +1,26 @@
+ import type { ToolSet } from 'ai';
+ import qwenFast from '../models/qwen-fast.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
++import { Capability, PreferPolicy } from '../src/core/types.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ 
+ const SYSTEM_PROMPT =
+   'You answer questions about local files. Use the read_file tool to read any file you need, then answer concisely.';
+ 
+ /** Build the file-Q&A agent with an injected tool set (e.g. the MCP read_file tools). */
+ export function createFileQaAgent(tools: ToolSet): Agent {
+   return {
+     name: 'file_qa',
+     description:
+       'Answers questions about, and summarizes, the contents of a specific local file using read_file.',
+-    model: createOllamaModel(qwenFast),
++    model: createOllamaModel(qwenFast), // default binding; selector may override live
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
+     modelDecl: qwenFast,
++    modelReq: {
++      role: 'general reasoning + tool use',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
+   };
+ }
+diff --git a/agents/web-fetch.ts b/agents/web-fetch.ts
+index 3cc7c3b..53daf76 100644
+--- a/agents/web-fetch.ts
++++ b/agents/web-fetch.ts
+@@ -1,20 +1,26 @@
+ import type { ToolSet } from 'ai';
+ import qwenFast from '../models/qwen-fast.ts';
+ import type { Agent } from '../src/core/agent-def.ts';
++import { Capability, PreferPolicy } from '../src/core/types.ts';
+ import { createOllamaModel } from '../src/providers/ollama.ts';
+ 
+ const SYSTEM_PROMPT =
+   'You answer questions about web pages. Use the fetch tool to retrieve the given URL, then answer or summarize concisely based on the page content.';
+ 
+ /** Build the web-fetch agent with an injected tool set (the mounted `fetch` tool). */
+ export function createWebFetchAgent(tools: ToolSet): Agent {
+   return {
+     name: 'web_fetch',
+     description:
+       'Fetches a URL and answers questions about or summarizes the content of a web page.',
+-    model: createOllamaModel(qwenFast),
++    model: createOllamaModel(qwenFast), // default binding; selector may override live
+     systemPrompt: SYSTEM_PROMPT,
+     tools,
+     modelDecl: qwenFast,
++    modelReq: {
++      role: 'general reasoning + tool use',
++      requires: [Capability.Tools],
++      prefer: PreferPolicy.LargestThatFits,
++    },
+   };
+ }
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index 2b5402e..f761a3a 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -1,24 +1,26 @@
+ import type { ProviderOptions } from '@ai-sdk/provider-utils';
+ import type { LanguageModel, ToolSet } from 'ai';
+ import { runAgent } from './agent.ts';
+-import type { ModelDeclaration } from './types.ts';
++import type { ModelDeclaration, ModelRequirement } from './types.ts';
+ 
+ /** A reusable agent: its own model + system prompt + tools, plus a routing description. */
+ export type Agent = {
+   name: string; // stable id used in delegate tool names, e.g. 'file_qa'
+   description: string; // capability description the orchestrator routes on
+   model: LanguageModel;
+   systemPrompt: string;
+   tools: ToolSet;
+-  /** Declaration of the agent's model, for the resource manager (optional; mock agents omit it). */
++  /** Declaration of the agent's model, for the resource manager (optional). */
+   modelDecl?: ModelDeclaration;
++  /** Capability requirement resolved LIVE by the selector via onBeforeDelegate. */
++  modelReq?: ModelRequirement;
+ };
+ 
+ /** Build provider options that set Ollama's context window for this call. */
+ export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
+   return numCtx === undefined
+     ? undefined
+     : { ollama: { options: { num_ctx: numCtx } } };
+ }
+ 
+ /** Run an agent definition against a task, optionally at a chosen context size and model. */
+diff --git a/tests/agents/specialist-req.test.ts b/tests/agents/specialist-req.test.ts
+new file mode 100644
+index 0000000..0aca5ed
+--- /dev/null
++++ b/tests/agents/specialist-req.test.ts
+@@ -0,0 +1,16 @@
++import { expect, test } from 'bun:test';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++import { createWebFetchAgent } from '../../agents/web-fetch.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++
++test('file_qa declares a tool requirement with largest-that-fits', () => {
++  const a = createFileQaAgent({});
++  expect(a.modelReq?.requires).toContain(Capability.Tools);
++  expect(a.modelReq?.prefer).toBe(PreferPolicy.LargestThatFits);
++});
++
++test('web_fetch declares a tool requirement with largest-that-fits', () => {
++  const a = createWebFetchAgent({});
++  expect(a.modelReq?.requires).toContain(Capability.Tools);
++  expect(a.modelReq?.prefer).toBe(PreferPolicy.LargestThatFits);
++});

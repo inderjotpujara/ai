@@ -1,0 +1,67 @@
+# Review package: 1b3d758..aedcdb6
+
+## Commits
+aedcdb6 feat(providers): add ollama model factory and qwen3:8b declaration
+
+## Files changed
+ models/qwen-fast.ts            | 11 +++++++++++
+ src/providers/ollama.ts        | 12 ++++++++++++
+ tests/providers/ollama.test.ts | 14 ++++++++++++++
+ 3 files changed, 37 insertions(+)
+
+## Diff
+diff --git a/models/qwen-fast.ts b/models/qwen-fast.ts
+new file mode 100644
+index 0000000..8be4906
+--- /dev/null
++++ b/models/qwen-fast.ts
+@@ -0,0 +1,11 @@
++import { ProviderKind, type ModelDeclaration } from '../src/core/types.ts';
++
++/** Fast general-purpose local model with reliable tool-calling. */
++const qwenFast: ModelDeclaration = {
++  provider: ProviderKind.Ollama,
++  model: 'qwen3:8b',
++  params: { temperature: 0.2, numCtx: 8192 },
++  role: 'general reasoning + tool use',
++};
++
++export default qwenFast;
+diff --git a/src/providers/ollama.ts b/src/providers/ollama.ts
+new file mode 100644
+index 0000000..03d4057
+--- /dev/null
++++ b/src/providers/ollama.ts
+@@ -0,0 +1,12 @@
++import type { LanguageModel } from 'ai';
++import { createOllama } from 'ollama-ai-provider-v2';
++import type { ModelDeclaration } from '../core/types.ts';
++
++// The provider's baseURL needs the /api suffix (per its own examples).
++const OLLAMA_BASE_URL = 'http://localhost:11434/api';
++
++/** Build an AI SDK LanguageModel for an Ollama-backed declaration. */
++export function createOllamaModel(decl: ModelDeclaration): LanguageModel {
++  const ollama = createOllama({ baseURL: OLLAMA_BASE_URL });
++  return ollama(decl.model);
++}
+diff --git a/tests/providers/ollama.test.ts b/tests/providers/ollama.test.ts
+new file mode 100644
+index 0000000..d280463
+--- /dev/null
++++ b/tests/providers/ollama.test.ts
+@@ -0,0 +1,14 @@
++import { expect, test } from 'bun:test';
++import { createOllamaModel } from '../../src/providers/ollama.ts';
++import { ProviderKind } from '../../src/core/types.ts';
++import qwenFast from '../../models/qwen-fast.ts';
++
++test('qwen-fast declaration targets qwen3:8b on ollama', () => {
++  expect(qwenFast.provider).toBe(ProviderKind.Ollama);
++  expect(qwenFast.model).toBe('qwen3:8b');
++});
++
++test('createOllamaModel returns a model whose id matches the declaration', () => {
++  const model = createOllamaModel(qwenFast);
++  expect(model.modelId).toBe('qwen3:8b');
++});

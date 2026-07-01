@@ -1,0 +1,53 @@
+# Review package: d13c78d..5c4fc09
+
+## Commits
+5c4fc09 feat(agents): file-qa as a reusable Agent definition
+
+## Files changed
+ agents/file-qa.ts            | 19 +++++++++++++++++++
+ tests/agents/file-qa.test.ts | 11 +++++++++++
+ 2 files changed, 30 insertions(+)
+
+## Diff
+diff --git a/agents/file-qa.ts b/agents/file-qa.ts
+new file mode 100644
+index 0000000..d9cb53b
+--- /dev/null
++++ b/agents/file-qa.ts
+@@ -0,0 +1,19 @@
++import type { ToolSet } from 'ai';
++import qwenFast from '../models/qwen-fast.ts';
++import type { Agent } from '../src/core/agent-def.ts';
++import { createOllamaModel } from '../src/providers/ollama.ts';
++
++const SYSTEM_PROMPT =
++  'You answer questions about local files. Use the read_file tool to read any file you need, then answer concisely.';
++
++/** Build the file-Q&A agent with an injected tool set (e.g. the MCP read_file tools). */
++export function createFileQaAgent(tools: ToolSet): Agent {
++  return {
++    name: 'file_qa',
++    description:
++      'Answers questions about, and summarizes, the contents of a specific local file using read_file.',
++    model: createOllamaModel(qwenFast),
++    systemPrompt: SYSTEM_PROMPT,
++    tools,
++  };
++}
+diff --git a/tests/agents/file-qa.test.ts b/tests/agents/file-qa.test.ts
+new file mode 100644
+index 0000000..3b79355
+--- /dev/null
++++ b/tests/agents/file-qa.test.ts
+@@ -0,0 +1,11 @@
++import { expect, test } from 'bun:test';
++import { createFileQaAgent } from '../../agents/file-qa.ts';
++
++test('file-qa agent has the expected identity and injected tools', () => {
++  const tools = { read_file: { description: 'x' } } as never;
++  const agent = createFileQaAgent(tools);
++  expect(agent.name).toBe('file_qa');
++  expect(agent.description.toLowerCase()).toContain('file');
++  expect(agent.tools).toBe(tools);
++  expect(agent.model).toBeTruthy();
++});

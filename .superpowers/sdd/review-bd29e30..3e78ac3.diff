@@ -1,0 +1,241 @@
+# Review package: bd29e30..3e78ac3
+
+## Commits
+3e78ac3 test(resource): live selection verify + docs for Slice 5
+
+## Files changed
+ README.md                                | 20 ++++++++++----------
+ docs/ROADMAP.md                          | 22 ++++++++++++++--------
+ docs/architecture.md                     |  2 ++
+ tests/integration/selection.live.test.ts | 27 +++++++++++++++++++++++++++
+ 4 files changed, 53 insertions(+), 18 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 5d4906b..7db4888 100644
+--- a/README.md
++++ b/README.md
+@@ -1,26 +1,23 @@
+ # Local Agents
+ 
+ A **local-first, multi-agent framework** for Apple Silicon. Build and run AI
+ agents against **local models** (no API keys), orchestrated by a super-agent,
+ on your own machine — today on a laptop, soon full-throttle on a dedicated Mac
+ Mini.
+ 
+-> **Status:** Slice 4 complete — **multi-model, hardware-aware**. The
+-> orchestrator routes on a small pinned `qwen3.5:4b`; specialists load
+-> `qwen3.5:9b` on demand. The Model Manager uses a **live free-RAM budget**
+-> (`min(75% × Metal cap, 80% × available RAM)`, recomputed each delegation via
+-> `vm_stat`) to load/evict models; pinned models are evicted only as a last resort
+-> (best-effort pinning). Context windows are sized **dynamically** from live
+-> headroom, clamped by the model's true max detected live (`POST /api/show`),
+-> floored at 4096 tokens — no hardcoded budgets or context sizes. Built on Slice
+-> 3's pluggable integrations. See [Roadmap](#roadmap).
++> **Status:** Slice 5 complete — **dynamic model selection**. Specialists declare
++> a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`)
++> rather than a fixed model; a selector picks the largest registry model that fits
++> the live RAM budget (degrading 9b→4b under pressure). Built on Slice 4's
++> hardware-aware Model Manager (live free-RAM budget via `vm_stat`, dynamic
++> `num_ctx`, best-effort pinning). See [Roadmap](#roadmap).
+ 
+ ---
+ 
+ ## What it does (today)
+ 
+ ```sh
+ # Ask a question about a local file. The agent reads the file via a tool and answers.
+ bun run src/cli/chat.ts "What animal is mentioned in /tmp/sample.txt?"
+ ```
+ 
+@@ -33,20 +30,22 @@ Under the hood, one CLI run autonomously:
+    (no hardcoded download step you have to run).
+ 3. **Warms the model** into memory.
+ 4. **Runs the agent loop** — the model calls a `read_file` tool (exposed over
+    **MCP**) and composes an answer.
+ 5. **Records the run** — writes the answer and an append-only journal to
+    `runs/<id>/`.
+ 6. **Unloads the model** to free memory.
+ 
+ No manual steps. No API keys. Everything runs locally.
+ 
++**Dynamic model selection (Slice 5).** Specialists declare a *capability requirement* (`requires: [tools]`, `prefer: largest-that-fits`) rather than a fixed model. At each delegation the selector picks the largest registry model that fits the **live** memory budget (degrading 9b→4b under pressure), prints a one-line notice (size · context · footprint · installed/pulling · budget), and the Model Manager loads it. If nothing fits, the run ends with an honest `resource` message and a non-zero exit instead of a hallucinated answer. The registry is a machine-adaptive bootstrap ladder that Slice 6 discovery will populate at runtime.
++
+ ---
+ 
+ ## Quick start
+ 
+ **Prerequisites:** [Bun](https://bun.com) ≥ 1.3, [Ollama](https://ollama.com)
+ (running locally), an Apple Silicon Mac, and [`uvx`](https://docs.astral.sh/uv/)
+ (for the keyless web-fetch agent — `uvx mcp-server-fetch`). The unit/mock test
+ suite needs none of these; only the CLI and opt-in live tests do.
+ 
+ ```sh
+@@ -158,21 +157,22 @@ interface — no agent code changes. See
+ ---
+ 
+ ## Roadmap
+ 
+ | Slice | Scope | Status |
+ |---|---|---|
+ | **1** | One agent (file Q&A) · resource warm-up/unload · MCP `read_file` · run store | ✅ Done |
+ | **2** | Super-agent (agents-as-tools) delegating to sub-agents · `report_capability_gap` (route-or-gap) · opt-in live test | ✅ Done |
+ | **3** | **Integrations:** `mountMcpServer()` (mount any MCP server) · web-fetch agent via keyless `uvx mcp-server-fetch` · multi-specialist routing · opt-in live tests | ✅ Done |
+ | **4** | **Model Manager:** multi-model, hardware-aware — small pinned router (`qwen3.5:4b`) + on-demand specialists (`qwen3.5:9b`) · live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation) · best-effort pin (pinned evicted only as last resort) · dynamic `num_ctx` sized from headroom, clamped by live model max, floored at 4096 | ✅ Done |
+-| **Next** | **Slice 5 — dynamic model selection** (role → registry → pick best model that fits → manager loads); then **Slice 6 — model discovery** (auto-fetch latest from Hugging Face). The two latent Slice-4 items (live budget + dynamic context sizing) are now shipped, unblocking Slice 5. | Planned |
++| **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
++| **Next** | **Slice 6 — model discovery** (auto-fetch latest models from Hugging Face, pull on demand, keep registry current — no hardcoded list) | Planned |
+ | **Later** | Agent-builder ⭐ (self-extend on a capability gap) · deeper agent graphs · parallel fan-out · RAG/memory · run-viewer & web UI · voice · daemon · A2A — full list in [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned |
+ 
+ **Full long-range roadmap** (agent-builder, model discovery, RAG, UI, voice,
+ daemon, A2A, …): [`docs/ROADMAP.md`](docs/ROADMAP.md). Design specs and
+ implementation plans live in [`docs/superpowers/`](docs/superpowers/).
+ 
+ ---
+ 
+ ## Development
+ 
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index 8f37f1e..9c1a406 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -1,45 +1,51 @@
+ # Roadmap
+ 
+ The long-range plan for this local-first, self-owned multi-agent platform. Each
+ item below becomes its own **brainstorm → spec → plan → subagent-driven build**
+-cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
++cycle (the same flow used for Slices 1–5). Order is a recommendation driven by
+ **dependencies + leverage**, not a contract — reprioritize freely.
+ 
+ > **North stars:** local-first & self-owned (no API keys) · one orchestrator
+ > routing to a growing fleet of specialists · capabilities are pluggable (mount
+ > an MCP server) · self-extending (build new agents on demand) · autonomous &
+ > **hardware/context-aware** on Apple Silicon.
+ 
+ ## Shipped
+ 
+ | Slice | Capability | Status |
+ |---|---|---|
+ | **1** | Local file-Q&A agent · model warm-up/unload · MCP `read_file` · run store | ✅ shipped + live-verified |
+ | **2** | Orchestrator (agents-as-tools) — route to a specialist or report a capability gap | ✅ shipped + live-verified |
+ | **3** | `mountMcpServer` (mount any MCP server) · web-fetch agent (`uvx mcp-server-fetch`) | ✅ shipped + live-verified |
+ 
+ | **4** | **Model Manager** — multi-model, hardware-aware: live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation); load/evict/pin within budget; best-effort pin (pinned evicted only as last resort); dynamic `num_ctx` sized from headroom, clamped by live model max (`POST /api/show`), floored at 4096; orchestrator on pinned `qwen3.5:4b`, specialists on `qwen3.5:9b` on demand | ✅ shipped + live-verified |
++| **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; a bootstrap registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` and a non-zero exit instead of a hallucinated answer | ✅ shipped + live-verified |
+ 
+ ## Near-term — finish the resource-manager line
+ 
+-> Slice 5 is the next active slice; not yet started.
+-
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+-| **5** | **Dynamic model selection** — an agent declares a *role/requirements* (`requires:['tools'], prefer:'fits-budget'`); a model **registry** + selector picks the best model that fits; the manager loads it | Slice 4 | Turns model choice from hardcoded into capability-driven |
+ | **6** | **Model discovery** — auto-fetch the latest models from Hugging Face, pull on demand, keep declarations current (no hardcoded list); feeds the Slice-5 registry | Slice 5 | "Always on the latest models" becomes runtime behavior |
+ | **4.5** | **Reclaim** — when memory is genuinely tight: degrade → ask once → kill non-essential apps (keeping a protected set) | Slice 4 | Small escalation of the manager; slot in once memory pressure is real |
+ 
+-**Slice 5 must also fix one remaining latent Model-Manager item** (from the Slice-4 final review — safe today because the 4b+9b budget has huge headroom, but it bites once varied/larger models compete):
+-1. **Propagate `ResourceError` from `onBeforeDelegate`** — today a "can't fit" error becomes a soft tool-result (AI SDK wraps tool-`execute` throws). When selection introduces models that can genuinely fail to fit, surface it as a real resource failure (e.g. pre-flight the chosen model at the CLI, or a capture-and-check seam).
+-2. ~~**Budget from real sizes, not the lower-bound estimate**~~ — **resolved**: `ensureReady` now uses `weightsBytes`/`kvCacheBytes` helpers against the live `liveBudgetBytes()` budget (recomputed each delegation from `vm_stat`); the static `estimateModelBytes` lower-bound issue is fixed.
++### Future Work (from Slice 5 brainstorm)
++
++The following items were identified during Slice 5 design (see spec §8) as valuable but deliberately deferred. They are committed for future slices — none are blocking:
++
++- **Global / lookahead scheduler** — today selection is greedy and per-delegation; a planner-aware scheduler with a task DAG could pre-warm models and schedule concurrent delegations globally rather than locally. Depends on a task planner / DAG component.
++- **Parallel fan-out memory arbitration** — when multiple specialists run concurrently, their combined footprints must be co-scheduled within the live budget. Requires an explicit `maxLoaded` cap on the Model Manager (today the only count ceiling is Ollama's `OLLAMA_MAX_LOADED_MODELS` env default) so concurrency is governed by both RAM headroom and a first-class model-count limit.
++- **Interactive resource arbitration** ("user takes calls") — when memory is genuinely exhausted and degradation has already bottomed out, surface a user-visible ask before killing non-essential processes. Overlaps with Reclaim (Slice 4.5); design together.
++- **Quality-ranked selection** — once Slice 6 populates the registry with richer metadata (benchmark scores, eval results), the selector can rank by quality-within-budget rather than pure size. This is the Slice 6 signal.
++- **Richer registry + discovery** — the current registry is a static bootstrap ladder; Slice 6 replaces it with a per-machine runtime fetch from Hugging Face. Includes per-machine capability metadata, pulled-model tracking, and multi-quantization awareness.
++- **Router-as-selected** — today the router (`qwen3.5:4b`) is pinned and hardcoded. A future slice could run it through the selector too, so even the routing model is capability-declared and hardware-adaptive.
++- **Fuller anti-churn / hysteresis** — the warm-aware tie-break in `selectCandidates` is a lightweight first step. A proper hysteresis policy (e.g. don't evict a resident model unless the challenger is significantly better, or a cooldown window after a recent load) would reduce unnecessary model thrashing under oscillating load.
+ 
+ ## Headline next — self-extension
+ 
+ | Slice | Capability | Depends on | Notes |
+ |---|---|---|---|
+ | **7** | **Agent-builder** ⭐ — on `report_capability_gap`, generate a new agent definition file (+ suggest an MCP server to mount) so the system *grows a capability* on demand. The `report_capability_gap` seam is already in place. | Slices 2, 3, (5/6 help) | **Highest-leverage future feature** — makes "describe a need → the system extends itself" real |
+ 
+ ## Orchestration & intelligence
+ 
+ - **Deeper agent graphs** — a "researcher" agent that itself delegates to `web_fetch` + `file_qa` (composability already exists via agents-as-tools), with the **hardware/context-aware guardrails**: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns.
+@@ -74,19 +80,19 @@ cycle (the same flow used for Slices 1–4). Order is a recommendation driven by
+ - **Scheduled / triggered agents** — cron- or event-driven (file added → process it) — the n8n "trigger" concept.
+ - **Multi-machine** — laptop delegates heavy work to the Mac Mini over the network.
+ - **A2A interop** — expose this orchestrator as an agent other tools can call, and consume external agents (Agent2Agent protocol).
+ 
+ ## Recommended priority next
+ 
+ 1. **Agent-builder (Slice 7)** — the feature that makes the self-extension vision real; the `report_capability_gap` hook is already waiting for it.
+ 2. **Model discovery (Slice 6)** — keeps the system on the latest models automatically.
+ 3. **Run-viewer UI** — makes the whole system visible and demoable for the cost of reading JSONL we already write.
+ 
+-(Slices 5 → 6 are the natural continuation of the resource line currently being built; the agent-builder can also be pulled forward if it's the exciting one.)
++(Slice 6 is the natural continuation of the resource line; the agent-builder can also be pulled forward if it's the exciting one.)
+ 
+ ## Deferred technical items (cross-cutting, fold in opportunistically)
+ 
+ - Declarative **`mcp.json` mount registry** (list servers + which agents get them, loaded at startup) — generalizes Slice 3's in-code mounts.
+ - **Codex** heavy-lifting backup (`@openai/codex-sdk`, personal plan) as an opt-in delegate agent.
+ - Migrate `biome.json` off the deprecated `recommended` field.
+ - **Per-slice Minor review findings** are recorded in `.superpowers/sdd/progress.md` (the SDD ledger) as each slice completes — e.g. run-journal O(n²) append, `runAgent.providerOptions` cross-package type, gap `message` hardcoded English, `ensureReady` post-pull comment. ~~hardcoded `kvBytesPerToken`~~ — **resolved**: `footprint.kvBytesPerToken` is now an optional per-model declaration field with default fallback. Sweep remaining items opportunistically; none are blocking.
+ - **Hardware/context-aware guardrails for deeper composition** (recorded constraint): the agent-graph/parallel-fan-out slices MUST bound delegation depth, add cross-agent cycle detection, reuse warm models (shared-model agents = one resident copy), keep returned answers concise, and schedule concurrency within the Model Manager's budget. Cost compounds ~15× for naive orchestrator-workers, so depth/fan-out are bounded deliberately.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index ef61a41..56c6362 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -132,20 +132,22 @@ rounded to `CTX_ROUNDING = 1024`.
+ 
+ **Control endpoints** via Ollama HTTP: warm = empty-prompt `POST /api/generate`
+ (`stream:false`, with `options:{num_ctx}`); pin = `keep_alive:-1`; unload =
+ `keep_alive:0`; inspect = `GET /api/ps`; model-max probe = `POST /api/show`.
+ Write requests use field `model`; `/api/tags` and `/api/ps` report it as `name`.
+ 
+ **Best-effort pinning:** a pinned model IS evicted as a last resort if it is the
+ only way to fit the target (logged as a warning). `ResourceError` is thrown only
+ when nothing is left to evict.
+ 
++**Selector (`src/resource/selector.ts`).** `selectCandidates` (pure: capability hard-filter + largest-that-fits rank + warm-aware tie-break) feeds `resolveModel`, a live fallback loop that walks candidates best-first against `manager.ensureReady` (the single fit-authority). The chosen model is bound lazily at delegation time via `onBeforeDelegate` (`src/cli/select-hook.ts`). A genuine no-fit is recorded in a `ResourceCapture` seam and surfaced by `runOrchestrator` as `{kind:'resource'}`.
++
+ **Slice 4 data flow (addition to the Slice 1 diagram above):**
+ 
+ ```
+ liveBudgetBytes()
+   → POST /api/show  (getModelMaxContext)
+   → choose chosenCtx  (min of desired / modelMax / headroom-fit, floor 4096)
+   → warm with options.num_ctx = chosenCtx
+   → inference reuses chosenCtx via providerOptions.ollama.options.num_ctx
+ ```
+ 
+diff --git a/tests/integration/selection.live.test.ts b/tests/integration/selection.live.test.ts
+new file mode 100644
+index 0000000..8eff511
+--- /dev/null
++++ b/tests/integration/selection.live.test.ts
+@@ -0,0 +1,27 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import { REGISTRY } from '../../models/registry.ts';
++import qwenFast from '../../models/qwen-fast.ts';
++import { Capability, PreferPolicy } from '../../src/core/types.ts';
++import { createModelManager } from '../../src/resource/model-manager.ts';
++import { resolveModel } from '../../src/resource/selector.ts';
++import { unloadModel } from '../../src/resource/ollama-control.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenFast.model);
++
++describe.skipIf(!ready)('live dynamic model selection (real Ollama)', () => {
++  afterAll(async () => {
++    await unloadModel(qwenFast.model);
++  });
++
++  test('with plentiful RAM, largest-that-fits resolves to the 9b specialist', async () => {
++    const manager = createModelManager();
++    const { decl, numCtx } = await resolveModel(
++      { role: 'general reasoning + tool use', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
++      REGISTRY,
++      { ensureReady: (d, o) => manager.ensureReady(d, o) },
++    );
++    expect(decl.model).toBe('qwen3.5:9b');
++    expect(numCtx).toBeGreaterThanOrEqual(4096);
++  }, 180_000);
++});

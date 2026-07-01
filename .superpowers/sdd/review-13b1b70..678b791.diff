@@ -1,0 +1,162 @@
+# Review package: 13b1b70..678b791
+
+## Commits
+678b791 feat(models): capability tags + model requirement types + registry
+
+## Files changed
+ models/qwen-fast.ts           |  9 ++++++---
+ models/qwen-router.ts         |  9 ++++++---
+ models/registry.ts            | 11 +++++++++++
+ src/core/types.ts             | 24 ++++++++++++++++++++++++
+ tests/models/registry.test.ts | 16 ++++++++++++++++
+ 5 files changed, 63 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/models/qwen-fast.ts b/models/qwen-fast.ts
+index a98d67c..4bac7d6 100644
+--- a/models/qwen-fast.ts
++++ b/models/qwen-fast.ts
+@@ -1,14 +1,17 @@
+-import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
++import {
++  Capability,
++  type ModelDeclaration,
++  ProviderKind,
++} from '../src/core/types.ts';
+ 
+ /** Fast general-purpose local model with reliable tool-calling. */
+ const qwenFast: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:9b',
+-  // Desired context for the role; the true max is detected live from Ollama
+-  // and the manager clamps this down under memory pressure.
+   params: { temperature: 0.2, numCtx: 16384 },
+   role: 'general reasoning + tool use',
++  capabilities: [Capability.Tools],
+   footprint: { approxParamsBillions: 9, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenFast;
+diff --git a/models/qwen-router.ts b/models/qwen-router.ts
+index a84c720..bdbd402 100644
+--- a/models/qwen-router.ts
++++ b/models/qwen-router.ts
+@@ -1,14 +1,17 @@
+-import { type ModelDeclaration, ProviderKind } from '../src/core/types.ts';
++import {
++  Capability,
++  type ModelDeclaration,
++  ProviderKind,
++} from '../src/core/types.ts';
+ 
+ /** Small, fast model for the orchestrator's routing decisions (stays pinned-resident). */
+ const qwenRouter: ModelDeclaration = {
+   provider: ProviderKind.Ollama,
+   model: 'qwen3.5:4b',
+-  // Desired context for the role; the true max is detected live from Ollama
+-  // and the manager clamps this down under memory pressure.
+   params: { temperature: 0.1, numCtx: 8192 },
+   role: 'routing / orchestration',
++  capabilities: [Capability.Tools],
+   footprint: { approxParamsBillions: 4, bytesPerWeight: 0.56 },
+ };
+ 
+ export default qwenRouter;
+diff --git a/models/registry.ts b/models/registry.ts
+new file mode 100644
+index 0000000..1f064a1
+--- /dev/null
++++ b/models/registry.ts
+@@ -0,0 +1,11 @@
++import type { ModelDeclaration } from '../src/core/types.ts';
++import qwenFast from './qwen-fast.ts';
++import qwenRouter from './qwen-router.ts';
++
++/**
++ * Bootstrap content of a machine-adaptive capability LADDER. The selector is
++ * N-rung capable; the live-budget fits-filter makes any rung inert where it does
++ * not fit. Only rungs verified on this hardware ship here; Slice 6 discovery will
++ * replace this static array with a per-machine runtime fetch.
++ */
++export const REGISTRY: ModelDeclaration[] = [qwenRouter, qwenFast];
+diff --git a/src/core/types.ts b/src/core/types.ts
+index fed8221..ad8f1bd 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -1,30 +1,54 @@
+ /** Which local runtime backs a model. String enum per project style. */
+ export enum ProviderKind {
+   Ollama = 'Ollama',
+ }
+ 
++/** A capability a model advertises and an agent can require. String enum (extensible). */
++export enum Capability {
++  Tools = 'tools',
++  // future: Vision = 'vision', LongContext = 'long-context', Coding = 'coding'
++}
++
++/** How the selector ranks the candidates that survive the hard filter. */
++export enum PreferPolicy {
++  LargestThatFits = 'largest-that-fits',
++  // future: SmallestThatFits, QualityRanked, GlobalSchedule
++}
++
++/** What a requirement-driven agent declares instead of a concrete model name. */
++export type ModelRequirement = {
++  /** Human description of the role. */
++  role: string;
++  /** HARD filter — every listed capability must be present on the model. */
++  requires: Capability[];
++  /** SOFT rank over the survivors. */
++  prefer: PreferPolicy;
++};
++
+ /** Tunable inference parameters carried by a model declaration. */
+ export type ModelParams = {
+   temperature?: number;
+   numCtx?: number;
+ };
+ 
+ /**
+  * A model declaration is DATA, not logic. Slice 1 pins a concrete model name;
+  * later slices can resolve a capability/role to a discovered model.
+  */
+ export type ModelDeclaration = {
+   provider: ProviderKind;
+   model: string;
+   params: ModelParams;
+   role: string;
++  /** Capabilities this model provides; selector hard-filters on these. Missing = none. */
++  capabilities?: Capability[];
+   /** Pre-load sizing hint for the model manager. */
+   footprint: {
+     approxParamsBillions: number;
+     bytesPerWeight: number;
+     /** Bytes of KV cache per token (per-model; defaults to 131072 if omitted). */
+     kvBytesPerToken?: number;
+   };
+   /**
+    * Optional cap on the context window. The true max is detected live from
+    * Ollama; set this only to deliberately cap below it or as a probe fallback.
+diff --git a/tests/models/registry.test.ts b/tests/models/registry.test.ts
+new file mode 100644
+index 0000000..1947787
+--- /dev/null
++++ b/tests/models/registry.test.ts
+@@ -0,0 +1,16 @@
++import { expect, test } from 'bun:test';
++import { REGISTRY } from '../../models/registry.ts';
++import { Capability } from '../../src/core/types.ts';
++
++test('registry contains the two verified rungs, both tool-capable', () => {
++  const names = REGISTRY.map((d) => d.model).sort();
++  expect(names).toEqual(['qwen3.5:4b', 'qwen3.5:9b']);
++  for (const d of REGISTRY) {
++    expect(d.capabilities ?? []).toContain(Capability.Tools);
++  }
++});
++
++test('registry has a real capability ladder (distinct sizes)', () => {
++  const sizes = REGISTRY.map((d) => d.footprint.approxParamsBillions);
++  expect(new Set(sizes).size).toBe(REGISTRY.length);
++});

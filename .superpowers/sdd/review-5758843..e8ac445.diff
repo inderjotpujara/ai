@@ -1,0 +1,356 @@
+# Review package: 5758843..e8ac445
+
+## Commits
+e8ac445 feat: instrument delegation + model select/load/evict spans; live e2e
+
+## Files changed
+ src/cli/select-hook.ts                    |  7 +++++
+ src/core/delegate.ts                      | 42 +++++++++++++------------
+ src/resource/model-manager.ts             | 20 +++++++++++-
+ tests/core/delegate.test.ts               | 50 ++++++++++++++++++++++++++++-
+ tests/integration/run-viewer.live.test.ts | 52 +++++++++++++++++++++++++++++++
+ 5 files changed, 149 insertions(+), 22 deletions(-)
+
+## Diff
+diff --git a/src/cli/select-hook.ts b/src/cli/select-hook.ts
+index ea3ca3b..b17176d 100644
+--- a/src/cli/select-hook.ts
++++ b/src/cli/select-hook.ts
+@@ -1,19 +1,20 @@
+ import type { Agent } from '../core/agent-def.ts';
+ import type { BeforeDelegate } from '../core/delegate.ts';
+ import { ResourceError } from '../core/errors.ts';
+ import type { ResourceCapture } from '../core/resource-capture.ts';
+ import { type ModelDeclaration, ProviderKind } from '../core/types.ts';
+ import type { EnsureOpts } from '../resource/model-manager.ts';
+ import type { LoadedModel } from '../resource/ollama-control.ts';
+ import { resolveModel } from '../resource/selector.ts';
+ import { runtimeFor } from '../runtime/registry.ts';
++import { recordModelSelect } from '../telemetry/spans.ts';
+ 
+ export type SelectHookDeps = {
+   registry: ModelDeclaration[];
+   ensureReady: (d: ModelDeclaration, o?: EnsureOpts) => Promise<number>;
+   pinned: string[];
+   capture: ResourceCapture;
+   listLoaded?: () => Promise<LoadedModel[]>;
+   /** Fired once after resolveModel succeeds, with the chosen ctx. */
+   notify?: (decl: ModelDeclaration, numCtx: number) => void | Promise<void>;
+ };
+@@ -29,20 +30,26 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
+     try {
+       const { decl, numCtx } = await resolveModel(
+         agent.modelReq,
+         deps.registry,
+         {
+           ensureReady: deps.ensureReady,
+           listLoaded: deps.listLoaded,
+         },
+         { pinned: deps.pinned },
+       );
++      recordModelSelect({
++        modelId: decl.model,
++        provider: decl.provider,
++        numCtx,
++        paramsBillions: decl.footprint.approxParamsBillions,
++      });
+       await deps.notify?.(decl, numCtx);
+       const model = runtimeFor(decl.provider).createModel(decl);
+       return {
+         model,
+         numCtx: decl.provider === ProviderKind.Ollama ? numCtx : undefined,
+       };
+     } catch (err) {
+       if (err instanceof ResourceError) {
+         deps.capture.error = err;
+         return {
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 07bcd21..3dbdbd4 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,13 +1,14 @@
+ import type { LanguageModel } from 'ai';
+ import { tool } from 'ai';
+ import { z } from 'zod';
++import { withDelegationSpan } from '../telemetry/spans.ts';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
+ /**
+  * A hook run just before a delegated agent executes. May return a chosen context
+  * size, a model to bind for this call, and/or an `abort` message that skips the
+@@ -24,33 +25,34 @@ export type BeforeDelegate = (
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+-    execute: async ({ task }) => {
+-      try {
+-        const pre = onBeforeDelegate
+-          ? await onBeforeDelegate(agent)
+-          : undefined;
+-        if (pre?.abort) {
+-          return { error: pre.abort };
++    execute: async ({ task }) =>
++      withDelegationSpan(agent.name, async () => {
++        try {
++          const pre = onBeforeDelegate
++            ? await onBeforeDelegate(agent)
++            : undefined;
++          if (pre?.abort) {
++            return { error: pre.abort };
++          }
++          const { text } = await runDefinedAgent(
++            agent,
++            task,
++            pre?.numCtx,
++            pre?.model,
++          );
++          return { text };
++        } catch (cause) {
++          return {
++            error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
++          };
+         }
+-        const { text } = await runDefinedAgent(
+-          agent,
+-          task,
+-          pre?.numCtx,
+-          pre?.model,
+-        );
+-        return { text };
+-      } catch (cause) {
+-        return {
+-          error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+-        };
+-      }
+-    },
++      }),
+   });
+ }
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+index 799ed5a..6feed0f 100644
+--- a/src/resource/model-manager.ts
++++ b/src/resource/model-manager.ts
+@@ -1,14 +1,15 @@
+ import { ResourceError } from '../core/errors.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
+ import { runtimeFor } from '../runtime/registry.ts';
+ import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
++import { recordEvict, withModelLoadSpan } from '../telemetry/spans.ts';
+ import { kvCacheBytes, weightsBytes } from './footprint.ts';
+ import { liveBudgetBytes } from './hardware.ts';
+ import {
+   activeKvCacheType,
+   effectiveKvBytesPerToken,
+   f16KvBytesPerToken,
+   isKvQuantRisky,
+   KvCacheType,
+ } from './kv-cache.ts';
+ 
+@@ -142,40 +143,57 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
+       if (evict === undefined) {
+         throw new ResourceError(
+           `Cannot load ${target} (needs ~${gb(minNeed)}GB at min context): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
+         );
+       }
+       if (pinned.has(evict.name)) {
+         d.warn(
+           `[model-manager] live memory budget (~${gb(freeBudget)}GB) too low to keep ${evict.name} pinned; evicting it to load ${target} (best-effort pin — it will reload on demand).`,
+         );
+       }
++      const evictReason = pinned.has(evict.name)
++        ? 'budget-too-low-evicting-pinned'
++        : 'lru-fit';
++      recordEvict(evict.name, evict.sizeBytes, evictReason);
+       await c.unload(evict.name);
+       lastUsed.delete(evict.name);
+       chosenCtxByModel.delete(evict.name);
+       headroom += evict.sizeBytes;
+       loaded = loaded.filter((m) => m.name !== evict.name);
+     }
+ 
+     // Scale context up into the remaining headroom, clamped by the live model max.
+     const probedMax = await modelMaxFor(c, target);
+     const ceiling = Math.min(
+       decl.maxContext ?? Number.POSITIVE_INFINITY,
+       probedMax ?? Number.POSITIVE_INFINITY,
+     );
+     const maxCtxByFit = Math.floor((headroom - weights) / kvPerToken);
+     let chosenCtx = Math.min(desired, ceiling, maxCtxByFit);
+     chosenCtx = Math.max(MIN_CTX, chosenCtx);
+     chosenCtx -= chosenCtx % CTX_ROUNDING;
+     chosenCtx = Math.max(MIN_CTX, chosenCtx);
+ 
+-    await c.warm(target, chosenCtx);
++    await withModelLoadSpan(
++      target,
++      {
++        weightsBytes: weights,
++        kvF16PerToken: f16Base,
++        kvEffectivePerToken: kvPerToken,
++        kvCacheType: activeKvCacheType(),
++        chosenCtx,
++        requestedCtx: desired,
++        footprintBytes: weights + kvCacheBytes(chosenCtx, kvPerToken),
++        budgetBytes: freeBudget,
++      },
++      () => c.warm(target, chosenCtx),
++    );
+     lastUsed.set(target, ++tick);
+     chosenCtxByModel.set(target, chosenCtx);
+     runtimeByModel.set(target, decl);
+     return chosenCtx;
+   }
+ 
+   async function unloadAll(): Promise<void> {
+     for (const model of [...lastUsed.keys()]) {
+       const decl = runtimeByModel.get(model);
+       if (decl) await d.controlFor(decl).unload(model);
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index d2aebc7..18e5e6d 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -1,14 +1,15 @@
+-import { expect, mock, test } from 'bun:test';
++import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ function cannedAgent(name: string, answer: string): Agent {
+   return {
+     name,
+     description: `agent ${name}`,
+     model: new MockLanguageModelV3({
+       doGenerate: async () => ({
+         content: [{ type: 'text', text: answer }],
+         finishReason: { unified: 'stop', raw: undefined },
+         usage: {
+@@ -102,10 +103,57 @@ test('abort short-circuits: agent never runs, returns soft error', async () => {
+     },
+   });
+   const t = asDelegateTool(a, async () => ({ abort: 'no fit' }));
+   const out = await t.execute?.(
+     { task: 'hi' },
+     { toolCallId: 't', messages: [] },
+   );
+   expect(out).toEqual({ error: 'no fit' });
+   expect(ran).toBe(false);
+ });
++
++// --- delegation span tests ---
++
++let spanExporter: ReturnType<typeof registerTestProvider>['exporter'];
++let spanProvider: ReturnType<typeof registerTestProvider>['provider'];
++
++beforeEach(() => {
++  ({ exporter: spanExporter, provider: spanProvider } = registerTestProvider());
++});
++
++afterEach(async () => {
++  await spanProvider.shutdown();
++  spanExporter.reset();
++});
++
++test('asDelegateTool opens an agent.delegation span tagged with the target', async () => {
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'done' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const delegateAgent: Agent = {
++    name: 'web_fetch',
++    description: 'fetches',
++    model,
++    systemPrompt: 's',
++    tools: {},
++  };
++  const tool = asDelegateTool(delegateAgent);
++  await tool.execute?.({ task: 'go' }, { toolCallId: 't', messages: [] });
++  const del = spanExporter
++    .getFinishedSpans()
++    .find((s) => s.name === 'agent.delegation');
++  expect(del).toBeDefined();
++  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
++});
+diff --git a/tests/integration/run-viewer.live.test.ts b/tests/integration/run-viewer.live.test.ts
+new file mode 100644
+index 0000000..cee9c79
+--- /dev/null
++++ b/tests/integration/run-viewer.live.test.ts
+@@ -0,0 +1,52 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import { mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { createSuperAgent } from '../../agents/super.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++import { runChat } from '../../src/cli/run-chat.ts';
++import { renderRun } from '../../src/cli/runs.ts';
++import { createFileTools } from '../../src/mcp/client.ts';
++import { unloadModel } from '../../src/resource/ollama-control.ts';
++import { readSpans } from '../../src/run/run-trace.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenRouter.model);
++
++describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
++  afterAll(async () => {
++    await unloadModel(qwenRouter.model);
++  });
++
++  test('a real run writes spans.jsonl with agent.run + agent.delegation, and renders', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'rv-live-'));
++    const fileDir = await mkdtemp(join(tmpdir(), 'rv-files-'));
++    try {
++      const filePath = join(fileDir, 'note.txt');
++      await writeFile(filePath, 'The capital of France is Paris.');
++      const { tools, close } = await createFileTools();
++      try {
++        const orchestrator = createSuperAgent(tools, {});
++        await runChat({
++          orchestrator,
++          task: `What is written in ${filePath}?`,
++          runsRoot,
++          runId: 'live-1',
++        });
++      } finally {
++        await close();
++      }
++      const { spans } = await readSpans(join(runsRoot, 'live-1'));
++      expect(spans.some((s) => s.name === 'agent.run')).toBe(true);
++      expect(spans.some((s) => s.name === 'agent.delegation')).toBe(true);
++      expect(spans.some((s) => s.name.startsWith('ai.generateText'))).toBe(
++        true,
++      );
++      const out = await renderRun(runsRoot, 'live-1');
++      expect(out).toContain('agent.run');
++    } finally {
++      await rm(runsRoot, { recursive: true, force: true });
++      await rm(fileDir, { recursive: true, force: true });
++    }
++  }, 120_000);
++});

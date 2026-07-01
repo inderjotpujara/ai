@@ -1,0 +1,130 @@
+# Review package: 1912ec2..a729106
+
+## Commits
+a729106 feat(telemetry): Bun-safe OTel provider + OTLP seam + IO flag
+
+## Files changed
+ src/telemetry/provider.ts        | 58 ++++++++++++++++++++++++++++++++++++++++
+ tests/telemetry/provider.test.ts | 49 +++++++++++++++++++++++++++++++++
+ 2 files changed, 107 insertions(+)
+
+## Diff
+diff --git a/src/telemetry/provider.ts b/src/telemetry/provider.ts
+new file mode 100644
+index 0000000..1da9a57
+--- /dev/null
++++ b/src/telemetry/provider.ts
+@@ -0,0 +1,58 @@
++import { join } from 'node:path';
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
++import { resourceFromAttributes } from '@opentelemetry/resources';
++import {
++  BasicTracerProvider,
++  BatchSpanProcessor,
++  SimpleSpanProcessor,
++  type SpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
++import { JsonlFileExporter } from './jsonl-exporter.ts';
++
++/** Whether prompts/responses/tool-IO are captured. Default on; AGENT_TELEMETRY_RECORD_IO=0 disables. */
++export function recordIoEnabled(): boolean {
++  return process.env.AGENT_TELEMETRY_RECORD_IO !== '0';
++}
++
++/** JSONL always; OTLP/HTTP added iff AGENT_OTLP_ENDPOINT is set (the swappable-backend seam). */
++export function buildProcessors(spansFilePath: string): SpanProcessor[] {
++  const processors: SpanProcessor[] = [
++    new SimpleSpanProcessor(new JsonlFileExporter(spansFilePath)),
++  ];
++  const endpoint = process.env.AGENT_OTLP_ENDPOINT;
++  if (endpoint) {
++    processors.push(
++      new BatchSpanProcessor(new OTLPTraceExporter({ url: endpoint })),
++    );
++  }
++  return processors;
++}
++
++let contextManagerSet = false;
++
++/** Register a per-run global TracerProvider writing to runDir/spans.jsonl. */
++export function initRunTelemetry(runDir: string): {
++  shutdown: () => Promise<void>;
++} {
++  const provider = new BasicTracerProvider({
++    resource: resourceFromAttributes({
++      [ATTR_SERVICE_NAME]: 'local-agent-framework',
++    }),
++    spanProcessors: buildProcessors(join(runDir, 'spans.jsonl')),
++  });
++  if (!contextManagerSet) {
++    context.setGlobalContextManager(
++      new AsyncLocalStorageContextManager().enable(),
++    );
++    contextManagerSet = true;
++  }
++  trace.setGlobalTracerProvider(provider);
++  return {
++    shutdown: async () => {
++      await provider.shutdown();
++    },
++  };
++}
+diff --git a/tests/telemetry/provider.test.ts b/tests/telemetry/provider.test.ts
+new file mode 100644
+index 0000000..ec3a45e
+--- /dev/null
++++ b/tests/telemetry/provider.test.ts
+@@ -0,0 +1,49 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { trace } from '@opentelemetry/api';
++import {
++  buildProcessors,
++  initRunTelemetry,
++  recordIoEnabled,
++} from '../../src/telemetry/provider.ts';
++
++let dir: string;
++beforeEach(async () => {
++  dir = await mkdtemp(join(tmpdir(), 'prov-'));
++});
++afterEach(async () => {
++  delete process.env.AGENT_OTLP_ENDPOINT;
++  delete process.env.AGENT_TELEMETRY_RECORD_IO;
++  await rm(dir, { recursive: true, force: true });
++});
++
++test('initRunTelemetry registers a provider that writes spans.jsonl', async () => {
++  const tel = initRunTelemetry(dir);
++  const span = trace.getTracer('t').startSpan('hello');
++  span.end();
++  await tel.shutdown();
++  const raw = await readFile(join(dir, 'spans.jsonl'), 'utf8');
++  expect(raw).toContain('"name":"hello"');
++});
++
++test('initRunTelemetry is idempotent across runs (re-register ok)', async () => {
++  const a = initRunTelemetry(dir);
++  await a.shutdown();
++  const b = initRunTelemetry(dir);
++  await b.shutdown();
++  expect(true).toBe(true); // no throw on second context-manager registration
++});
++
++test('buildProcessors adds OTLP only when AGENT_OTLP_ENDPOINT is set', () => {
++  expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(1);
++  process.env.AGENT_OTLP_ENDPOINT = 'http://localhost:4318/v1/traces';
++  expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(2);
++});
++
++test('recordIoEnabled defaults true, off when set to 0', () => {
++  expect(recordIoEnabled()).toBe(true);
++  process.env.AGENT_TELEMETRY_RECORD_IO = '0';
++  expect(recordIoEnabled()).toBe(false);
++});

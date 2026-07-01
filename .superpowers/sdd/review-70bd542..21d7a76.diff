@@ -1,0 +1,308 @@
+# Review package: 70bd542..21d7a76
+
+## Commits
+21d7a76 chore(docs): enforce the documentation hard line (checker + git hooks)
+
+## Files changed
+ .githooks/pre-commit  |  5 ++++
+ .githooks/pre-push    | 31 +++++++++++++++++++++
+ CLAUDE.md             | 27 +++++++++++++++++++
+ README.md             | 20 ++++++++++++++
+ docs/README.md        | 34 +++++++++++++++++++++++
+ docs/architecture.md  |  1 +
+ package.json          |  4 +++
+ scripts/docs-check.ts | 74 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 196 insertions(+)
+
+## Diff
+diff --git a/.githooks/pre-commit b/.githooks/pre-commit
+new file mode 100755
+index 0000000..8441701
+--- /dev/null
++++ b/.githooks/pre-commit
+@@ -0,0 +1,5 @@
++#!/bin/sh
++# Documentation hard line — structural guard on every commit.
++# Blocks if a living doc is missing/orphaned or a src subsystem is undocumented.
++# Activate once per clone with: bun run setup
++exec bun run docs:check
+diff --git a/.githooks/pre-push b/.githooks/pre-push
+new file mode 100755
+index 0000000..4e419b6
+--- /dev/null
++++ b/.githooks/pre-push
+@@ -0,0 +1,31 @@
++#!/bin/sh
++# Documentation currency gate — slice-merge granularity.
++# Blocks a push whose commits change src/** but do NOT update docs/architecture.md.
++# Deliberate bypass (genuine no-doc-needed push): DOCS_OK=1 git push
++# Activate once per clone with: bun run setup
++[ "$DOCS_OK" = "1" ] && exit 0
++
++ZERO="0000000000000000000000000000000000000000"
++status=0
++
++while read -r local_ref local_oid remote_ref remote_oid; do
++  [ "$local_oid" = "$ZERO" ] && continue   # branch deletion
++  if echo "$remote_oid" | grep -qE '^0+$'; then
++    # new branch on the remote: diff against main, else the root commit
++    base=$(git merge-base "$local_oid" origin/main 2>/dev/null \
++      || git merge-base "$local_oid" main 2>/dev/null \
++      || git rev-list --max-parents=0 "$local_oid" | tail -1)
++  else
++    base="$remote_oid"
++  fi
++  changed=$(git diff --name-only "$base" "$local_oid" 2>/dev/null)
++  if echo "$changed" | grep -qE '^src/' && ! echo "$changed" | grep -qx 'docs/architecture.md'; then
++    echo "✖ pre-push: src/ changed but docs/architecture.md was not updated in this push."
++    echo "  The hard line: every shipped change keeps the architecture doc current."
++    echo "  Update docs/architecture.md (+ the README map / docs/README.md), or, if a doc"
++    echo "  change is genuinely not needed, bypass once with:  DOCS_OK=1 git push"
++    status=1
++  fi
++done
++
++exit $status
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..651085c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1,27 @@
++# Project rules — local-agent framework (~/ai)
++
++Global dev workflow (bun, browser, code style, quick commands) lives in the
++user-level CLAUDE.md. This file holds the **repo-specific** rules. The full
++technical map is [`docs/architecture.md`](docs/architecture.md); the doc index
++is [`docs/README.md`](docs/README.md).
++
++## Documentation — the hard line (non-negotiable)
++
++**Documentation stays current with the code. A stale doc is a defect, not debt.**
++We cannot afford to ship a change that the docs don't reflect.
++
++- **Every slice updates [`docs/architecture.md`](docs/architecture.md)** to reflect what it changed — a new module, a new data-flow edge, a new mechanism/formula. If it adds or renames a *living* doc, also update the [documentation map](docs/README.md) and the root README pointer.
++- **Every spec and plan carries two standing notes:** an **"architecture-doc update"** note and a **"telemetry to emit"** note (see [`docs/ROADMAP.md`](docs/ROADMAP.md) "observable by default").
++- **The slice's final review audits the doc against the diff for accuracy** — not just "was the file touched," but "do its claims still match the code." (Presence is enforced by tooling; *truth* is the review's job. This is how the Slice-9 audit caught 6 wrong edges.)
++- **The interactive architecture snapshot Artifact** is regenerated/verified from `architecture.md` when the architecture changes, and is held to the same accuracy bar.
++
++### Enforced automatically
++- Run **`bun run setup`** once per clone to activate the git hooks (`.githooks/`, via `core.hooksPath`).
++- **pre-commit** → `bun run docs:check`: blocks if a living doc is missing/orphaned or a `src/<subsystem>` is undocumented in `architecture.md`.
++- **pre-push** → blocks a push whose commits change `src/**` but not `docs/architecture.md`. Deliberate bypass only (genuinely doc-neutral change): `DOCS_OK=1 git push`.
++- **Pre-PR / pre-merge gate:** `bun run check` (docs-check · typecheck · lint · tests). Don't merge red.
++
++## Don't
++- Commit without `bun run typecheck`; skip tests; leave `console.log`.
++- Ship a `src/**` change without updating `docs/architecture.md` (or a conscious, justified `DOCS_OK=1`).
++- Hardcode model choices, budgets, or limits — compute live; env vars are fallback-only.
+diff --git a/README.md b/README.md
+index 06e5b46..e7c6ca0 100644
+--- a/README.md
++++ b/README.md
+@@ -196,10 +196,30 @@ bun run test:file -- ./tests/...    # a specific test file
+ bun run lint -- --write             # auto-fix lint/format
+ ```
+ 
+ - **Stack:** TypeScript + Bun + Vercel AI SDK 6. Pinned: `ai@^6` (not v7 — it
+   renames APIs), `ollama-ai-provider-v2@^3`, `@ai-sdk/mcp@^1`,
+   `@modelcontextprotocol/sdk@^1`, `zod@^4`.
+ - **Style:** small single-responsibility files, plain self-explanatory code,
+   typed errors, string enums. Tests verify real behavior (the agent loop is
+   tested against AI SDK's mock model; the MCP path is a real subprocess
+   round-trip).
++- **First clone:** run `bun run setup` once to activate the git hooks
++  (`.githooks/`). `bun run check` runs the full pre-PR gate
++  (docs-check · typecheck · lint · tests).
++
++---
++
++## Documentation
++
++Start at the **[documentation map](docs/README.md)** — the index of every
++maintained doc. The key references:
++
++- **[`docs/architecture.md`](docs/architecture.md)** — the living technical map: module/dependency graph, runtime data-flow, every subsystem and mechanism.
++- **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — the long-range plan (local-first n8n × CrewAI, phases A–F).
++- Module docs: [`agents/README.md`](agents/README.md), [`model-images/README.md`](model-images/README.md). Per-slice design records: [`docs/superpowers/`](docs/superpowers/).
++
++**The hard line:** documentation stays current with the code — a stale doc is a
++defect, not debt. Every slice updates `architecture.md` (and this map if a doc
++is added/renamed); the slice's final review audits the doc against the diff for
++accuracy. Enforced by `bun run docs:check` (pre-commit) and a pre-push currency
++gate. See the [documentation map](docs/README.md) for details.
+diff --git a/docs/README.md b/docs/README.md
+new file mode 100644
+index 0000000..d173afa
+--- /dev/null
++++ b/docs/README.md
+@@ -0,0 +1,34 @@
++# Documentation map
++
++The single index of every maintained document. If you add or rename a living
++doc, add it here **and** link it from the root [`README.md`](../README.md) —
++the `docs-check` guard fails otherwise.
++
++## The hard line (non-negotiable)
++
++**Documentation stays current with the code. A stale doc is a defect, not debt.**
++
++- **Every slice updates [`architecture.md`](architecture.md)** to reflect what it changed (new module, new data-flow edge, new mechanism) — and updates this map + the root README if it adds/renames a living doc. Each spec/plan carries an **"architecture-doc update"** note next to its **"telemetry to emit"** note.
++- **The slice's final review audits the doc against the diff for accuracy** — presence is enforced by tooling, but *truth* is a human/review check (this is how the Slice-9 audit caught 6 wrong edges). Don't just touch the file; verify its claims still match the code.
++- Enforced automatically (run `bun run setup` once per clone to activate the git hooks):
++  - **pre-commit** → `bun run docs:check`: blocks if a living doc is missing/orphaned or a `src/<subsystem>` is undocumented in `architecture.md`. No false positives.
++  - **pre-push** → blocks a push whose commits change `src/**` but not `docs/architecture.md`. Deliberate bypass only: `DOCS_OK=1 git push` (for a genuinely doc-neutral change).
++  - Pre-PR gate: `bun run check` (docs-check + typecheck + lint + tests).
++
++## Living docs — kept current
++
++| Doc | What it is |
++|---|---|
++| [`../README.md`](../README.md) | Product overview, quick start, the pointer hub for everything below. |
++| [`architecture.md`](architecture.md) | **Living technical map** — module/dependency graph + runtime data-flow + every subsystem and mechanism. The source of truth for *how the system is wired*. (Interactive snapshot rendered as an Artifact on request.) |
++| [`ROADMAP.md`](ROADMAP.md) | Long-range plan — North Star (local-first n8n × CrewAI), phases A–F, the engine line, cross-cutting principles. |
++| [`../agents/README.md`](../agents/README.md) | The current agents (super / file-qa / web-fetch) and the capability-requirement pattern. |
++| [`../model-images/README.md`](../model-images/README.md) | The local model store (git-ignored), per-machine model blobs, Ollama integration. |
++
++## Historical artifacts — immutable, not "maintained"
++
++Per-slice design records, dated and frozen once their slice ships. They are not
++updated after the fact (the living docs above carry the current state).
++
++- [`superpowers/specs/`](superpowers/specs/) — one design spec per slice.
++- [`superpowers/plans/`](superpowers/plans/) — one implementation plan per slice.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index b4d4032..e14dce7 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -118,20 +118,21 @@ graph TD
+     runscli --> runtrace
+     runtrace --> spansfile
+ ```
+ 
+ | Layer | Files | Responsibility | Knows about |
+ |---|---|---|---|
+ | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
++| **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+ | **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+diff --git a/package.json b/package.json
+index 12695fb..42988e4 100644
+--- a/package.json
++++ b/package.json
+@@ -3,20 +3,24 @@
+   "version": "0.1.0",
+   "private": true,
+   "type": "module",
+   "scripts": {
+     "serve": "bash scripts/serve.sh",
+     "typecheck": "tsc --noEmit",
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+     "lint:file": "biome check",
++    "lint:claude": "biome check .",
++    "docs:check": "bun run scripts/docs-check.ts",
++    "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
++    "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
+     "discover": "bun run src/cli/discover.ts",
+     "runs": "bun run src/cli/runs.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/mcp": "^1.0.55",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/context-async-hooks": "^2.8.0",
+     "@opentelemetry/core": "^2.8.0",
+diff --git a/scripts/docs-check.ts b/scripts/docs-check.ts
+new file mode 100644
+index 0000000..b405d79
+--- /dev/null
++++ b/scripts/docs-check.ts
+@@ -0,0 +1,74 @@
++#!/usr/bin/env bun
++/**
++ * docs-check — structural documentation guard (the hard line).
++ *
++ * Deterministic, no false positives. Run on every commit (pre-commit hook) and
++ * in the pre-PR gate. Asserts:
++ *   1. every living doc exists,
++ *   2. the README links the documentation map and every living doc (no orphans),
++ *   3. every src/<subsystem> is documented in docs/architecture.md
++ *      (so a whole new subsystem can't land undocumented).
++ *
++ * It does NOT check semantic accuracy — that is the per-slice final-review
++ * audit (see CLAUDE.md / docs/README.md). This only enforces presence + links.
++ */
++import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
++import { join } from 'node:path';
++
++/** Docs meant to be kept current. Per-slice specs/plans are immutable history, not listed. */
++const LIVING_DOCS = [
++  'README.md',
++  'docs/README.md',
++  'docs/architecture.md',
++  'docs/ROADMAP.md',
++  'agents/README.md',
++  'model-images/README.md',
++];
++
++const failures: string[] = [];
++
++// 1. Existence
++for (const doc of LIVING_DOCS) {
++  if (!existsSync(doc)) failures.push(`missing living doc: ${doc}`);
++}
++
++// 2. README links the doc map + every living doc (repo-root-relative paths)
++const readme = existsSync('README.md') ? readFileSync('README.md', 'utf8') : '';
++if (!readme.includes('docs/README.md')) {
++  failures.push('README.md must link the documentation map: docs/README.md');
++}
++for (const doc of LIVING_DOCS) {
++  if (doc === 'README.md') continue;
++  if (!readme.includes(doc)) {
++    failures.push(`living doc not linked from README.md: ${doc}`);
++  }
++}
++
++// 3. Every src/<subsystem> is named in docs/architecture.md
++const arch = existsSync('docs/architecture.md')
++  ? readFileSync('docs/architecture.md', 'utf8')
++  : '';
++if (existsSync('src')) {
++  for (const entry of readdirSync('src')) {
++    if (!statSync(join('src', entry)).isDirectory()) continue;
++    if (!arch.includes(`src/${entry}`)) {
++      failures.push(
++        `subsystem src/${entry}/ is not documented in docs/architecture.md`,
++      );
++    }
++  }
++}
++
++if (failures.length > 0) {
++  console.error(`\n✖ docs-check failed (${failures.length}):`);
++  for (const f of failures) console.error(`  - ${f}`);
++  console.error(
++    '\nThe hard line: docs stay current. Fix by linking the doc from README.md / the map,\n' +
++      'or documenting the new subsystem in docs/architecture.md. See docs/README.md.\n',
++  );
++  process.exit(1);
++}
++
++console.log(
++  '✔ docs-check: living docs present + linked; every src subsystem documented.',
++);

@@ -1,0 +1,60 @@
+# Review package: b1a02ea..987bfda
+
+## Commits
+987bfda feat(discovery): quant->bytes-per-weight map + pick-best-quant-that-fits
+
+## Files changed
+ src/discovery/quant.ts        | 20 ++++++++++++++++++++
+ tests/discovery/quant.test.ts | 17 +++++++++++++++++
+ 2 files changed, 37 insertions(+)
+
+## Diff
+diff --git a/src/discovery/quant.ts b/src/discovery/quant.ts
+new file mode 100644
+index 0000000..665fdea
+--- /dev/null
++++ b/src/discovery/quant.ts
+@@ -0,0 +1,20 @@
++export type QuantFile = { quant: string; sizeBytes: number };
++
++/** Approximate bytes-per-weight for common GGUF/MLX quant labels. */
++const BPW: Record<string, number> = {
++  Q2_K: 0.34, Q3_K_M: 0.43, Q4_0: 0.56, Q4_K_M: 0.56, Q4_K_S: 0.52,
++  Q5_K_M: 0.70, Q5_0: 0.68, Q6_K: 0.82, Q8_0: 1.06,
++  IQ4_XS: 0.5, '4BIT': 0.55, '8BIT': 1.06, FP16: 2.0, F16: 2.0,
++};
++
++/** Bytes/weight for a quant label (case-insensitive); falls back to Q4_K_M-ish. */
++export function bytesPerWeightForQuant(quant: string): number {
++  return BPW[quant.toUpperCase()] ?? 0.6;
++}
++
++/** Largest quant file that fits the budget (file size ≈ weights footprint). */
++export function pickBestQuantThatFits(files: QuantFile[], budgetBytes: number): QuantFile | undefined {
++  return [...files]
++    .filter((f) => f.sizeBytes <= budgetBytes)
++    .sort((a, b) => b.sizeBytes - a.sizeBytes)[0];
++}
+diff --git a/tests/discovery/quant.test.ts b/tests/discovery/quant.test.ts
+new file mode 100644
+index 0000000..290dee0
+--- /dev/null
++++ b/tests/discovery/quant.test.ts
+@@ -0,0 +1,17 @@
++import { expect, test } from 'bun:test';
++import { bytesPerWeightForQuant, pickBestQuantThatFits } from '../../src/discovery/quant.ts';
++
++test('maps common GGUF quants to bytes/weight', () => {
++  expect(bytesPerWeightForQuant('Q4_K_M')).toBeCloseTo(0.56, 2);
++  expect(bytesPerWeightForQuant('Q8_0')).toBeGreaterThan(1.0);
++  expect(bytesPerWeightForQuant('unknown')).toBeGreaterThan(0); // safe default
++});
++test('picks the largest quant whose file fits the budget', () => {
++  const files = [
++    { quant: 'Q4_K_M', sizeBytes: 5e9 },
++    { quant: 'Q6_K', sizeBytes: 7e9 },
++    { quant: 'Q8_0', sizeBytes: 9e9 },
++  ];
++  expect(pickBestQuantThatFits(files, 8e9)?.quant).toBe('Q6_K');
++  expect(pickBestQuantThatFits(files, 4e9)).toBeUndefined();
++});

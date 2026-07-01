@@ -1,0 +1,141 @@
+# Review package: 7bba47c..5758843
+
+## Commits
+5758843 feat(core): enable AI-SDK experimental_telemetry with per-agent functionId
+
+## Files changed
+ src/core/agent-def.ts              |  1 +
+ src/core/agent.ts                  |  8 +++++++
+ tests/core/agent-telemetry.test.ts | 48 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 57 insertions(+)
+
+## Diff
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index f761a3a..afb84aa 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -29,12 +29,13 @@ export function runDefinedAgent(
+   task: string,
+   numCtx?: number,
+   modelOverride?: LanguageModel,
+ ): ReturnType<typeof runAgent> {
+   return runAgent({
+     model: modelOverride ?? agent.model,
+     systemPrompt: agent.systemPrompt,
+     prompt: task,
+     tools: agent.tools,
+     providerOptions: ollamaCtxOptions(numCtx),
++    functionId: agent.name,
+   });
+ }
+diff --git a/src/core/agent.ts b/src/core/agent.ts
+index ab0d81d..a56466a 100644
+--- a/src/core/agent.ts
++++ b/src/core/agent.ts
+@@ -1,44 +1,52 @@
+ import type { ProviderOptions } from '@ai-sdk/provider-utils';
+ import {
+   generateText,
+   type LanguageModel,
+   stepCountIs,
+   type ToolSet,
+ } from 'ai';
++import { recordIoEnabled } from '../telemetry/provider.ts';
+ import { MaxStepsError } from './errors.ts';
+ 
+ const DEFAULT_MAX_STEPS = 10;
+ 
+ export type RunAgentInput = {
+   model: LanguageModel;
+   systemPrompt: string;
+   prompt: string;
+   tools: ToolSet;
+   maxSteps?: number;
+   temperature?: number;
+   providerOptions?: ProviderOptions;
++  functionId?: string;
+ };
+ 
+ /** Run one agent turn: model + tools loop, bounded by a step guard. Returns text + steps. */
+ export async function runAgent(input: RunAgentInput): Promise<{
+   text: string;
+   steps: Awaited<ReturnType<typeof generateText>>['steps'];
+ }> {
+   const result = await generateText({
+     model: input.model,
+     system: input.systemPrompt,
+     prompt: input.prompt,
+     tools: input.tools,
+     temperature: input.temperature,
+     providerOptions: input.providerOptions,
+     stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
++    experimental_telemetry: {
++      isEnabled: true,
++      functionId: input.functionId,
++      recordInputs: recordIoEnabled(),
++      recordOutputs: recordIoEnabled(),
++    },
+   });
+   const { text, finishReason, steps } = result;
+   if (text.trim() === '' && finishReason !== 'stop') {
+     throw new MaxStepsError(
+       `Agent exhausted step ceiling (${steps.length} steps) without producing a final answer.`,
+       steps,
+     );
+   }
+   return { text, steps };
+ }
+diff --git a/tests/core/agent-telemetry.test.ts b/tests/core/agent-telemetry.test.ts
+new file mode 100644
+index 0000000..b6a638a
+--- /dev/null
++++ b/tests/core/agent-telemetry.test.ts
+@@ -0,0 +1,48 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { MockLanguageModelV3 } from 'ai/test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { runDefinedAgent } from '../../src/core/agent-def.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++
++let exporter: ReturnType<typeof registerTestProvider>['exporter'];
++let provider: ReturnType<typeof registerTestProvider>['provider'];
++
++beforeEach(() => {
++  ({ exporter, provider } = registerTestProvider());
++});
++
++afterEach(async () => {
++  await provider.shutdown();
++  exporter.reset();
++});
++
++test('runDefinedAgent emits an ai.generateText span tagged with the agent name', async () => {
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'ok' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const agent: Agent = {
++    name: 'file_qa',
++    description: 'answers from files',
++    model,
++    systemPrompt: 'you answer',
++    tools: {},
++  };
++  await runDefinedAgent(agent, 'hello');
++  const spans = exporter.getFinishedSpans();
++  const gen = spans.find((s) => s.name.startsWith('ai.generateText'));
++  expect(gen).toBeDefined();
++  expect(gen?.attributes['ai.telemetry.functionId']).toBe('file_qa');
++});

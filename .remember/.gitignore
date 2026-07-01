@@ -1,0 +1,4 @@
+# This buffer is intentionally tracked (cross-machine session continuity).
+# Track the .md memory files; keep only transient runtime dirs out.
+logs/
+tmp/

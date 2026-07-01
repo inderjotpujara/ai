@@ -1,0 +1,3769 @@
+# Review package: 13e5753ed101901264747d29ac95d21ffdb713ba..e8ac445
+
+## Commits
+e8ac445 feat: instrument delegation + model select/load/evict spans; live e2e
+5758843 feat(core): enable AI-SDK experimental_telemetry with per-agent functionId
+7bba47c feat(run): runChat emits OTel root span to spans.jsonl; retire journal.jsonl
+6d04728 feat(cli): runs viewer (list + render + --follow) and bun run runs
+dcd2a2d feat(cli): pure trace timeline + run-list renderers
+5e4953d feat(run): span reader + trace tree builder + run summary
+9600aa4 fix(telemetry): flush spans on shutdown + re-init-safe provider swap
+99fb1d7 feat(telemetry): semantic span helpers + ATTR keys (run/delegation/model)
+a729106 feat(telemetry): Bun-safe OTel provider + OTLP seam + IO flag
+1912ec2 feat(telemetry): JsonlFileExporter + SpanRecord (OTel local span sink)
+cd9cd9b docs(slice-8): implementation plan + telemetry-extensibility mandate
+be58eb4 docs(slice-8): run-viewer design — OTel run tracing + terminal viewer
+
+## Files changed
+ bun.lock                                           |   29 +
+ docs/ROADMAP.md                                    |   19 +-
+ .../plans/2026-06-30-slice-8-run-viewer.md         | 1620 ++++++++++++++++++++
+ .../specs/2026-06-30-slice-8-run-viewer-design.md  |  210 +++
+ package.json                                       |   10 +-
+ src/cli/render-trace.ts                            |   40 +
+ src/cli/run-chat.ts                                |   57 +-
+ src/cli/runs.ts                                    |   80 +
+ src/cli/select-hook.ts                             |    7 +
+ src/core/agent-def.ts                              |    1 +
+ src/core/agent.ts                                  |    8 +
+ src/core/delegate.ts                               |   42 +-
+ src/resource/model-manager.ts                      |   20 +-
+ src/run/journal.ts                                 |   33 -
+ src/run/run-trace.ts                               |   83 +
+ src/telemetry/jsonl-exporter.ts                    |   77 +
+ src/telemetry/provider.ts                          |   59 +
+ src/telemetry/spans.ts                             |  150 ++
+ tests/cli/render-trace.test.ts                     |   64 +
+ tests/cli/run-chat.test.ts                         |   34 +-
+ tests/cli/runs.test.ts                             |   64 +
+ tests/core/agent-telemetry.test.ts                 |   48 +
+ tests/core/delegate.test.ts                        |   50 +-
+ tests/helpers/otel-test-provider.ts                |   29 +
+ tests/integration/run-viewer.live.test.ts          |   52 +
+ tests/run/journal.test.ts                          |   23 -
+ tests/run/run-trace.test.ts                        |  101 ++
+ tests/telemetry/jsonl-exporter.test.ts             |   56 +
+ tests/telemetry/provider.test.ts                   |   58 +
+ tests/telemetry/spans.test.ts                      |   50 +
+ 30 files changed, 3055 insertions(+), 119 deletions(-)
+
+## Diff
+diff --git a/bun.lock b/bun.lock
+index 0637040..bb029a7 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -1,20 +1,27 @@
+ {
+   "lockfileVersion": 1,
+   "configVersion": 1,
+   "workspaces": {
+     "": {
+       "name": "local-agents",
+       "dependencies": {
+         "@ai-sdk/mcp": "^1.0.55",
+         "@ai-sdk/openai-compatible": "^1",
+         "@modelcontextprotocol/sdk": "^1.29.0",
++        "@opentelemetry/api": "^1.9.1",
++        "@opentelemetry/context-async-hooks": "^2.8.0",
++        "@opentelemetry/core": "^2.8.0",
++        "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
++        "@opentelemetry/resources": "^2.8.0",
++        "@opentelemetry/sdk-trace-base": "^2.8.0",
++        "@opentelemetry/semantic-conventions": "^1.41.1",
+         "ai": "^6.0.214",
+         "ollama-ai-provider-v2": "^3.6.0",
+         "zod": "^4.4.3",
+       },
+       "devDependencies": {
+         "@biomejs/biome": "2.5.1",
+         "@types/bun": "^1.3.14",
+         "typescript": "^5.9.0",
+       },
+     },
+@@ -47,20 +54,42 @@
+     "@biomejs/cli-win32-arm64": ["@biomejs/cli-win32-arm64@2.5.1", "", { "os": "win32", "cpu": "arm64" }, "sha512-zgXnKNgWPC4iPF7Y1lR3STUeCUuZRpD6IiOrC7TZTlh0Lx6FiVUT05myuMQHQ9D+1cc7uyMldi4forE6lp0ivQ=="],
+ 
+     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.5.1", "", { "os": "win32", "cpu": "x64" }, "sha512-6uxpR9hvaglANkZemeSiN/FhYgkGasrEGn267eXIWvjrjJ2LhDlk251IhjVJq6MXzkV2/bcXwLwSroLyPtqRZg=="],
+ 
+     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
+ 
+     "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.29.0", "", { "dependencies": { "@hono/node-server": "^1.19.9", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ=="],
+ 
+     "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
+ 
++    "@opentelemetry/api-logs": ["@opentelemetry/api-logs@0.219.0", "", { "dependencies": { "@opentelemetry/api": "^1.3.0" } }, "sha512-FFx7YnaYJlIjqWW/AG/yAZ0L/NEY724PipXXXQLdtZPbLwBGbUMTGL1i/esI56TWfTUXxhLfpgrnWJCG8aUJyg=="],
++
++    "@opentelemetry/context-async-hooks": ["@opentelemetry/context-async-hooks@2.8.0", "", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0 <1.10.0" } }, "sha512-/3FIraneMcng67SUJCxvyInk/oxzwsxyadufk0wwfOBLf5wqtAGX4MoQASwSbndBPeARzBryUM9Azr5kHIdWLw=="],
++
++    "@opentelemetry/core": ["@opentelemetry/core@2.8.0", "", { "dependencies": { "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.0.0 <1.10.0" } }, "sha512-hd1Lfh8p545nNz+jq1Ejfz+Mn1hyLuxYn1YzTfFNrxr8urEWMNQLPf1Th8kjOH+HxwawCrtgBp8JpBUR4ZSgww=="],
++
++    "@opentelemetry/exporter-trace-otlp-proto": ["@opentelemetry/exporter-trace-otlp-proto@0.219.0", "", { "dependencies": { "@opentelemetry/core": "2.8.0", "@opentelemetry/otlp-exporter-base": "0.219.0", "@opentelemetry/otlp-transformer": "0.219.0", "@opentelemetry/resources": "2.8.0", "@opentelemetry/sdk-trace-base": "2.8.0" }, "peerDependencies": { "@opentelemetry/api": "^1.3.0" } }, "sha512-lF/LUBfhOFmxJa+SQsLN7ziV4MHa2pyKgOM6JNehSOfU+npjM4gwm9oIKEJrzrWcexMcqydiyoFy0XCb1Ql3wQ=="],
++
++    "@opentelemetry/otlp-exporter-base": ["@opentelemetry/otlp-exporter-base@0.219.0", "", { "dependencies": { "@opentelemetry/core": "2.8.0", "@opentelemetry/otlp-transformer": "0.219.0" }, "peerDependencies": { "@opentelemetry/api": "^1.3.0" } }, "sha512-zvIxQX/AZUVKDU+hCuYx+7UkiP7GRdnk1ZbFQRYzHvYp47cAWR4j3IhoPhV9KaeXEv2xdGq3IA6PnpzDmLcmSA=="],
++
++    "@opentelemetry/otlp-transformer": ["@opentelemetry/otlp-transformer@0.219.0", "", { "dependencies": { "@opentelemetry/api-logs": "0.219.0", "@opentelemetry/core": "2.8.0", "@opentelemetry/resources": "2.8.0", "@opentelemetry/sdk-logs": "0.219.0", "@opentelemetry/sdk-metrics": "2.8.0", "@opentelemetry/sdk-trace-base": "2.8.0" }, "peerDependencies": { "@opentelemetry/api": "^1.3.0" } }, "sha512-aaYKAyXhw9VchKZVGOopD3Gw/kPsyrX2c6IQ0AW32mTjqmZOh5Y6Gf5OYqTNqVktAeBjmFinhyFaCwW6GYK9YQ=="],
++
++    "@opentelemetry/resources": ["@opentelemetry/resources@2.8.0", "", { "dependencies": { "@opentelemetry/core": "2.8.0", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <1.10.0" } }, "sha512-qmXQ27ilDbUK/vGMqwL8D4/rhn76C+sherM4wTbjlfknR8Nvfc/hCxjRJPhkzZzUsPiNg16SA31NxMabwttRjg=="],
++
++    "@opentelemetry/sdk-logs": ["@opentelemetry/sdk-logs@0.219.0", "", { "dependencies": { "@opentelemetry/api-logs": "0.219.0", "@opentelemetry/core": "2.8.0", "@opentelemetry/resources": "2.8.0", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.4.0 <1.10.0" } }, "sha512-s6lTKRakaPClvKoWHRChxnXjDMkM/TQ30ff78jN6EBGf7MI7VzANE5PU3f4z9qDUudWjvZjOLHG0rBnBKYvoXA=="],
++
++    "@opentelemetry/sdk-metrics": ["@opentelemetry/sdk-metrics@2.8.0", "", { "dependencies": { "@opentelemetry/core": "2.8.0", "@opentelemetry/resources": "2.8.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.9.0 <1.10.0" } }, "sha512-UDBGaj6W0Rgy5rTTaoxs8gVGF/aGkAKyjurJv7se6wjRxJu7FoquTLT/vt54DZfo4crbprYfhX/SOK9+BPw1qg=="],
++
++    "@opentelemetry/sdk-trace-base": ["@opentelemetry/sdk-trace-base@2.8.0", "", { "dependencies": { "@opentelemetry/core": "2.8.0", "@opentelemetry/resources": "2.8.0", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <1.10.0" } }, "sha512-mhU4jp+vW0mGbFRd+GeXHvmfA4aDqWjBjLC3pE5XMpLs0IE2ryYb019Ts2AQrOq67gaTF25D91+fgvEHDZEnuQ=="],
++
++    "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.41.1", "", {}, "sha512-/UhIkaZgPutTFmQ7RnIJGgDXZmtEJ7Dvi86xNTFWcnRxVRNk/aotsqDJYeEvDP+FSMB2SdW+pQzNMcWP0rwuNA=="],
++
+     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
+ 
+     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+ 
+     "@types/node": ["@types/node@26.0.1", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-fc3KiUoBt6kie0N9bIW3E47vZsuaMf0PM2AaUpLCLT0s/LvX1nxAim6Fc049cNxODPpGm6qRAuUOB86SkRuPQw=="],
+ 
+     "@vercel/oidc": ["@vercel/oidc@3.2.0", "", {}, "sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug=="],
+ 
+     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
+ 
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index e4770e2..97e06cb 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -52,20 +52,37 @@ server (`mcp-server-fetch`). The next phase pivots from *engine* to *product*.
+ 
+ > **Cross-cutting design principle — grounded & trustworthy by default.** Every
+ > agent we build (and every agent the agent-builder generates) should *prefer
+ > abstention over fabrication*: answer from evidence (retrieved context, tool
+ > output, the user's files), cite it where it matters, and say "I don't know" or
+ > report a gap rather than guess. The system already does this passively
+ > (`report_capability_gap`, `{kind:'resource'}`); Phase B makes it active
+ > (faithfulness judging, citation enforcement, corrective re-retrieval). This is
+ > a property of the whole platform, not a single slice.
+ 
++> **Cross-cutting design principle — observable by default (extend telemetry as we go).**
++> Phase A's run-viewer establishes an **OpenTelemetry tracing layer** (`src/telemetry/`)
++> that is **modular and meant to be extended by every feature we build after it.**
++> The rule, going forward: **any new subsystem that does meaningful work emits
++> spans/events** through the shared `src/telemetry/spans.ts` helpers (add a
++> `withXSpan` helper + `ATTR` keys following the existing pattern) — the workflow/DAG
++> engine (span per step/branch/fan-out), crews (span per role/task/process),
++> memory/RAG (retrieve → rerank → generate spans + `gen_ai.*`), grounded
++> verification (faithfulness/citation spans), agent-builder, triggers/daemon, and
++> the Engine-line scheduler all extend the same trace. Because everything funnels
++> through the OTel `SpanExporter` seam, the **local JSONL viewer and any OSS backend
++> (Jaeger / Tempo / Phoenix / Honeycomb via `AGENT_OTLP_ENDPOINT`) get the new
++> signal for free** — no re-instrumentation. **Telemetry is not a Phase-A
++> deliverable that ends; it is a standing obligation of every later slice.** Each
++> new spec/plan MUST include a "telemetry to emit" note. See
++> `reference-otel-run-viewer-constraint` memory.
++
+ ## Foundation — SHIPPED (the engine)
+ 
+ | Slice | Capability | Status |
+ |---|---|---|
+ | **1** | Local file-Q&A agent · model warm-up/unload · MCP `read_file` · run store | ✅ shipped + live-verified |
+ | **2** | Orchestrator (agents-as-tools) — route to a specialist or report a capability gap | ✅ shipped + live-verified |
+ | **3** | `mountMcpServer` (mount any MCP server) · web-fetch agent (`uvx mcp-server-fetch`) | ✅ shipped + live-verified |
+ | **4** | **Model Manager** — multi-model, hardware-aware: live free-RAM budget (`min(75% Metal cap, 80% available)` via `vm_stat`, per-delegation); load/evict/pin within budget; dynamic `num_ctx` from headroom, clamped by live model max, floored at 4096 | ✅ shipped + live-verified |
+ | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`); a registry + selector pick the largest model that fits; genuine no-fit → `{kind:'resource'}` + non-zero exit, never a hallucinated answer | ✅ shipped + live-verified |
+ | **6** | **Model discovery + multi-runtime** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (sized to live RAM), writes `catalog.json`, pre-pulls top fit; offline `buildRegistry` merge; Ollama + MLX-server runtime ports; four-axis taxonomy (capability/modality · runtime · source · content-policy) | ✅ shipped + live-verified |
+@@ -76,21 +93,21 @@ server (`mcp-server-fetch`). The next phase pivots from *engine* to *product*.
+ # The product line — toward n8n × CrewAI
+ 
+ Six themed phases. Sequence is a recommendation; phases A→D are the critical
+ path to a recognizable n8n/CrewAI experience. The **Engine line** and
+ **Capability breadth** run continuously alongside, pulled in opportunistically.
+ 
+ ## Phase A — See it & trust it  *(cheap, high-leverage, unblocks everything)*
+ 
+ | Item | Why now | Depends on |
+ |---|---|---|
+-| **Run-viewer (`/runs`)** ⭐ | Renders the JSONL journals we **already write** — timeline of delegations, gaps, model loads, artifacts. Makes 7 slices of invisible engine **demoable**, and becomes the **debugging surface** you'll need the instant workflows/crews/agent-builder start misrouting. Lowest cost, highest visibility. | run store (Slice 1) |
++| **Run-viewer (`/runs`)** ⭐ | Instruments each run as an **OpenTelemetry trace** (root + delegation + model-lifecycle spans; AI-SDK gives agent/tool/token spans free) to `runs/<id>/spans.jsonl`, rendered as a terminal timeline (`bun run runs`, with `--follow`). Establishes the **extensible `src/telemetry/` layer every later feature emits into** (see the observable-by-default principle above) + a swappable OTLP backend seam. Makes 7 slices of invisible engine **demoable**, and becomes the **debugging surface** you'll need the instant workflows/crews/agent-builder start misrouting. Lowest cost, highest visibility. | run store (Slice 1) |
+ | **Graceful degradation** | If `uvx` / an MCP server / a model is down, **drop that agent and tell the user** instead of failing the whole CLI. Essential for an always-on autonomous box; today a dead dependency can sink a run. | Slices 2–3 |
+ | **Telemetry + eval harness** | Log per-agent latency / tokens / tool-call success; a small harness scoring **routing accuracy** (did the orchestrator pick the right specialist?) **and answer faithfulness / citation-faithfulness** (RAGAS-style: % of claims supported by retrieved evidence; penalize fabricated citations) against a ~100-item golden set. The moment agent-builder adds specialists *and* RAG adds retrieved context, routing quality + groundedness are what break — cheap insurance, measurable. | Slice 2 |
+ 
+ ## Phase B — Compose it  *(the heart of n8n & CrewAI)*
+ 
+ | Item | Why | Depends on |
+ |---|---|---|
+ | **Composition guardrails** | **Prerequisite** for any multi-agent depth: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns + warm-model reuse. The roadmap has long flagged these as MUST-haves; they must land **before** crews/agent-builder, or deep graphs become a cost/loop footgun (~15× compounding). | Slice 2 |
+ | **Workflow / DAG engine** ⭐ | The defining capability we lack vs **both** n8n and CrewAI: **deterministic multi-step orchestration** — a typed DAG of steps (agent call, tool call, branch, map/fan-out) with explicit data flow, instead of one LLM picking one specialist. This is the n8n "workflow" and the CrewAI "sequential process." | guardrails, run store |
+ | **Crews & roles** | The CrewAI layer on top of the engine: agents gain **role + goal**; a **task list** runs under a **process** (sequential pipeline or hierarchical = our orchestrator). Formalizes "a team of agents collaborating on a goal." | workflow engine |
+diff --git a/docs/superpowers/plans/2026-06-30-slice-8-run-viewer.md b/docs/superpowers/plans/2026-06-30-slice-8-run-viewer.md
+new file mode 100644
+index 0000000..02463d6
+--- /dev/null
++++ b/docs/superpowers/plans/2026-06-30-slice-8-run-viewer.md
+@@ -0,0 +1,1620 @@
++# Slice 8 — Phase A Run-viewer (OpenTelemetry tracing + terminal viewer) Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Instrument each run as an OpenTelemetry trace (root + delegation + model-lifecycle spans; AI-SDK gives agent/tool/token spans free) written to `runs/<id>/spans.jsonl`, and add a `bun run runs` terminal viewer that lists runs and renders one as a timeline (with `--follow`).
++
++**Architecture:** OTel-native, global provider (Approach A). A thin `src/telemetry/` module owns a Bun-safe `BasicTracerProvider` + `AsyncLocalStorageContextManager`, a custom `JsonlFileExporter`, and semantic span helpers. `runChat` owns the provider lifecycle and the root span; manual spans at the delegation / model-select / model-load·evict seams ride the active OTel context so AI-SDK `generateText`/`toolCall`/token spans nest underneath automatically. A pure reader + renderer back the `runs` CLI. The same spans stream to any OSS backend by setting `AGENT_OTLP_ENDPOINT`.
++
++**Tech Stack:** TypeScript on Bun; AI SDK `ai@6.0.214` (`experimental_telemetry`); OpenTelemetry JS v2.x (`@opentelemetry/{api,sdk-trace-base,context-async-hooks,core,resources,semantic-conventions,exporter-trace-otlp-proto}`); `bun:test`; Biome.
++
++## Global Constraints
++
++- **Runtime:** Bun. **AI SDK is v6** (`ai@6.0.214`) — use `experimental_telemetry`, NOT the v7-beta `@ai-sdk/otel`/`registerTelemetry`.
++- **Bun-safe OTel only:** `BasicTracerProvider` + `AsyncLocalStorageContextManager` registered programmatically. Do NOT add `NodeTracerProvider`, `@opentelemetry/auto-instrumentations-node`, or any `@opentelemetry/instrumentation-*` (Bun breaks Node monkey-patching).
++- **OTel JS v2.x API:** `span.spanContext()` is a **method**; parent id = `span.parentSpanContext?.spanId` (NOT `parentSpanId`); processors passed via constructor `spanProcessors:[]` (no `addSpanProcessor`); `HrTime` is `[seconds, nanos]`. OTLP uses HTTP/proto (`exporter-trace-otlp-proto`) — never gRPC on Bun.
++- **Telemetry is best-effort:** helpers must NEVER throw into the agent path; with no provider registered they fall back to the OTel no-op tracer (zero spans, no breakage).
++- **Telemetry is a reusable, extensible subsystem (standing rule, not just this slice):** keep `src/telemetry/` modular so later features extend it by adding a `withXSpan`/`recordX` helper + `ATTR` keys in `spans.ts` — never by touching the transport (`provider.ts`/`jsonl-exporter.ts`) or the OTLP seam. New spans flow to the local viewer AND any OTLP backend for free. (See spec §6½ and ROADMAP's "observable by default" principle.) Build the helpers in this slice with that extension pattern visible and uniform.
++- **`gen_ai.*` is experimental:** emit both `gen_ai.provider.name` and legacy `gen_ai.system`; the viewer reads `gen_ai.*` keys generically.
++- **Env is fallback-only:** `AGENT_TELEMETRY_RECORD_IO` (default on), `AGENT_OTLP_ENDPOINT` (unset = JSONL only), `AGENT_RUNS_ROOT` (default `runs`).
++- **Code style (Biome):** single quotes, always semicolons, 2-space indent, organize-imports on. **Imports use explicit `.ts` extensions.** `verbatimModuleSyntax` → use `import type` for types. `strict` + `noUncheckedIndexedAccess` — guard array/object access. Prefer `enum` for finite named sets, but reuse existing string-union shapes structurally where they already exist.
++- **Tests:** `bun:test` (`describe`/`test`/`expect`/`mock`/`beforeEach`/`afterEach`). Temp dirs via `mkdtemp(join(tmpdir(), 'prefix-'))` + `rm(dir,{recursive:true,force:true})`. Mock models via `MockLanguageModelV3` from `ai/test`. Live tests: file suffix `*.live.test.ts`, gate `const ready = await ollamaReady(...); describe.skipIf(!ready)(...)`, timeout `120_000`.
++- **Every commit message ends with the trailer:**
++  ```
++  Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
++  ```
++- **Gates between/within tasks:** `bun run typecheck` and `bun run lint` clean; `bun test` green (live tests skip when Ollama is down).
++
++---
++
++## File Structure
++
++**Create:**
++- `src/telemetry/jsonl-exporter.ts` — `SpanRecord` type + `JsonlFileExporter` (custom `SpanExporter`).
++- `src/telemetry/provider.ts` — `initRunTelemetry`, `buildProcessors`, `recordIoEnabled`.
++- `src/telemetry/spans.ts` — `ATTR` keys, span helpers (`withRunSpan`, `setRunOutcome`, `withDelegationSpan`, `recordModelSelect`, `withModelLoadSpan`, `recordEvict`), info types.
++- `src/run/run-trace.ts` — `readSpans`, `buildTree`, `summarizeRun` (pure reader).
++- `src/cli/render-trace.ts` — `renderTimeline`, `renderRunList` (pure string renderers).
++- `src/cli/runs.ts` — `listRuns`, `renderRun`, `main` (CLI).
++- Tests mirroring each under `tests/telemetry/`, `tests/run/`, `tests/cli/`, plus `tests/integration/run-viewer.live.test.ts`.
++
++**Modify:**
++- `package.json` — deps + `"runs"` script.
++- `src/cli/run-chat.ts` — root span + telemetry lifecycle; remove `appendJournal`.
++- `src/core/agent.ts`, `src/core/agent-def.ts` — `functionId` + `experimental_telemetry`.
++- `src/core/delegate.ts` — `withDelegationSpan`.
++- `src/cli/select-hook.ts` — `recordModelSelect`.
++- `src/resource/model-manager.ts` — `withModelLoadSpan` + `recordEvict`.
++- `tests/cli/run-chat.test.ts` — spans-based assertions.
++
++**Delete:**
++- `src/run/journal.ts`, `tests/run/journal.test.ts` (superseded by `spans.jsonl`; only `run-chat.ts` imports it).
++
++---
++
++### Task 1: `JsonlFileExporter` + `SpanRecord`
++
++**Files:**
++- Modify: `package.json` (dependencies)
++- Create: `src/telemetry/jsonl-exporter.ts`
++- Test: `tests/telemetry/jsonl-exporter.test.ts`
++
++**Interfaces:**
++- Produces: `type SpanRecord` (consumed by `run-trace.ts`, `render-trace.ts`); `class JsonlFileExporter implements SpanExporter` (consumed by `provider.ts`).
++
++- [ ] **Step 1: Add OpenTelemetry dependencies**
++
++Run:
++```bash
++bun add @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/context-async-hooks @opentelemetry/core @opentelemetry/resources @opentelemetry/semantic-conventions @opentelemetry/exporter-trace-otlp-proto
++```
++Expected: packages added to `package.json` `dependencies`; `bun.lock` updated. Then `bun run typecheck` → clean.
++
++- [ ] **Step 2: Write the failing test**
++
++Create `tests/telemetry/jsonl-exporter.test.ts`:
++```typescript
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { readFile } from 'node:fs/promises';
++import { mkdtemp, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import {
++  BasicTracerProvider,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import { trace } from '@opentelemetry/api';
++import { JsonlFileExporter } from '../../src/telemetry/jsonl-exporter.ts';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++
++let dir: string;
++beforeEach(async () => {
++  dir = await mkdtemp(join(tmpdir(), 'spans-'));
++});
++afterEach(async () => {
++  await rm(dir, { recursive: true, force: true });
++});
++
++test('writes one JSON line per ended span with parent linkage', async () => {
++  const file = join(dir, 'spans.jsonl');
++  const provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(new JsonlFileExporter(file))],
++  });
++  const tracer = provider.getTracer('test');
++  const parent = tracer.startSpan('parent');
++  parent.setAttribute('k', 'v');
++  parent.end();
++  await provider.shutdown();
++
++  const lines = (await readFile(file, 'utf8'))
++    .split('\n')
++    .filter((l) => l.length > 0);
++  expect(lines.length).toBe(1);
++  const rec = JSON.parse(lines[0] as string) as SpanRecord;
++  expect(rec.name).toBe('parent');
++  expect(rec.parentSpanId).toBeNull();
++  expect(rec.traceId).toHaveLength(32);
++  expect(rec.spanId).toHaveLength(16);
++  expect(rec.attributes.k).toBe('v');
++  expect(typeof rec.durationMs).toBe('number');
++});
++```
++
++- [ ] **Step 3: Run test to verify it fails**
++
++Run: `bun test tests/telemetry/jsonl-exporter.test.ts`
++Expected: FAIL — cannot resolve `../../src/telemetry/jsonl-exporter.ts`.
++
++- [ ] **Step 4: Write minimal implementation**
++
++Create `src/telemetry/jsonl-exporter.ts`:
++```typescript
++import { appendFile } from 'node:fs/promises';
++import {
++  type ExportResult,
++  ExportResultCode,
++  hrTimeToMicroseconds,
++} from '@opentelemetry/core';
++import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
++
++/** One serialized span per line in runs/<id>/spans.jsonl. */
++export type SpanRecord = {
++  name: string;
++  kind: number;
++  traceId: string;
++  spanId: string;
++  parentSpanId: string | null;
++  startUnixNano: number;
++  endUnixNano: number;
++  durationMs: number;
++  status: { code: number; message?: string };
++  attributes: Record<string, unknown>;
++  events: {
++    name: string;
++    timeUnixNano: number;
++    attributes?: Record<string, unknown>;
++  }[];
++};
++
++function toRecord(span: ReadableSpan): SpanRecord {
++  const ctx = span.spanContext();
++  return {
++    name: span.name,
++    kind: span.kind,
++    traceId: ctx.traceId,
++    spanId: ctx.spanId,
++    parentSpanId: span.parentSpanContext?.spanId ?? null,
++    startUnixNano: hrTimeToMicroseconds(span.startTime) * 1000,
++    endUnixNano: hrTimeToMicroseconds(span.endTime) * 1000,
++    durationMs: hrTimeToMicroseconds(span.duration) / 1000,
++    status: { code: span.status.code, message: span.status.message },
++    attributes: { ...span.attributes },
++    events: span.events.map((e) => ({
++      name: e.name,
++      timeUnixNano: hrTimeToMicroseconds(e.time) * 1000,
++      attributes: e.attributes ? { ...e.attributes } : undefined,
++    })),
++  };
++}
++
++/** Best-effort local span sink. Never throws into the run. */
++export class JsonlFileExporter implements SpanExporter {
++  constructor(private readonly filePath: string) {}
++
++  export(
++    spans: ReadableSpan[],
++    resultCallback: (result: ExportResult) => void,
++  ): void {
++    const payload = `${spans.map((s) => JSON.stringify(toRecord(s))).join('\n')}\n`;
++    appendFile(this.filePath, payload)
++      .then(() => resultCallback({ code: ExportResultCode.SUCCESS }))
++      .catch((error: Error) =>
++        resultCallback({ code: ExportResultCode.FAILED, error }),
++      );
++  }
++
++  async shutdown(): Promise<void> {}
++}
++```
++
++- [ ] **Step 5: Run test to verify it passes**
++
++Run: `bun test tests/telemetry/jsonl-exporter.test.ts`
++Expected: PASS.
++
++- [ ] **Step 6: Typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint:file -- src/telemetry/jsonl-exporter.ts tests/telemetry/jsonl-exporter.test.ts`
++Expected: clean.
++```bash
++git add package.json bun.lock src/telemetry/jsonl-exporter.ts tests/telemetry/jsonl-exporter.test.ts
++git commit -m "feat(telemetry): JsonlFileExporter + SpanRecord (OTel local span sink)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 2: `provider.ts` — provider lifecycle, processor factory, IO flag
++
++**Files:**
++- Create: `src/telemetry/provider.ts`
++- Test: `tests/telemetry/provider.test.ts`
++
++**Interfaces:**
++- Consumes: `JsonlFileExporter` (Task 1).
++- Produces: `initRunTelemetry(runDir: string): { shutdown: () => Promise<void> }`; `recordIoEnabled(): boolean`; `buildProcessors(spansFilePath: string): SpanProcessor[]` (exported for testing).
++
++- [ ] **Step 1: Write the failing test**
++
++Create `tests/telemetry/provider.test.ts`:
++```typescript
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { trace } from '@opentelemetry/api';
++import {
++  buildProcessors,
++  initRunTelemetry,
++  recordIoEnabled,
++} from '../../src/telemetry/provider.ts';
++
++let dir: string;
++beforeEach(async () => {
++  dir = await mkdtemp(join(tmpdir(), 'prov-'));
++});
++afterEach(async () => {
++  delete process.env.AGENT_OTLP_ENDPOINT;
++  delete process.env.AGENT_TELEMETRY_RECORD_IO;
++  await rm(dir, { recursive: true, force: true });
++});
++
++test('initRunTelemetry registers a provider that writes spans.jsonl', async () => {
++  const tel = initRunTelemetry(dir);
++  const span = trace.getTracer('t').startSpan('hello');
++  span.end();
++  await tel.shutdown();
++  const raw = await readFile(join(dir, 'spans.jsonl'), 'utf8');
++  expect(raw).toContain('"name":"hello"');
++});
++
++test('initRunTelemetry is idempotent across runs (re-register ok)', async () => {
++  const a = initRunTelemetry(dir);
++  await a.shutdown();
++  const b = initRunTelemetry(dir);
++  await b.shutdown();
++  expect(true).toBe(true); // no throw on second context-manager registration
++});
++
++test('buildProcessors adds OTLP only when AGENT_OTLP_ENDPOINT is set', () => {
++  expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(1);
++  process.env.AGENT_OTLP_ENDPOINT = 'http://localhost:4318/v1/traces';
++  expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(2);
++});
++
++test('recordIoEnabled defaults true, off when set to 0', () => {
++  expect(recordIoEnabled()).toBe(true);
++  process.env.AGENT_TELEMETRY_RECORD_IO = '0';
++  expect(recordIoEnabled()).toBe(false);
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/telemetry/provider.test.ts`
++Expected: FAIL — cannot resolve `provider.ts`.
++
++- [ ] **Step 3: Write minimal implementation**
++
++Create `src/telemetry/provider.ts`:
++```typescript
++import { join } from 'node:path';
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import { resourceFromAttributes } from '@opentelemetry/resources';
++import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
++import {
++  BasicTracerProvider,
++  BatchSpanProcessor,
++  SimpleSpanProcessor,
++  type SpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
++import { JsonlFileExporter } from './jsonl-exporter.ts';
++
++/** Whether prompts/responses/tool-IO are captured. Default on; AGENT_TELEMETRY_RECORD_IO=0 disables. */
++export function recordIoEnabled(): boolean {
++  return process.env.AGENT_TELEMETRY_RECORD_IO !== '0';
++}
++
++/** JSONL always; OTLP/HTTP added iff AGENT_OTLP_ENDPOINT is set (the swappable-backend seam). */
++export function buildProcessors(spansFilePath: string): SpanProcessor[] {
++  const processors: SpanProcessor[] = [
++    new SimpleSpanProcessor(new JsonlFileExporter(spansFilePath)),
++  ];
++  const endpoint = process.env.AGENT_OTLP_ENDPOINT;
++  if (endpoint) {
++    processors.push(
++      new BatchSpanProcessor(new OTLPTraceExporter({ url: endpoint })),
++    );
++  }
++  return processors;
++}
++
++let contextManagerSet = false;
++
++/** Register a per-run global TracerProvider writing to runDir/spans.jsonl. */
++export function initRunTelemetry(runDir: string): {
++  shutdown: () => Promise<void>;
++} {
++  const provider = new BasicTracerProvider({
++    resource: resourceFromAttributes({
++      [ATTR_SERVICE_NAME]: 'local-agent-framework',
++    }),
++    spanProcessors: buildProcessors(join(runDir, 'spans.jsonl')),
++  });
++  if (!contextManagerSet) {
++    context.setGlobalContextManager(
++      new AsyncLocalStorageContextManager().enable(),
++    );
++    contextManagerSet = true;
++  }
++  trace.setGlobalTracerProvider(provider);
++  return {
++    shutdown: async () => {
++      await provider.shutdown();
++    },
++  };
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun test tests/telemetry/provider.test.ts`
++Expected: PASS (4 tests).
++
++- [ ] **Step 5: Typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint:file -- src/telemetry/provider.ts tests/telemetry/provider.test.ts`
++```bash
++git add src/telemetry/provider.ts tests/telemetry/provider.test.ts
++git commit -m "feat(telemetry): Bun-safe OTel provider + OTLP seam + IO flag
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 3: `spans.ts` — semantic span helpers (+ Bun ALS nesting smoke)
++
++**Files:**
++- Create: `src/telemetry/spans.ts`
++- Test: `tests/telemetry/spans.test.ts`
++
++**Interfaces:**
++- Consumes: `recordIoEnabled` (Task 2).
++- Produces:
++  - `const ATTR` (attribute-key constants);
++  - `type ModelSelectInfo = { modelId: string; provider: string; numCtx: number; paramsBillions?: number }`;
++  - `type ModelLoadInfo = { weightsBytes: number; kvF16PerToken: number; kvEffectivePerToken: number; kvCacheType: string; chosenCtx: number; requestedCtx: number; footprintBytes: number; budgetBytes: number }`;
++  - `withRunSpan<T>(runId: string, task: string, fn: () => Promise<T>): Promise<T>`;
++  - `setRunOutcome(result: { kind: string; message?: string; missingCapability?: string }): void`;
++  - `withDelegationSpan<T>(target: string, fn: () => Promise<T>): Promise<T>`;
++  - `recordModelSelect(info: ModelSelectInfo): void`;
++  - `withModelLoadSpan<T>(modelId: string, info: ModelLoadInfo, fn: () => Promise<T>): Promise<T>`;
++  - `recordEvict(modelId: string, sizeBytes: number, reason: string): void`.
++
++- [ ] **Step 1: Write the failing test**
++
++Create `tests/telemetry/spans.test.ts`:
++```typescript
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import {
++  ATTR,
++  recordEvict,
++  setRunOutcome,
++  withDelegationSpan,
++  withRunSpan,
++} from '../../src/telemetry/spans.ts';
++
++let exporter: InMemorySpanExporter;
++let provider: BasicTracerProvider;
++beforeEach(() => {
++  exporter = new InMemorySpanExporter();
++  provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(exporter)],
++  });
++  context.setGlobalContextManager(
++    new AsyncLocalStorageContextManager().enable(),
++  ); // returns false if already set — harmless
++  trace.setGlobalTracerProvider(provider);
++});
++afterEach(async () => {
++  await provider.shutdown();
++  exporter.reset();
++});
++
++test('delegation span nests under the run span (Bun ALS context propagation)', async () => {
++  await withRunSpan('run-x', 'do a thing', async () => {
++    setRunOutcome({ kind: 'answer' });
++    await withDelegationSpan('file_qa', async () => {
++      recordEvict('old:model', 123, 'lru-fit');
++    });
++  });
++  const spans = exporter.getFinishedSpans();
++  const run = spans.find((s) => s.name === 'agent.run');
++  const del = spans.find((s) => s.name === 'agent.delegation');
++  expect(run).toBeDefined();
++  expect(del).toBeDefined();
++  expect(del?.parentSpanContext?.spanId).toBe(run?.spanContext().spanId);
++  expect(run?.attributes[ATTR.RUN_ID]).toBe('run-x');
++  expect(run?.attributes[ATTR.OUTCOME]).toBe('answer');
++  expect(del?.attributes[ATTR.DELEGATION_TARGET]).toBe('file_qa');
++  expect(del?.events.find((e) => e.name === 'agent.model.evict')).toBeDefined();
++});
++
++test('resource outcome sets ERROR status on the run span', async () => {
++  await withRunSpan('run-y', 'x', async () => {
++    setRunOutcome({ kind: 'resource', message: 'no fit' });
++  });
++  const run = exporter.getFinishedSpans().find((s) => s.name === 'agent.run');
++  expect(run?.status.code).toBe(2); // SpanStatusCode.ERROR
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/telemetry/spans.test.ts`
++Expected: FAIL — cannot resolve `spans.ts`.
++
++- [ ] **Step 3: Write minimal implementation**
++
++Create `src/telemetry/spans.ts`:
++```typescript
++import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
++import { recordIoEnabled } from './provider.ts';
++
++export const ATTR = {
++  RUN_ID: 'agent.run.id',
++  TASK: 'agent.task',
++  OUTCOME: 'agent.outcome',
++  GAP_MISSING: 'agent.gap.missing_capability',
++  DELEGATION_TARGET: 'agent.delegation.target',
++  MODEL_ID: 'gen_ai.request.model',
++  MODEL_PROVIDER: 'gen_ai.provider.name',
++  MODEL_PARAMS_B: 'model.params_billions',
++  MODEL_NUM_CTX: 'model.num_ctx',
++  MODEL_REQUESTED_CTX: 'model.requested_num_ctx',
++  MODEL_WEIGHTS_BYTES: 'model.weights_bytes',
++  MODEL_KV_F16_PER_TOKEN: 'model.kv_f16_bytes_per_token',
++  MODEL_KV_BYTES_PER_TOKEN: 'model.kv_bytes_per_token',
++  MODEL_KV_CACHE_TYPE: 'model.kv_cache_type',
++  MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
++  MODEL_BUDGET_BYTES: 'model.budget_bytes',
++  MODEL_SIZE_BYTES: 'model.size_bytes',
++  EVICT_REASON: 'model.evict.reason',
++} as const;
++
++export type ModelSelectInfo = {
++  modelId: string;
++  provider: string;
++  numCtx: number;
++  paramsBillions?: number;
++};
++
++export type ModelLoadInfo = {
++  weightsBytes: number;
++  kvF16PerToken: number;
++  kvEffectivePerToken: number;
++  kvCacheType: string;
++  chosenCtx: number;
++  requestedCtx: number;
++  footprintBytes: number;
++  budgetBytes: number;
++};
++
++const tracer = () => trace.getTracer('agent');
++
++async function inSpan<T>(name: string, fn: (span: Span) => Promise<T>): Promise<T> {
++  return tracer().startActiveSpan(name, async (span) => {
++    try {
++      return await fn(span);
++    } catch (err) {
++      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
++      throw err;
++    } finally {
++      span.end();
++    }
++  });
++}
++
++export function withRunSpan<T>(runId: string, task: string, fn: () => Promise<T>): Promise<T> {
++  return inSpan('agent.run', async (span) => {
++    span.setAttribute(ATTR.RUN_ID, runId);
++    if (recordIoEnabled()) span.setAttribute(ATTR.TASK, task);
++    return fn();
++  });
++}
++
++export function setRunOutcome(result: {
++  kind: string;
++  message?: string;
++  missingCapability?: string;
++}): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.setAttribute(ATTR.OUTCOME, result.kind);
++  if (result.kind === 'gap' && result.missingCapability) {
++    span.setAttribute(ATTR.GAP_MISSING, result.missingCapability);
++  }
++  if (result.kind === 'resource') {
++    span.setStatus({
++      code: SpanStatusCode.ERROR,
++      message: result.message ?? 'resource error',
++    });
++  }
++}
++
++export function withDelegationSpan<T>(target: string, fn: () => Promise<T>): Promise<T> {
++  return inSpan('agent.delegation', async (span) => {
++    span.setAttribute(ATTR.DELEGATION_TARGET, target);
++    return fn();
++  });
++}
++
++export function recordModelSelect(info: ModelSelectInfo): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.addEvent('agent.model.select', {
++    [ATTR.MODEL_ID]: info.modelId,
++    [ATTR.MODEL_PROVIDER]: info.provider,
++    'gen_ai.system': info.provider,
++    [ATTR.MODEL_NUM_CTX]: info.numCtx,
++    ...(info.paramsBillions !== undefined
++      ? { [ATTR.MODEL_PARAMS_B]: info.paramsBillions }
++      : {}),
++  });
++}
++
++export function withModelLoadSpan<T>(
++  modelId: string,
++  info: ModelLoadInfo,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('agent.model.load', async (span) => {
++    span.setAttribute(ATTR.MODEL_ID, modelId);
++    span.setAttribute(ATTR.MODEL_WEIGHTS_BYTES, info.weightsBytes);
++    span.setAttribute(ATTR.MODEL_KV_F16_PER_TOKEN, info.kvF16PerToken);
++    span.setAttribute(ATTR.MODEL_KV_BYTES_PER_TOKEN, info.kvEffectivePerToken);
++    span.setAttribute(ATTR.MODEL_KV_CACHE_TYPE, info.kvCacheType);
++    span.setAttribute(ATTR.MODEL_NUM_CTX, info.chosenCtx);
++    span.setAttribute(ATTR.MODEL_REQUESTED_CTX, info.requestedCtx);
++    span.setAttribute(ATTR.MODEL_FOOTPRINT_BYTES, info.footprintBytes);
++    span.setAttribute(ATTR.MODEL_BUDGET_BYTES, info.budgetBytes);
++    return fn();
++  });
++}
++
++export function recordEvict(modelId: string, sizeBytes: number, reason: string): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.addEvent('agent.model.evict', {
++    [ATTR.MODEL_ID]: modelId,
++    [ATTR.MODEL_SIZE_BYTES]: sizeBytes,
++    [ATTR.EVICT_REASON]: reason,
++  });
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun test tests/telemetry/spans.test.ts`
++Expected: PASS (2 tests; confirms Bun ALS parent/child nesting works).
++
++- [ ] **Step 5: Typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint:file -- src/telemetry/spans.ts tests/telemetry/spans.test.ts`
++```bash
++git add src/telemetry/spans.ts tests/telemetry/spans.test.ts
++git commit -m "feat(telemetry): semantic span helpers + ATTR keys (run/delegation/model)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 4: `run-trace.ts` — reader + tree builder + summary
++
++**Files:**
++- Create: `src/run/run-trace.ts`
++- Test: `tests/run/run-trace.test.ts`
++
++**Interfaces:**
++- Consumes: `type SpanRecord` (Task 1), `ATTR` (Task 3).
++- Produces:
++  - `readSpans(runDir: string): Promise<{ spans: SpanRecord[]; malformed: number }>`;
++  - `type TraceNode = { span: SpanRecord; children: TraceNode[] }`;
++  - `buildTree(spans: SpanRecord[]): TraceNode[]`;
++  - `type RunSummary = { id: string; startMs: number; durationMs: number; outcome: string; models: string[] }`;
++  - `summarizeRun(runsRoot: string, id: string): Promise<RunSummary | undefined>`.
++
++- [ ] **Step 1: Write the failing test**
++
++Create `tests/run/run-trace.test.ts`:
++```typescript
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++import {
++  buildTree,
++  readSpans,
++  summarizeRun,
++} from '../../src/run/run-trace.ts';
++
++function span(p: Partial<SpanRecord> & { name: string; spanId: string }): SpanRecord {
++  return {
++    kind: 0,
++    traceId: 't1',
++    parentSpanId: null,
++    startUnixNano: 0,
++    endUnixNano: 1_000_000,
++    durationMs: 1,
++    status: { code: 0 },
++    attributes: {},
++    events: [],
++    ...p,
++  };
++}
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'rt-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++test('buildTree links children to parents and sorts by start time', () => {
++  const spans = [
++    span({ name: 'agent.run', spanId: 'a', startUnixNano: 0 }),
++    span({ name: 'agent.delegation', spanId: 'c', parentSpanId: 'a', startUnixNano: 20 }),
++    span({ name: 'ai.generateText', spanId: 'b', parentSpanId: 'a', startUnixNano: 10 }),
++  ];
++  const tree = buildTree(spans);
++  expect(tree).toHaveLength(1);
++  expect(tree[0]?.span.name).toBe('agent.run');
++  expect(tree[0]?.children.map((c) => c.span.name)).toEqual([
++    'ai.generateText',
++    'agent.delegation',
++  ]);
++});
++
++test('buildTree promotes orphans (missing parent) to roots', () => {
++  const tree = buildTree([
++    span({ name: 'orphan', spanId: 'x', parentSpanId: 'missing' }),
++  ]);
++  expect(tree).toHaveLength(1);
++  expect(tree[0]?.span.name).toBe('orphan');
++});
++
++test('readSpans parses good lines and counts malformed ones', async () => {
++  const dir = join(root, 'run-1');
++  await mkdir(dir, { recursive: true });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${JSON.stringify(span({ name: 'agent.run', spanId: 'a' }))}\nNOT JSON\n`,
++  );
++  const { spans, malformed } = await readSpans(dir);
++  expect(spans).toHaveLength(1);
++  expect(malformed).toBe(1);
++});
++
++test('summarizeRun derives outcome + models from the root and model attrs', async () => {
++  const dir = join(root, 'run-2');
++  await mkdir(dir, { recursive: true });
++  const rootSpan = span({
++    name: 'agent.run',
++    spanId: 'a',
++    durationMs: 42,
++    attributes: { 'agent.outcome': 'answer' },
++  });
++  const loadSpan = span({
++    name: 'agent.model.load',
++    spanId: 'b',
++    parentSpanId: 'a',
++    attributes: { 'gen_ai.request.model': 'qwen3.5:9b' },
++  });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${JSON.stringify(rootSpan)}\n${JSON.stringify(loadSpan)}\n`,
++  );
++  const s = await summarizeRun(root, 'run-2');
++  expect(s?.outcome).toBe('answer');
++  expect(s?.durationMs).toBe(42);
++  expect(s?.models).toContain('qwen3.5:9b');
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/run/run-trace.test.ts`
++Expected: FAIL — cannot resolve `run-trace.ts`.
++
++- [ ] **Step 3: Write minimal implementation**
++
++Create `src/run/run-trace.ts`:
++```typescript
++import { readFile } from 'node:fs/promises';
++import { join } from 'node:path';
++import { ATTR } from '../telemetry/spans.ts';
++import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
++
++export async function readSpans(
++  runDir: string,
++): Promise<{ spans: SpanRecord[]; malformed: number }> {
++  let raw: string;
++  try {
++    raw = await readFile(join(runDir, 'spans.jsonl'), 'utf8');
++  } catch {
++    return { spans: [], malformed: 0 };
++  }
++  const spans: SpanRecord[] = [];
++  let malformed = 0;
++  for (const line of raw.split('\n')) {
++    if (line.length === 0) continue;
++    try {
++      spans.push(JSON.parse(line) as SpanRecord);
++    } catch {
++      malformed += 1;
++    }
++  }
++  return { spans, malformed };
++}
++
++export type TraceNode = { span: SpanRecord; children: TraceNode[] };
++
++export function buildTree(spans: SpanRecord[]): TraceNode[] {
++  const byId = new Map<string, TraceNode>();
++  for (const s of spans) byId.set(s.spanId, { span: s, children: [] });
++  const roots: TraceNode[] = [];
++  for (const node of byId.values()) {
++    const parentId = node.span.parentSpanId;
++    const parent = parentId ? byId.get(parentId) : undefined;
++    if (parent) parent.children.push(node);
++    else roots.push(node);
++  }
++  const sortByStart = (a: TraceNode, b: TraceNode) =>
++    a.span.startUnixNano - b.span.startUnixNano;
++  const sortDeep = (n: TraceNode) => {
++    n.children.sort(sortByStart);
++    for (const c of n.children) sortDeep(c);
++  };
++  roots.sort(sortByStart);
++  for (const r of roots) sortDeep(r);
++  return roots;
++}
++
++export type RunSummary = {
++  id: string;
++  startMs: number;
++  durationMs: number;
++  outcome: string;
++  models: string[];
++};
++
++export async function summarizeRun(
++  runsRoot: string,
++  id: string,
++): Promise<RunSummary | undefined> {
++  const { spans } = await readSpans(join(runsRoot, id));
++  if (spans.length === 0) return undefined;
++  const root = spans.find((s) => s.name === 'agent.run');
++  const models = new Set<string>();
++  for (const s of spans) {
++    const m = s.attributes[ATTR.MODEL_ID];
++    if (typeof m === 'string') models.add(m);
++  }
++  return {
++    id,
++    startMs: (root ?? spans[0])?.startUnixNano
++      ? Math.round(((root ?? spans[0]) as SpanRecord).startUnixNano / 1e6)
++      : 0,
++    durationMs: root?.durationMs ?? 0,
++    outcome:
++      typeof root?.attributes[ATTR.OUTCOME] === 'string'
++        ? (root.attributes[ATTR.OUTCOME] as string)
++        : 'unknown',
++    models: [...models],
++  };
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun test tests/run/run-trace.test.ts`
++Expected: PASS (4 tests).
++
++- [ ] **Step 5: Typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint:file -- src/run/run-trace.ts tests/run/run-trace.test.ts`
++```bash
++git add src/run/run-trace.ts tests/run/run-trace.test.ts
++git commit -m "feat(run): span reader + trace tree builder + run summary
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 5: `render-trace.ts` — pure string renderers
++
++**Files:**
++- Create: `src/cli/render-trace.ts`
++- Test: `tests/cli/render-trace.test.ts`
++
++**Interfaces:**
++- Consumes: `type TraceNode`, `type RunSummary` (Task 4); `ATTR` (Task 3).
++- Produces: `renderTimeline(tree: TraceNode[]): string`; `renderRunList(runs: RunSummary[]): string`.
++
++- [ ] **Step 1: Write the failing test**
++
++Create `tests/cli/render-trace.test.ts`:
++```typescript
++import { expect, test } from 'bun:test';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++import type { TraceNode } from '../../src/run/run-trace.ts';
++import { renderRunList, renderTimeline } from '../../src/cli/render-trace.ts';
++
++function node(name: string, attrs: Record<string, unknown>, children: TraceNode[] = []): TraceNode {
++  const span: SpanRecord = {
++    name,
++    kind: 0,
++    traceId: 't',
++    spanId: name,
++    parentSpanId: null,
++    startUnixNano: 0,
++    endUnixNano: 1_000_000,
++    durationMs: 5,
++    status: { code: 0 },
++    attributes: attrs,
++    events: [],
++  };
++  return { span, children };
++}
++
++test('renderTimeline indents children and shows model + duration', () => {
++  const tree = [
++    node('agent.run', { 'agent.outcome': 'answer' }, [
++      node('agent.delegation', { 'agent.delegation.target': 'file_qa' }, [
++        node('agent.model.load', { 'gen_ai.request.model': 'qwen3.5:9b' }),
++      ]),
++    ]),
++  ];
++  const out = renderTimeline(tree);
++  expect(out).toContain('agent.run');
++  expect(out).toContain('answer');
++  expect(out).toContain('file_qa');
++  expect(out).toContain('qwen3.5:9b');
++  // child is indented deeper than parent
++  const runLine = out.split('\n').find((l) => l.includes('agent.run')) ?? '';
++  const loadLine = out.split('\n').find((l) => l.includes('agent.model.load')) ?? '';
++  expect(loadLine.indexOf('agent.model.load')).toBeGreaterThan(
++    runLine.indexOf('agent.run'),
++  );
++});
++
++test('renderRunList lists newest-first with id, outcome, duration', () => {
++  const out = renderRunList([
++    { id: 'run-2', startMs: 200, durationMs: 5, outcome: 'answer', models: ['m'] },
++    { id: 'run-1', startMs: 100, durationMs: 9, outcome: 'gap', models: [] },
++  ]);
++  const lines = out.split('\n').filter((l) => l.includes('run-'));
++  expect(lines[0]).toContain('run-2'); // newest first
++  expect(out).toContain('answer');
++  expect(out).toContain('gap');
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/cli/render-trace.test.ts`
++Expected: FAIL — cannot resolve `render-trace.ts`.
++
++- [ ] **Step 3: Write minimal implementation**
++
++Create `src/cli/render-trace.ts`:
++```typescript
++import { ATTR } from '../telemetry/spans.ts';
++import type { RunSummary, TraceNode } from '../run/run-trace.ts';
++
++function spanLabel(node: TraceNode): string {
++  const a = node.span.attributes;
++  const bits: string[] = [`${node.span.name} (${node.span.durationMs}ms)`];
++  const model = a[ATTR.MODEL_ID];
++  if (typeof model === 'string') bits.push(model);
++  const target = a[ATTR.DELEGATION_TARGET];
++  if (typeof target === 'string') bits.push(`→ ${target}`);
++  const outcome = a[ATTR.OUTCOME];
++  if (typeof outcome === 'string') bits.push(`[${outcome}]`);
++  const inTok = a['gen_ai.usage.input_tokens'];
++  const outTok = a['gen_ai.usage.output_tokens'];
++  if (typeof inTok === 'number' || typeof outTok === 'number') {
++    bits.push(`tok ${inTok ?? '?'}/${outTok ?? '?'}`);
++  }
++  if (node.span.status.code === 2) bits.push('ERROR');
++  return bits.join('  ');
++}
++
++function renderNode(node: TraceNode, depth: number, lines: string[]): void {
++  lines.push(`${'  '.repeat(depth)}${spanLabel(node)}`);
++  for (const child of node.children) renderNode(child, depth + 1, lines);
++}
++
++export function renderTimeline(tree: TraceNode[]): string {
++  const lines: string[] = [];
++  for (const root of tree) renderNode(root, 0, lines);
++  return lines.join('\n');
++}
++
++export function renderRunList(runs: RunSummary[]): string {
++  const sorted = [...runs].sort((a, b) => b.startMs - a.startMs);
++  const lines = sorted.map(
++    (r) =>
++      `${r.id}\t${r.outcome}\t${r.durationMs}ms\t${r.models.join(',') || '-'}`,
++  );
++  return ['RUN\tOUTCOME\tDURATION\tMODELS', ...lines].join('\n');
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun test tests/cli/render-trace.test.ts`
++Expected: PASS (2 tests).
++
++- [ ] **Step 5: Typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint:file -- src/cli/render-trace.ts tests/cli/render-trace.test.ts`
++```bash
++git add src/cli/render-trace.ts tests/cli/render-trace.test.ts
++git commit -m "feat(cli): pure trace timeline + run-list renderers
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 6: `runs.ts` CLI + `runs` script
++
++**Files:**
++- Create: `src/cli/runs.ts`
++- Modify: `package.json` (scripts)
++- Test: `tests/cli/runs.test.ts`
++
++**Interfaces:**
++- Consumes: `readSpans`, `buildTree`, `summarizeRun` (Task 4); `renderTimeline`, `renderRunList` (Task 5).
++- Produces: `listRuns(runsRoot: string): Promise<string>`; `renderRun(runsRoot: string, id: string): Promise<string>`.
++
++- [ ] **Step 1: Write the failing test**
++
++Create `tests/cli/runs.test.ts`:
++```typescript
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++import { listRuns, renderRun } from '../../src/cli/runs.ts';
++
++function span(p: Partial<SpanRecord> & { name: string; spanId: string }): SpanRecord {
++  return {
++    kind: 0, traceId: 't', parentSpanId: null, startUnixNano: 0,
++    endUnixNano: 1_000_000, durationMs: 3, status: { code: 0 },
++    attributes: {}, events: [], ...p,
++  };
++}
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'runs-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++async function writeRun(id: string, spans: SpanRecord[]): Promise<void> {
++  const dir = join(root, id);
++  await mkdir(dir, { recursive: true });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${spans.map((s) => JSON.stringify(s)).join('\n')}\n`,
++  );
++}
++
++test('renderRun shows the timeline for a run', async () => {
++  await writeRun('run-1', [
++    span({ name: 'agent.run', spanId: 'a', attributes: { 'agent.outcome': 'answer' } }),
++  ]);
++  const out = await renderRun(root, 'run-1');
++  expect(out).toContain('agent.run');
++  expect(out).toContain('answer');
++});
++
++test('renderRun reports a clear message when the run is missing', async () => {
++  const out = await renderRun(root, 'nope');
++  expect(out.toLowerCase()).toContain('no spans');
++});
++
++test('listRuns lists runs found under the root', async () => {
++  await writeRun('run-1', [span({ name: 'agent.run', spanId: 'a' })]);
++  const out = await listRuns(root);
++  expect(out).toContain('run-1');
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/cli/runs.test.ts`
++Expected: FAIL — cannot resolve `runs.ts`.
++
++- [ ] **Step 3: Write minimal implementation**
++
++Create `src/cli/runs.ts`:
++```typescript
++import { readdir } from 'node:fs/promises';
++import { buildTree, readSpans, summarizeRun } from '../run/run-trace.ts';
++import type { RunSummary } from '../run/run-trace.ts';
++import { renderRunList, renderTimeline } from './render-trace.ts';
++
++function runsRootDir(): string {
++  return process.env.AGENT_RUNS_ROOT ?? 'runs';
++}
++
++export async function renderRun(runsRoot: string, id: string): Promise<string> {
++  const { spans, malformed } = await readSpans(join0(runsRoot, id));
++  if (spans.length === 0) return `No spans for run '${id}'.`;
++  const body = renderTimeline(buildTree(spans));
++  return malformed > 0
++    ? `${body}\n(${malformed} malformed span line(s) skipped)`
++    : body;
++}
++
++export async function listRuns(runsRoot: string): Promise<string> {
++  let ids: string[];
++  try {
++    const entries = await readdir(runsRoot, { withFileTypes: true });
++    ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
++  } catch {
++    return 'No runs found.';
++  }
++  const summaries: RunSummary[] = [];
++  for (const id of ids) {
++    const s = await summarizeRun(runsRoot, id);
++    if (s) summaries.push(s);
++  }
++  if (summaries.length === 0) return 'No runs found.';
++  return renderRunList(summaries);
++}
++
++// local join to avoid an extra import line churn in this file
++import { join as join0 } from 'node:path';
++
++async function main(): Promise<void> {
++  const args = process.argv.slice(2);
++  const follow = args.includes('--follow');
++  const id = args.find((a) => !a.startsWith('--'));
++  const root = runsRootDir();
++  if (!id) {
++    console.log(await listRuns(root));
++    return;
++  }
++  if (follow) {
++    let last = '';
++    const tick = async () => {
++      const out = await renderRun(root, id);
++      if (out !== last) {
++        console.clear();
++        console.log(out);
++        last = out;
++      }
++    };
++    await tick();
++    const timer = setInterval(() => {
++      void tick();
++    }, 500);
++    // Stop once the root run span has been written (run finished).
++    const stopper = setInterval(async () => {
++      const { spans } = await readSpans(join0(root, id));
++      if (spans.some((s) => s.name === 'agent.run')) {
++        clearInterval(timer);
++        clearInterval(stopper);
++        await tick();
++      }
++    }, 500);
++    return;
++  }
++  console.log(await renderRun(root, id));
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
++```
++> Note: keep the `join` import at the top per organize-imports; the inline comment above is illustrative — place `import { join } from 'node:path';` with the other imports and use `join` (not `join0`). Biome's organize-imports will enforce ordering.
++
++- [ ] **Step 4: Fix imports to satisfy Biome**
++
++Move `import { join } from 'node:path';` to the top import block, replace `join0` usages with `join`, and remove the illustrative comment. Run: `bun run lint:file -- src/cli/runs.ts` → clean (organize-imports passes).
++
++- [ ] **Step 5: Add the `runs` script**
++
++Edit `package.json` `scripts`, add after `"discover"`:
++```json
++    "runs": "bun run src/cli/runs.ts"
++```
++
++- [ ] **Step 6: Run tests to verify they pass**
++
++Run: `bun test tests/cli/runs.test.ts`
++Expected: PASS (3 tests).
++
++- [ ] **Step 7: Typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint:file -- src/cli/runs.ts`
++```bash
++git add src/cli/runs.ts package.json tests/cli/runs.test.ts
++git commit -m "feat(cli): runs viewer (list + render + --follow) and bun run runs
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 7: Wire `runChat` (root span + telemetry lifecycle); retire `journal.ts`
++
++**Files:**
++- Modify: `src/cli/run-chat.ts`
++- Delete: `src/run/journal.ts`, `tests/run/journal.test.ts`
++- Test: `tests/cli/run-chat.test.ts` (update)
++
++**Interfaces:**
++- Consumes: `initRunTelemetry` (Task 2); `withRunSpan`, `setRunOutcome` (Task 3).
++- Produces: `runChat` now writes `runs/<id>/spans.jsonl` (root `agent.run` span) and no longer writes `journal.jsonl`.
++
++- [ ] **Step 1: Update the failing test**
++
++Edit `tests/cli/run-chat.test.ts`. Add these tests (keep existing artifact assertions; remove any `journal.jsonl`/`readJournal` references if present):
++```typescript
++import { stat } from 'node:fs/promises';
++import { readSpans } from '../../src/run/run-trace.ts';
++
++test('runChat writes spans.jsonl with a root run span carrying the outcome', async () => {
++  const result = await runChat({
++    orchestrator: gapOrchestrator(),
++    task: 'email my boss',
++    runsRoot: root,
++    runId: 'run-span',
++  });
++  expect(result.kind).toBe('gap');
++  const { spans } = await readSpans(join(root, 'run-span'));
++  const runSpan = spans.find((s) => s.name === 'agent.run');
++  expect(runSpan).toBeDefined();
++  expect(runSpan?.attributes['agent.outcome']).toBe('gap');
++});
++
++test('runChat no longer writes journal.jsonl', async () => {
++  await runChat({
++    orchestrator: gapOrchestrator(),
++    task: 'x',
++    runsRoot: root,
++    runId: 'run-nojournal',
++  });
++  await expect(stat(join(root, 'run-nojournal', 'journal.jsonl'))).rejects.toThrow();
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/cli/run-chat.test.ts`
++Expected: FAIL — `spans.jsonl` not written / `agent.run` span absent.
++
++- [ ] **Step 3: Rewrite `runChat`**
++
++Replace the body of `src/cli/run-chat.ts`. New file:
++```typescript
++import { createRun, writeArtifact } from '../run/run-store.ts';
++import { runOrchestrator } from '../core/orchestrator.ts';
++import type { Agent } from '../core/agent-def.ts';
++import type { OrchestratorResult } from '../core/orchestrator.ts';
++import type { ResourceCapture } from '../core/resource-capture.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { setRunOutcome, withRunSpan } from '../telemetry/spans.ts';
++
++export type ChatDeps = {
++  orchestrator: Agent;
++  task: string;
++  runsRoot: string;
++  runId: string;
++  routerNumCtx?: number;
++  capture?: ResourceCapture;
++};
++
++export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  const tel = initRunTelemetry(run.dir);
++  try {
++    return await withRunSpan(deps.runId, deps.task, async () => {
++      const result = await runOrchestrator(
++        deps.orchestrator,
++        deps.task,
++        deps.routerNumCtx,
++        deps.capture,
++      );
++      setRunOutcome(result);
++      if (result.kind === 'answer') {
++        await writeArtifact(run, 'answer.txt', result.text);
++      } else if (result.kind === 'gap') {
++        await writeArtifact(run, 'gap.txt', result.message);
++      } else {
++        await writeArtifact(run, 'resource.txt', result.message);
++      }
++      return result;
++    });
++  } finally {
++    await tel.shutdown();
++  }
++}
++```
++> Verify the exact import paths/names for `runOrchestrator`, `OrchestratorResult`, `Agent`, `ResourceCapture`, `createRun`, `writeArtifact` against the current files before saving (they match today's `run-chat.ts` imports except `appendJournal`/`journal.ts` is removed).
++
++- [ ] **Step 4: Delete the journal module**
++
++Run:
++```bash
++git rm src/run/journal.ts tests/run/journal.test.ts
++```
++Then `grep -rn "journal" src/ tests/` → expect zero remaining imports of `journal.ts` (only `journal.jsonl`-string mentions, if any, should be gone too).
++
++- [ ] **Step 5: Run tests to verify they pass**
++
++Run: `bun test tests/cli/run-chat.test.ts`
++Expected: PASS (existing artifact tests + 2 new span tests).
++
++- [ ] **Step 6: Full suite, typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint && bun test`
++Expected: all green (live tests skip if Ollama down).
++```bash
++git add src/cli/run-chat.ts tests/cli/run-chat.test.ts
++git commit -m "feat(run): runChat emits OTel root span to spans.jsonl; retire journal.jsonl
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 8: AI-SDK telemetry — thread `functionId` + `experimental_telemetry`
++
++**Files:**
++- Modify: `src/core/agent.ts`, `src/core/agent-def.ts`
++- Test: `tests/core/agent-telemetry.test.ts`
++
++**Interfaces:**
++- Consumes: `recordIoEnabled` (Task 2).
++- Produces: `RunAgentInput` gains `functionId?: string`; `generateText` is called with `experimental_telemetry`.
++
++- [ ] **Step 1: Write the failing test**
++
++Create `tests/core/agent-telemetry.test.ts`:
++```typescript
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import { MockLanguageModelV3 } from 'ai/test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { runDefinedAgent } from '../../src/core/agent-def.ts';
++
++let exporter: InMemorySpanExporter;
++let provider: BasicTracerProvider;
++beforeEach(() => {
++  exporter = new InMemorySpanExporter();
++  provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(exporter)],
++  });
++  context.setGlobalContextManager(
++    new AsyncLocalStorageContextManager().enable(),
++  );
++  trace.setGlobalTracerProvider(provider);
++});
++afterEach(async () => {
++  await provider.shutdown();
++  exporter.reset();
++});
++
++test('runDefinedAgent emits an ai.generateText span tagged with the agent name', async () => {
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'ok' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const agent: Agent = {
++    name: 'file_qa',
++    description: 'answers from files',
++    model,
++    systemPrompt: 'you answer',
++    tools: {},
++  };
++  await runDefinedAgent(agent, 'hello');
++  const spans = exporter.getFinishedSpans();
++  const gen = spans.find((s) => s.name.startsWith('ai.generateText'));
++  expect(gen).toBeDefined();
++  expect(gen?.attributes['ai.telemetry.functionId']).toBe('file_qa');
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/core/agent-telemetry.test.ts`
++Expected: FAIL — no `ai.generateText` span (telemetry not enabled yet).
++
++- [ ] **Step 3: Add `functionId` to `RunAgentInput` and `experimental_telemetry` to `generateText`**
++
++In `src/core/agent.ts`:
++- Add to the `RunAgentInput` type: `functionId?: string;`
++- Add `import { recordIoEnabled } from '../telemetry/provider.ts';`
++- In the `generateText({ ... })` call, add:
++```typescript
++    experimental_telemetry: {
++      isEnabled: true,
++      functionId: input.functionId,
++      recordInputs: recordIoEnabled(),
++      recordOutputs: recordIoEnabled(),
++    },
++```
++
++In `src/core/agent-def.ts`, in `runDefinedAgent`'s `runAgent({ ... })` call, add:
++```typescript
++    functionId: agent.name,
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `bun test tests/core/agent-telemetry.test.ts`
++Expected: PASS.
++> If the attribute key differs in this AI-SDK build, inspect `gen?.attributes` (log it) and assert the actual functionId key; per v6 docs it is `ai.telemetry.functionId`.
++
++- [ ] **Step 5: Typecheck, lint, commit**
++
++Run: `bun run typecheck && bun run lint:file -- src/core/agent.ts src/core/agent-def.ts tests/core/agent-telemetry.test.ts`
++```bash
++git add src/core/agent.ts src/core/agent-def.ts tests/core/agent-telemetry.test.ts
++git commit -m "feat(core): enable AI-SDK experimental_telemetry with per-agent functionId
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++### Task 9: Manual spans at delegation / model-select / model-load·evict + live e2e
++
++**Files:**
++- Modify: `src/core/delegate.ts`, `src/cli/select-hook.ts`, `src/resource/model-manager.ts`
++- Test: `tests/core/delegate.test.ts` (add), `tests/integration/run-viewer.live.test.ts` (create)
++
++**Interfaces:**
++- Consumes: `withDelegationSpan`, `recordModelSelect`, `withModelLoadSpan`, `recordEvict` (Task 3); `activeKvCacheType` (`src/resource/kv-cache.ts`), `kvCacheBytes` (`src/resource/footprint.ts`).
++
++- [ ] **Step 1: Write the failing delegation test**
++
++Create/extend `tests/core/delegate.test.ts` with:
++```typescript
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import { MockLanguageModelV3 } from 'ai/test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { asDelegateTool } from '../../src/core/delegate.ts';
++
++let exporter: InMemorySpanExporter;
++let provider: BasicTracerProvider;
++beforeEach(() => {
++  exporter = new InMemorySpanExporter();
++  provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
++  context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
++  trace.setGlobalTracerProvider(provider);
++});
++afterEach(async () => {
++  await provider.shutdown();
++  exporter.reset();
++});
++
++test('asDelegateTool opens an agent.delegation span tagged with the target', async () => {
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'done' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: { total: 1, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const agent: Agent = { name: 'web_fetch', description: 'fetches', model, systemPrompt: 's', tools: {} };
++  const tool = asDelegateTool(agent);
++  await tool.execute?.({ task: 'go' }, { toolCallId: 't', messages: [] });
++  const del = exporter.getFinishedSpans().find((s) => s.name === 'agent.delegation');
++  expect(del).toBeDefined();
++  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
++});
++```
++> Verify the second arg shape `asDelegateTool(...).execute` expects in this AI-SDK build; if `execute` needs no second arg in tests, call `tool.execute?.({ task: 'go' })` and adjust.
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `bun test tests/core/delegate.test.ts`
++Expected: FAIL — no `agent.delegation` span.
++
++- [ ] **Step 3: Wrap delegate execute in a delegation span**
++
++In `src/core/delegate.ts`, add `import { withDelegationSpan } from '../telemetry/spans.ts';` and wrap the `execute` body:
++```typescript
++    execute: async ({ task }) =>
++      withDelegationSpan(agent.name, async () => {
++        try {
++          const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
++          if (pre?.abort) {
++            return { error: pre.abort };
++          }
++          const { text } = await runDefinedAgent(agent, task, pre?.numCtx, pre?.model);
++          return { text };
++        } catch (cause) {
++          return { error: `Agent ${agent.name} failed: ${(cause as Error).message}` };
++        }
++      }),
++```
++
++- [ ] **Step 4: Run delegation test to verify it passes**
++
++Run: `bun test tests/core/delegate.test.ts`
++Expected: PASS.
++
++- [ ] **Step 5: Emit `agent.model.select` in the select hook**
++
++In `src/cli/select-hook.ts`, add `import { recordModelSelect } from '../telemetry/spans.ts';`, and immediately after `resolveModel` returns `{ decl, numCtx }` (before `deps.notify`), add:
++```typescript
++      recordModelSelect({
++        modelId: decl.model,
++        provider: decl.provider,
++        numCtx,
++        paramsBillions: decl.footprint.approxParamsBillions,
++      });
++```
++
++- [ ] **Step 6: Wrap load + record eviction in the model manager**
++
++In `src/resource/model-manager.ts`:
++- Add imports: `import { recordEvict, withModelLoadSpan } from '../telemetry/spans.ts';` and `import { activeKvCacheType } from './kv-cache.ts';` (confirm `kvCacheBytes` is already imported; it is used at line ~129).
++- At the eviction call (current line 152 `await c.unload(evict.name);`), prepend:
++```typescript
++      const evictReason = pinned.has(evict.name)
++        ? 'budget-too-low-evicting-pinned'
++        : 'lru-fit';
++      recordEvict(evict.name, evict.sizeBytes, evictReason);
++```
++- Replace the load call (current line 171 `await c.warm(target, chosenCtx);`) with:
++```typescript
++    await withModelLoadSpan(
++      target,
++      {
++        weightsBytes: weights,
++        kvF16PerToken: f16Base,
++        kvEffectivePerToken: kvPerToken,
++        kvCacheType: activeKvCacheType(),
++        chosenCtx,
++        requestedCtx: desired,
++        footprintBytes: weights + kvCacheBytes(chosenCtx, kvPerToken),
++        budgetBytes: freeBudget,
++      },
++      () => c.warm(target, chosenCtx),
++    );
++```
++> Confirm the in-scope names (`weights`, `f16Base`, `kvPerToken`, `chosenCtx`, `desired`, `freeBudget`) and `kvCacheBytes` signature against the current file before saving.
++
++- [ ] **Step 7: Run the unit suite, typecheck, lint**
++
++Run: `bun run typecheck && bun run lint && bun test`
++Expected: green (live tests skip if Ollama down).
++
++- [ ] **Step 8: Create the live e2e test**
++
++Create `tests/integration/run-viewer.live.test.ts`:
++```typescript
++import { afterAll, describe, expect, test } from 'bun:test';
++import { mkdtemp, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++// Reuse the project's existing live setup helpers (match orchestrator.live.test.ts):
++//   building a real orchestrator + manager, and the ollamaReady(...) gate + unloadModel cleanup.
++import { ollamaReady } from '../helpers/ollama-ready.ts'; // adjust path to the existing helper
++import { readSpans } from '../../src/run/run-trace.ts';
++import { renderRun } from '../../src/cli/runs.ts';
++
++const ready = await ollamaReady('qwen3.5:4b');
++
++describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
++  test(
++    'a real run writes spans.jsonl with delegation + model spans, and renders',
++    async () => {
++      const root = await mkdtemp(join(tmpdir(), 'rv-live-'));
++      try {
++        // Build the same orchestrator/manager wiring chat.ts uses, then:
++        //   await runChat({ orchestrator, task: 'Read <file> and summarize', runsRoot: root, runId: 'live-1', ... });
++        // (Construct via the existing live helpers; see orchestrator.live.test.ts for the exact setup.)
++        const { spans } = await readSpans(join(root, 'live-1'));
++        expect(spans.some((s) => s.name === 'agent.run')).toBe(true);
++        expect(spans.some((s) => s.name === 'agent.delegation')).toBe(true);
++        expect(
++          spans.some((s) => s.name.startsWith('ai.generateText')),
++        ).toBe(true);
++        const out = await renderRun(root, 'live-1');
++        expect(out).toContain('agent.run');
++      } finally {
++        await rm(root, { recursive: true, force: true });
++      }
++    },
++    120_000,
++  );
++});
++```
++> Mirror the EXACT live-setup pattern from `tests/integration/orchestrator.live.test.ts` (gate import, orchestrator/manager construction, `afterAll` `unloadModel`). Fill the run-construction block from that file's helpers rather than re-inventing it.
++
++- [ ] **Step 9: Run the live test if Ollama is up**
++
++Run (only meaningful with `bun run serve` running + models pulled): `bun test tests/integration/run-viewer.live.test.ts`
++Expected: PASS, or cleanly SKIPPED when Ollama is down.
++
++- [ ] **Step 10: Final gate + commit**
++
++Run: `bun run typecheck && bun run lint && bun test`
++Expected: all green; live skips cleanly.
++```bash
++git add src/core/delegate.ts src/cli/select-hook.ts src/resource/model-manager.ts tests/core/delegate.test.ts tests/integration/run-viewer.live.test.ts
++git commit -m "feat: instrument delegation + model select/load/evict spans; live e2e
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++## Self-Review
++
++**1. Spec coverage:**
++- §1.1 OTel-native global provider → Tasks 2, 3, 7. ✓
++- §1.2 root + delegation + model lifecycle spans → Tasks 3 (helpers), 7 (root), 9 (delegation/model). ✓
++- §1.3 `spans.jsonl` canonical, retire `journal.jsonl`, keep `.txt` → Tasks 1, 7. ✓
++- §1.4 terminal viewer + `--follow` → Tasks 5, 6. ✓
++- §1.5 OTLP seam wired now → Task 2 (`buildProcessors` + dep). ✓
++- §1.6 best-effort / no-op safe → Task 1 (exporter), Task 3 (`getActiveSpan` guards), Task 8 (`isEnabled` w/ no-op fallback). ✓
++- §2.1–2.6 components → Tasks 1–6. ✓
++- §2.7 wiring (chat/run-chat/agent/delegate/select-hook/manager) → Tasks 7, 8, 9. (Refinement: telemetry lifecycle moved from `chat.ts` to `runChat` for testability — documented in Task 7.) ✓
++- §2.8 retirements → Task 7. ✓
++- §2.9 deps → Task 1. ✓
++- §3 span model → Tasks 3, 7, 8, 9. ✓
++- §4 error handling → Task 1 (FAILED), Task 6 (malformed/missing), Task 3 (guards). ✓
++- §5 testing (unit/ALS smoke/integration/live) → every task + Task 9 live. ✓
++- §7 acceptance → covered by Task 9 live + gates.
++
++**2. Placeholder scan:** No "TBD"/"add error handling"/"similar to". The two `>` verify-before-save notes (exact in-scope names in manager; AI-SDK `execute` arg shape) are explicit verification instructions with the expected values stated, not deferred work.
++
++**3. Type consistency:** `SpanRecord` (Task 1) used identically in Tasks 4/5/6 tests. `TraceNode`/`RunSummary` (Task 4) consumed by Task 5/6. `ATTR` keys defined once (Task 3) and referenced by string-equal literals in tests. `ModelLoadInfo` fields (Task 3) match the manager call (Task 9). `functionId` added in Task 8 to `RunAgentInput` and passed from `runDefinedAgent`. Consistent.
++
++**Note for executor:** `chat.ts` is intentionally NOT modified — `runChat` now owns telemetry init/shutdown (Task 7). Router pre-warm spans in `chat.ts` are out of trace scope by design.
+diff --git a/docs/superpowers/specs/2026-06-30-slice-8-run-viewer-design.md b/docs/superpowers/specs/2026-06-30-slice-8-run-viewer-design.md
+new file mode 100644
+index 0000000..daf2e23
+--- /dev/null
++++ b/docs/superpowers/specs/2026-06-30-slice-8-run-viewer-design.md
+@@ -0,0 +1,210 @@
++# Slice 8 — Phase A Run-viewer (OpenTelemetry run tracing + terminal viewer) — design
++
++**Date:** 2026-06-30
++**Status:** approved (brainstorm complete) → ready for implementation plan
++**Depends on:** Slice 1 (run store), Slice 2 (orchestrator + delegation), Slice 4–7 (Model Manager: selection, footprint, dynamic context, KV-cache type)
++**Feeds:** Phase A telemetry + eval harness (RAGAS-style scoring); Phase B (debugging surface for workflows/crews/agent-builder when they misroute); Phase F (TUI/local web UI = the visual layer over this data layer)
++
++---
++
++## 1. Problem & goal
++
++The roadmap calls Phase A Run-viewer "renders the JSONL journals we **already write** — timeline of delegations, gaps, model loads, artifacts." But what we *already write* is **thin**: `src/run/journal.ts` appends only a `start` event and exactly **one** terminal event (`answer` | `gap` | `resource`) per run (`runs/<runId>/journal.jsonl`). The data that makes a run worth debugging — **delegations** (`delegate_to_*`), **model selection / load / eviction** (KV sizing, footprint, evictions), per-step **tool calls** and **token usage** — is computed *live* during a run and then **discarded** (it lives transiently in `generateText`'s `steps`, the select-hook `notify`, and the resource-capture seam).
++
++So this slice is **instrument + render**, in that order:
++1. **Instrument** the run as an **OpenTelemetry trace** — a span tree capturing the delegations, model lifecycle, agent turns, tool calls, and token usage.
++2. **Render** it with a **terminal viewer** (`bun run runs`) — list runs, render one as a timeline tree, and `--follow` a live run.
++
++**Hard constraint (user-mandated): follow OpenTelemetry**, so that *any* OSS observability backend (Jaeger, Grafana Tempo, Honeycomb, Arize Phoenix, …) can be plugged in later without re-instrumenting. The local terminal viewer reads a local span file; the **same spans** can be shipped over OTLP to any backend by adding an exporter — no code change in the instrumented call paths.
++
++### Validated facts driving the design (researched 2026-06-30, current sources)
++- Repo runs **`ai@6.0.214` (AI SDK v6 GA)** on **Bun**; **`@opentelemetry/api@1.9.0` is already a transitive dep**. ⚠ The live ai-sdk.dev telemetry docs render the **v7-beta** model (`@ai-sdk/otel`, `registerTelemetry`) — **NOT** what v6 uses. Ground truth = AI SDK v6 source + installed `node_modules/ai/dist/index.d.ts`.
++- **AI SDK telemetry is free spans:** `experimental_telemetry: { isEnabled, functionId, metadata, recordInputs, recordOutputs, tracer? }` on `generateText` → emits `ai.generateText` → `ai.generateText.doGenerate` → `ai.toolCall` spans into the **global** OTel TracerProvider (or a passed `tracer`). Inner `*.doGenerate` spans carry **`gen_ai.*`** attributes (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens`/`output_tokens`) plus `ai.usage.promptTokens`/`completionTokens`.
++- **Bun-safe OTel setup (critical):** use **`BasicTracerProvider` + `AsyncLocalStorageContextManager` directly**. Do NOT use `NodeTracerProvider` / `@opentelemetry/auto-instrumentations-node` / `instrumentation-*` — Bun breaks Node module monkey-patching (`opendirSync` wrap error, bun#6546). AI SDK spans are created via the OTel API (not auto-instrumentation), so they export fine on Bun. `AsyncLocalStorage` nesting works on Bun; the known throughput cliff (bun#24324) is irrelevant for our few long-lived spans/run. Initialize the provider **programmatically at the top of the entry file** (no `--require`).
++- **OTel JS is v2.x** — `ReadableSpan` gotchas to code against: `spanContext()` is a **method**; parent id is **`parentSpanContext?.spanId`** (was `parentSpanId`); `instrumentationScope` (was `instrumentationLibrary`); processors passed via **constructor `spanProcessors:[]`** (`addSpanProcessor()` removed). Use `SimpleSpanProcessor` for the local file (writes each span on `end()`), `BatchSpanProcessor` for OTLP.
++- **OTLP plug-in path:** swapping/adding a backend = add a processor with `@opentelemetry/exporter-trace-otlp-proto` (OTLP/HTTP+protobuf; **avoid gRPC on Bun**, otel-js#5260). Jaeger (v1.35+/v2), Tempo, Honeycomb, Phoenix all ingest OTLP/HTTP natively.
++- **`gen_ai.*` is still experimental** — `gen_ai.system` → `gen_ai.provider.name` mid-transition. The viewer reads `gen_ai.*` keys **generically** and tolerates both names.
++
++### Locked decisions
++1. **Architecture = OTel-native, global provider, thin `src/telemetry/` module** (Approach A). AI SDK spans nest under our manual spans via the active OTel context.
++2. **Span set = root + delegation + model lifecycle** (manual); AI-SDK gives agent-turn / tool-call / token spans for free.
++3. **`spans.jsonl` is canonical.** New `runs/<runId>/spans.jsonl` (one OTel span per line) is the viewer's single source of truth. **`journal.jsonl` is retired** (its `start`/`answer`/`gap`/`resource` semantics map onto the root span's start + status/attributes). Human-facing `answer.txt` / `gap.txt` / `resource.txt` artifacts **stay**.
++4. **Viewer = terminal/CLI** (`bun run runs`), zero new UI deps; supports **`--follow`** (live-tail). Polished TUI/web stays in Phase F.
++5. **OTLP seam is wired now**, env-gated (`AGENT_OTLP_ENDPOINT`) — the "plug in any OSS tool" promise is real and tested this slice (JSONL + OTLP processors run side-by-side).
++6. **Telemetry is best-effort:** it never throws into the agent path; with no provider registered the AI SDK falls back to the no-op tracer (tests stay span-free unless they opt in).
++7. **Telemetry is modular and extended by every later feature (standing rule).** `src/telemetry/` is built as a reusable subsystem, not a one-off for this slice. Adding observability for a new feature = add a `withXSpan`/`recordX` helper + `ATTR` keys in `src/telemetry/spans.ts` following the existing pattern; the exporter/provider layer and the OTLP backend seam are untouched. See §6½.
++
++---
++
++## 2. Components
++
++### 2.1 `src/telemetry/jsonl-exporter.ts` (new — local `SpanExporter`)
++```ts
++import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
++import { type ExportResult, ExportResultCode, hrTimeToMicroseconds } from '@opentelemetry/core';
++
++/** Serialized span shape persisted to runs/<id>/spans.jsonl (one JSON per line). */
++export type SpanRecord = {
++  name: string;
++  kind: number;                 // SpanKind enum
++  traceId: string;
++  spanId: string;
++  parentSpanId: string | null;  // null ⇒ root
++  startUnixNano: number;
++  endUnixNano: number;
++  durationMs: number;
++  status: { code: number; message?: string };
++  attributes: Record<string, unknown>;
++  events: { name: string; timeUnixNano: number; attributes?: Record<string, unknown> }[];
++};
++
++/** Best-effort: append failure → ExportResultCode.FAILED, never throws into the run. */
++export class JsonlFileExporter implements SpanExporter {
++  constructor(filePath: string);
++  export(spans: ReadableSpan[], done: (r: ExportResult) => void): void;
++  shutdown(): Promise<void>;
++}
++```
++Serialization notes: `s.spanContext()` is a method; parent = `s.parentSpanContext?.spanId ?? null`; `HrTime` `[s, ns]` → convert via `hrTimeToMicroseconds`.
++
++### 2.2 `src/telemetry/provider.ts` (new — provider lifecycle + processor factory)
++```ts
++/** Build the processor list. JSONL always; OTLP added iff AGENT_OTLP_ENDPOINT is set. */
++function buildProcessors(spansFilePath: string): SpanProcessor[];
++//   → [ new SimpleSpanProcessor(new JsonlFileExporter(spansFilePath)),
++//       ...(otlpEndpoint ? [ new BatchSpanProcessor(new OTLPTraceExporter({ url: otlpEndpoint })) ] : []) ]
++
++/** Register a per-run BasicTracerProvider (resource service.name=local-agent-framework)
++ *  + a once-guarded global AsyncLocalStorageContextManager. Idempotent for tests. */
++export function initRunTelemetry(runDir: string): { shutdown: () => Promise<void> };
++
++/** Whether IO (prompt/response/tool args) is recorded. Default true; AGENT_TELEMETRY_RECORD_IO=0 disables. */
++export function recordIoEnabled(): boolean;
++```
++- Context manager registered **once per process** (module-level guard; re-`enable()` is a no-op). Provider is per-run; `setGlobalTracerProvider` per run; `shutdown()` flushes all processors (so `spans.jsonl` is complete and OTLP is drained).
++- One run = one OS process (`run-<PID>`), so per-run provider is correct and simple.
++
++### 2.3 `src/telemetry/spans.ts` (new — semantic helpers + attribute keys)
++```ts
++export const ATTR = {
++  RUN_ID: 'agent.run.id',
++  TASK: 'agent.task',
++  OUTCOME: 'agent.outcome',                  // 'answer' | 'gap' | 'resource'
++  GAP_MISSING: 'agent.gap.missing_capability',
++  DELEGATION_TARGET: 'agent.delegation.target',
++  // model.* (manager story) + gen_ai.* (standard, read generically)
++  MODEL_ID: 'gen_ai.request.model',
++  MODEL_PROVIDER: 'gen_ai.provider.name',    // also set legacy gen_ai.system
++  MODEL_SIZE_BYTES: 'model.size_bytes',
++  MODEL_NUM_CTX: 'model.num_ctx',
++  MODEL_KV_BYTES_PER_TOKEN: 'model.kv_bytes_per_token',
++  MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
++  MODEL_KV_CACHE_TYPE: 'model.kv_cache_type',
++  EVICT_REASON: 'model.evict.reason',
++} as const;
++
++/** Open the root run span; sets outcome attrs from the OrchestratorResult; ends on return/throw. */
++export function withRunSpan<T>(runId: string, task: string, fn: () => Promise<T>): Promise<T>;
++/** Open a delegation span (active context) so the sub-agent's AI-SDK spans nest under it. */
++export function withDelegationSpan<T>(target: string, fn: () => Promise<T>): Promise<T>;
++/** Record model selection as a span event on the current span (instantaneous). */
++export function recordModelSelect(info: ModelSelectInfo): void;
++/** Wrap a model load (has duration) in a child span. */
++export function withModelLoadSpan<T>(modelId: string, fn: () => Promise<T>): Promise<T>;
++/** Record an eviction (reason) as an event on the current span. */
++export function recordEvict(modelId: string, reason: string): void;
++```
++All helpers are **no-ops-safe**: if no real provider is registered they use the API's no-op tracer and add ~nothing.
++
++### 2.4 `src/run/run-trace.ts` (new — reader + tree builder, viewer side, pure)
++```ts
++export function readSpans(runDir: string): Promise<SpanRecord[]>;     // parse spans.jsonl; skip malformed lines (count them)
++export type TraceNode = { span: SpanRecord; children: TraceNode[] };
++export function buildTree(spans: SpanRecord[]): TraceNode[];          // group by traceId, link via parentSpanId, sort by start; orphans → roots
++export type RunSummary = { id: string; startMs: number; durationMs: number; outcome: string; models: string[] };
++export function summarizeRun(runDir: string): Promise<RunSummary>;    // from the root span + model spans
++```
++
++### 2.5 `src/cli/render-trace.ts` (new — pure tree → lines, snapshot-testable)
++```ts
++export function renderTimeline(tree: TraceNode[]): string;            // indented tree: name · durationMs · key attrs (model/tokens/outcome)
++export function renderRunList(runs: RunSummary[]): string;            // newest-first table
++```
++
++### 2.6 `src/cli/runs.ts` (new — CLI entry)
++- `bun run runs` → list all runs (newest-first) via `renderRunList`.
++- `bun run runs <runId>` → `renderTimeline(buildTree(await readSpans(dir)))`.
++- `bun run runs <runId> --follow` → poll/tail `spans.jsonl`, re-render as spans complete (root appears last); plain `console.log`, matches existing CLI style (`process.argv`, no CLI lib).
++
++### 2.7 Wiring edits (existing files)
++- `src/cli/chat.ts` — `const tel = initRunTelemetry(runDir)` before the run; `await tel.shutdown()` in a `finally`.
++- `src/cli/run-chat.ts` — wrap orchestrator in `withRunSpan(runId, task, …)`; set outcome attrs from `OrchestratorResult`; **remove `appendJournal` calls**; keep `writeArtifact` (`answer/gap/resource.txt`).
++- `src/core/agent.ts` / `src/core/agent-def.ts` — add `experimental_telemetry: { isEnabled: true, functionId: <agentName>, recordInputs: recordIoEnabled(), recordOutputs: recordIoEnabled() }` to the `generateText` call(s).
++- `src/core/delegate.ts` — wrap `asDelegateTool` `execute` body in `withDelegationSpan(agent.name, …)`.
++- `src/cli/select-hook.ts` — in `notify`, call `recordModelSelect(...)` with the resolved model + footprint/ctx/kv-type.
++- **Model manager** (loads/evicts) — `withModelLoadSpan(...)` around a load; `recordEvict(...)` on eviction. *(Exact file + lines pinned during planning via a quick targeted read.)*
++
++### 2.8 Retirements
++- **Delete** `src/run/journal.ts` and `tests/run/journal.test.ts` (superseded by `spans.jsonl`).
++- Update `tests/cli/run-chat.test.ts` to assert spans-based behavior (root-span outcome; no `journal.jsonl`; artifacts intact).
++
++### 2.9 New dependencies
++`@opentelemetry/api` (promote to direct), `@opentelemetry/sdk-trace-base`, `@opentelemetry/context-async-hooks`, `@opentelemetry/core`, `@opentelemetry/resources`, `@opentelemetry/semantic-conventions`, `@opentelemetry/exporter-trace-otlp-proto`. Pin `semantic-conventions` (experimental `gen_ai.*` names).
++
++---
++
++## 3. Span model (trace shape)
++
++```
++agent.run                          root · agent.run.id, agent.task, agent.outcome=answer|gap|resource, agent.gap.missing_capability?
++└─ ai.generateText (router)        AI SDK (free) · functionId=router
++   └─ ai.toolCall delegate_to_X    AI SDK (free) · tool args/result
++      └─ agent.delegation          ours · agent.delegation.target=X
++         ├─ (event) agent.model.select   resolved model id/provider/size/num_ctx/kv_bytes_per_token/footprint/kv_cache_type
++         ├─ agent.model.load       ours · duration of load (when manager loads)
++         ├─ (event) agent.model.evict    model + reason (when manager evicts under pressure)
++         └─ ai.generateText (sub)  AI SDK (free) · functionId=<specialist>, gen_ai.* + token usage
++```
++Outcome → root span: `answer` ⇒ `OK` + `agent.outcome=answer`; `gap` ⇒ `OK` + `agent.outcome=gap` + `agent.gap.missing_capability`; `resource` ⇒ `ERROR` (status message) + `agent.outcome=resource`.
++
++---
++
++## 4. Error handling
++- **Exporter** append/network failure → `ExportResultCode.FAILED`; the run is unaffected. Telemetry helpers swallow their own errors — tracing must never break a run.
++- **Provider** re-init within one process is idempotent (guarded global context manager); `shutdown()` always called in `finally`.
++- **Viewer:** malformed JSONL line → skipped, with a `"(N malformed span lines skipped)"` notice. Missing run dir / `spans.jsonl` → clear message, non-zero exit. Unclosed spans (live `--follow` or crashed run) → rendered with `(running…)` / no duration.
++- **IO capture:** `recordInputs`/`recordOutputs` default **on** (local single-user, high debug value); `AGENT_TELEMETRY_RECORD_IO=0` disables (env is fallback-only, per project convention).
++
++---
++
++## 5. Testing (TDD)
++- **Unit** — `JsonlFileExporter` (fake `ReadableSpan` → JSONL shape, append-failure path); `buildTree` (ordering, orphan promotion, malformed-line skipping); `renderTimeline`/`renderRunList` (snapshot); `provider` idempotency + actually writes a span file; `recordIoEnabled` env.
++- **Bun ALS smoke** — register a `BasicTracerProvider` + `AsyncLocalStorageContextManager` + `ConsoleSpanExporter`/in-memory exporter, open parent → `await` → child, assert `child.parentSpanContext.spanId === parent.spanId` (validates Bun context propagation, which the research flagged as the one thing to verify).
++- **Integration** — `run-chat` with a stubbed orchestrator: asserts root span with correct outcome attrs, **no `journal.jsonl`**, artifacts written; OTLP processor added iff `AGENT_OTLP_ENDPOINT` set (assert factory output, not a live endpoint).
++- **Live (`*.live`, skipped unless Ollama up + models pulled)** — a real `chat` run produces `spans.jsonl` containing `agent.run` + `agent.delegation` + `agent.model.*` + `ai.generateText`/`ai.toolCall` spans; `bun run runs <id>` renders a non-empty timeline; `bun run runs` lists it.
++
++---
++
++## 6½. Extending telemetry (STANDING RULE — every later slice)
++
++This slice builds the telemetry **layer**, not its final set of spans. It is designed to be extended, and **every later feature MUST extend it as it lands** (mirrored in `docs/ROADMAP.md`'s "observable by default" cross-cutting principle and the `reference-otel-run-viewer-constraint` memory):
++
++- **The extension point is `src/telemetry/spans.ts`.** A new subsystem that does meaningful work adds a `withXSpan(...)`/`recordX(...)` helper + any new `ATTR` keys there, following the `withDelegationSpan`/`recordModelSelect` pattern. It does **not** touch `provider.ts`/`jsonl-exporter.ts` (the transport) or any call path's wiring beyond calling the helper.
++- **Because all spans funnel through the OTel `SpanExporter` seam,** the local `runs` viewer *and* any OSS backend (`AGENT_OTLP_ENDPOINT` → Jaeger/Tempo/Phoenix/Honeycomb) pick up new spans automatically — zero re-instrumentation.
++- **Concrete future spans (non-binding map, to be filled in by those slices):** workflow/DAG engine → span per step / branch / map-fan-out with data-flow attrs; crews → span per role / task / process; memory/RAG → `retrieve → rerank → generate` spans (+ `gen_ai.*` on embeddings/generation); grounded verification → faithfulness-judge / citation-check spans + a `verdict` attr; agent-builder → capability-gap → generate-agent span; triggers/daemon → trigger-fired root spans; Engine-line scheduler → pre-warm / fan-out arbitration spans.
++- **Process requirement:** **every future spec and plan MUST include a "Telemetry to emit" note** naming the spans/events/attributes that slice adds. A slice that does real orchestration work and emits nothing is incomplete.
++
++## 6. Out of scope (future / later phases)
++- Polished TUI / local web UI (Phase F — this slice is the data layer + a plain terminal renderer).
++- Metrics/logs OTel signals (only **traces** this slice).
++- Eval-harness / RAGAS faithfulness scoring (Phase A sister item, separate slice — but `gen_ai.*` token spans here are its substrate).
++- Cross-process / distributed trace context propagation (single-process runs only).
++- Shipping bundled OSS backends; we only emit OTLP — the user points it at their chosen backend.
++
++---
++
++## 7. Acceptance
++- `bun run typecheck`, `bun run lint`, `bun test` all green (live tests skip cleanly when Ollama is down).
++- A real run writes `runs/<id>/spans.jsonl`; `bun run runs` lists it; `bun run runs <id>` shows delegations + model loads + token usage; `--follow` updates live.
++- Setting `AGENT_OTLP_ENDPOINT=http://localhost:4318/v1/traces` additionally streams the same spans to an OTLP backend with no code change.
++- `journal.jsonl` is no longer written; `answer/gap/resource.txt` still are.
+diff --git a/package.json b/package.json
+index 3bf6b88..12695fb 100644
+--- a/package.json
++++ b/package.json
+@@ -3,26 +3,34 @@
+   "version": "0.1.0",
+   "private": true,
+   "type": "module",
+   "scripts": {
+     "serve": "bash scripts/serve.sh",
+     "typecheck": "tsc --noEmit",
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+     "lint:file": "biome check",
+-    "discover": "bun run src/cli/discover.ts"
++    "discover": "bun run src/cli/discover.ts",
++    "runs": "bun run src/cli/runs.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/mcp": "^1.0.55",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
++    "@opentelemetry/api": "^1.9.1",
++    "@opentelemetry/context-async-hooks": "^2.8.0",
++    "@opentelemetry/core": "^2.8.0",
++    "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
++    "@opentelemetry/resources": "^2.8.0",
++    "@opentelemetry/sdk-trace-base": "^2.8.0",
++    "@opentelemetry/semantic-conventions": "^1.41.1",
+     "ai": "^6.0.214",
+     "ollama-ai-provider-v2": "^3.6.0",
+     "zod": "^4.4.3"
+   },
+   "devDependencies": {
+     "typescript": "^5.9.0",
+     "@biomejs/biome": "2.5.1",
+     "@types/bun": "^1.3.14"
+   }
+ }
+diff --git a/src/cli/render-trace.ts b/src/cli/render-trace.ts
+new file mode 100644
+index 0000000..b01def6
+--- /dev/null
++++ b/src/cli/render-trace.ts
+@@ -0,0 +1,40 @@
++import type { RunSummary, TraceNode } from '../run/run-trace.ts';
++import { ATTR } from '../telemetry/spans.ts';
++
++function spanLabel(node: TraceNode): string {
++  const a = node.span.attributes;
++  const bits: string[] = [`${node.span.name} (${node.span.durationMs}ms)`];
++  const model = a[ATTR.MODEL_ID];
++  if (typeof model === 'string') bits.push(model);
++  const target = a[ATTR.DELEGATION_TARGET];
++  if (typeof target === 'string') bits.push(`→ ${target}`);
++  const outcome = a[ATTR.OUTCOME];
++  if (typeof outcome === 'string') bits.push(`[${outcome}]`);
++  const inTok = a['gen_ai.usage.input_tokens'];
++  const outTok = a['gen_ai.usage.output_tokens'];
++  if (typeof inTok === 'number' || typeof outTok === 'number') {
++    bits.push(`tok ${inTok ?? '?'}/${outTok ?? '?'}`);
++  }
++  if (node.span.status.code === 2) bits.push('ERROR');
++  return bits.join('  ');
++}
++
++function renderNode(node: TraceNode, depth: number, lines: string[]): void {
++  lines.push(`${'  '.repeat(depth)}${spanLabel(node)}`);
++  for (const child of node.children) renderNode(child, depth + 1, lines);
++}
++
++export function renderTimeline(tree: TraceNode[]): string {
++  const lines: string[] = [];
++  for (const root of tree) renderNode(root, 0, lines);
++  return lines.join('\n');
++}
++
++export function renderRunList(runs: RunSummary[]): string {
++  const sorted = [...runs].sort((a, b) => b.startMs - a.startMs);
++  const lines = sorted.map(
++    (r) =>
++      `${r.id}\t${r.outcome}\t${r.durationMs}ms\t${r.models.join(',') || '-'}`,
++  );
++  return ['RUN\tOUTCOME\tDURATION\tMODELS', ...lines].join('\n');
++}
+diff --git a/src/cli/run-chat.ts b/src/cli/run-chat.ts
+index cf200b1..4bad606 100644
+--- a/src/cli/run-chat.ts
++++ b/src/cli/run-chat.ts
+@@ -1,51 +1,42 @@
+ import type { Agent } from '../core/agent-def.ts';
+-import {
+-  type OrchestratorResult,
+-  runOrchestrator,
+-} from '../core/orchestrator.ts';
++import type { OrchestratorResult } from '../core/orchestrator.ts';
++import { runOrchestrator } from '../core/orchestrator.ts';
+ import type { ResourceCapture } from '../core/resource-capture.ts';
+-import { appendJournal } from '../run/journal.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { setRunOutcome, withRunSpan } from '../telemetry/spans.ts';
+ 
+ export type ChatDeps = {
+   orchestrator: Agent;
+   task: string;
+   runsRoot: string;
+   runId: string;
+   routerNumCtx?: number;
+   capture?: ResourceCapture;
+ };
+ 
+-/** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
+ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+-  await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
+-
+-  const result = await runOrchestrator(
+-    deps.orchestrator,
+-    deps.task,
+-    deps.routerNumCtx,
+-    deps.capture,
+-  );
+-
+-  if (result.kind === 'answer') {
+-    await writeArtifact(run, 'answer.txt', result.text);
+-    await appendJournal(run.dir, {
+-      step: 'answer',
+-      data: { text: result.text },
+-    });
+-  } else if (result.kind === 'gap') {
+-    await writeArtifact(run, 'gap.txt', result.message);
+-    await appendJournal(run.dir, {
+-      step: 'gap',
+-      data: { missingCapability: result.missingCapability },
+-    });
+-  } else {
+-    await writeArtifact(run, 'resource.txt', result.message);
+-    await appendJournal(run.dir, {
+-      step: 'resource',
+-      data: { message: result.message },
++  const tel = initRunTelemetry(run.dir);
++  try {
++    return await withRunSpan(deps.runId, deps.task, async () => {
++      const result = await runOrchestrator(
++        deps.orchestrator,
++        deps.task,
++        deps.routerNumCtx,
++        deps.capture,
++      );
++      setRunOutcome(result);
++      if (result.kind === 'answer') {
++        await writeArtifact(run, 'answer.txt', result.text);
++      } else if (result.kind === 'gap') {
++        await writeArtifact(run, 'gap.txt', result.message);
++      } else {
++        await writeArtifact(run, 'resource.txt', result.message);
++      }
++      return result;
+     });
++  } finally {
++    await tel.shutdown();
+   }
+-  return result;
+ }
+diff --git a/src/cli/runs.ts b/src/cli/runs.ts
+new file mode 100644
+index 0000000..785d105
+--- /dev/null
++++ b/src/cli/runs.ts
+@@ -0,0 +1,80 @@
++import { readdir } from 'node:fs/promises';
++import { join } from 'node:path';
++import type { RunSummary } from '../run/run-trace.ts';
++import { buildTree, readSpans, summarizeRun } from '../run/run-trace.ts';
++import { renderRunList, renderTimeline } from './render-trace.ts';
++
++function runsRootDir(): string {
++  return process.env.AGENT_RUNS_ROOT ?? 'runs';
++}
++
++export async function renderRun(runsRoot: string, id: string): Promise<string> {
++  const { spans, malformed } = await readSpans(join(runsRoot, id));
++  if (spans.length === 0) return `No spans for run '${id}'.`;
++  const body = renderTimeline(buildTree(spans));
++  return malformed > 0
++    ? `${body}\n(${malformed} malformed span line(s) skipped)`
++    : body;
++}
++
++export async function listRuns(runsRoot: string): Promise<string> {
++  let ids: string[];
++  try {
++    const entries = await readdir(runsRoot, { withFileTypes: true });
++    ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
++  } catch {
++    return 'No runs found.';
++  }
++  const summaries: RunSummary[] = [];
++  for (const id of ids) {
++    const s = await summarizeRun(runsRoot, id);
++    if (s) summaries.push(s);
++  }
++  if (summaries.length === 0) return 'No runs found.';
++  return renderRunList(summaries);
++}
++
++async function main(): Promise<void> {
++  const args = process.argv.slice(2);
++  const follow = args.includes('--follow');
++  const id = args.find((a) => !a.startsWith('--'));
++  const root = runsRootDir();
++  if (!id) {
++    console.log(await listRuns(root));
++    return;
++  }
++  if (follow) {
++    let last = '';
++    const tick = async () => {
++      const out = await renderRun(root, id);
++      if (out !== last) {
++        console.clear();
++        console.log(out);
++        last = out;
++      }
++    };
++    await tick();
++    const timer = setInterval(() => {
++      void tick();
++    }, 500);
++    const stopper = setInterval(async () => {
++      const { spans } = await readSpans(join(root, id));
++      if (spans.some((s) => s.name === 'agent.run')) {
++        clearInterval(timer);
++        clearInterval(stopper);
++        await tick();
++      }
++    }, 500);
++    // Reference stopper to satisfy linter (used via clearInterval above)
++    void stopper;
++    return;
++  }
++  console.log(await renderRun(root, id));
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
+diff --git a/src/cli/select-hook.ts b/src/cli/select-hook.ts
+index ea3ca3b..b17176d 100644
+--- a/src/cli/select-hook.ts
++++ b/src/cli/select-hook.ts
+@@ -1,19 +1,20 @@
+ import type { Agent } from '../core/agent-def.ts';
+ import type { BeforeDelegate } from '../core/delegate.ts';
+ import { ResourceError } from '../core/errors.ts';
+ import type { ResourceCapture } from '../core/resource-capture.ts';
+ import { type ModelDeclaration, ProviderKind } from '../core/types.ts';
+ import type { EnsureOpts } from '../resource/model-manager.ts';
+ import type { LoadedModel } from '../resource/ollama-control.ts';
+ import { resolveModel } from '../resource/selector.ts';
+ import { runtimeFor } from '../runtime/registry.ts';
++import { recordModelSelect } from '../telemetry/spans.ts';
+ 
+ export type SelectHookDeps = {
+   registry: ModelDeclaration[];
+   ensureReady: (d: ModelDeclaration, o?: EnsureOpts) => Promise<number>;
+   pinned: string[];
+   capture: ResourceCapture;
+   listLoaded?: () => Promise<LoadedModel[]>;
+   /** Fired once after resolveModel succeeds, with the chosen ctx. */
+   notify?: (decl: ModelDeclaration, numCtx: number) => void | Promise<void>;
+ };
+@@ -29,20 +30,26 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
+     try {
+       const { decl, numCtx } = await resolveModel(
+         agent.modelReq,
+         deps.registry,
+         {
+           ensureReady: deps.ensureReady,
+           listLoaded: deps.listLoaded,
+         },
+         { pinned: deps.pinned },
+       );
++      recordModelSelect({
++        modelId: decl.model,
++        provider: decl.provider,
++        numCtx,
++        paramsBillions: decl.footprint.approxParamsBillions,
++      });
+       await deps.notify?.(decl, numCtx);
+       const model = runtimeFor(decl.provider).createModel(decl);
+       return {
+         model,
+         numCtx: decl.provider === ProviderKind.Ollama ? numCtx : undefined,
+       };
+     } catch (err) {
+       if (err instanceof ResourceError) {
+         deps.capture.error = err;
+         return {
+diff --git a/src/core/agent-def.ts b/src/core/agent-def.ts
+index f761a3a..afb84aa 100644
+--- a/src/core/agent-def.ts
++++ b/src/core/agent-def.ts
+@@ -29,12 +29,13 @@ export function runDefinedAgent(
+   task: string,
+   numCtx?: number,
+   modelOverride?: LanguageModel,
+ ): ReturnType<typeof runAgent> {
+   return runAgent({
+     model: modelOverride ?? agent.model,
+     systemPrompt: agent.systemPrompt,
+     prompt: task,
+     tools: agent.tools,
+     providerOptions: ollamaCtxOptions(numCtx),
++    functionId: agent.name,
+   });
+ }
+diff --git a/src/core/agent.ts b/src/core/agent.ts
+index ab0d81d..a56466a 100644
+--- a/src/core/agent.ts
++++ b/src/core/agent.ts
+@@ -1,44 +1,52 @@
+ import type { ProviderOptions } from '@ai-sdk/provider-utils';
+ import {
+   generateText,
+   type LanguageModel,
+   stepCountIs,
+   type ToolSet,
+ } from 'ai';
++import { recordIoEnabled } from '../telemetry/provider.ts';
+ import { MaxStepsError } from './errors.ts';
+ 
+ const DEFAULT_MAX_STEPS = 10;
+ 
+ export type RunAgentInput = {
+   model: LanguageModel;
+   systemPrompt: string;
+   prompt: string;
+   tools: ToolSet;
+   maxSteps?: number;
+   temperature?: number;
+   providerOptions?: ProviderOptions;
++  functionId?: string;
+ };
+ 
+ /** Run one agent turn: model + tools loop, bounded by a step guard. Returns text + steps. */
+ export async function runAgent(input: RunAgentInput): Promise<{
+   text: string;
+   steps: Awaited<ReturnType<typeof generateText>>['steps'];
+ }> {
+   const result = await generateText({
+     model: input.model,
+     system: input.systemPrompt,
+     prompt: input.prompt,
+     tools: input.tools,
+     temperature: input.temperature,
+     providerOptions: input.providerOptions,
+     stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
++    experimental_telemetry: {
++      isEnabled: true,
++      functionId: input.functionId,
++      recordInputs: recordIoEnabled(),
++      recordOutputs: recordIoEnabled(),
++    },
+   });
+   const { text, finishReason, steps } = result;
+   if (text.trim() === '' && finishReason !== 'stop') {
+     throw new MaxStepsError(
+       `Agent exhausted step ceiling (${steps.length} steps) without producing a final answer.`,
+       steps,
+     );
+   }
+   return { text, steps };
+ }
+diff --git a/src/core/delegate.ts b/src/core/delegate.ts
+index 07bcd21..3dbdbd4 100644
+--- a/src/core/delegate.ts
++++ b/src/core/delegate.ts
+@@ -1,13 +1,14 @@
+ import type { LanguageModel } from 'ai';
+ import { tool } from 'ai';
+ import { z } from 'zod';
++import { withDelegationSpan } from '../telemetry/spans.ts';
+ import { type Agent, runDefinedAgent } from './agent-def.ts';
+ 
+ /** The orchestrator-facing tool name for delegating to an agent. */
+ export function delegateToolName(agent: Agent): string {
+   return `delegate_to_${agent.name}`;
+ }
+ 
+ /**
+  * A hook run just before a delegated agent executes. May return a chosen context
+  * size, a model to bind for this call, and/or an `abort` message that skips the
+@@ -24,33 +25,34 @@ export type BeforeDelegate = (
+  */
+ export function asDelegateTool(
+   agent: Agent,
+   onBeforeDelegate?: BeforeDelegate,
+ ) {
+   return tool({
+     description: agent.description,
+     inputSchema: z.object({
+       task: z.string().describe('The task for this agent'),
+     }),
+-    execute: async ({ task }) => {
+-      try {
+-        const pre = onBeforeDelegate
+-          ? await onBeforeDelegate(agent)
+-          : undefined;
+-        if (pre?.abort) {
+-          return { error: pre.abort };
++    execute: async ({ task }) =>
++      withDelegationSpan(agent.name, async () => {
++        try {
++          const pre = onBeforeDelegate
++            ? await onBeforeDelegate(agent)
++            : undefined;
++          if (pre?.abort) {
++            return { error: pre.abort };
++          }
++          const { text } = await runDefinedAgent(
++            agent,
++            task,
++            pre?.numCtx,
++            pre?.model,
++          );
++          return { text };
++        } catch (cause) {
++          return {
++            error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
++          };
+         }
+-        const { text } = await runDefinedAgent(
+-          agent,
+-          task,
+-          pre?.numCtx,
+-          pre?.model,
+-        );
+-        return { text };
+-      } catch (cause) {
+-        return {
+-          error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+-        };
+-      }
+-    },
++      }),
+   });
+ }
+diff --git a/src/resource/model-manager.ts b/src/resource/model-manager.ts
+index 799ed5a..6feed0f 100644
+--- a/src/resource/model-manager.ts
++++ b/src/resource/model-manager.ts
+@@ -1,14 +1,15 @@
+ import { ResourceError } from '../core/errors.ts';
+ import type { ModelDeclaration } from '../core/types.ts';
+ import { runtimeFor } from '../runtime/registry.ts';
+ import type { LoadedModel, RuntimeControl } from '../runtime/runtime.ts';
++import { recordEvict, withModelLoadSpan } from '../telemetry/spans.ts';
+ import { kvCacheBytes, weightsBytes } from './footprint.ts';
+ import { liveBudgetBytes } from './hardware.ts';
+ import {
+   activeKvCacheType,
+   effectiveKvBytesPerToken,
+   f16KvBytesPerToken,
+   isKvQuantRisky,
+   KvCacheType,
+ } from './kv-cache.ts';
+ 
+@@ -142,40 +143,57 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
+       if (evict === undefined) {
+         throw new ResourceError(
+           `Cannot load ${target} (needs ~${gb(minNeed)}GB at min context): it exceeds the live memory budget (~${gb(freeBudget)}GB) even after evicting every other model.`,
+         );
+       }
+       if (pinned.has(evict.name)) {
+         d.warn(
+           `[model-manager] live memory budget (~${gb(freeBudget)}GB) too low to keep ${evict.name} pinned; evicting it to load ${target} (best-effort pin — it will reload on demand).`,
+         );
+       }
++      const evictReason = pinned.has(evict.name)
++        ? 'budget-too-low-evicting-pinned'
++        : 'lru-fit';
++      recordEvict(evict.name, evict.sizeBytes, evictReason);
+       await c.unload(evict.name);
+       lastUsed.delete(evict.name);
+       chosenCtxByModel.delete(evict.name);
+       headroom += evict.sizeBytes;
+       loaded = loaded.filter((m) => m.name !== evict.name);
+     }
+ 
+     // Scale context up into the remaining headroom, clamped by the live model max.
+     const probedMax = await modelMaxFor(c, target);
+     const ceiling = Math.min(
+       decl.maxContext ?? Number.POSITIVE_INFINITY,
+       probedMax ?? Number.POSITIVE_INFINITY,
+     );
+     const maxCtxByFit = Math.floor((headroom - weights) / kvPerToken);
+     let chosenCtx = Math.min(desired, ceiling, maxCtxByFit);
+     chosenCtx = Math.max(MIN_CTX, chosenCtx);
+     chosenCtx -= chosenCtx % CTX_ROUNDING;
+     chosenCtx = Math.max(MIN_CTX, chosenCtx);
+ 
+-    await c.warm(target, chosenCtx);
++    await withModelLoadSpan(
++      target,
++      {
++        weightsBytes: weights,
++        kvF16PerToken: f16Base,
++        kvEffectivePerToken: kvPerToken,
++        kvCacheType: activeKvCacheType(),
++        chosenCtx,
++        requestedCtx: desired,
++        footprintBytes: weights + kvCacheBytes(chosenCtx, kvPerToken),
++        budgetBytes: freeBudget,
++      },
++      () => c.warm(target, chosenCtx),
++    );
+     lastUsed.set(target, ++tick);
+     chosenCtxByModel.set(target, chosenCtx);
+     runtimeByModel.set(target, decl);
+     return chosenCtx;
+   }
+ 
+   async function unloadAll(): Promise<void> {
+     for (const model of [...lastUsed.keys()]) {
+       const decl = runtimeByModel.get(model);
+       if (decl) await d.controlFor(decl).unload(model);
+diff --git a/src/run/journal.ts b/src/run/journal.ts
+deleted file mode 100644
+index 1e4d381..0000000
+--- a/src/run/journal.ts
++++ /dev/null
+@@ -1,33 +0,0 @@
+-import { appendFile, readFile } from 'node:fs/promises';
+-import { join } from 'node:path';
+-
+-export type JournalEntry = { step: string; data?: unknown };
+-type StoredEntry = JournalEntry & { index: number };
+-
+-function journalPath(dir: string): string {
+-  return join(dir, 'journal.jsonl');
+-}
+-
+-/** Append one entry as a JSON line, stamped with the next index. */
+-export async function appendJournal(
+-  dir: string,
+-  entry: JournalEntry,
+-): Promise<void> {
+-  const existing = await readJournal(dir);
+-  const stored: StoredEntry = { index: existing.length, ...entry };
+-  await appendFile(journalPath(dir), `${JSON.stringify(stored)}\n`);
+-}
+-
+-/** Read all entries in order; empty array if the journal does not exist yet. */
+-export async function readJournal(dir: string): Promise<StoredEntry[]> {
+-  let raw: string;
+-  try {
+-    raw = await readFile(journalPath(dir), 'utf8');
+-  } catch {
+-    return [];
+-  }
+-  return raw
+-    .split('\n')
+-    .filter((line) => line.length > 0)
+-    .map((line) => JSON.parse(line) as StoredEntry);
+-}
+diff --git a/src/run/run-trace.ts b/src/run/run-trace.ts
+new file mode 100644
+index 0000000..1c7cd9b
+--- /dev/null
++++ b/src/run/run-trace.ts
+@@ -0,0 +1,83 @@
++import { readFile } from 'node:fs/promises';
++import { join } from 'node:path';
++import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
++import { ATTR } from '../telemetry/spans.ts';
++
++export async function readSpans(
++  runDir: string,
++): Promise<{ spans: SpanRecord[]; malformed: number }> {
++  let raw: string;
++  try {
++    raw = await readFile(join(runDir, 'spans.jsonl'), 'utf8');
++  } catch {
++    return { spans: [], malformed: 0 };
++  }
++  const spans: SpanRecord[] = [];
++  let malformed = 0;
++  for (const line of raw.split('\n')) {
++    if (line.length === 0) continue;
++    try {
++      spans.push(JSON.parse(line) as SpanRecord);
++    } catch {
++      malformed += 1;
++    }
++  }
++  return { spans, malformed };
++}
++
++export type TraceNode = { span: SpanRecord; children: TraceNode[] };
++
++export function buildTree(spans: SpanRecord[]): TraceNode[] {
++  const byId = new Map<string, TraceNode>();
++  for (const s of spans) byId.set(s.spanId, { span: s, children: [] });
++  const roots: TraceNode[] = [];
++  for (const node of byId.values()) {
++    const parentId = node.span.parentSpanId;
++    const parent = parentId ? byId.get(parentId) : undefined;
++    if (parent) parent.children.push(node);
++    else roots.push(node);
++  }
++  const sortByStart = (a: TraceNode, b: TraceNode) =>
++    a.span.startUnixNano - b.span.startUnixNano;
++  const sortDeep = (n: TraceNode) => {
++    n.children.sort(sortByStart);
++    for (const c of n.children) sortDeep(c);
++  };
++  roots.sort(sortByStart);
++  for (const r of roots) sortDeep(r);
++  return roots;
++}
++
++export type RunSummary = {
++  id: string;
++  startMs: number;
++  durationMs: number;
++  outcome: string;
++  models: string[];
++};
++
++export async function summarizeRun(
++  runsRoot: string,
++  id: string,
++): Promise<RunSummary | undefined> {
++  const { spans } = await readSpans(join(runsRoot, id));
++  if (spans.length === 0) return undefined;
++  const root = spans.find((s) => s.name === 'agent.run');
++  const models = new Set<string>();
++  for (const s of spans) {
++    const m = s.attributes[ATTR.MODEL_ID];
++    if (typeof m === 'string') models.add(m);
++  }
++  return {
++    id,
++    startMs: (root ?? spans[0])?.startUnixNano
++      ? Math.round(((root ?? spans[0]) as SpanRecord).startUnixNano / 1e6)
++      : 0,
++    durationMs: root?.durationMs ?? 0,
++    outcome:
++      typeof root?.attributes[ATTR.OUTCOME] === 'string'
++        ? (root.attributes[ATTR.OUTCOME] as string)
++        : 'unknown',
++    models: [...models],
++  };
++}
+diff --git a/src/telemetry/jsonl-exporter.ts b/src/telemetry/jsonl-exporter.ts
+new file mode 100644
+index 0000000..872ddad
+--- /dev/null
++++ b/src/telemetry/jsonl-exporter.ts
+@@ -0,0 +1,77 @@
++import { appendFile } from 'node:fs/promises';
++import {
++  type ExportResult,
++  ExportResultCode,
++  hrTimeToMicroseconds,
++} from '@opentelemetry/core';
++import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
++
++/** One serialized span per line in runs/<id>/spans.jsonl. */
++export type SpanRecord = {
++  name: string;
++  kind: number;
++  traceId: string;
++  spanId: string;
++  parentSpanId: string | null;
++  startUnixNano: number;
++  endUnixNano: number;
++  durationMs: number;
++  status: { code: number; message?: string };
++  attributes: Record<string, unknown>;
++  events: {
++    name: string;
++    timeUnixNano: number;
++    attributes?: Record<string, unknown>;
++  }[];
++};
++
++function toRecord(span: ReadableSpan): SpanRecord {
++  const ctx = span.spanContext();
++  return {
++    name: span.name,
++    kind: span.kind,
++    traceId: ctx.traceId,
++    spanId: ctx.spanId,
++    parentSpanId: span.parentSpanContext?.spanId ?? null,
++    startUnixNano: hrTimeToMicroseconds(span.startTime) * 1000,
++    endUnixNano: hrTimeToMicroseconds(span.endTime) * 1000,
++    durationMs: hrTimeToMicroseconds(span.duration) / 1000,
++    status: { code: span.status.code, message: span.status.message },
++    attributes: { ...span.attributes },
++    events: span.events.map((e) => ({
++      name: e.name,
++      timeUnixNano: hrTimeToMicroseconds(e.time) * 1000,
++      attributes: e.attributes ? { ...e.attributes } : undefined,
++    })),
++  };
++}
++
++/** Best-effort local span sink. Never throws into the run. */
++export class JsonlFileExporter implements SpanExporter {
++  private writeChain: Promise<void> = Promise.resolve();
++
++  constructor(private readonly filePath: string) {}
++
++  export(
++    spans: ReadableSpan[],
++    resultCallback: (result: ExportResult) => void,
++  ): void {
++    const payload = `${spans.map((s) => JSON.stringify(toRecord(s))).join('\n')}\n`;
++    this.writeChain = this.writeChain.then(() =>
++      appendFile(this.filePath, payload),
++    );
++    this.writeChain.then(
++      () => resultCallback({ code: ExportResultCode.SUCCESS }),
++      (error: Error) =>
++        resultCallback({ code: ExportResultCode.FAILED, error }),
++    );
++  }
++
++  async forceFlush(): Promise<void> {
++    await this.writeChain.catch(() => {});
++  }
++
++  async shutdown(): Promise<void> {
++    await this.writeChain.catch(() => {});
++  }
++}
+diff --git a/src/telemetry/provider.ts b/src/telemetry/provider.ts
+new file mode 100644
+index 0000000..f4f06d3
+--- /dev/null
++++ b/src/telemetry/provider.ts
+@@ -0,0 +1,59 @@
++import { join } from 'node:path';
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
++import { resourceFromAttributes } from '@opentelemetry/resources';
++import {
++  BasicTracerProvider,
++  BatchSpanProcessor,
++  SimpleSpanProcessor,
++  type SpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
++import { JsonlFileExporter } from './jsonl-exporter.ts';
++
++/** Whether prompts/responses/tool-IO are captured. Default on; AGENT_TELEMETRY_RECORD_IO=0 disables. */
++export function recordIoEnabled(): boolean {
++  return process.env.AGENT_TELEMETRY_RECORD_IO !== '0';
++}
++
++/** JSONL always; OTLP/HTTP added iff AGENT_OTLP_ENDPOINT is set (the swappable-backend seam). */
++export function buildProcessors(spansFilePath: string): SpanProcessor[] {
++  const processors: SpanProcessor[] = [
++    new SimpleSpanProcessor(new JsonlFileExporter(spansFilePath)),
++  ];
++  const endpoint = process.env.AGENT_OTLP_ENDPOINT;
++  if (endpoint) {
++    processors.push(
++      new BatchSpanProcessor(new OTLPTraceExporter({ url: endpoint })),
++    );
++  }
++  return processors;
++}
++
++let contextManagerSet = false;
++
++/** Register a per-run global TracerProvider writing to runDir/spans.jsonl. */
++export function initRunTelemetry(runDir: string): {
++  shutdown: () => Promise<void>;
++} {
++  const provider = new BasicTracerProvider({
++    resource: resourceFromAttributes({
++      [ATTR_SERVICE_NAME]: 'local-agent-framework',
++    }),
++    spanProcessors: buildProcessors(join(runDir, 'spans.jsonl')),
++  });
++  if (!contextManagerSet) {
++    context.setGlobalContextManager(
++      new AsyncLocalStorageContextManager().enable(),
++    );
++    contextManagerSet = true;
++  }
++  trace.disable();
++  trace.setGlobalTracerProvider(provider);
++  return {
++    shutdown: async () => {
++      await provider.shutdown();
++    },
++  };
++}
+diff --git a/src/telemetry/spans.ts b/src/telemetry/spans.ts
+new file mode 100644
+index 0000000..8147ba6
+--- /dev/null
++++ b/src/telemetry/spans.ts
+@@ -0,0 +1,150 @@
++import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
++import { recordIoEnabled } from './provider.ts';
++
++export const ATTR = {
++  RUN_ID: 'agent.run.id',
++  TASK: 'agent.task',
++  OUTCOME: 'agent.outcome',
++  GAP_MISSING: 'agent.gap.missing_capability',
++  DELEGATION_TARGET: 'agent.delegation.target',
++  MODEL_ID: 'gen_ai.request.model',
++  MODEL_PROVIDER: 'gen_ai.provider.name',
++  MODEL_PARAMS_B: 'model.params_billions',
++  MODEL_NUM_CTX: 'model.num_ctx',
++  MODEL_REQUESTED_CTX: 'model.requested_num_ctx',
++  MODEL_WEIGHTS_BYTES: 'model.weights_bytes',
++  MODEL_KV_F16_PER_TOKEN: 'model.kv_f16_bytes_per_token',
++  MODEL_KV_BYTES_PER_TOKEN: 'model.kv_bytes_per_token',
++  MODEL_KV_CACHE_TYPE: 'model.kv_cache_type',
++  MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
++  MODEL_BUDGET_BYTES: 'model.budget_bytes',
++  MODEL_SIZE_BYTES: 'model.size_bytes',
++  EVICT_REASON: 'model.evict.reason',
++} as const;
++
++export type ModelSelectInfo = {
++  modelId: string;
++  provider: string;
++  numCtx: number;
++  paramsBillions?: number;
++};
++
++export type ModelLoadInfo = {
++  weightsBytes: number;
++  kvF16PerToken: number;
++  kvEffectivePerToken: number;
++  kvCacheType: string;
++  chosenCtx: number;
++  requestedCtx: number;
++  footprintBytes: number;
++  budgetBytes: number;
++};
++
++const tracer = () => trace.getTracer('agent');
++
++async function inSpan<T>(
++  name: string,
++  fn: (span: Span) => Promise<T>,
++): Promise<T> {
++  return tracer().startActiveSpan(name, async (span) => {
++    try {
++      return await fn(span);
++    } catch (err) {
++      span.setStatus({
++        code: SpanStatusCode.ERROR,
++        message: (err as Error).message,
++      });
++      throw err;
++    } finally {
++      span.end();
++    }
++  });
++}
++
++export function withRunSpan<T>(
++  runId: string,
++  task: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('agent.run', async (span) => {
++    span.setAttribute(ATTR.RUN_ID, runId);
++    if (recordIoEnabled()) span.setAttribute(ATTR.TASK, task);
++    return fn();
++  });
++}
++
++export function setRunOutcome(result: {
++  kind: string;
++  message?: string;
++  missingCapability?: string;
++}): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.setAttribute(ATTR.OUTCOME, result.kind);
++  if (result.kind === 'gap' && result.missingCapability) {
++    span.setAttribute(ATTR.GAP_MISSING, result.missingCapability);
++  }
++  if (result.kind === 'resource') {
++    span.setStatus({
++      code: SpanStatusCode.ERROR,
++      message: result.message ?? 'resource error',
++    });
++  }
++}
++
++export function withDelegationSpan<T>(
++  target: string,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('agent.delegation', async (span) => {
++    span.setAttribute(ATTR.DELEGATION_TARGET, target);
++    return fn();
++  });
++}
++
++export function recordModelSelect(info: ModelSelectInfo): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.addEvent('agent.model.select', {
++    [ATTR.MODEL_ID]: info.modelId,
++    [ATTR.MODEL_PROVIDER]: info.provider,
++    'gen_ai.system': info.provider,
++    [ATTR.MODEL_NUM_CTX]: info.numCtx,
++    ...(info.paramsBillions !== undefined
++      ? { [ATTR.MODEL_PARAMS_B]: info.paramsBillions }
++      : {}),
++  });
++}
++
++export function withModelLoadSpan<T>(
++  modelId: string,
++  info: ModelLoadInfo,
++  fn: () => Promise<T>,
++): Promise<T> {
++  return inSpan('agent.model.load', async (span) => {
++    span.setAttribute(ATTR.MODEL_ID, modelId);
++    span.setAttribute(ATTR.MODEL_WEIGHTS_BYTES, info.weightsBytes);
++    span.setAttribute(ATTR.MODEL_KV_F16_PER_TOKEN, info.kvF16PerToken);
++    span.setAttribute(ATTR.MODEL_KV_BYTES_PER_TOKEN, info.kvEffectivePerToken);
++    span.setAttribute(ATTR.MODEL_KV_CACHE_TYPE, info.kvCacheType);
++    span.setAttribute(ATTR.MODEL_NUM_CTX, info.chosenCtx);
++    span.setAttribute(ATTR.MODEL_REQUESTED_CTX, info.requestedCtx);
++    span.setAttribute(ATTR.MODEL_FOOTPRINT_BYTES, info.footprintBytes);
++    span.setAttribute(ATTR.MODEL_BUDGET_BYTES, info.budgetBytes);
++    return fn();
++  });
++}
++
++export function recordEvict(
++  modelId: string,
++  sizeBytes: number,
++  reason: string,
++): void {
++  const span = trace.getActiveSpan();
++  if (!span) return;
++  span.addEvent('agent.model.evict', {
++    [ATTR.MODEL_ID]: modelId,
++    [ATTR.MODEL_SIZE_BYTES]: sizeBytes,
++    [ATTR.EVICT_REASON]: reason,
++  });
++}
+diff --git a/tests/cli/render-trace.test.ts b/tests/cli/render-trace.test.ts
+new file mode 100644
+index 0000000..f0f51d4
+--- /dev/null
++++ b/tests/cli/render-trace.test.ts
+@@ -0,0 +1,64 @@
++import { expect, test } from 'bun:test';
++import { renderRunList, renderTimeline } from '../../src/cli/render-trace.ts';
++import type { TraceNode } from '../../src/run/run-trace.ts';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++
++function node(
++  name: string,
++  attrs: Record<string, unknown>,
++  children: TraceNode[] = [],
++): TraceNode {
++  const span: SpanRecord = {
++    name,
++    kind: 0,
++    traceId: 't',
++    spanId: name,
++    parentSpanId: null,
++    startUnixNano: 0,
++    endUnixNano: 1_000_000,
++    durationMs: 5,
++    status: { code: 0 },
++    attributes: attrs,
++    events: [],
++  };
++  return { span, children };
++}
++
++test('renderTimeline indents children and shows model + duration', () => {
++  const tree = [
++    node('agent.run', { 'agent.outcome': 'answer' }, [
++      node('agent.delegation', { 'agent.delegation.target': 'file_qa' }, [
++        node('agent.model.load', { 'gen_ai.request.model': 'qwen3.5:9b' }),
++      ]),
++    ]),
++  ];
++  const out = renderTimeline(tree);
++  expect(out).toContain('agent.run');
++  expect(out).toContain('answer');
++  expect(out).toContain('file_qa');
++  expect(out).toContain('qwen3.5:9b');
++  // child is indented deeper than parent
++  const runLine = out.split('\n').find((l) => l.includes('agent.run')) ?? '';
++  const loadLine =
++    out.split('\n').find((l) => l.includes('agent.model.load')) ?? '';
++  expect(loadLine.indexOf('agent.model.load')).toBeGreaterThan(
++    runLine.indexOf('agent.run'),
++  );
++});
++
++test('renderRunList lists newest-first with id, outcome, duration', () => {
++  const out = renderRunList([
++    {
++      id: 'run-2',
++      startMs: 200,
++      durationMs: 5,
++      outcome: 'answer',
++      models: ['m'],
++    },
++    { id: 'run-1', startMs: 100, durationMs: 9, outcome: 'gap', models: [] },
++  ]);
++  const lines = out.split('\n').filter((l) => l.includes('run-'));
++  expect(lines[0]).toContain('run-2'); // newest first
++  expect(out).toContain('answer');
++  expect(out).toContain('gap');
++});
+diff --git a/tests/cli/run-chat.test.ts b/tests/cli/run-chat.test.ts
+index dab688c..d0a9bc3 100644
+--- a/tests/cli/run-chat.test.ts
++++ b/tests/cli/run-chat.test.ts
+@@ -1,19 +1,19 @@
+ import { afterEach, beforeEach, expect, test } from 'bun:test';
+-import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import { runChat } from '../../src/cli/run-chat.ts';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { createOrchestrator } from '../../src/core/orchestrator.ts';
+-import { readJournal } from '../../src/run/journal.ts';
++import { readSpans } from '../../src/run/run-trace.ts';
+ 
+ let root: string;
+ beforeEach(async () => {
+   root = await mkdtemp(join(tmpdir(), 'chat-'));
+ });
+ afterEach(async () => {
+   await rm(root, { recursive: true, force: true });
+ });
+ 
+ function gapOrchestrator(): Agent {
+@@ -68,22 +68,20 @@ test('runChat records a gap run and writes the gap artifact', async () => {
+   const result = await runChat({
+     orchestrator: gapOrchestrator(),
+     task: 'email my boss',
+     runsRoot: root,
+     runId: 'run-1',
+   });
+   expect(result.kind).toBe('gap');
+   expect(await readFile(join(root, 'run-1', 'gap.txt'), 'utf8')).toContain(
+     'send email',
+   );
+-  const journal = await readJournal(join(root, 'run-1'));
+-  expect(journal.map((e) => e.step)).toEqual(['start', 'gap']);
+ });
+ 
+ function answerOrchestrator(): Agent {
+   // orchestrator model that produces final text directly (no tool calls)
+   const model = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [{ type: 'text', text: 'Here is your answer.' }],
+       finishReason: { unified: 'stop', raw: undefined },
+       usage: {
+         inputTokens: {
+@@ -107,13 +105,37 @@ test('runChat records an answer run and writes the answer artifact', async () =>
+     runsRoot: root,
+     runId: 'run-2',
+   });
+   expect(result.kind).toBe('answer');
+   if (result.kind === 'answer') {
+     expect(result.text).toBe('Here is your answer.');
+   }
+   expect(await readFile(join(root, 'run-2', 'answer.txt'), 'utf8')).toBe(
+     'Here is your answer.',
+   );
+-  const journal = await readJournal(join(root, 'run-2'));
+-  expect(journal.map((e) => e.step)).toEqual(['start', 'answer']);
++});
++
++test('runChat writes spans.jsonl with a root run span carrying the outcome', async () => {
++  const result = await runChat({
++    orchestrator: gapOrchestrator(),
++    task: 'email my boss',
++    runsRoot: root,
++    runId: 'run-span',
++  });
++  expect(result.kind).toBe('gap');
++  const { spans } = await readSpans(join(root, 'run-span'));
++  const runSpan = spans.find((s) => s.name === 'agent.run');
++  expect(runSpan).toBeDefined();
++  expect(runSpan?.attributes['agent.outcome']).toBe('gap');
++});
++
++test('runChat no longer writes journal.jsonl', async () => {
++  await runChat({
++    orchestrator: gapOrchestrator(),
++    task: 'x',
++    runsRoot: root,
++    runId: 'run-nojournal',
++  });
++  await expect(
++    stat(join(root, 'run-nojournal', 'journal.jsonl')),
++  ).rejects.toThrow();
+ });
+diff --git a/tests/cli/runs.test.ts b/tests/cli/runs.test.ts
+new file mode 100644
+index 0000000..f4f5f26
+--- /dev/null
++++ b/tests/cli/runs.test.ts
+@@ -0,0 +1,64 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { listRuns, renderRun } from '../../src/cli/runs.ts';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++
++function span(
++  p: Partial<SpanRecord> & { name: string; spanId: string },
++): SpanRecord {
++  return {
++    kind: 0,
++    traceId: 't',
++    parentSpanId: null,
++    startUnixNano: 0,
++    endUnixNano: 1_000_000,
++    durationMs: 3,
++    status: { code: 0 },
++    attributes: {},
++    events: [],
++    ...p,
++  };
++}
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'runs-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++async function writeRun(id: string, spans: SpanRecord[]): Promise<void> {
++  const dir = join(root, id);
++  await mkdir(dir, { recursive: true });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${spans.map((s) => JSON.stringify(s)).join('\n')}\n`,
++  );
++}
++
++test('renderRun shows the timeline for a run', async () => {
++  await writeRun('run-1', [
++    span({
++      name: 'agent.run',
++      spanId: 'a',
++      attributes: { 'agent.outcome': 'answer' },
++    }),
++  ]);
++  const out = await renderRun(root, 'run-1');
++  expect(out).toContain('agent.run');
++  expect(out).toContain('answer');
++});
++
++test('renderRun reports a clear message when the run is missing', async () => {
++  const out = await renderRun(root, 'nope');
++  expect(out.toLowerCase()).toContain('no spans');
++});
++
++test('listRuns lists runs found under the root', async () => {
++  await writeRun('run-1', [span({ name: 'agent.run', spanId: 'a' })]);
++  const out = await listRuns(root);
++  expect(out).toContain('run-1');
++});
+diff --git a/tests/core/agent-telemetry.test.ts b/tests/core/agent-telemetry.test.ts
+new file mode 100644
+index 0000000..b6a638a
+--- /dev/null
++++ b/tests/core/agent-telemetry.test.ts
+@@ -0,0 +1,48 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { MockLanguageModelV3 } from 'ai/test';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { runDefinedAgent } from '../../src/core/agent-def.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++
++let exporter: ReturnType<typeof registerTestProvider>['exporter'];
++let provider: ReturnType<typeof registerTestProvider>['provider'];
++
++beforeEach(() => {
++  ({ exporter, provider } = registerTestProvider());
++});
++
++afterEach(async () => {
++  await provider.shutdown();
++  exporter.reset();
++});
++
++test('runDefinedAgent emits an ai.generateText span tagged with the agent name', async () => {
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'ok' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const agent: Agent = {
++    name: 'file_qa',
++    description: 'answers from files',
++    model,
++    systemPrompt: 'you answer',
++    tools: {},
++  };
++  await runDefinedAgent(agent, 'hello');
++  const spans = exporter.getFinishedSpans();
++  const gen = spans.find((s) => s.name.startsWith('ai.generateText'));
++  expect(gen).toBeDefined();
++  expect(gen?.attributes['ai.telemetry.functionId']).toBe('file_qa');
++});
+diff --git a/tests/core/delegate.test.ts b/tests/core/delegate.test.ts
+index d2aebc7..18e5e6d 100644
+--- a/tests/core/delegate.test.ts
++++ b/tests/core/delegate.test.ts
+@@ -1,14 +1,15 @@
+-import { expect, mock, test } from 'bun:test';
++import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+ 
+ function cannedAgent(name: string, answer: string): Agent {
+   return {
+     name,
+     description: `agent ${name}`,
+     model: new MockLanguageModelV3({
+       doGenerate: async () => ({
+         content: [{ type: 'text', text: answer }],
+         finishReason: { unified: 'stop', raw: undefined },
+         usage: {
+@@ -102,10 +103,57 @@ test('abort short-circuits: agent never runs, returns soft error', async () => {
+     },
+   });
+   const t = asDelegateTool(a, async () => ({ abort: 'no fit' }));
+   const out = await t.execute?.(
+     { task: 'hi' },
+     { toolCallId: 't', messages: [] },
+   );
+   expect(out).toEqual({ error: 'no fit' });
+   expect(ran).toBe(false);
+ });
++
++// --- delegation span tests ---
++
++let spanExporter: ReturnType<typeof registerTestProvider>['exporter'];
++let spanProvider: ReturnType<typeof registerTestProvider>['provider'];
++
++beforeEach(() => {
++  ({ exporter: spanExporter, provider: spanProvider } = registerTestProvider());
++});
++
++afterEach(async () => {
++  await spanProvider.shutdown();
++  spanExporter.reset();
++});
++
++test('asDelegateTool opens an agent.delegation span tagged with the target', async () => {
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => ({
++      content: [{ type: 'text', text: 'done' }],
++      finishReason: { unified: 'stop', raw: undefined },
++      usage: {
++        inputTokens: {
++          total: 1,
++          noCache: undefined,
++          cacheRead: undefined,
++          cacheWrite: undefined,
++        },
++        outputTokens: { total: 1, text: undefined, reasoning: undefined },
++      },
++      warnings: [],
++    }),
++  });
++  const delegateAgent: Agent = {
++    name: 'web_fetch',
++    description: 'fetches',
++    model,
++    systemPrompt: 's',
++    tools: {},
++  };
++  const tool = asDelegateTool(delegateAgent);
++  await tool.execute?.({ task: 'go' }, { toolCallId: 't', messages: [] });
++  const del = spanExporter
++    .getFinishedSpans()
++    .find((s) => s.name === 'agent.delegation');
++  expect(del).toBeDefined();
++  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
++});
+diff --git a/tests/helpers/otel-test-provider.ts b/tests/helpers/otel-test-provider.ts
+new file mode 100644
+index 0000000..ed277d9
+--- /dev/null
++++ b/tests/helpers/otel-test-provider.ts
+@@ -0,0 +1,29 @@
++import { context, trace } from '@opentelemetry/api';
++import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
++import {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++
++let contextManagerSet = false;
++
++/** Register a fresh InMemory-backed global provider for a test (public API, swappable). */
++export function registerTestProvider(): {
++  exporter: InMemorySpanExporter;
++  provider: BasicTracerProvider;
++} {
++  const exporter = new InMemorySpanExporter();
++  const provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(exporter)],
++  });
++  if (!contextManagerSet) {
++    context.setGlobalContextManager(
++      new AsyncLocalStorageContextManager().enable(),
++    );
++    contextManagerSet = true;
++  }
++  trace.disable();
++  trace.setGlobalTracerProvider(provider);
++  return { exporter, provider };
++}
+diff --git a/tests/integration/run-viewer.live.test.ts b/tests/integration/run-viewer.live.test.ts
+new file mode 100644
+index 0000000..cee9c79
+--- /dev/null
++++ b/tests/integration/run-viewer.live.test.ts
+@@ -0,0 +1,52 @@
++import { afterAll, describe, expect, test } from 'bun:test';
++import { mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { createSuperAgent } from '../../agents/super.ts';
++import qwenRouter from '../../models/qwen-router.ts';
++import { runChat } from '../../src/cli/run-chat.ts';
++import { renderRun } from '../../src/cli/runs.ts';
++import { createFileTools } from '../../src/mcp/client.ts';
++import { unloadModel } from '../../src/resource/ollama-control.ts';
++import { readSpans } from '../../src/run/run-trace.ts';
++import { ollamaReady } from './ollama-available.ts';
++
++const ready = await ollamaReady(qwenRouter.model);
++
++describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
++  afterAll(async () => {
++    await unloadModel(qwenRouter.model);
++  });
++
++  test('a real run writes spans.jsonl with agent.run + agent.delegation, and renders', async () => {
++    const runsRoot = await mkdtemp(join(tmpdir(), 'rv-live-'));
++    const fileDir = await mkdtemp(join(tmpdir(), 'rv-files-'));
++    try {
++      const filePath = join(fileDir, 'note.txt');
++      await writeFile(filePath, 'The capital of France is Paris.');
++      const { tools, close } = await createFileTools();
++      try {
++        const orchestrator = createSuperAgent(tools, {});
++        await runChat({
++          orchestrator,
++          task: `What is written in ${filePath}?`,
++          runsRoot,
++          runId: 'live-1',
++        });
++      } finally {
++        await close();
++      }
++      const { spans } = await readSpans(join(runsRoot, 'live-1'));
++      expect(spans.some((s) => s.name === 'agent.run')).toBe(true);
++      expect(spans.some((s) => s.name === 'agent.delegation')).toBe(true);
++      expect(spans.some((s) => s.name.startsWith('ai.generateText'))).toBe(
++        true,
++      );
++      const out = await renderRun(runsRoot, 'live-1');
++      expect(out).toContain('agent.run');
++    } finally {
++      await rm(runsRoot, { recursive: true, force: true });
++      await rm(fileDir, { recursive: true, force: true });
++    }
++  }, 120_000);
++});
+diff --git a/tests/run/journal.test.ts b/tests/run/journal.test.ts
+deleted file mode 100644
+index 8ee8ff7..0000000
+--- a/tests/run/journal.test.ts
++++ /dev/null
+@@ -1,23 +0,0 @@
+-import { afterEach, beforeEach, expect, test } from 'bun:test';
+-import { mkdtemp, rm } from 'node:fs/promises';
+-import { tmpdir } from 'node:os';
+-import { join } from 'node:path';
+-import { appendJournal, readJournal } from '../../src/run/journal.ts';
+-
+-let dir: string;
+-beforeEach(async () => {
+-  dir = await mkdtemp(join(tmpdir(), 'journal-'));
+-});
+-afterEach(async () => {
+-  await rm(dir, { recursive: true, force: true });
+-});
+-
+-test('appends entries as ordered JSON lines and reads them back', async () => {
+-  await appendJournal(dir, { step: 'start' });
+-  await appendJournal(dir, { step: 'answer', data: { text: 'hi' } });
+-  const entries = await readJournal(dir);
+-  expect(entries).toEqual([
+-    { index: 0, step: 'start' },
+-    { index: 1, step: 'answer', data: { text: 'hi' } },
+-  ]);
+-});
+diff --git a/tests/run/run-trace.test.ts b/tests/run/run-trace.test.ts
+new file mode 100644
+index 0000000..d662104
+--- /dev/null
++++ b/tests/run/run-trace.test.ts
+@@ -0,0 +1,101 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { buildTree, readSpans, summarizeRun } from '../../src/run/run-trace.ts';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++
++function span(
++  p: Partial<SpanRecord> & { name: string; spanId: string },
++): SpanRecord {
++  return {
++    kind: 0,
++    traceId: 't1',
++    parentSpanId: null,
++    startUnixNano: 0,
++    endUnixNano: 1_000_000,
++    durationMs: 1,
++    status: { code: 0 },
++    attributes: {},
++    events: [],
++    ...p,
++  };
++}
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'rt-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++test('buildTree links children to parents and sorts by start time', () => {
++  const spans = [
++    span({ name: 'agent.run', spanId: 'a', startUnixNano: 0 }),
++    span({
++      name: 'agent.delegation',
++      spanId: 'c',
++      parentSpanId: 'a',
++      startUnixNano: 20,
++    }),
++    span({
++      name: 'ai.generateText',
++      spanId: 'b',
++      parentSpanId: 'a',
++      startUnixNano: 10,
++    }),
++  ];
++  const tree = buildTree(spans);
++  expect(tree).toHaveLength(1);
++  expect(tree[0]?.span.name).toBe('agent.run');
++  expect(tree[0]?.children.map((c) => c.span.name)).toEqual([
++    'ai.generateText',
++    'agent.delegation',
++  ]);
++});
++
++test('buildTree promotes orphans (missing parent) to roots', () => {
++  const tree = buildTree([
++    span({ name: 'orphan', spanId: 'x', parentSpanId: 'missing' }),
++  ]);
++  expect(tree).toHaveLength(1);
++  expect(tree[0]?.span.name).toBe('orphan');
++});
++
++test('readSpans parses good lines and counts malformed ones', async () => {
++  const dir = join(root, 'run-1');
++  await mkdir(dir, { recursive: true });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${JSON.stringify(span({ name: 'agent.run', spanId: 'a' }))}\nNOT JSON\n`,
++  );
++  const { spans, malformed } = await readSpans(dir);
++  expect(spans).toHaveLength(1);
++  expect(malformed).toBe(1);
++});
++
++test('summarizeRun derives outcome + models from the root and model attrs', async () => {
++  const dir = join(root, 'run-2');
++  await mkdir(dir, { recursive: true });
++  const rootSpan = span({
++    name: 'agent.run',
++    spanId: 'a',
++    durationMs: 42,
++    attributes: { 'agent.outcome': 'answer' },
++  });
++  const loadSpan = span({
++    name: 'agent.model.load',
++    spanId: 'b',
++    parentSpanId: 'a',
++    attributes: { 'gen_ai.request.model': 'qwen3.5:9b' },
++  });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${JSON.stringify(rootSpan)}\n${JSON.stringify(loadSpan)}\n`,
++  );
++  const s = await summarizeRun(root, 'run-2');
++  expect(s?.outcome).toBe('answer');
++  expect(s?.durationMs).toBe(42);
++  expect(s?.models).toContain('qwen3.5:9b');
++});
+diff --git a/tests/telemetry/jsonl-exporter.test.ts b/tests/telemetry/jsonl-exporter.test.ts
+new file mode 100644
+index 0000000..8ef1e01
+--- /dev/null
++++ b/tests/telemetry/jsonl-exporter.test.ts
+@@ -0,0 +1,56 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import {
++  BasicTracerProvider,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++import { JsonlFileExporter } from '../../src/telemetry/jsonl-exporter.ts';
++
++let dir: string;
++beforeEach(async () => {
++  dir = await mkdtemp(join(tmpdir(), 'spans-'));
++});
++afterEach(async () => {
++  await rm(dir, { recursive: true, force: true });
++});
++
++test('writes one JSON line per ended span with parent linkage', async () => {
++  const file = join(dir, 'spans.jsonl');
++  const provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(new JsonlFileExporter(file))],
++  });
++  const tracer = provider.getTracer('test');
++  const parent = tracer.startSpan('parent');
++  parent.setAttribute('k', 'v');
++  parent.end();
++  await provider.shutdown();
++
++  const lines = (await readFile(file, 'utf8'))
++    .split('\n')
++    .filter((l) => l.length > 0);
++  expect(lines.length).toBe(1);
++  const rec = JSON.parse(lines[0] as string) as SpanRecord;
++  expect(rec.name).toBe('parent');
++  expect(rec.parentSpanId).toBeNull();
++  expect(rec.traceId).toHaveLength(32);
++  expect(rec.spanId).toHaveLength(16);
++  expect(rec.attributes.k).toBe('v');
++  expect(typeof rec.durationMs).toBe('number');
++});
++
++test('shutdown flushes in-flight writes before returning', async () => {
++  const file = join(dir, 'spans.jsonl');
++  const provider = new BasicTracerProvider({
++    spanProcessors: [new SimpleSpanProcessor(new JsonlFileExporter(file))],
++  });
++  const tracer = provider.getTracer('test');
++  const span = tracer.startSpan('flush-check');
++  span.end();
++  // Do NOT sleep — shutdown must await the pending write
++  await provider.shutdown();
++  const raw = await readFile(file, 'utf8');
++  expect(raw).toContain('"name":"flush-check"');
++});
+diff --git a/tests/telemetry/provider.test.ts b/tests/telemetry/provider.test.ts
+new file mode 100644
+index 0000000..b5d7d55
+--- /dev/null
++++ b/tests/telemetry/provider.test.ts
+@@ -0,0 +1,58 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { trace } from '@opentelemetry/api';
++import {
++  buildProcessors,
++  initRunTelemetry,
++  recordIoEnabled,
++} from '../../src/telemetry/provider.ts';
++
++let dir: string;
++let dir2: string;
++beforeEach(async () => {
++  dir = await mkdtemp(join(tmpdir(), 'prov-'));
++  dir2 = await mkdtemp(join(tmpdir(), 'prov2-'));
++});
++afterEach(async () => {
++  delete process.env.AGENT_OTLP_ENDPOINT;
++  delete process.env.AGENT_TELEMETRY_RECORD_IO;
++  await rm(dir, { recursive: true, force: true });
++  await rm(dir2, { recursive: true, force: true });
++});
++
++test('initRunTelemetry registers a provider that writes spans.jsonl', async () => {
++  const tel = initRunTelemetry(dir);
++  const span = trace.getTracer('t').startSpan('hello');
++  span.end();
++  await tel.shutdown();
++  const raw = await readFile(join(dir, 'spans.jsonl'), 'utf8');
++  expect(raw).toContain('"name":"hello"');
++});
++
++test('initRunTelemetry re-init swaps the provider so second run writes to its own file', async () => {
++  const a = initRunTelemetry(dir);
++  await a.shutdown();
++
++  const b = initRunTelemetry(dir2);
++  const span = trace.getTracer('t').startSpan('second-run-span');
++  span.end();
++  await b.shutdown();
++
++  // The span must appear in dir2's file (the re-init swapped the provider)
++  const raw = await readFile(join(dir2, 'spans.jsonl'), 'utf8');
++  expect(raw).toContain('"name":"second-run-span"');
++});
++
++test('buildProcessors adds OTLP only when AGENT_OTLP_ENDPOINT is set', () => {
++  expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(1);
++  process.env.AGENT_OTLP_ENDPOINT = 'http://localhost:4318/v1/traces';
++  expect(buildProcessors(join(dir, 's.jsonl'))).toHaveLength(2);
++});
++
++test('recordIoEnabled defaults true, off when set to 0', () => {
++  expect(recordIoEnabled()).toBe(true);
++  process.env.AGENT_TELEMETRY_RECORD_IO = '0';
++  expect(recordIoEnabled()).toBe(false);
++});
+diff --git a/tests/telemetry/spans.test.ts b/tests/telemetry/spans.test.ts
+new file mode 100644
+index 0000000..6b86701
+--- /dev/null
++++ b/tests/telemetry/spans.test.ts
+@@ -0,0 +1,50 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import type {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++} from '@opentelemetry/sdk-trace-base';
++import {
++  ATTR,
++  recordEvict,
++  setRunOutcome,
++  withDelegationSpan,
++  withRunSpan,
++} from '../../src/telemetry/spans.ts';
++import { registerTestProvider } from '../helpers/otel-test-provider.ts';
++
++let exporter: InMemorySpanExporter;
++let provider: BasicTracerProvider;
++beforeEach(() => {
++  ({ exporter, provider } = registerTestProvider());
++});
++afterEach(async () => {
++  await provider.shutdown();
++  exporter.reset();
++});
++
++test('delegation span nests under the run span (Bun ALS context propagation)', async () => {
++  await withRunSpan('run-x', 'do a thing', async () => {
++    setRunOutcome({ kind: 'answer' });
++    await withDelegationSpan('file_qa', async () => {
++      recordEvict('old:model', 123, 'lru-fit');
++    });
++  });
++  const spans = exporter.getFinishedSpans();
++  const run = spans.find((s) => s.name === 'agent.run');
++  const del = spans.find((s) => s.name === 'agent.delegation');
++  expect(run).toBeDefined();
++  expect(del).toBeDefined();
++  expect(del?.parentSpanContext?.spanId).toBe(run?.spanContext().spanId);
++  expect(run?.attributes[ATTR.RUN_ID]).toBe('run-x');
++  expect(run?.attributes[ATTR.OUTCOME]).toBe('answer');
++  expect(del?.attributes[ATTR.DELEGATION_TARGET]).toBe('file_qa');
++  expect(del?.events.find((e) => e.name === 'agent.model.evict')).toBeDefined();
++});
++
++test('resource outcome sets ERROR status on the run span', async () => {
++  await withRunSpan('run-y', 'x', async () => {
++    setRunOutcome({ kind: 'resource', message: 'no fit' });
++  });
++  const run = exporter.getFinishedSpans().find((s) => s.name === 'agent.run');
++  expect(run?.status.code).toBe(2); // SpanStatusCode.ERROR
++});

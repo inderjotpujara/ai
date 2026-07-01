@@ -1,0 +1,66 @@
+# Review package: a8a02c3..ff9123d
+
+## Commits
+ff9123d feat(resource): add model memory footprint estimator
+
+## Files changed
+ src/resource/footprint.ts        | 20 ++++++++++++++++++++
+ tests/resource/footprint.test.ts | 23 +++++++++++++++++++++++
+ 2 files changed, 43 insertions(+)
+
+## Diff
+diff --git a/src/resource/footprint.ts b/src/resource/footprint.ts
+new file mode 100644
+index 0000000..96cedeb
+--- /dev/null
++++ b/src/resource/footprint.ts
+@@ -0,0 +1,20 @@
++/** Inputs for a rough pre-load RAM estimate of a quantized model. */
++export type FootprintInput = {
++  paramsBillions: number;
++  bytesPerWeight: number;
++  contextTokens: number;
++  kvBytesPerToken: number;
++};
++
++const RUNTIME_OVERHEAD = 1.2;
++
++/**
++ * Estimate the RAM a model needs before loading it.
++ * weights = params * bytesPerWeight * overhead; plus a KV-cache term that grows with context.
++ */
++export function estimateModelBytes(input: FootprintInput): number {
++  const weights =
++    input.paramsBillions * 1e9 * input.bytesPerWeight * RUNTIME_OVERHEAD;
++  const kvCache = input.contextTokens * input.kvBytesPerToken;
++  return weights + kvCache;
++}
+diff --git a/tests/resource/footprint.test.ts b/tests/resource/footprint.test.ts
+new file mode 100644
+index 0000000..d4ab8af
+--- /dev/null
++++ b/tests/resource/footprint.test.ts
+@@ -0,0 +1,23 @@
++import { expect, test } from 'bun:test';
++import { estimateModelBytes } from '../../src/resource/footprint.ts';
++
++test('estimates an 8B Q4_K_M model with 8k context', () => {
++  // weights = 8e9 * 0.56 * 1.2 = 5,376,000,000 ; kv = 8192 * 131072 = 1,073,741,824
++  const bytes = estimateModelBytes({
++    paramsBillions: 8,
++    bytesPerWeight: 0.56,
++    contextTokens: 8192,
++    kvBytesPerToken: 131072,
++  });
++  expect(bytes).toBe(5_376_000_000 + 1_073_741_824);
++});
++
++test('zero context means weights-only', () => {
++  const bytes = estimateModelBytes({
++    paramsBillions: 1,
++    bytesPerWeight: 2,
++    contextTokens: 0,
++    kvBytesPerToken: 999,
++  });
++  expect(bytes).toBe(1e9 * 2 * 1.2);
++});

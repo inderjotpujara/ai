@@ -1,0 +1,247 @@
+# Review package: ed5710a..49be1e9
+
+## Commits
+49be1e9 feat(runtime): live /api/show KV-arch probe on the RuntimeControl port
+
+## Files changed
+ src/resource/ollama-control.ts               | 38 ++++++++++++++++++++++++++++
+ src/runtime/mlx-server.ts                    |  1 +
+ src/runtime/ollama.ts                        |  2 ++
+ src/runtime/runtime.ts                       |  2 ++
+ tests/resource/model-manager.test.ts         |  1 +
+ tests/resource/ollama-control-kvarch.test.ts | 27 ++++++++++++++++++++
+ tests/resource/select-degrade.test.ts        |  1 +
+ 7 files changed, 72 insertions(+)
+
+## Diff
+diff --git a/src/resource/ollama-control.ts b/src/resource/ollama-control.ts
+index 5103990..787d9b9 100644
+--- a/src/resource/ollama-control.ts
++++ b/src/resource/ollama-control.ts
+@@ -1,11 +1,12 @@
+ import { ProviderError } from '../core/errors.ts';
++import type { KvArch } from './kv-cache.ts';
+ 
+ const DEFAULT_BASE_URL = 'http://localhost:11434';
+ 
+ type TagsResponse = { models?: Array<{ name: string }> };
+ 
+ /** A model currently resident in Ollama, with its memory footprint. */
+ export type LoadedModel = { name: string; sizeBytes: number };
+ 
+ type PsResponse = { models?: Array<{ name: string; size: number }> };
+ 
+@@ -116,10 +117,47 @@ export async function listLoadedModels(
+   let res: Response;
+   try {
+     res = await fetch(`${baseUrl}/api/ps`);
+   } catch (cause) {
+     throw new ProviderError('Ollama /api/ps failed', { cause });
+   }
+   if (!res.ok) throw new ProviderError(`Ollama /api/ps returned ${res.status}`);
+   const data = (await res.json()) as PsResponse;
+   return (data.models ?? []).map((m) => ({ name: m.name, sizeBytes: m.size }));
+ }
++
++/** The model's KV attention dims, read live from POST /api/show. Undefined if unavailable. */
++export async function getModelKvArch(
++  model: string,
++  baseUrl: string = DEFAULT_BASE_URL,
++): Promise<KvArch | undefined> {
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/show`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ model }),
++    });
++  } catch {
++    return undefined;
++  }
++  if (!res.ok) return undefined;
++  const data = (await res.json()) as { model_info?: Record<string, unknown> };
++  const info = data.model_info ?? {};
++  const arch = info['general.architecture'];
++  if (typeof arch !== 'string') return undefined;
++  const num = (key: string): number | undefined => {
++    const v = info[`${arch}.${key}`];
++    return typeof v === 'number' ? v : undefined;
++  };
++  const blockCount = num('block_count');
++  const headCountKv = num('attention.head_count_kv');
++  const keyLength = num('attention.key_length');
++  const valueLength = num('attention.value_length');
++  if (
++    blockCount === undefined || headCountKv === undefined ||
++    keyLength === undefined || valueLength === undefined
++  ) {
++    return undefined;
++  }
++  return { blockCount, headCountKv, keyLength, valueLength, expertCount: num('expert_count') ?? 0 };
++}
+diff --git a/src/runtime/mlx-server.ts b/src/runtime/mlx-server.ts
+index 0460da1..abf2fa4 100644
+--- a/src/runtime/mlx-server.ts
++++ b/src/runtime/mlx-server.ts
+@@ -44,12 +44,13 @@ export const mlxServerRuntime: Runtime = {
+       if ((await listIds()).includes(m)) return;
+       throw new Error(
+         `MLX model "${m}" is not loaded in the MLX server at ${BASE}. Load it there (e.g. in LM Studio), then retry.`,
+       );
+     },
+     warm: async () => {},
+     unload: async () => {},
+     listLoaded: async (): Promise<LoadedModel[]> =>
+       (await listIds()).map((name) => ({ name, sizeBytes: 0 })),
+     getModelMax: async () => undefined,
++    getModelKvArch: async () => undefined,
+   },
+ };
+diff --git a/src/runtime/ollama.ts b/src/runtime/ollama.ts
+index c846e66..8c80aa7 100644
+--- a/src/runtime/ollama.ts
++++ b/src/runtime/ollama.ts
+@@ -1,13 +1,14 @@
+ import { ProviderKind } from '../core/types.ts';
+ import { createOllamaModel } from '../providers/ollama.ts';
+ import {
++  getModelKvArch,
+   getModelMaxContext,
+   isModelInstalled,
+   listLoadedModels,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../resource/ollama-control.ts';
+ import type { Runtime } from './runtime.ts';
+ 
+ const BASE = 'http://localhost:11434';
+@@ -25,12 +26,13 @@ export const ollamaRuntime: Runtime = {
+     }
+   },
+   createModel: (decl) => createOllamaModel(decl),
+   control: {
+     isInstalled: (m) => isModelInstalled(m),
+     pull: (m) => pullModel(m),
+     warm: (m, n) => warmModel(m, n),
+     unload: (m) => unloadModel(m),
+     listLoaded: () => listLoadedModels(),
+     getModelMax: (m) => getModelMaxContext(m),
++    getModelKvArch: (m) => getModelKvArch(m),
+   },
+ };
+diff --git a/src/runtime/runtime.ts b/src/runtime/runtime.ts
+index f48eeed..bd992a1 100644
+--- a/src/runtime/runtime.ts
++++ b/src/runtime/runtime.ts
+@@ -1,23 +1,25 @@
+ import type { LanguageModel } from 'ai';
+ import type { ModelDeclaration, ProviderKind } from '../core/types.ts';
++import type { KvArch } from '../resource/kv-cache.ts';
+ import type { LoadedModel } from '../resource/ollama-control.ts';
+ 
+ export type { LoadedModel };
+ 
+ /** Lifecycle the Model Manager drives, abstracted per runtime. */
+ export type RuntimeControl = {
+   isInstalled(model: string): Promise<boolean>;
+   pull(model: string): Promise<void>;
+   warm(model: string, numCtx?: number): Promise<void>;
+   unload(model: string): Promise<void>;
+   listLoaded(): Promise<LoadedModel[]>;
+   getModelMax(model: string): Promise<number | undefined>;
++  getModelKvArch(model: string): Promise<KvArch | undefined>;
+ };
+ 
+ /** A model runtime: builds AI-SDK models and owns their lifecycle + availability. */
+ export type Runtime = {
+   kind: ProviderKind;
+   isAvailable(): Promise<boolean>;
+   createModel(decl: ModelDeclaration): LanguageModel;
+   control: RuntimeControl;
+ };
+diff --git a/tests/resource/model-manager.test.ts b/tests/resource/model-manager.test.ts
+index c51bcc3..73e6ea0 100644
+--- a/tests/resource/model-manager.test.ts
++++ b/tests/resource/model-manager.test.ts
+@@ -19,20 +19,21 @@ function decl(model: string, b: number): ModelDeclaration {
+ // weightsBytes(b, 1) === b*1e9*1.2
+ 
+ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
+   return {
+     isInstalled: mock(async () => true),
+     pull: mock(async () => {}),
+     warm: mock(async () => {}),
+     unload: mock(async () => {}),
+     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
+     getModelMax: mock(async () => 262144),
++    getModelKvArch: mock(async () => undefined),
+     ...over,
+   };
+ }
+ 
+ function fakes(
+   overrides: {
+     control?: RuntimeControl;
+     budgetBytes?: number;
+     warn?: (m: string) => void;
+   } = {},
+diff --git a/tests/resource/ollama-control-kvarch.test.ts b/tests/resource/ollama-control-kvarch.test.ts
+new file mode 100644
+index 0000000..649138c
+--- /dev/null
++++ b/tests/resource/ollama-control-kvarch.test.ts
+@@ -0,0 +1,27 @@
++import { afterEach, expect, test } from 'bun:test';
++import { getModelKvArch } from '../../src/resource/ollama-control.ts';
++
++const orig = globalThis.fetch;
++afterEach(() => { globalThis.fetch = orig; });
++
++test('parses KV arch from /api/show model_info', async () => {
++  globalThis.fetch = (async () =>
++    new Response(JSON.stringify({ model_info: {
++      'general.architecture': 'qwen3',
++      'qwen3.block_count': 36,
++      'qwen3.attention.head_count_kv': 8,
++      'qwen3.attention.key_length': 128,
++      'qwen3.attention.value_length': 128,
++    } }), { status: 200 })) as unknown as typeof fetch;
++  const arch = await getModelKvArch('qwen3.5:9b');
++  expect(arch).toEqual({ blockCount: 36, headCountKv: 8, keyLength: 128, valueLength: 128, expertCount: 0 });
++});
++test('undefined when required fields missing', async () => {
++  globalThis.fetch = (async () =>
++    new Response(JSON.stringify({ model_info: { 'general.architecture': 'x' } }), { status: 200 })) as unknown as typeof fetch;
++  expect(await getModelKvArch('x')).toBeUndefined();
++});
++test('undefined (no throw) on fetch failure', async () => {
++  globalThis.fetch = (async () => { throw new Error('down'); }) as unknown as typeof fetch;
++  expect(await getModelKvArch('x')).toBeUndefined();
++});
+diff --git a/tests/resource/select-degrade.test.ts b/tests/resource/select-degrade.test.ts
+index d2bb241..d5e93e0 100644
+--- a/tests/resource/select-degrade.test.ts
++++ b/tests/resource/select-degrade.test.ts
+@@ -19,20 +19,21 @@ import type { RuntimeControl } from '../../src/runtime/runtime.ts';
+ const BUDGET_BYTES = 4e9;
+ 
+ function fakeControl(over: Partial<RuntimeControl> = {}): RuntimeControl {
+   return {
+     isInstalled: mock(async () => true),
+     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
+     pull: mock(async () => {}),
+     warm: mock(async () => {}),
+     unload: mock(async () => {}),
+     getModelMax: mock(async () => 262144),
++    getModelKvArch: mock(async () => undefined),
+     ...over,
+   };
+ }
+ 
+ test('degrade-to-4b: resolveModel over real BOOTSTRAP falls back to qwen3.5:4b under 4 GB budget', async () => {
+   const control = fakeControl();
+   const mgr = createModelManager({
+     budgetBytes: BUDGET_BYTES,
+     warn: mock(() => {}),
+     controlFor: () => control,

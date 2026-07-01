@@ -1,0 +1,340 @@
+# Review package: cbe7de7..3e2569a
+
+## Commits
+3e2569a feat(cli): drive the orchestrator (answer or capability-gap), replace direct file-qa path
+
+## Files changed
+ src/cli/answer-file-question.ts        | 35 ---------------
+ src/cli/chat.ts                        | 35 +++++++--------
+ src/cli/run-chat.ts                    | 37 ++++++++++++++++
+ tests/cli/answer-file-question.test.ts | 58 ------------------------
+ tests/cli/run-chat.test.ts             | 80 ++++++++++++++++++++++++++++++++++
+ 5 files changed, 132 insertions(+), 113 deletions(-)
+
+## Diff
+diff --git a/src/cli/answer-file-question.ts b/src/cli/answer-file-question.ts
+deleted file mode 100644
+index 71c6186..0000000
+--- a/src/cli/answer-file-question.ts
++++ /dev/null
+@@ -1,35 +0,0 @@
+-import type { LanguageModel, ToolSet } from 'ai';
+-import { runAgent } from '../core/agent.ts';
+-import { appendJournal } from '../run/journal.ts';
+-import { createRun, writeArtifact } from '../run/run-store.ts';
+-
+-const SYSTEM_PROMPT =
+-  'You answer questions about local files. Use the read_file tool to read any file you need, then answer concisely.';
+-
+-export type AnswerDeps = {
+-  model: LanguageModel;
+-  tools: ToolSet;
+-  question: string;
+-  runsRoot: string;
+-  runId: string;
+-};
+-
+-/** Orchestrate one file-Q&A run: journal, agent, artifact, journal. */
+-export async function answerFileQuestion(deps: AnswerDeps): Promise<string> {
+-  const run = await createRun(deps.runsRoot, deps.runId);
+-  await appendJournal(run.dir, {
+-    step: 'start',
+-    data: { question: deps.question },
+-  });
+-
+-  const { text } = await runAgent({
+-    model: deps.model,
+-    systemPrompt: SYSTEM_PROMPT,
+-    prompt: deps.question,
+-    tools: deps.tools,
+-  });
+-
+-  await writeArtifact(run, 'answer.txt', text);
+-  await appendJournal(run.dir, { step: 'answer', data: { text } });
+-  return text;
+-}
+diff --git a/src/cli/chat.ts b/src/cli/chat.ts
+index 270c4df..6b7817a 100644
+--- a/src/cli/chat.ts
++++ b/src/cli/chat.ts
+@@ -1,72 +1,67 @@
++import { createSuperAgent } from '../../agents/super.ts';
+ import qwenFast from '../../models/qwen-fast.ts';
+ import { ResourceError } from '../core/errors.ts';
+ import { createFileTools } from '../mcp/client.ts';
+-import { createOllamaModel } from '../providers/ollama.ts';
+ import { estimateModelBytes } from '../resource/footprint.ts';
+ import { fitsBudget, machineBudgetBytes } from '../resource/hardware.ts';
+ import { isProjectStoreActive } from '../resource/model-store.ts';
+ import {
+   isModelInstalled,
+   pullModel,
+   unloadModel,
+   warmModel,
+ } from '../resource/ollama-control.ts';
+-import { answerFileQuestion } from './answer-file-question.ts';
++import { runChat } from './run-chat.ts';
+ 
+-// qwen3:8b @ Q4_K_M, 8k context — rough footprint for the budget check.
+ const FOOTPRINT = estimateModelBytes({
+   paramsBillions: 8,
+   bytesPerWeight: 0.56,
+   contextTokens: qwenFast.params.numCtx ?? 8192,
+   kvBytesPerToken: 131072,
+ });
+ 
+ async function main(): Promise<void> {
+-  const question = process.argv.slice(2).join(' ').trim();
+-  if (question.length === 0) {
+-    console.error('Usage: bun run src/cli/chat.ts "<question about a file>"');
++  const task = process.argv.slice(2).join(' ').trim();
++  if (task.length === 0) {
++    console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+     process.exit(1);
+   }
+ 
+   const budget = machineBudgetBytes();
+   if (!fitsBudget(FOOTPRINT, budget)) {
+     throw new ResourceError(
+       `${qwenFast.model} (~${Math.round(FOOTPRINT / 1e9)}GB) exceeds the GPU budget (~${Math.round(budget / 1e9)}GB)`,
+     );
+   }
+ 
+   if (!(await isModelInstalled(qwenFast.model))) {
+     console.error(`Pulling ${qwenFast.model} (first run only)...`);
+     await pullModel(qwenFast.model);
+   }
+   await warmModel(qwenFast.model);
++  console.error(
++    isProjectStoreActive()
++      ? 'Using project-local models from ./model-images'
++      : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
++  );
+ 
+-  if (isProjectStoreActive()) {
+-    console.error('Using project-local models from ./model-images');
+-  } else {
+-    console.error(
+-      '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
+-    );
+-  }
+-
+-  const model = createOllamaModel(qwenFast);
+   const { tools, close } = await createFileTools();
+   try {
+-    const answer = await answerFileQuestion({
+-      model,
+-      tools,
+-      question,
++    const orchestrator = createSuperAgent(tools);
++    const result = await runChat({
++      orchestrator,
++      task,
+       runsRoot: 'runs',
+       runId: `run-${process.pid}`,
+     });
+-    console.log(answer);
++    console.log(result.kind === 'answer' ? result.text : result.message);
+   } finally {
+     await close();
+     await unloadModel(qwenFast.model);
+   }
+ }
+ 
+ main().catch((err) => {
+   console.error(err);
+   process.exit(1);
+ });
+diff --git a/src/cli/run-chat.ts b/src/cli/run-chat.ts
+new file mode 100644
+index 0000000..3685a77
+--- /dev/null
++++ b/src/cli/run-chat.ts
+@@ -0,0 +1,37 @@
++import type { Agent } from '../core/agent-def.ts';
++import {
++  type OrchestratorResult,
++  runOrchestrator,
++} from '../core/orchestrator.ts';
++import { appendJournal } from '../run/journal.ts';
++import { createRun, writeArtifact } from '../run/run-store.ts';
++
++export type ChatDeps = {
++  orchestrator: Agent;
++  task: string;
++  runsRoot: string;
++  runId: string;
++};
++
++/** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
++export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
++  const run = await createRun(deps.runsRoot, deps.runId);
++  await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
++
++  const result = await runOrchestrator(deps.orchestrator, deps.task);
++
++  if (result.kind === 'answer') {
++    await writeArtifact(run, 'answer.txt', result.text);
++    await appendJournal(run.dir, {
++      step: 'answer',
++      data: { text: result.text },
++    });
++  } else {
++    await writeArtifact(run, 'gap.txt', result.message);
++    await appendJournal(run.dir, {
++      step: 'gap',
++      data: { missingCapability: result.missingCapability },
++    });
++  }
++  return result;
++}
+diff --git a/tests/cli/answer-file-question.test.ts b/tests/cli/answer-file-question.test.ts
+deleted file mode 100644
+index 522eebc..0000000
+--- a/tests/cli/answer-file-question.test.ts
++++ /dev/null
+@@ -1,58 +0,0 @@
+-import { afterEach, beforeEach, expect, test } from 'bun:test';
+-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+-import { tmpdir } from 'node:os';
+-import { join } from 'node:path';
+-import { tool } from 'ai';
+-import { MockLanguageModelV3 } from 'ai/test';
+-import { z } from 'zod';
+-import { answerFileQuestion } from '../../src/cli/answer-file-question.ts';
+-import { readJournal } from '../../src/run/journal.ts';
+-
+-let root: string;
+-beforeEach(async () => {
+-  root = await mkdtemp(join(tmpdir(), 'cli-'));
+-});
+-afterEach(async () => {
+-  await rm(root, { recursive: true, force: true });
+-});
+-
+-test('answers a question, writes the answer artifact, and journals the run', async () => {
+-  const model = new MockLanguageModelV3({
+-    doGenerate: async () => ({
+-      content: [{ type: 'text', text: 'The file is a greeting.' }],
+-      finishReason: { unified: 'stop', raw: undefined },
+-      usage: {
+-        inputTokens: {
+-          total: 1,
+-          noCache: undefined,
+-          cacheRead: undefined,
+-          cacheWrite: undefined,
+-        },
+-        outputTokens: { total: 1, text: undefined, reasoning: undefined },
+-      },
+-      warnings: [],
+-    }),
+-  });
+-  const tools = {
+-    read_file: tool({
+-      description: 'read a file',
+-      inputSchema: z.object({ path: z.string() }),
+-      execute: async ({ path }) => ({ text: `contents of ${path}` }),
+-    }),
+-  };
+-
+-  const answer = await answerFileQuestion({
+-    model,
+-    tools,
+-    question: 'Summarize notes.txt',
+-    runsRoot: root,
+-    runId: 'run-1',
+-  });
+-
+-  expect(answer).toBe('The file is a greeting.');
+-  expect(await readFile(join(root, 'run-1', 'answer.txt'), 'utf8')).toBe(
+-    'The file is a greeting.',
+-  );
+-  const journal = await readJournal(join(root, 'run-1'));
+-  expect(journal.map((e) => e.step)).toEqual(['start', 'answer']);
+-});
+diff --git a/tests/cli/run-chat.test.ts b/tests/cli/run-chat.test.ts
+new file mode 100644
+index 0000000..fd8046d
+--- /dev/null
++++ b/tests/cli/run-chat.test.ts
+@@ -0,0 +1,80 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { MockLanguageModelV3 } from 'ai/test';
++import { runChat } from '../../src/cli/run-chat.ts';
++import type { Agent } from '../../src/core/agent-def.ts';
++import { createOrchestrator } from '../../src/core/orchestrator.ts';
++import { readJournal } from '../../src/run/journal.ts';
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'chat-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++function gapOrchestrator(): Agent {
++  // orchestrator model that calls report_capability_gap on turn 1
++  let call = 0;
++  const model = new MockLanguageModelV3({
++    doGenerate: async () => {
++      call += 1;
++      if (call === 1) {
++        return {
++          content: [
++            {
++              type: 'tool-call',
++              toolCallId: 'c1',
++              toolName: 'report_capability_gap',
++              input: JSON.stringify({ missingCapability: 'send email' }),
++            },
++          ],
++          finishReason: { unified: 'tool-calls', raw: undefined },
++          usage: {
++            inputTokens: {
++              total: 1,
++              noCache: undefined,
++              cacheRead: undefined,
++              cacheWrite: undefined,
++            },
++            outputTokens: { total: 1, text: undefined, reasoning: undefined },
++          },
++          warnings: [],
++        };
++      }
++      return {
++        content: [{ type: 'text', text: '' }],
++        finishReason: { unified: 'stop', raw: undefined },
++        usage: {
++          inputTokens: {
++            total: 1,
++            noCache: undefined,
++            cacheRead: undefined,
++            cacheWrite: undefined,
++          },
++          outputTokens: { total: 1, text: undefined, reasoning: undefined },
++        },
++        warnings: [],
++      };
++    },
++  });
++  return createOrchestrator({ model, systemPrompt: 'route', agents: [] });
++}
++
++test('runChat records a gap run and writes the gap artifact', async () => {
++  const result = await runChat({
++    orchestrator: gapOrchestrator(),
++    task: 'email my boss',
++    runsRoot: root,
++    runId: 'run-1',
++  });
++  expect(result.kind).toBe('gap');
++  expect(await readFile(join(root, 'run-1', 'gap.txt'), 'utf8')).toContain(
++    'send email',
++  );
++  const journal = await readJournal(join(root, 'run-1'));
++  expect(journal.map((e) => e.step)).toEqual(['start', 'gap']);
++});

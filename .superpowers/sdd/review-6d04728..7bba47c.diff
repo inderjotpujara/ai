@@ -1,0 +1,250 @@
+# Review package: 6d04728..7bba47c
+
+## Commits
+7bba47c feat(run): runChat emits OTel root span to spans.jsonl; retire journal.jsonl
+
+## Files changed
+ src/cli/run-chat.ts        | 57 +++++++++++++++++++---------------------------
+ src/run/journal.ts         | 33 ---------------------------
+ tests/cli/run-chat.test.ts | 34 ++++++++++++++++++++++-----
+ tests/run/journal.test.ts  | 23 -------------------
+ 4 files changed, 52 insertions(+), 95 deletions(-)
+
+## Diff
+diff --git a/src/cli/run-chat.ts b/src/cli/run-chat.ts
+index cf200b1..4bad606 100644
+--- a/src/cli/run-chat.ts
++++ b/src/cli/run-chat.ts
+@@ -1,51 +1,42 @@
+ import type { Agent } from '../core/agent-def.ts';
+-import {
+-  type OrchestratorResult,
+-  runOrchestrator,
+-} from '../core/orchestrator.ts';
++import type { OrchestratorResult } from '../core/orchestrator.ts';
++import { runOrchestrator } from '../core/orchestrator.ts';
+ import type { ResourceCapture } from '../core/resource-capture.ts';
+-import { appendJournal } from '../run/journal.ts';
+ import { createRun, writeArtifact } from '../run/run-store.ts';
++import { initRunTelemetry } from '../telemetry/provider.ts';
++import { setRunOutcome, withRunSpan } from '../telemetry/spans.ts';
+ 
+ export type ChatDeps = {
+   orchestrator: Agent;
+   task: string;
+   runsRoot: string;
+   runId: string;
+   routerNumCtx?: number;
+   capture?: ResourceCapture;
+ };
+ 
+-/** Orchestrate one chat run: journal, run orchestrator, write artifact, journal. */
+ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
+   const run = await createRun(deps.runsRoot, deps.runId);
+-  await appendJournal(run.dir, { step: 'start', data: { task: deps.task } });
+-
+-  const result = await runOrchestrator(
+-    deps.orchestrator,
+-    deps.task,
+-    deps.routerNumCtx,
+-    deps.capture,
+-  );
+-
+-  if (result.kind === 'answer') {
+-    await writeArtifact(run, 'answer.txt', result.text);
+-    await appendJournal(run.dir, {
+-      step: 'answer',
+-      data: { text: result.text },
+-    });
+-  } else if (result.kind === 'gap') {
+-    await writeArtifact(run, 'gap.txt', result.message);
+-    await appendJournal(run.dir, {
+-      step: 'gap',
+-      data: { missingCapability: result.missingCapability },
+-    });
+-  } else {
+-    await writeArtifact(run, 'resource.txt', result.message);
+-    await appendJournal(run.dir, {
+-      step: 'resource',
+-      data: { message: result.message },
++  const tel = initRunTelemetry(run.dir);
++  try {
++    return await withRunSpan(deps.runId, deps.task, async () => {
++      const result = await runOrchestrator(
++        deps.orchestrator,
++        deps.task,
++        deps.routerNumCtx,
++        deps.capture,
++      );
++      setRunOutcome(result);
++      if (result.kind === 'answer') {
++        await writeArtifact(run, 'answer.txt', result.text);
++      } else if (result.kind === 'gap') {
++        await writeArtifact(run, 'gap.txt', result.message);
++      } else {
++        await writeArtifact(run, 'resource.txt', result.message);
++      }
++      return result;
+     });
++  } finally {
++    await tel.shutdown();
+   }
+-  return result;
+ }
+diff --git a/src/run/journal.ts b/src/run/journal.ts
+deleted file mode 100644
+index 1e4d381..0000000
+--- a/src/run/journal.ts
++++ /dev/null
+@@ -1,33 +0,0 @@
+-import { appendFile, readFile } from 'node:fs/promises';
+-import { join } from 'node:path';
+-
+-export type JournalEntry = { step: string; data?: unknown };
+-type StoredEntry = JournalEntry & { index: number };
+-
+-function journalPath(dir: string): string {
+-  return join(dir, 'journal.jsonl');
+-}
+-
+-/** Append one entry as a JSON line, stamped with the next index. */
+-export async function appendJournal(
+-  dir: string,
+-  entry: JournalEntry,
+-): Promise<void> {
+-  const existing = await readJournal(dir);
+-  const stored: StoredEntry = { index: existing.length, ...entry };
+-  await appendFile(journalPath(dir), `${JSON.stringify(stored)}\n`);
+-}
+-
+-/** Read all entries in order; empty array if the journal does not exist yet. */
+-export async function readJournal(dir: string): Promise<StoredEntry[]> {
+-  let raw: string;
+-  try {
+-    raw = await readFile(journalPath(dir), 'utf8');
+-  } catch {
+-    return [];
+-  }
+-  return raw
+-    .split('\n')
+-    .filter((line) => line.length > 0)
+-    .map((line) => JSON.parse(line) as StoredEntry);
+-}
+diff --git a/tests/cli/run-chat.test.ts b/tests/cli/run-chat.test.ts
+index dab688c..d0a9bc3 100644
+--- a/tests/cli/run-chat.test.ts
++++ b/tests/cli/run-chat.test.ts
+@@ -1,19 +1,19 @@
+ import { afterEach, beforeEach, expect, test } from 'bun:test';
+-import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { MockLanguageModelV3 } from 'ai/test';
+ import { runChat } from '../../src/cli/run-chat.ts';
+ import type { Agent } from '../../src/core/agent-def.ts';
+ import { createOrchestrator } from '../../src/core/orchestrator.ts';
+-import { readJournal } from '../../src/run/journal.ts';
++import { readSpans } from '../../src/run/run-trace.ts';
+ 
+ let root: string;
+ beforeEach(async () => {
+   root = await mkdtemp(join(tmpdir(), 'chat-'));
+ });
+ afterEach(async () => {
+   await rm(root, { recursive: true, force: true });
+ });
+ 
+ function gapOrchestrator(): Agent {
+@@ -68,22 +68,20 @@ test('runChat records a gap run and writes the gap artifact', async () => {
+   const result = await runChat({
+     orchestrator: gapOrchestrator(),
+     task: 'email my boss',
+     runsRoot: root,
+     runId: 'run-1',
+   });
+   expect(result.kind).toBe('gap');
+   expect(await readFile(join(root, 'run-1', 'gap.txt'), 'utf8')).toContain(
+     'send email',
+   );
+-  const journal = await readJournal(join(root, 'run-1'));
+-  expect(journal.map((e) => e.step)).toEqual(['start', 'gap']);
+ });
+ 
+ function answerOrchestrator(): Agent {
+   // orchestrator model that produces final text directly (no tool calls)
+   const model = new MockLanguageModelV3({
+     doGenerate: async () => ({
+       content: [{ type: 'text', text: 'Here is your answer.' }],
+       finishReason: { unified: 'stop', raw: undefined },
+       usage: {
+         inputTokens: {
+@@ -107,13 +105,37 @@ test('runChat records an answer run and writes the answer artifact', async () =>
+     runsRoot: root,
+     runId: 'run-2',
+   });
+   expect(result.kind).toBe('answer');
+   if (result.kind === 'answer') {
+     expect(result.text).toBe('Here is your answer.');
+   }
+   expect(await readFile(join(root, 'run-2', 'answer.txt'), 'utf8')).toBe(
+     'Here is your answer.',
+   );
+-  const journal = await readJournal(join(root, 'run-2'));
+-  expect(journal.map((e) => e.step)).toEqual(['start', 'answer']);
++});
++
++test('runChat writes spans.jsonl with a root run span carrying the outcome', async () => {
++  const result = await runChat({
++    orchestrator: gapOrchestrator(),
++    task: 'email my boss',
++    runsRoot: root,
++    runId: 'run-span',
++  });
++  expect(result.kind).toBe('gap');
++  const { spans } = await readSpans(join(root, 'run-span'));
++  const runSpan = spans.find((s) => s.name === 'agent.run');
++  expect(runSpan).toBeDefined();
++  expect(runSpan?.attributes['agent.outcome']).toBe('gap');
++});
++
++test('runChat no longer writes journal.jsonl', async () => {
++  await runChat({
++    orchestrator: gapOrchestrator(),
++    task: 'x',
++    runsRoot: root,
++    runId: 'run-nojournal',
++  });
++  await expect(
++    stat(join(root, 'run-nojournal', 'journal.jsonl')),
++  ).rejects.toThrow();
+ });
+diff --git a/tests/run/journal.test.ts b/tests/run/journal.test.ts
+deleted file mode 100644
+index 8ee8ff7..0000000
+--- a/tests/run/journal.test.ts
++++ /dev/null
+@@ -1,23 +0,0 @@
+-import { afterEach, beforeEach, expect, test } from 'bun:test';
+-import { mkdtemp, rm } from 'node:fs/promises';
+-import { tmpdir } from 'node:os';
+-import { join } from 'node:path';
+-import { appendJournal, readJournal } from '../../src/run/journal.ts';
+-
+-let dir: string;
+-beforeEach(async () => {
+-  dir = await mkdtemp(join(tmpdir(), 'journal-'));
+-});
+-afterEach(async () => {
+-  await rm(dir, { recursive: true, force: true });
+-});
+-
+-test('appends entries as ordered JSON lines and reads them back', async () => {
+-  await appendJournal(dir, { step: 'start' });
+-  await appendJournal(dir, { step: 'answer', data: { text: 'hi' } });
+-  const entries = await readJournal(dir);
+-  expect(entries).toEqual([
+-    { index: 0, step: 'start' },
+-    { index: 1, step: 'answer', data: { text: 'hi' } },
+-  ]);
+-});

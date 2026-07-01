@@ -1,0 +1,226 @@
+# Review package: 918bd17..99a6dbe
+
+## Commits
+99a6dbe feat(workflow): typed step model + WorkflowError
+
+## Files changed
+ docs/architecture.md          | 26 ++++++++++++--
+ src/core/errors.ts            |  3 ++
+ src/workflow/types.ts         | 84 +++++++++++++++++++++++++++++++++++++++++++
+ tests/workflow/errors.test.ts | 11 ++++++
+ 4 files changed, 121 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/docs/architecture.md b/docs/architecture.md
+index e14dce7..9a3c179 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -124,20 +124,21 @@ graph TD
+ | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer | everything below |
+ | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
+ | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
+ | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
+ | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
+ | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
+ | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
+ | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
+ | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
+ | **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
++| **Workflow / DAG** | `src/workflow/` | Pure types + error class for deterministic multi-step workflows (Slice 10) — step model, context-threading, failure policies, DAG validation | Zod (I/O schemas) |
+ 
+ **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
+ 
+ ---
+ 
+ ## 3. Runtime data flow (one `chat` run, current)
+ 
+ ```mermaid
+ sequenceDiagram
+     actor User
+@@ -244,39 +245,58 @@ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewa
+ 
+ The safe-composition foundation for the future workflow/crew engine. Each delegation is a fresh, isolated `generateText` instance, so the risks are **non-termination** and **cost**, not state corruption — both bounded by depth. Backed by an `AsyncLocalStorage<DelegationContext>` (`{depth, ancestors, numCtx}`) in `src/core/guardrails.ts`, enforced at the single delegation chokepoint (`delegate.ts`).
+ 
+ - **Depth limit (the termination guarantee).** `checkDelegation` rejects when `current.depth + 1 > maxDelegationDepth()` (default 5, `AGENT_MAX_DELEGATION_DEPTH`). Every hop goes through `runInDelegationContext` (depth++), and the orchestrator root is seeded via `withRootDelegationContext` — so **no chain can bypass the counter**; any chain (incl. self-recursion) terminates ≤ depth levels. **Recursion is allowed** (no name-based cycle ban — that would forbid legitimate recursive decomposition); ancestry is carried for telemetry only.
+ - **Live return cap.** `concise(text, callerNumCtx)` caps a delegated return to `floor(returnCtxFraction() × callerNumCtx × 4 chars/token)` — a fraction (default 0.25, `AGENT_RETURN_CTX_FRACTION`) of the **consumer's** live `num_ctx`, captured from the parent frame before entering the child. Not a flat constant — it scales with the same hardware-aware budget as everything else.
+ - **Soft failure.** Violations return `{ error }` from the delegate tool (the existing soft-tool-error path) so the calling agent's LLM can adapt, plus an `agent.guardrail.violation` span event. `withDelegationSpan` tags `agent.delegation.depth` / `agent.delegation.ancestors` (visible in `bun run runs`).
+ - **Warm-model reuse** is already provided by the manager (state keyed by model string); locked in by a regression test.
+ 
+ ---
+ 
+-## 9. On-disk stores
++## 9. Workflows / DAG engine (Slice 10)
++
++**Pure types + execution model for deterministic multi-step workflows.** While the agent loop is *agentic* (an LLM autonomously chooses actions), workflows are *choreographed* — steps run in a defined DAG order, each produces validated output, and branches/maps are explicit.
++
++- **Types** (`src/workflow/types.ts`): 
++  - `enum StepKind { Agent, Tool, Branch, Map }` — the four step kinds
++  - `WorkflowContext` — thread of `{stepId: output}` through a run; maps + branches thread `item`/`index`
++  - Step variants: `AgentStep` (run an agent, input is a prompt), `ToolStep` (call a tool, input is args), `BranchStep` (if-then-else on a predicate), `MapStep` (fan-out per item in a list, run sub-step once per item)
++  - `StepError` — per-step failure policy: `'fail'` (fast), `'continue'` (skip on error), `{ fallback }` (use a fallback value)
++  - `WorkflowDef` — a named list of steps + metadata
++  - `WorkflowOutcome` — `{ kind: 'done', output }` or `{ kind: 'failed', failedStep, message }`
++  - `effectiveDeps(step, index, steps)` — helper: explicit `dependsOn` or implicit previous-step deps
++
++- **Error class** (`src/core/errors.ts`): `WorkflowError extends FrameworkError` for workflow-specific failures (bad definition, step failure, context mismatch)
++
++Execution engine (`src/workflow/engine.ts` — later tasks) will traverse the DAG, thread context, validate outputs, and handle failures per policy. Every step emission will produce `agent.workflow.*` spans (one per step, one per branch taken, one per map iteration).
++
++---
++
++## 10. On-disk stores
+ 
+ - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
+ - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
+ 
+ ---
+ 
+-## 10. Testing strategy
++## 11. Testing strategy
+ 
+ - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
+ - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
+ - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
+ - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
+ - **MCP** — real stdio round-trip (subprocess server).
+ - **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+ 
+ ---
+ 
+-## 11. Glossary
++## 12. Glossary
+ 
+ - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
+ - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
+ - **Span / trace** — OpenTelemetry units. A run = a root `agent.run` span; delegations, model loads, and AI-SDK `generateText`/tool calls nest beneath it via the active async context. `bun run runs` renders the tree.
+ - **Delegation context** — the `AsyncLocalStorage` `{depth, ancestors, numCtx}` threaded through every hop; basis for the depth guard, the live return cap (off the parent's `numCtx`), and the `delegation.depth`/`ancestors` span attrs.
+ - **Live budget** — `min(0.75 × total RAM, 0.8 × availableRamBytes())` (first term = the Metal cap), recomputed per delegation; `availableRamBytes()` parses `vm_stat`.
+ - **Dynamic num_ctx** — `min(desired, modelMax, maxCtxByFit)`, floor 4096, rounded 1024; `modelMax` probed live via `/api/show`; same value for warm + inference.
+ - **Model Manager** — `src/resource/model-manager.ts`; `ensureReady` drives the lifecycle within live budget and returns the chosen context. State keyed by model string ⇒ shared-model agents = one resident copy.
+ - **Mounting an MCP server** — `mountMcpServer({command,args})` connects to any stdio MCP server and returns `{tools, close}`. Capability = pointing at a server, not writing tool code. `createFileTools` (native `read_file`) + `createFetchTools` (`uvx mcp-server-fetch`) are presets.
+ - **Declaration** — a data file describing a model (provider + name + params + footprint) or an agent. Not weights, not logic.
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+index 31c05ef..cd8de67 100644
+--- a/src/core/errors.ts
++++ b/src/core/errors.ts
+@@ -16,10 +16,13 @@ export class ToolError extends FrameworkError {}
+ export class MaxStepsError extends FrameworkError {
+   readonly steps: unknown[];
+   constructor(message: string, steps: unknown[] = []) {
+     super(message);
+     this.steps = steps;
+   }
+ }
+ 
+ /** A model cannot fit the machine's memory budget. */
+ export class ResourceError extends FrameworkError {}
++
++/** A workflow definition or execution error. */
++export class WorkflowError extends FrameworkError {}
+diff --git a/src/workflow/types.ts b/src/workflow/types.ts
+new file mode 100644
+index 0000000..148e4d1
+--- /dev/null
++++ b/src/workflow/types.ts
+@@ -0,0 +1,84 @@
++import type { z } from 'zod';
++
++/** The four step kinds supported in v1. */
++export enum StepKind {
++  Agent = 'agent',
++  Tool = 'tool',
++  Branch = 'branch',
++  Map = 'map',
++}
++
++/** Context threaded through a run: each completed step's validated output, by id.
++ *  `input` holds the workflow's initial input; `map` sub-steps also see `item`/`index`. */
++export type WorkflowContext = Record<string, unknown>;
++
++/** Per-step failure policy. Default 'fail' (fail-fast). */
++export type StepError = 'fail' | 'continue' | { fallback: unknown };
++
++type StepBase<O> = {
++  id: string;
++  /** Execution deps. Omitted = previous step in declaration order (linear pipeline).
++   *  `[]` = a root step. Branch/parallel fan-in set these explicitly. */
++  dependsOn?: string[];
++  /** Structured I/O — the step's result is validated against this after it runs. */
++  output: z.ZodType<O>;
++  /** Failure policy; default 'fail'. */
++  onError?: StepError;
++};
++
++export type AgentStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Agent;
++  agent: string; // agent name resolved from the agent map at run time
++  input: (ctx: WorkflowContext) => string; // the task prompt for the agent
++};
++
++export type ToolStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Tool;
++  tool: string; // tool name in the mounted ToolSet
++  input: (ctx: WorkflowContext) => unknown; // tool args (validated by the tool's own schema)
++};
++
++export type BranchStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Branch;
++  predicate: (ctx: WorkflowContext) => boolean;
++  whenTrue: string; // step id taken when predicate true
++  whenFalse: string; // step id taken when predicate false
++};
++
++/** A map sub-step is an agent/tool step run once per item; id is synthesized,
++ *  deps are implicit (the item), so they are omitted. */
++export type MapSubStep =
++  | Omit<AgentStep, 'id' | 'dependsOn'>
++  | Omit<ToolStep, 'id' | 'dependsOn'>;
++
++export type MapStep<O = unknown> = StepBase<O> & {
++  kind: StepKind.Map;
++  over: (ctx: WorkflowContext) => unknown[]; // the list to map
++  step: MapSubStep; // sub-step run per item (sees ctx.item / ctx.index)
++  maxParallel?: number; // per-map override of the engine concurrency cap
++};
++
++export type Step = AgentStep | ToolStep | BranchStep | MapStep;
++
++export type WorkflowDef = {
++  id: string;
++  description?: string;
++  steps: Step[];
++};
++
++export type WorkflowOutcome =
++  | { kind: 'done'; output: WorkflowContext }
++  | { kind: 'failed'; failedStep: string; message: string };
++
++/** The effective dependencies of a step: explicit `dependsOn`, else the previous
++ *  step in declaration order (first step => no deps). Shared by define + engine. */
++export function effectiveDeps(
++  step: Step,
++  index: number,
++  steps: Step[],
++): string[] {
++  if (step.dependsOn) return step.dependsOn;
++  if (index === 0) return [];
++  const prev = steps[index - 1];
++  return prev ? [prev.id] : [];
++}
+diff --git a/tests/workflow/errors.test.ts b/tests/workflow/errors.test.ts
+new file mode 100644
+index 0000000..9d827ea
+--- /dev/null
++++ b/tests/workflow/errors.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, it } from 'bun:test';
++import { WorkflowError } from '../../src/core/errors.ts';
++
++describe('WorkflowError', () => {
++  it('is an Error with the right name', () => {
++    const e = new WorkflowError('bad def');
++    expect(e).toBeInstanceOf(Error);
++    expect(e.name).toBe('WorkflowError');
++    expect(e.message).toBe('bad def');
++  });
++});

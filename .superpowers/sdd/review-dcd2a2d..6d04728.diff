@@ -1,0 +1,196 @@
+# Review package: dcd2a2d..6d04728
+
+## Commits
+6d04728 feat(cli): runs viewer (list + render + --follow) and bun run runs
+
+## Files changed
+ package.json           |  3 +-
+ src/cli/runs.ts        | 80 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/cli/runs.test.ts | 64 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 146 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/package.json b/package.json
+index 74bf4ed..12695fb 100644
+--- a/package.json
++++ b/package.json
+@@ -3,21 +3,22 @@
+   "version": "0.1.0",
+   "private": true,
+   "type": "module",
+   "scripts": {
+     "serve": "bash scripts/serve.sh",
+     "typecheck": "tsc --noEmit",
+     "test": "bun test",
+     "test:file": "bun test",
+     "lint": "biome check .",
+     "lint:file": "biome check",
+-    "discover": "bun run src/cli/discover.ts"
++    "discover": "bun run src/cli/discover.ts",
++    "runs": "bun run src/cli/runs.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/mcp": "^1.0.55",
+     "@ai-sdk/openai-compatible": "^1",
+     "@modelcontextprotocol/sdk": "^1.29.0",
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/context-async-hooks": "^2.8.0",
+     "@opentelemetry/core": "^2.8.0",
+     "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
+     "@opentelemetry/resources": "^2.8.0",
+diff --git a/src/cli/runs.ts b/src/cli/runs.ts
+new file mode 100644
+index 0000000..785d105
+--- /dev/null
++++ b/src/cli/runs.ts
+@@ -0,0 +1,80 @@
++import { readdir } from 'node:fs/promises';
++import { join } from 'node:path';
++import type { RunSummary } from '../run/run-trace.ts';
++import { buildTree, readSpans, summarizeRun } from '../run/run-trace.ts';
++import { renderRunList, renderTimeline } from './render-trace.ts';
++
++function runsRootDir(): string {
++  return process.env.AGENT_RUNS_ROOT ?? 'runs';
++}
++
++export async function renderRun(runsRoot: string, id: string): Promise<string> {
++  const { spans, malformed } = await readSpans(join(runsRoot, id));
++  if (spans.length === 0) return `No spans for run '${id}'.`;
++  const body = renderTimeline(buildTree(spans));
++  return malformed > 0
++    ? `${body}\n(${malformed} malformed span line(s) skipped)`
++    : body;
++}
++
++export async function listRuns(runsRoot: string): Promise<string> {
++  let ids: string[];
++  try {
++    const entries = await readdir(runsRoot, { withFileTypes: true });
++    ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
++  } catch {
++    return 'No runs found.';
++  }
++  const summaries: RunSummary[] = [];
++  for (const id of ids) {
++    const s = await summarizeRun(runsRoot, id);
++    if (s) summaries.push(s);
++  }
++  if (summaries.length === 0) return 'No runs found.';
++  return renderRunList(summaries);
++}
++
++async function main(): Promise<void> {
++  const args = process.argv.slice(2);
++  const follow = args.includes('--follow');
++  const id = args.find((a) => !a.startsWith('--'));
++  const root = runsRootDir();
++  if (!id) {
++    console.log(await listRuns(root));
++    return;
++  }
++  if (follow) {
++    let last = '';
++    const tick = async () => {
++      const out = await renderRun(root, id);
++      if (out !== last) {
++        console.clear();
++        console.log(out);
++        last = out;
++      }
++    };
++    await tick();
++    const timer = setInterval(() => {
++      void tick();
++    }, 500);
++    const stopper = setInterval(async () => {
++      const { spans } = await readSpans(join(root, id));
++      if (spans.some((s) => s.name === 'agent.run')) {
++        clearInterval(timer);
++        clearInterval(stopper);
++        await tick();
++      }
++    }, 500);
++    // Reference stopper to satisfy linter (used via clearInterval above)
++    void stopper;
++    return;
++  }
++  console.log(await renderRun(root, id));
++}
++
++if (import.meta.main) {
++  main().catch((err) => {
++    console.error(err);
++    process.exit(1);
++  });
++}
+diff --git a/tests/cli/runs.test.ts b/tests/cli/runs.test.ts
+new file mode 100644
+index 0000000..f4f5f26
+--- /dev/null
++++ b/tests/cli/runs.test.ts
+@@ -0,0 +1,64 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { listRuns, renderRun } from '../../src/cli/runs.ts';
++import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
++
++function span(
++  p: Partial<SpanRecord> & { name: string; spanId: string },
++): SpanRecord {
++  return {
++    kind: 0,
++    traceId: 't',
++    parentSpanId: null,
++    startUnixNano: 0,
++    endUnixNano: 1_000_000,
++    durationMs: 3,
++    status: { code: 0 },
++    attributes: {},
++    events: [],
++    ...p,
++  };
++}
++
++let root: string;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), 'runs-'));
++});
++afterEach(async () => {
++  await rm(root, { recursive: true, force: true });
++});
++
++async function writeRun(id: string, spans: SpanRecord[]): Promise<void> {
++  const dir = join(root, id);
++  await mkdir(dir, { recursive: true });
++  await writeFile(
++    join(dir, 'spans.jsonl'),
++    `${spans.map((s) => JSON.stringify(s)).join('\n')}\n`,
++  );
++}
++
++test('renderRun shows the timeline for a run', async () => {
++  await writeRun('run-1', [
++    span({
++      name: 'agent.run',
++      spanId: 'a',
++      attributes: { 'agent.outcome': 'answer' },
++    }),
++  ]);
++  const out = await renderRun(root, 'run-1');
++  expect(out).toContain('agent.run');
++  expect(out).toContain('answer');
++});
++
++test('renderRun reports a clear message when the run is missing', async () => {
++  const out = await renderRun(root, 'nope');
++  expect(out.toLowerCase()).toContain('no spans');
++});
++
++test('listRuns lists runs found under the root', async () => {
++  await writeRun('run-1', [span({ name: 'agent.run', spanId: 'a' })]);
++  const out = await listRuns(root);
++  expect(out).toContain('run-1');
++});

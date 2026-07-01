@@ -1,0 +1,101 @@
+# Review package: 4f70e94..0a732f4
+
+## Commits
+0a732f4 feat(discovery): host-capability detector + atomic catalog cache
+
+## Files changed
+ src/discovery/catalog-cache.ts        | 34 ++++++++++++++++++++++++++++++++++
+ src/discovery/host.ts                 | 10 ++++++++++
+ tests/discovery/catalog-cache.test.ts | 27 +++++++++++++++++++++++++++
+ 3 files changed, 71 insertions(+)
+
+## Diff
+diff --git a/src/discovery/catalog-cache.ts b/src/discovery/catalog-cache.ts
+new file mode 100644
+index 0000000..55fa297
+--- /dev/null
++++ b/src/discovery/catalog-cache.ts
+@@ -0,0 +1,34 @@
++import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
++import { join } from 'node:path';
++import type { Candidate } from './catalog-source.ts';
++
++/** Per-machine, git-ignored cache co-located with the model store. */
++export function catalogPath(): string {
++  return join(process.cwd(), 'model-images', 'catalog.json');
++}
++
++export function readCatalog(path: string = catalogPath()): Candidate[] | undefined {
++  try {
++    if (!existsSync(path)) return undefined;
++    const data = JSON.parse(readFileSync(path, 'utf8')) as { candidates?: Candidate[] };
++    return data.candidates;
++  } catch {
++    return undefined; // corrupt cache → treat as absent
++  }
++}
++
++/** Atomic write (temp + rename) so a failure never corrupts an existing catalog. */
++export function writeCatalog(candidates: Candidate[], path: string = catalogPath()): void {
++  const tmp = `${path}.tmp`;
++  writeFileSync(tmp, JSON.stringify({ writtenAt: new Date().toISOString(), candidates }, null, 2));
++  renameSync(tmp, path);
++}
++
++export function isStale(ttlMs: number, path: string = catalogPath()): boolean {
++  try {
++    if (!existsSync(path)) return true;
++    return Date.now() - statSync(path).mtimeMs > ttlMs;
++  } catch {
++    return true;
++  }
++}
+diff --git a/src/discovery/host.ts b/src/discovery/host.ts
+new file mode 100644
+index 0000000..9264245
+--- /dev/null
++++ b/src/discovery/host.ts
+@@ -0,0 +1,10 @@
++import { totalmem } from 'node:os';
++import type { HostCapabilities } from './catalog-source.ts';
++import { liveBudgetBytes } from '../resource/hardware.ts';
++import { availableRuntimes } from '../runtime/registry.ts';
++
++/** Detect what this machine can run right now: RAM, live budget, reachable runtimes. */
++export async function detectHost(): Promise<HostCapabilities> {
++  const runtimes = (await availableRuntimes()).map((r) => r.kind);
++  return { totalRamBytes: totalmem(), liveBudgetBytes: await liveBudgetBytes(), runtimes };
++}
+diff --git a/tests/discovery/catalog-cache.test.ts b/tests/discovery/catalog-cache.test.ts
+new file mode 100644
+index 0000000..3ecf246
+--- /dev/null
++++ b/tests/discovery/catalog-cache.test.ts
+@@ -0,0 +1,27 @@
++import { afterEach, expect, test } from 'bun:test';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { isStale, readCatalog, writeCatalog } from '../../src/discovery/catalog-cache.ts';
++import { ProviderKind } from '../../src/core/types.ts';
++
++let dir: string;
++afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
++
++test('write then read round-trips candidates', () => {
++  dir = mkdtempSync(join(tmpdir(), 'cat-'));
++  const p = join(dir, 'catalog.json');
++  const cands = [{
++    provider: ProviderKind.Ollama, model: 'hf.co/x:Q4_K_M', params: {}, role: 'r',
++    footprint: { approxParamsBillions: 7, bytesPerWeight: 0.56 },
++    repo: 'x', quant: 'Q4_K_M', fileSizeBytes: 5e9, downloads: 1, installed: false,
++  }];
++  writeCatalog(cands, p);
++  expect(readCatalog(p)?.[0]?.model).toBe('hf.co/x:Q4_K_M');
++});
++test('missing file → undefined and stale', () => {
++  dir = mkdtempSync(join(tmpdir(), 'cat-'));
++  const p = join(dir, 'none.json');
++  expect(readCatalog(p)).toBeUndefined();
++  expect(isStale(1000, p)).toBe(true);
++});

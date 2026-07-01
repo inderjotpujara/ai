@@ -1,0 +1,85 @@
+# Review package: ff56188..b76bfd8
+
+## Commits
+b76bfd8 feat(core): add report_capability_gap tool + gap detection
+
+## Files changed
+ src/core/capability-gap.ts        | 36 ++++++++++++++++++++++++++++++++++++
+ tests/core/capability-gap.test.ts | 26 ++++++++++++++++++++++++++
+ 2 files changed, 62 insertions(+)
+
+## Diff
+diff --git a/src/core/capability-gap.ts b/src/core/capability-gap.ts
+new file mode 100644
+index 0000000..f44c75b
+--- /dev/null
++++ b/src/core/capability-gap.ts
+@@ -0,0 +1,36 @@
++import { tool, type generateText } from 'ai';
++import { z } from 'zod';
++
++/** The tool the orchestrator calls when no registered agent can handle a task. */
++export const CAPABILITY_GAP_TOOL = 'report_capability_gap';
++
++export type CapabilityGap = { missingCapability: string };
++
++type Steps = Awaited<ReturnType<typeof generateText>>['steps'];
++
++/**
++ * Tool the orchestrator calls when nothing fits. The FUTURE agent-builder hooks
++ * in here. Detection happens from the run's steps (the call), not this result.
++ */
++export const capabilityGapTool = tool({
++  description:
++    'Call this ONLY when no available agent can handle the task. Describe the missing capability.',
++  inputSchema: z.object({
++    missingCapability: z
++      .string()
++      .describe('The capability that is missing, in plain words'),
++  }),
++  execute: async () => ({ reported: true }),
++});
++
++/** Find a reported capability gap in a run's steps, if any. */
++export function findCapabilityGap(steps: Steps): CapabilityGap | undefined {
++  for (const step of steps) {
++    for (const call of step.toolCalls) {
++      if (call.toolName === CAPABILITY_GAP_TOOL) {
++        return call.input as CapabilityGap;
++      }
++    }
++  }
++  return undefined;
++}
+diff --git a/tests/core/capability-gap.test.ts b/tests/core/capability-gap.test.ts
+new file mode 100644
+index 0000000..cb16350
+--- /dev/null
++++ b/tests/core/capability-gap.test.ts
+@@ -0,0 +1,26 @@
++import { expect, test } from 'bun:test';
++import {
++  CAPABILITY_GAP_TOOL,
++  capabilityGapTool,
++  findCapabilityGap,
++} from '../../src/core/capability-gap.ts';
++
++test('tool name and schema are exported', () => {
++  expect(CAPABILITY_GAP_TOOL).toBe('report_capability_gap');
++  expect(capabilityGapTool).toBeDefined();
++});
++
++test('findCapabilityGap extracts the missing capability from a matching tool call', () => {
++  const steps = [
++    { toolCalls: [{ toolName: 'delegate_to_file_qa', input: { task: 'x' } }] },
++    { toolCalls: [{ toolName: 'report_capability_gap', input: { missingCapability: 'book a flight' } }] },
++  ] as never;
++  expect(findCapabilityGap(steps)).toEqual({ missingCapability: 'book a flight' });
++});
++
++test('findCapabilityGap returns undefined when no gap was reported', () => {
++  const steps = [
++    { toolCalls: [{ toolName: 'delegate_to_file_qa', input: { task: 'x' } }] },
++  ] as never;
++  expect(findCapabilityGap(steps)).toBeUndefined();
++});
