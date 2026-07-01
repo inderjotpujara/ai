@@ -273,6 +273,12 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 
 - **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready.
 
+- **Definition + validation** (`src/workflow/define.ts`): `defineWorkflow(def)` validates a `WorkflowDef` at construction time — unique step ids, every `dependsOn`/branch target resolves to a real step, and the dependency graph is acyclic (Kahn's algorithm) — throwing `WorkflowError` on any violation, so a malformed workflow fails fast at import time rather than mid-run.
+
+- **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
+
+- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, and prints the last step's output (or the failure) to stdout/stderr — closing the fetch then file server in `finally`, mirroring `chat.ts`'s mount/close order.
+
 ---
 
 ## 10. On-disk stores
@@ -289,7 +295,7 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
 - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
 - **MCP** — real stdio round-trip (subprocess server).
-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
 
 ---
 
