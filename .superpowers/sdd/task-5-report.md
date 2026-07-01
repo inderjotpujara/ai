@@ -1,95 +1,76 @@
-# Task 5 Report: Live-capped semantic chunker
+# Task 5 Report: Judge (MiniCheck check + faithfulness aggregation)
 
 ## Status
-✅ COMPLETE
+✅ **COMPLETE** — Implementation passing all tests, typecheck, and lint.
 
-## Implementation Summary
-Created `src/memory/chunk.ts` with a dual-mode text chunking function:
+## Implementation
+Created two core exports in `src/verification/judge.ts`:
 
-1. **Fixed-size fallback** (no embed fn): Deterministic chunking with capTokens * 4 (chars ≈ tokens) cap
-2. **Semantic split** (embed fn supplied): Embedding-driven splitting with:
-   - Sentence boundary detection via regex: `/(?<=[.!?])\s+/`
-   - Cosine similarity calculation between adjacent sentence vectors
-   - Split threshold (default 0.5) to break at semantic boundaries
-   - Hard-cap oversize chunks using fixed splitter fallback
-   - Proper ordinal sequencing after all splits
+1. **`checkClaim(claim, evidence, judgeModel, deps): Promise<boolean>`**
+   - MiniCheck-style evaluator: formats a "Document / Claim / Is it supported?" prompt
+   - Returns true if evidence is non-empty AND the LLM response starts with "yes" (case-insensitive)
+   - Returns false if evidence is empty or response doesn't start with "yes"
 
-## TDD Execution
+2. **`verifyFaithfulness(claims, evidenceById, judgeModel, fallback, threshold, deps): Promise<Verdict>`**
+   - Iterates over claims; for each:
+     - No citedIds → mark unsupported with reason "no citation"
+     - Has citedIds → gather evidence from the Map, call checkClaim
+     - Collect result in ClaimVerdict with appropriate reason (undefined if supported, else "unsupported by cited evidence" or "cited chunk missing")
+   - Aggregates: `faithfulness = supportedCount / totalClaims`
+   - Sets `supported = faithfulness >= threshold`
+   - Returns Verdict with claims, unsupportedClaims list, and usedFallback flag
 
-### RED (Tests Fail)
-- Test file written at `tests/memory/chunk.test.ts`
-- Module import fails: `Cannot find module '../../src/memory/chunk.ts'`
+## Test Coverage
+Created `tests/verification/judge.test.ts` with 2 tests:
 
-### GREEN (Tests Pass)
-- Implementation written at `src/memory/chunk.ts`
-- All 3 tests pass: `3 pass, 0 fail, 13 expect() calls`
-- Test coverage:
-  1. Fixed-size fallback respects capTokens cap
-  2. Text reassembles to original with no overlap loss
-  3. Semantic split with embed function respects cap + calls embed
+1. **checkClaim mapping**: Verifies "Yes"/No string → boolean conversion
+   - "sky is blue" with evidence "the sky is blue" → true (contains "blue")
+   - "grass is red" with evidence "grass is green" → false (doesn't contain "blue")
 
-### Verification
-- ✅ `bun test tests/memory/chunk.test.ts`: 3 pass
-- ✅ `bun run typecheck`: No errors
-- ✅ `bun run lint:file`: No issues (formatted per Biome style)
+2. **verifyFaithfulness aggregation & thresholds**:
+   - 3 claims: sky is blue (cited, passes check), grass is red (cited, fails check), uncited fact (no citation)
+   - Threshold 0.9: 1/3 ≈ 0.333 < 0.9 → `supported = false`
+   - Faithfulness = 1/3, unsupportedClaims = ["grass is red", "uncited fact"]
+   - Uncited claim always marked unsupported regardless of threshold
+
+Mock `VerifyDeps` checks for "blue" in the prompt to simulate judge model behavior.
+
+## TDD Flow
+1. ✅ **RED**: Test file created, import fails (judge.ts doesn't exist)
+2. ✅ **GREEN**: Implementation written, 2/2 tests pass
+3. ✅ **LINT**: Applied Biome formatter (long parameter lists, properly organized imports)
+4. ✅ **TYPECHECK**: No errors
+5. ✅ **COMMIT**: Committed with message "feat(verification): MiniCheck claim check + faithfulness aggregation"
+
+## Code Quality
+- **No `any` types**: Properly typed with `VerifyDeps` interface in tests
+- **Formatted**: Biome checks pass (long function signatures split across lines, proper spacing)
+- **Tested**: 2 comprehensive tests covering both functions + edge case (uncited claims)
+- **Self-contained**: Imports only Claim/ClaimVerdict/Verdict/VerifyDeps from types.ts, no external dependencies
 
 ## Files
-- **Created:** `src/memory/chunk.ts` (80 lines)
-- **Created:** `tests/memory/chunk.test.ts` (25 lines)
-- **Committed:** 7367f98
+- `/Users/inderjotsingh/ai/src/verification/judge.ts` (57 lines)
+- `/Users/inderjotsingh/ai/tests/verification/judge.test.ts` (47 lines)
 
-## Self-Review
+## Verification
+```bash
+bun test tests/verification/judge.test.ts
+# 2 pass, 0 fail, 8 expect() calls
 
-### Correctness
-- Properly implements both fixed-size and semantic paths
-- Cosine similarity with undefined-checks prevents type errors
-- Early return for empty sentences prevents vector array bounds issues
-- Ordinal sequencing is correct (0-indexed, sequential after hard-cap splits)
+bun run typecheck
+# (no errors)
 
-### Code Quality
-- Clean separation of concerns: `fixed()`, `cosine()`, `chunk()`
-- All functions have clear single responsibilities
-- Defensive checks prevent undefined dereferences
-- Follows project style (bun:test, no non-null assertions)
+bun run lint:file -- src/verification/judge.ts tests/verification/judge.test.ts
+# (no errors)
 
-### Edge Cases Handled
-- Empty/whitespace-only input → returns `[]`
-- Single sentence (no boundaries) → falls back to fixed-size split
-- Oversize semantic chunks → hard-capped with fixed splitter
-- Vector array bounds → safe access with undefined checks
+bun run test
+# 267 pass (including new 2), 18 skip, 0 fail
+```
+
+## Commit
+```
+ad04cec feat(verification): MiniCheck claim check + faithfulness aggregation
+```
 
 ## Concerns
-None. All tests pass, typecheck clean, linting passes. Implementation matches brief exactly (with safety improvements for TypeScript strict mode).
-
----
-
-## Fix Section: Review Findings Applied
-
-### Changes Made
-
-1. **Fail loudly on embed/sentence mismatch** (`src/memory/chunk.ts`):
-   - Added length guard after `const vecs = await opts.embed(sentences)`:
-     ```ts
-     if (vecs.length !== sentences.length) {
-       throw new Error('chunk: embed returned ' + vecs.length + ' vectors for ' + sentences.length + ' sentences');
-     }
-     ```
-   - Removed per-iteration silent `continue` guard (`if (!prevVec || !currVec || !sentence) continue;`)
-   - Added non-null assertions (`!`) on vector/sentence access since length is now verified above
-
-2. **Strengthen semantic-split test** (`tests/memory/chunk.test.ts`):
-   - Added `let embedCalled = false;` flag set to `true` inside mock embed
-   - Added assertion `expect(embedCalled).toBe(true)` after calling `chunk()`
-   - Kept existing cap assertion
-
-### Test Execution
-
-**Command:** `bun test tests/memory/chunk.test.ts`
-
-**Result:** ✅ 3 pass, 0 fail, 14 expect() calls (includes new embedCalled assertion)
-
-**Typecheck:** `bun run typecheck` — no errors
-
-### Commit
-
-SHA: `71dc3aa` | Subject: `fix(memory): fail loudly on chunk embed/sentence mismatch + assert embed called`
+None. Implementation follows the brief exactly, all tests pass, code is clean and properly typed.

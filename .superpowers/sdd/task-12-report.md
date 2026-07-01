@@ -1,167 +1,119 @@
-# Task 12 report: wire memory into crews + workflows
+# Task 12 report (Slice 13 — Grounded Verification): live MiniCheck test
+
+NOTE: this file previously held a stale report from an unrelated Slice 12 task
+("wire memory into crews + workflows") that reused this filename/number in a
+different slice's numbering. Replaced below with the correct Task 12 report
+for Slice 13.
 
 ## Summary
 
-Wired the memory layer (Tasks 4/9/10) into the workflow and crew engines as two
-strictly optional, additive integrations. When `memory` is absent from deps,
-behavior is byte-for-byte identical to before this change — verified by running
-the full existing crew/workflow suites unchanged and green.
+Added `tests/integration/verification.live.test.ts` — a live test that
+exercises the real MiniCheck judge model (`bespoke-minicheck`, via
+`verifyModel()`) end-to-end through the real `verify()` primitive, and skips
+cleanly when Ollama or the judge model is unavailable.
 
-## TDD: RED -> GREEN
+## Skip guard
 
-1. Wrote `tests/memory/wiring.test.ts` (5 cases, expanded beyond the brief's 2):
-   persist-true writes namespaced (asserts `namespace`, `space`, `kind`,
-   `source`, and text payload), persist-false skips, no-store skips,
-   empty/whitespace output skips, non-string output gets `JSON.stringify`'d.
-2. Ran `bun test tests/memory/wiring.test.ts` -> **FAIL**:
-   `SyntaxError: Export named 'autoPersistStepOutput' not found in module
-   '.../src/workflow/run-step.ts'.` (RED confirmed.)
-3. Implemented `autoPersistStepOutput` in `src/workflow/run-step.ts` per the
-   brief's exact shape (space=`default`, kind=`MemoryKind.RunMemory`,
-   source=`${workflowId}:${stepId}`).
-4. Reran -> **5 pass, 0 fail** (GREEN).
+Mirrors `tests/integration/memory.live.test.ts`'s `ollamaReady()` +
+`describe.skipIf` pattern, extended with a pull-or-skip step for the judge
+model:
 
-## Implementation
+- `judgeReady()` first calls the existing `ollamaReady(EMBED_MODEL)` helper
+  (checks `/api/version` reachable + `qwen3-embedding:0.6b` installed —
+  needed because the test also ingests memory for citations).
+- If that's up, it checks `isModelInstalled('bespoke-minicheck')` (from
+  `src/resource/ollama-control.ts`); if missing, it attempts
+  `control.pull('bespoke-minicheck')` once and re-checks installation.
+- The whole thing is wrapped in try/catch — any failure (Ollama down, pull
+  fails, network error) resolves `false`, so `describe.skipIf(!ready)` skips
+  the suite. No hang, no throw.
+- `ready` is computed once at module load (top-level `await`), same as the
+  memory live test.
 
-**`src/workflow/run-step.ts`**
-- Added `autoPersistStepOutput(store, info)`: no-op if `!store || !persist`;
-  stringifies non-string output; skips empty/whitespace text; calls
-  `store.remember(text, { space: 'default', namespace: workflowId, kind:
-  MemoryKind.RunMemory, source: \`${workflowId}:${stepId}\`, at })`.
-- Extended `WorkflowDeps` with optional `memory?: MemoryStore` and
-  `persistMemory?: boolean` (engine-wide default, true when omitted).
+## Real-deps wiring
 
-**`src/workflow/types.ts`**
-- Added `persistMemory?: boolean` to `StepBase<O>` (inherited by all step
-  kinds) so an individual step can opt out even when the engine-level default
-  is on.
+Built the same way the CLI does (`src/cli/verify-runtime.ts` /
+`src/cli/memory.ts`), inlined into the test (not via `makeRealVerifyDeps`
+directly) to keep the test self-contained/explicit, matching the style of
+`memory.live.test.ts`:
 
-**`src/workflow/engine.ts`**
-- After a step's raw output passes `output.safeParse` (i.e. "completes +
-  validates"), and only when `deps.memory` is set, calls
-  `autoPersistStepOutput(deps.memory, { workflowId: def.id, stepId: step.id,
-  output: parsed.data, persist: step.persistMemory ?? deps.persistMemory ??
-  true, at: Date.now() })`. Placed before the `{ step, value }` result is
-  returned, inside the existing try/catch so a memory-write failure surfaces
-  through the step's normal `onError` policy rather than crashing the batch
-  silently.
+- `createModelManager()` for the real Model Manager.
+- `runtimeFor(ProviderKind.Ollama).control` for the real Ollama control
+  (`isInstalled`/`pull`/embed, etc.).
+- `makeEmbedder(...)` + `createMemoryStore(...)` — identical construction to
+  `memory.live.test.ts`, writing to a scratch dir `/tmp/verify-live` (cleaned
+  up before and after).
+- `makeVerifyDeps({ manager, control, generalModel: qwenRouter.model, store,
+  space: 'default' })` from `src/verification/deps.ts` (Task 10) — the exact
+  factory the CLI uses, with `qwenRouter.model` (`qwen3.5:4b`) as the real
+  general/decompose/grade model, matching `makeRealVerifyDeps` in
+  `verify-runtime.ts`.
 
-**`src/crew/types.ts`**
-- Added `Task.persistMemory?: boolean` (per-task override) and
-  `CrewDef.persistMemory?: boolean` (crew-wide default for sequential crews).
+Ingested two evidence chunks via `store.remember(text, { space, source, at })`
+with explicit `source` ids (`raft-fact`, `sky-fact`) so citation ids are
+deterministic (`${source}#0`) rather than depending on recall ranking. Added a
+sanity check that `store.getByIds` resolves the raft chunk's text before using
+it in a citation, so a failing assertion downstream points at the judge model
+rather than an id-wiring bug.
 
-**`src/crew/compile.ts`**
-- `compileToWorkflow` now threads `task.persistMemory` onto the compiled
-  workflow step, so a task's own opt-out reaches the engine.
+## Assertions
 
-**`src/crew/engine.ts`**
-- `CrewDeps` gained `memory?: MemoryStore` and `persistMemory?: boolean`.
-- `crewAgentMap(crew, tools, memory?)` — when `memory` is present, builds one
-  shared `recall` tool via `makeRecallTool(memory, { namespace: crew.id })`
-  and merges it into every member's tool set (`{ ...(member.tools ?? tools),
-  ...recallTools }`), so each member can call `recall` mid-run in addition to
-  its own tools.
-- `runCrew`'s sequential branch passes `deps.memory` into `crewAgentMap` and
-  into `runWorkflow`'s deps (`memory: deps.memory, persistMemory:
-  deps.persistMemory ?? def.persistMemory`), so auto-write fires downstream.
-  Since `compileToWorkflow` sets the workflow id to the crew id
-  (`defineWorkflow({ id: crew.id, ... })`), the auto-write namespace and the
-  recall namespace are both `crew.id` — consistent, as called out in the brief.
-- Hierarchical crews (the orchestrator path) were intentionally left
-  untouched: they're a structurally different delegation mechanism not in the
-  brief's scope, and touching them risked breaking `orchestrator`'s own
-  contract for no requested benefit. Recall/auto-write is currently only wired
-  for the sequential (workflow-backed) path.
+1. **Grounded**: answer `"Raft elects a leader using randomized election
+   timeouts. [mem:raft-fact#0]"` against the Raft evidence chunk ("The Raft
+   consensus algorithm elects a leader via randomized election timeouts.") →
+   `verify(...)` expected `supported: true`.
+2. **Planted hallucination**: answer `"The sky appears blue because it is
+   reflecting the ocean. [mem:sky-fact#0]"` cites a chunk whose real text says
+   "The sky appears blue due to Rayleigh scattering." — contradicts it →
+   expected `supported: false`, and `unsupportedClaims` joined+lowercased
+   expected to match `/ocean|reflecting/` (the hallucinated claim text
+   itself).
 
-## Live test
+Both calls go through the real `verify()` (`src/verification/verify.ts`),
+exercising `decomposeClaims` → `getByIds` → `ensureJudge(verifyModel())` →
+`verifyFaithfulness`/`checkClaim` against the real MiniCheck model end-to-end.
+180s timeout on the `it(...)`, matching the memory live test.
 
-Added `tests/integration/memory.live.test.ts`:
-- Mirrors `tests/integration/crew.live.test.ts`'s skip guard exactly:
-  `const ready = await ollamaReady('qwen3-embedding:0.6b'); describe.skipIf(!ready)(...)`.
-- Builds the real store the same way `src/cli/memory.ts`'s `makeRealStore`
-  does: `createModelManager()` + `runtimeFor(ProviderKind.Ollama).control` +
-  `makeEmbedder({ ensureReady, control, model })` + `probeEmbedder` +
-  `createMemoryStore`.
-- First asserts `probeEmbedder('qwen3-embedding:0.6b')` returns real numeric
-  `dim > 0` and `maxInput > 0` — closes the Task 4 minor about the silent
-  `{dim:768, maxInput:2048}` fallback going unverified.
-- Remembers "The Raft consensus algorithm elects a leader via randomized
-  election timeouts." then recalls "how does raft choose a leader"; asserts at
-  least one hit comes back and the joined text matches `/leader|raft/i`.
-- 180s timeout; cleans up `/tmp/mem-live` before and after; calls
-  `store.close()` and `manager.unloadAll()` in a `finally`.
-- **Result in this environment: SKIPPED** (Ollama unreachable at
-  `localhost:11434` — confirmed via `ollamaReady` returning false). This is
-  expected per the brief ("It's fine if it SKIPS in this environment"); the
-  unit wiring test is the real gate and it passed.
+## Run results in this environment
 
-## Verification run
+- Ollama is **not reachable** here (`curl localhost:11434/api/version`
+  returned nothing — connection refused). `judgeReady()` correctly resolved
+  `false`.
+- `bun test tests/integration/verification.live.test.ts` → `0 pass, 1 skip,
+  0 fail`, completed in 163ms — clean skip, no hang, no error.
+- `bun run typecheck` → clean.
+- `bun run lint:file -- "tests/integration/verification.live.test.ts"` →
+  clean (biome, no fixes needed).
+- Full `bun run check` (docs:check + typecheck + lint + full test suite) →
+  **green**: 293 pass, 19 skip, 0 fail, 631 expect() calls across 312 tests /
+  103 files. The new live test is one of the 19 skips.
 
-- `bun test tests/memory/wiring.test.ts` -> 5 pass, 0 fail.
-- `bun run typecheck` -> clean (`tsc --noEmit`, no output/errors).
-- `bun test tests/crew tests/workflow tests/memory` -> 64 pass, 0 fail
-  (confirms existing `crew/*.test.ts`, `workflow/*.test.ts` suites pass
-  unchanged alongside the new memory wiring tests).
-- `bun test` (full suite) -> **253 pass, 17 skip, 0 fail** across 270 tests /
-  90 files (skips are all live/Ollama-gated tests, consistent with pre-task
-  baseline).
-- `bun run lint:file` on all 8 touched/added files -> clean after
-  `biome check --write` fixed two cosmetic issues (import order in
-  `wiring.test.ts`, one line-wrap in `memory.live.test.ts`).
-- `bun run lint` (whole repo) -> pre-existing 6 errors/3 warnings/1 info
-  unrelated to this task (in `tests/memory/recall-tool.test.ts` and
-  `tests/memory/define.test.ts`, from earlier Task 9/10 work). Confirmed via
-  `git stash` + rerun that these exist independent of this task's diff — not
-  introduced here, and out of this task's scope to fix.
-
-## Self-review
-
-- Additive-only: `WorkflowDeps.memory`, `WorkflowDeps.persistMemory`,
-  `StepBase.persistMemory`, `CrewDeps.memory`, `CrewDeps.persistMemory`,
-  `CrewDef.persistMemory`, `Task.persistMemory` are all optional with safe
-  defaults (`persist` defaults to `true` only when a store is actually
-  supplied — when `memory` is absent nothing changes at all, since the whole
-  block in `engine.ts` is gated on `if (deps.memory)`).
-- Default-true when memory IS present matches the brief precisely
-  ("Respect a `persistMemory` flag (default true) on the crew/task").
-- Namespace consistency (crew id == workflow id) verified by reading
-  `compile.ts`'s `defineWorkflow({ id: crew.id, ... })` rather than assuming it.
-- Recall tool name `recall` could collide with a member's own custom tool
-  named `recall`; current merge order (`...memberTools, ...recallTools`) has
-  the memory-bound recall tool win that collision. This seems like the
-  right default (the framework's memory recall should be authoritative) but
-  is worth flagging — no existing crew defines a `recall` tool today, so no
-  behavior changed in practice.
-- Memory write failures inside `autoPersistStepOutput` propagate through the
-  step's existing `try/catch` in the engine and are subject to the step's
-  `onError` policy (fail/continue/fallback) — no new silent-failure path was
-  introduced; a broken memory store during a run surfaces exactly like any
-  other step-level error would.
-- Did not touch `docs/architecture.md` — the memory section is explicitly
-  marked "Stub — filled in as the slice lands (Task 14)" and this task's brief
-  does not list docs as a deliverable; leaving that to Task 14 as scoped.
-
-## Concerns
-
-- None blocking. The one soft judgment call is leaving the hierarchical crew
-  path (orchestrator-based) without recall/auto-write wiring — flagged above
-  for visibility in case Slice 12's later tasks or the final slice review
-  expect memory parity across both crew processes.
-- Live test is unverified end-to-end in this environment (Ollama down) — its
-  correctness rests on careful reading of `makeRealStore`/`probeEmbedder`
-  signatures rather than an actual run. Recommend running it once on a machine
-  with Ollama + `qwen3-embedding:0.6b` pulled before considering Slice 12 done.
+The test did **not** run against the real model in this environment (no
+Ollama available) — only the skip path was exercised. It has never been run
+"hot" against a live `bespoke-minicheck`, so that should be validated on a
+machine with Ollama + the model available before fully trusting the
+assertions' wording/thresholds match real MiniCheck output. The logic mirrors
+the offline gate (Task 11) and unit tests (`tests/verification/verify.test.ts`),
+which do pass, so confidence is reasonably high, but the live numeric
+threshold behavior (`verifyThreshold()` default 0.9) with real model variance
+is unverified.
 
 ## Files touched
 
-- `/Users/inderjotsingh/ai/src/workflow/run-step.ts`
-- `/Users/inderjotsingh/ai/src/workflow/engine.ts`
-- `/Users/inderjotsingh/ai/src/workflow/types.ts`
-- `/Users/inderjotsingh/ai/src/crew/engine.ts`
-- `/Users/inderjotsingh/ai/src/crew/types.ts`
-- `/Users/inderjotsingh/ai/src/crew/compile.ts`
-- `/Users/inderjotsingh/ai/tests/memory/wiring.test.ts` (new)
-- `/Users/inderjotsingh/ai/tests/integration/memory.live.test.ts` (new)
+- `/Users/inderjotsingh/ai/tests/integration/verification.live.test.ts` (new)
 
-Commit: `e0748ad` — "feat(memory): wire recall + namespaced auto-write into
-crews and workflows"
+## Concerns
+
+- Cannot confirm the "RAN" path (real MiniCheck call) in this sandbox — no
+  Ollama daemon reachable. Recommend a follow-up manual run on a dev machine
+  with Ollama + `bespoke-minicheck` pulled to confirm the assertions hold
+  against real model output (especially the hallucination case, since
+  MiniCheck's yes/no framing could be sensitive to phrasing).
+- The pre-commit `docs:check` hook ran and passed automatically as part of the
+  commit (no `docs/architecture.md` change needed for a test-only addition).
+- Left other pre-existing modified files (`.remember/`, `.superpowers/sdd/*.md`
+  from sibling task agents) untouched/unstaged — commit only includes the new
+  test file, scoped to Task 12.
+
+Commit: `f0cc57b` — "test(verification): live MiniCheck faithfulness
+roundtrip (skips w/o model)"

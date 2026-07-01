@@ -1,94 +1,95 @@
-# Task 4 report: Embeddings port (`RuntimeControl.embed` + probe + manager-backed wrapper)
+# Task 4 Report: Claim Decomposition + Citation Parsing (Slice 13)
 
-## Status: DONE
+## Summary
+**Status:** ✅ COMPLETE
 
-Commit: `dde9348` — "feat(memory): embeddings via runtime port (weights-only, manager-backed)" on branch `slice-12-memory-rag`.
+Implemented `src/verification/claims.ts` with two core functions:
+1. `parseCitations(text: string): string[]` — extracts and dedupes `[mem:id]` citation references
+2. `decomposeClaims(answer: string, deps: VerifyDeps): Promise<Claim[]>` — decomposes answers into atomic claims via model generation, with robust JSON parsing and fallback
 
-## Implemented
+## TDD Flow
 
-1. **`src/runtime/runtime.ts`** — added `embed(model: string, texts: string[]): Promise<number[][]>` to `RuntimeControl`.
+### Step 1: Failing Test
+Created `tests/verification/claims.test.ts` with two test cases:
+- `parseCitations extracts + dedupes [mem:id]`
+- `decomposeClaims parses model JSON`
 
-2. **`src/runtime/ollama.ts`** — added `ollamaEmbed(model, texts)`, built on AI SDK v6 `embedMany` + `ollama-ai-provider-v2`'s `createOllama({ baseURL })`. Reused the existing `/api` baseURL convention (`http://localhost:11434/api`, matching `src/providers/ollama.ts`). Wired as `control.embed`.
+Test failed as expected with "Cannot find module" error.
 
-3. **`src/runtime/mlx-server.ts`** — `control.embed` throws `MemoryError('embeddings are not supported on the MLX runtime yet')`.
+### Step 2: Implementation
+Implemented `src/verification/claims.ts` per the brief specification:
+- **`parseCitations`:** Uses regex `/\[mem:([^\]]+)\]/g` to find all citations, dedupes by checking `!out.includes(id)`
+- **`extractJson`:** Strips markdown fence ` ```json` if present, extracts JSON array from raw model output
+- **`decomposeClaims`:** 
+  - Calls `deps.generate(deps.generalModel, prompt)` with carefully crafted prompt
+  - Parses JSON array of `{text, citedIds}`
+  - Falls back to single whole-answer claim if JSON parsing fails
+  - Filters valid claims and normalizes `citedIds` to string arrays
 
-4. **`src/memory/embed.ts`** (new) — `embedderDecl(model)`, `probeEmbedder(model, baseUrl?)`, `EmbedderDeps` type, `makeEmbedder(deps)`. No bogus self-import; `embedderDecl` defined locally as specified in the brief.
+### Step 3: Linting & Formatting
+Initial lint run revealed 4 errors, 4 warnings:
+- Fixed assignment-in-expression pattern by unrolling the while loop
+- Replaced non-null assertions (`!`) with optional chaining (`?.`) + fallback (`?? raw.trim()`)
+- Fixed `any` type by using `Record<string, unknown>` cast
+- Applied Biome formatter suggestions for line breaks and function signature formatting
 
-## Provider accessor verified
+### Step 4: Verification
 
-Inspected `node_modules/ollama-ai-provider-v2/dist/index.d.ts` (installed `3.6.0`) directly rather than trusting the brief's guess. The `OllamaProvider` interface exposes three embedding-related methods:
-- `embedding(modelId, settings?)` — current, non-deprecated
-- `textEmbedding(modelId, settings?)` — **@deprecated**, use `textEmbeddingModel` instead
-- `textEmbeddingModel(modelId, settings?)` — current, non-deprecated
-
-Used **`textEmbeddingModel`**, exactly as the brief's sketch specified — confirmed correct and not the deprecated alias.
-
-## `ModelDeclaration` fields filled (from `src/core/types.ts`)
-
-`ModelDeclaration` requires: `provider`, `model`, `params` (a `ModelParams` object — required, not optional), `role`, `footprint: { approxParamsBillions, bytesPerWeight, kvBytesPerToken? }`. Optional: `capabilities`, `contentPolicy`, `maxContext`.
-
-`embedderDecl(model)` returns:
-```ts
-{
-  provider: ProviderKind.Ollama,
-  model,
-  params: {},                 // no numCtx override — manager falls back to MIN_CTX
-  role: 'embedder',
-  footprint: {
-    approxParamsBillions: 0.6,
-    bytesPerWeight: 1,
-    kvBytesPerToken: 0,        // weights-only — no KV budget reserved
-  },
-}
+**Tests:** ✅ 2/2 pass (5 expect() calls)
 ```
-No `as ModelDeclaration` cast was needed — the object satisfies the type directly once all mandatory fields are present. Confirmed `model-manager.ts`'s `ensureReady` only reads `decl.params.numCtx` (optional-chained via `??`), `decl.model`, and `decl.footprint.*`, so an empty `params: {}` and `kvBytesPerToken: 0` are safe inputs.
+bun test tests/verification/claims.test.ts
+ 2 pass
+ 0 fail
+ 5 expect() calls
+Ran 2 tests across 1 file. [12.00ms]
+```
 
-## `probeEmbedder`
+**Typecheck:** ✅ Pass (no errors)
 
-Mirrors `getModelMaxContext`/`getModelKvArch` in `src/runtime/ollama-control.ts`: `POST /api/show` with `{ model }`, reads `model_info['general.architecture']` then `model_info['<arch>.embedding_length']` (dim) and `model_info['<arch>.context_length']` (maxInput), with fallback defaults (768 / 2048) if unreported. Not unit-tested per the brief (live-Ollama-gated; deferred to Task 12's live test).
+**Lint:** ✅ Pass (no errors/warnings)
 
-## TDD
+## Files Modified/Created
+- ✅ `src/verification/claims.ts` (35 lines)
+- ✅ `tests/verification/claims.test.ts` (29 lines)
 
-- **RED**: wrote `tests/memory/embed.test.ts` (using `bun:test`, matching this repo's actual test runner — the brief's sketch showed `vitest`, which is not used here; verified via `tests/memory/define.test.ts` and other existing memory tests) importing `embedderDecl` before the module existed. Ran `bun test tests/memory/embed.test.ts` → failed with `Cannot find module '../../src/memory/embed.ts'`.
-- **GREEN**: implemented all four files; `bun test tests/memory/embed.test.ts` → 2 pass, 6 expect() calls.
+## Commit
+```
+dee74c1 feat(verification): claim decomposition + [mem:id] citation parsing
+```
 
-Test asserts: `model` echoed, `provider === ProviderKind.Ollama`, `footprint.kvBytesPerToken === 0`, `footprint.approxParamsBillions > 0`, `role` truthy, `params` deep-equals `{}`.
+Passed pre-commit `docs-check` hook (living docs + subsystems documented).
 
-## Regression fix (required, not optional)
+## Implementation Details
 
-Adding `embed` to `RuntimeControl` is a breaking type change — every object typed as `RuntimeControl` needs the field. `bun run typecheck` caught 4 pre-existing test files building mock `RuntimeControl` fixtures without it:
-- `tests/resource/model-manager-kv.test.ts`
-- `tests/resource/model-manager.test.ts`
-- `tests/resource/select-degrade.test.ts`
-- `tests/resource/warm-reuse.test.ts`
+### `parseCitations` Logic
+- Regex pattern: `/\[mem:([^\]]+)\]/g` captures everything inside `[mem:...`]
+- Loop through all matches, extract group 1 and trim whitespace
+- Guard against duplicates with `!out.includes(id)` before pushing
+- Returns empty array if no citations found
 
-Added `embed: mock(async () => [])` to each fixture (alongside the existing `getModelKvArch` mock). These were included in the same commit since they're required for the codebase to compile — not scope creep, a direct consequence of the type change the task specifies.
+### `decomposeClaims` Logic
+- Constructs a detailed prompt asking the model to break answer into atomic claims with citation ids
+- `extractJson` helper handles both fenced and unfenced JSON output
+- Try-catch wraps JSON.parse; catches any parsing errors
+- Returns a **fallback claim** (the whole answer as one claim) if parsing fails — this keeps the primitive robust
+- Filters out claims with missing/non-string `text` field
+- Normalizes `citedIds` to string array (coerces via `.map(String)`, defaults to `[]`)
 
-## Verification run
+## Code Quality Notes
+- ✅ No `any` types (cast to `Record<string, unknown>` when needed)
+- ✅ No non-null assertions (replaced with optional chaining + nullish coalescing)
+- ✅ No console.log or debug code
+- ✅ Self-contained module (only imports types from `./types.ts`)
+- ✅ Test mocks `generate` properly for isolation
+- ✅ Formatter compliant (Biome checked)
+- ✅ All linting rules satisfied
 
-- `bun test tests/memory/embed.test.ts` → 2 pass
-- `bun run typecheck` → clean (`tsc --noEmit`, no errors)
-- `bun run lint:file` on all 9 touched files → clean after one `biome check --write` pass (import-order + one line-wrap auto-fix; no manual logic changes from lint)
-- **Full suite**: `bun test` → **229 pass, 16 skip, 0 fail** (245 tests across 81 files) — no regression vs. pre-task baseline (skips are pre-existing live-service-gated tests, unrelated to this change)
-- `bun run docs:check` → passes (`src/memory/` already documented in `docs/architecture.md`'s Slice 12 stub from an earlier task; no new subsystem directory introduced)
+## Design Rationale
 
-## Self-review / concerns
+1. **Regex over string.split():** Citation format `[mem:id]` is unambiguous; regex handles deduplication elegantly
+2. **Fallback to whole-answer claim:** Model may return unparseable JSON; rather than error, we degrade gracefully to treating the full answer as one claim with all its citations
+3. **Type guards in filter:** Guard ensures only objects with string `text` field pass through, preventing runtime errors
+4. **Prompt specificity:** Explicit instruction to cite ONLY `[mem:id]` tags in the answer keeps the model focused and outputs clean JSON
 
-- **Provider accessor**: confirmed by reading the installed package's `.d.ts` directly rather than trusting the brief — `textEmbeddingModel` is correct and current (not the deprecated `textEmbedding`).
-- **`ModelDeclaration.params: {}`**: leaves `numCtx` unset for the embedder decl, so `ensureReady` defaults to `MIN_CTX`. This seems right for a weights-only model — no deliberate context cap is needed since `kvBytesPerToken: 0` makes the KV term contribute zero bytes to the budget regardless of chosen context. Flagging for review in case a later task (e.g. Task 12, wiring live embed calls) wants an explicit `numCtx` for embedding batch-size reasons.
-- **`role: 'embedder'`**: chosen as a plain descriptive string (matches the free-text `role: string` field pattern used elsewhere, e.g. `role: 'test'` / `role: 't'` in existing test fixtures). No enum exists for this since `role` is documented as a "human description," not a hard-filtered field.
-- **Test runner mismatch in the brief**: the brief's Step 1 sketch imports `describe/expect/test` from `'vitest'`; this repo's actual convention (per `tests/memory/define.test.ts`, `budget.test.ts`, `spans.test.ts`, and `package.json` test scripts) is `bun:test`. Used `bun:test` — flagging in case the discrepancy is a signal about a planned test-runner migration, though nothing else in the repo suggests one.
-- **`probeEmbedder` is untested** in this task, per explicit brief instruction (live-Ollama-gated; Task 12 covers it live). No unit test added for it here.
-- **Did not touch** `docs/architecture.md`, `README.md`, or `docs/ROADMAP.md` — this is a mid-slice task commit, not the slice-landing commit; the standing "all four surfaces" rule applies at slice completion, and `src/memory/` is already present in architecture.md from an earlier task's stub. Flagging so the slice's final review knows to verify the embeddings capability gets folded into the architecture.md Slice 12 section language once the full RAG pipeline lands.
-
-## Files touched
-
-- `/Users/inderjotsingh/ai/src/runtime/runtime.ts`
-- `/Users/inderjotsingh/ai/src/runtime/ollama.ts`
-- `/Users/inderjotsingh/ai/src/runtime/mlx-server.ts`
-- `/Users/inderjotsingh/ai/src/memory/embed.ts` (new)
-- `/Users/inderjotsingh/ai/tests/memory/embed.test.ts` (new)
-- `/Users/inderjotsingh/ai/tests/resource/model-manager-kv.test.ts`
-- `/Users/inderjotsingh/ai/tests/resource/model-manager.test.ts`
-- `/Users/inderjotsingh/ai/tests/resource/select-degrade.test.ts`
-- `/Users/inderjotsingh/ai/tests/resource/warm-reuse.test.ts`
+## Concerns
+- None. Implementation is straightforward, well-tested, and follows the brief exactly.
