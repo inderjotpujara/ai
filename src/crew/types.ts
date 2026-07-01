@@ -30,6 +30,10 @@ export type Task<O = unknown> = {
   /** Per-task override of the crew's memory auto-write policy. Only takes
    *  effect when the crew is run with a `memory` store; default true. */
   persistMemory?: boolean;
+  /** Opt-in grounded verification: when true, the compiler inserts a
+   *  verify → branch(supported?) → bounded-CRAG corrective → abstain sub-graph
+   *  after this task's answer step. Additive; a task without it compiles as before. */
+  verify?: boolean;
 };
 
 export enum CrewProcess {
@@ -47,8 +51,21 @@ export type CrewDef = {
    *  a task's own `persistMemory` overrides it. Default true. */
   persistMemory?: boolean;
   managerModel?: ModelDeclaration; // hierarchical only; defaults to the router
+  /** Crew-wide grounded-verification default: when true, every task is verified
+   *  (equivalent to setting `verify: true` on each). A task's own `verify`
+   *  overrides this. Additive; default (undefined/false) = today's behavior. */
+  verify?: boolean;
 };
 
 export type CrewOutcome =
   | { kind: 'done'; output: unknown }
-  | { kind: 'failed'; failedTask?: string; message: string };
+  | { kind: 'failed'; failedTask?: string; message: string }
+  /** A verified task's answer stayed unsupported after the bounded corrective
+   *  retries — the crew abstains rather than emit a hallucination. */
+  | {
+      kind: 'unverified';
+      failedTaskId?: string;
+      unsupportedClaims: string[];
+      faithfulness: number;
+      draft: string;
+    };

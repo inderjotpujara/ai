@@ -5,11 +5,27 @@ import type { BeforeDelegate } from '../core/delegate.ts';
 import { createOrchestrator } from '../core/orchestrator.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
 import { ATTR, annotateStep } from '../telemetry/spans.ts';
+import { expandVerification } from '../verification/expand.ts';
+import type { VerifyDeps } from '../verification/types.ts';
 import { defineWorkflow } from '../workflow/define.ts';
-import { StepKind, type WorkflowDef } from '../workflow/types.ts';
+import { type Step, StepKind, type WorkflowDef } from '../workflow/types.ts';
 import { effectiveTaskDeps } from './define.ts';
 import { buildCrewAgent } from './member-agent.ts';
 import type { CrewDef, Task } from './types.ts';
+
+/** Compile-time inputs for the grounded-verification sub-graph. Present only when
+ *  the crew is run with verify deps; absent = no task is expanded (today's path).*/
+export type CompileVerifyOpts = {
+  verifyDeps: VerifyDeps;
+  space?: string;
+  maxRetries?: number;
+  threshold?: number;
+};
+
+/** A task is verified when it opts in, or the crew defaults verify on. */
+function taskVerifies(task: Task, crew: CrewDef): boolean {
+  return task.verify ?? crew.verify ?? false;
+}
 
 /** Build the task-specific prompt: description + expected output + the outputs of
  *  its dependency tasks (or the crew input for a root task). */
@@ -32,13 +48,20 @@ export function composeTaskInput(
   return parts.join('\n');
 }
 
-/** Sequential crew -> a WorkflowDef of agent steps (runs on the Slice-10 engine). */
-export function compileToWorkflow(crew: CrewDef): WorkflowDef {
-  const steps = crew.tasks.map((task, i) => {
+/** Sequential crew -> a WorkflowDef of agent steps (runs on the Slice-10 engine).
+ *  When `verifyOpts` is supplied, any task that opts into `verify` gets its
+ *  grounded-verification sub-graph spliced in right after its answer step. A task
+ *  without `verify` (or when `verifyOpts` is absent) compiles exactly as before. */
+export function compileToWorkflow(
+  crew: CrewDef,
+  verifyOpts?: CompileVerifyOpts,
+): WorkflowDef {
+  const steps: Step[] = [];
+  crew.tasks.forEach((task, i) => {
     const deps = effectiveTaskDeps(task, i, crew.tasks);
-    return {
+    steps.push({
       id: task.id,
-      kind: StepKind.Agent as const,
+      kind: StepKind.Agent,
       agent: task.member,
       dependsOn: deps,
       input: (ctx: Record<string, unknown>) => {
@@ -47,7 +70,19 @@ export function compileToWorkflow(crew: CrewDef): WorkflowDef {
       },
       output: task.output ?? z.string(),
       persistMemory: task.persistMemory,
-    };
+    });
+    if (verifyOpts && taskVerifies(task, crew)) {
+      steps.push(
+        ...expandVerification({
+          answerStepId: task.id,
+          answerAgent: task.member,
+          space: verifyOpts.space ?? 'default',
+          verifyDeps: verifyOpts.verifyDeps,
+          maxRetries: verifyOpts.maxRetries,
+          threshold: verifyOpts.threshold,
+        }),
+      );
+    }
   });
   // Reuse the workflow validator as a second gate (unique ids / acyclic).
   return defineWorkflow({ id: crew.id, description: crew.description, steps });

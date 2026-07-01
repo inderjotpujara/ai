@@ -4,7 +4,13 @@ import type { BeforeDelegate } from '../core/delegate.ts';
 import { runOrchestrator } from '../core/orchestrator.ts';
 import { makeRecallTool } from '../memory/recall-tool.ts';
 import type { MemoryStore } from '../memory/store.ts';
+import type { RetrievalResult } from '../memory/types.ts';
 import { withCrewSpan } from '../telemetry/spans.ts';
+import {
+  isUnverifiedMarker,
+  type UnverifiedMarker,
+} from '../verification/expand.ts';
+import type { VerifyDeps } from '../verification/types.ts';
 import {
   defaultRunAgentStep,
   runWorkflow,
@@ -26,7 +32,32 @@ export type CrewDeps = {
   /** Default memory auto-write policy when `memory` is set; a task's own
    *  `persistMemory` overrides it. Default true. */
   persistMemory?: boolean;
+  /** Injected grounded-verification deps. Required to activate any task's
+   *  `verify` flag; absent = verify flags are inert and the crew compiles as
+   *  today. The real Ollama-backed deps are wired by the CLI (Task 10); tests
+   *  inject a fake with a controllable judge. */
+  verifyDeps?: VerifyDeps;
+  /** Re-recall used by the corrective (CRAG) path. Absent = corrective re-answers
+   *  without fresh retrieval. Namespaced by the caller. */
+  recall?: (query: string) => Promise<RetrievalResult[]>;
+  /** Memory space verify fetches cited evidence + re-recalls from. Default 'default'. */
+  verifySpace?: string;
+  /** Bounded corrective attempts override; default `verifyMaxRetries()`. */
+  verifyMaxRetries?: number;
+  /** Faithfulness threshold override forwarded to verify. */
+  verifyThreshold?: number;
 };
+
+/** Scan a finished workflow context for an abstain marker (a verified task whose
+ *  answer stayed unsupported after bounded correction). First marker wins. */
+function findUnverified(
+  output: Record<string, unknown>,
+): UnverifiedMarker | undefined {
+  for (const v of Object.values(output)) {
+    if (isUnverifiedMarker(v)) return v;
+  }
+  return undefined;
+}
 
 /** Build the crew's member agents keyed by name (for the sequential agent map).
  *  When `memory` is present, each member also gets a `recall` tool bound to
@@ -59,7 +90,17 @@ export function runCrew(
 ): Promise<CrewOutcome> {
   return withCrewSpan(def.id, def.process, async () => {
     if (def.process === CrewProcess.Sequential) {
-      const wf = compileToWorkflow(def);
+      // Only build the verification sub-graph when deps are injected; without
+      // them the compiler leaves verify flags inert (compiles as today).
+      const verifyOpts = deps.verifyDeps
+        ? {
+            verifyDeps: deps.verifyDeps,
+            space: deps.verifySpace,
+            maxRetries: deps.verifyMaxRetries,
+            threshold: deps.verifyThreshold,
+          }
+        : undefined;
+      const wf = compileToWorkflow(def, verifyOpts);
       const runAgentStep =
         deps.runAgentStep ??
         defaultRunAgentStep(
@@ -72,9 +113,23 @@ export function runCrew(
         maxParallel: deps.maxParallel,
         memory: deps.memory,
         persistMemory: deps.persistMemory ?? def.persistMemory,
+        recall: deps.recall,
       });
-      if (outcome.kind === 'done')
+      if (outcome.kind === 'done') {
+        const unverified = findUnverified(
+          outcome.output as Record<string, unknown>,
+        );
+        if (unverified) {
+          return {
+            kind: 'unverified',
+            failedTaskId: unverified.answerStepId,
+            unsupportedClaims: unverified.unsupportedClaims,
+            faithfulness: unverified.faithfulness,
+            draft: unverified.draft,
+          };
+        }
         return { kind: 'done', output: outcome.output };
+      }
       return {
         kind: 'failed',
         failedTask: outcome.failedStep,

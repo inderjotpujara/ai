@@ -33,6 +33,12 @@ export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
           ? outcome.output
           : JSON.stringify(outcome.output, null, 2);
       await writeArtifact(run, 'result.txt', text);
+    } else if (outcome.kind === 'unverified') {
+      await writeArtifact(
+        run,
+        'unverified.txt',
+        `task ${outcome.failedTaskId ?? '?'} abstained (faithfulness ${outcome.faithfulness}); unsupported claims:\n${outcome.unsupportedClaims.join('\n')}\n\ndraft:\n${outcome.draft}`,
+      );
     } else {
       await writeArtifact(
         run,
@@ -79,6 +85,11 @@ async function main(): Promise<void> {
               ? outcome.output
               : JSON.stringify(outcome.output, null, 2),
           );
+        } else if (outcome.kind === 'unverified') {
+          console.error(
+            `Crew abstained at ${outcome.failedTaskId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
+          );
+          process.exitCode = 1;
         } else {
           console.error(
             `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
