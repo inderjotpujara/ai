@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
+import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
+import type { Agent } from '../../src/core/agent-def.ts';
 import {
   DEFAULT_MAX_PARALLEL,
+  defaultRunAgentStep,
   runStepByKind,
   type WorkflowDeps,
 } from '../../src/workflow/run-step.ts';
@@ -90,5 +93,40 @@ describe('runStepByKind', () => {
 
   it('exposes a conservative default concurrency cap', () => {
     expect(DEFAULT_MAX_PARALLEL).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('defaultRunAgentStep', () => {
+  it('threads onBeforeDelegate into the guarded agent run', async () => {
+    const seen: string[] = [];
+    const agent: Agent = {
+      name: 'web_fetch',
+      description: 'fetches',
+      model: new MockLanguageModelV3({
+        doGenerate: async () => ({
+          content: [{ type: 'text', text: 'done' }],
+          finishReason: { unified: 'stop', raw: undefined },
+          usage: {
+            inputTokens: {
+              total: 1,
+              noCache: undefined,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: undefined, reasoning: undefined },
+          },
+          warnings: [],
+        }),
+      }),
+      systemPrompt: 's',
+      tools: {},
+    };
+    const onBeforeDelegate = async (a: Agent) => {
+      seen.push(a.name);
+    };
+    const run = defaultRunAgentStep({ web_fetch: agent }, onBeforeDelegate);
+    const out = await run('web_fetch', 'do it');
+    expect(out).toBe('done');
+    expect(seen).toEqual(['web_fetch']);
   });
 });

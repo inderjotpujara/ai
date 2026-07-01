@@ -38,8 +38,10 @@ graph TD
         chat["chat.ts (entry)"]
         runchat["run-chat.ts"]
         selhook["select-hook.ts"]
+        selrt["select-runtime.ts · createSelectionRuntime"]
         runscli["runs.ts · bun run runs"]
         flow["flow.ts · bun run flow"]
+        crewcli["crew.ts · bun run crew"]
     end
     subgraph CORE["Core · src/core"]
         orch["orchestrator.ts"]
@@ -83,6 +85,13 @@ graph TD
         wfengine["engine.ts · runWorkflow"]
         wfrunstep["run-step.ts · runStepByKind"]
     end
+    subgraph CREW["Crew · src/crew"]
+        crewtypes["types.ts · CrewMember/Task/CrewProcess"]
+        crewdefine["define.ts · defineCrew"]
+        crewmember["member-agent.ts · buildCrewAgent"]
+        crewcompile["compile.ts · compileToWorkflow/buildHierarchicalOrchestrator"]
+        crewengine["engine.ts · runCrew"]
+    end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
         images[("model-images/ + catalog.json")]
@@ -91,6 +100,7 @@ graph TD
         agents["agents/*"]
         models["models/* · BOOTSTRAP"]
         workflows["workflows/* · WORKFLOWS"]
+        crews["crews/* · CREWS"]
     end
 
     chat --> runchat
@@ -131,17 +141,35 @@ graph TD
     flow -. mounts .-> mcpclient
     flow --> agents
     flow --> workflows
+    flow --> selrt
     wfengine --> wfrunstep
     wfrunstep --> delegate
     wfengine --> spans
     wfrunstep --> spans
     wfdefine --> wftypes
+    crewengine --> crewcompile
+    crewcompile --> crewmember
+    crewcompile --> wfdefine
+    crewmember --> sel
+    crewengine --> wfengine
+    crewengine --> orch
+    crewengine --> spans
+    crewdefine --> crewtypes
+    crewtypes --> wftypes
+    crewcli --> crewengine
+    crewcli --> runstore
+    crewcli -. mounts .-> mcpclient
+    crewcli --> crews
+    crewcli --> selrt
+    selrt --> selhook
+    selrt --> buildreg
+    selrt --> mgr
     runstore --> spansfile
 ```
 
 | Layer | Files | Responsibility | Knows about |
 |---|---|---|---|
-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
+| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
 | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
@@ -150,8 +178,9 @@ graph TD
 | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
-| **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
+| **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example) | nothing (pure data) |
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
+| **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -297,29 +326,118 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 
 - **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
 
-- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, and prints the last step's output (or the failure) to stdout/stderr — closing the fetch then file server in `finally`, mirroring `chat.ts`'s mount/close order.
+- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` mounts file+fetch MCP tools, builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, builds the shared live-selection runtime (below) and prints the last step's output (or the failure) to stdout/stderr — closing the selection runtime, then the fetch server, then the file server in `finally`, mirroring `chat.ts`'s mount/close order.
+
+- **Shared live-selection runtime** (`src/cli/select-runtime.ts`, Slice 11 Task 7): `createSelectionRuntime(opts?)` extracts `chat.ts`'s inline manager + offline `buildRegistry()` + `createSelectHook` + one-line selection `notify` into a single reusable async factory, returning `{ onBeforeDelegate, capture, close }`. `close()` calls `manager.unloadAll()`. Both `flow.ts`'s and `crew.ts`'s `main()` build one runtime per CLI invocation (nested inside the mounted file/fetch MCP servers, closed in `finally`) and thread `onBeforeDelegate` into `defaultRunAgentStep`/`runCrew` respectively — so a workflow agent step or a crew member is resolved to the largest model that fits the *live* RAM budget at delegation time, the same guarantee `chat.ts` gives its orchestrator. `chat.ts` itself is left with its original inline wiring in this slice; deduping it against `select-runtime.ts` is a follow-up.
 
 ---
 
-## 10. On-disk stores
+## 10. Crews & roles (Slice 11)
+
+A CrewAI-style **role/task/process** layer — a **thin composition** over the
+workflow engine (§9, sequential) and the orchestrator (§13 Glossary,
+hierarchical), **not a new engine**: both processes ultimately run on
+machinery Slices 9/10 already shipped.
+
+- **Types** (`src/crew/types.ts`): `CrewMember{name, role, goal, backstory,
+  requires, prefer, tools?}` — `role`/`goal`/`backstory` are prompt scaffolding;
+  `requires`/`prefer` are the same `Capability[]`/`PreferPolicy` axes the core
+  selector already uses, so a member's model is a live selection, not a
+  hardcoded one. `Task{id, description, expectedOutput, member, dependsOn?,
+  output?}` — `description`+`expectedOutput` are prompt text, `member` is the
+  `CrewMember.name` that runs it, `dependsOn` are upstream task ids whose
+  outputs become context, `output` is an optional zod schema for typed
+  hand-offs (defaults to `z.string()` when compiled). `enum CrewProcess {
+  Sequential, Hierarchical }`. `CrewDef{id, description?, members, tasks,
+  process, managerModel?}`. `CrewOutcome` — `{kind:'done', output}` or
+  `{kind:'failed', failedTask?, message}`.
+- **Validation** (`src/crew/define.ts`): `defineCrew(def)` checks at
+  construction time — unique member names, unique task ids, every
+  `task.member` resolves to a real member, every effective dependency
+  (`effectiveTaskDeps`: explicit `dependsOn`, else the previous task, else `[]`
+  for the first task — the CrewAI sequential default) resolves to a real task,
+  and the task graph is acyclic (Kahn's algorithm, same technique as
+  `workflow/define.ts`) — throwing `CrewError` on any violation.
+- **Member → agent** (`src/crew/member-agent.ts`): `buildCrewAgent(member,
+  tools?)` composes role/goal/backstory into an `Agent.systemPrompt`, sets
+  `description` (routing) and `modelReq: {role, requires, prefer}`. The model
+  bound at construction (`qwenFast`) is a placeholder — the real model is
+  resolved **live** by the selector at delegation via `modelReq` +
+  `onBeforeDelegate`, exactly like the preset agents (this is the only
+  genuinely new mechanism the layer adds).
+- **Compile** (`src/crew/compile.ts`): **sequential** — `compileToWorkflow`
+  maps each task to an `AgentStep` (`agent = task.member`, `dependsOn` = the
+  effective deps, `input` = `composeTaskInput` which renders the task's
+  description/expected-output plus either the crew's raw input (root task) or
+  its dependencies' outputs as context, `output = task.output ?? z.string()`),
+  then runs `defineWorkflow` as a second validation gate and executes on the
+  **existing** Slice-10 engine unmodified. **Hierarchical** —
+  `buildHierarchicalOrchestrator` builds one `Agent` per member via
+  `buildCrewAgent`, writes a manager system prompt listing every task
+  (`member: description -> expectedOutput`), and hands the member agents +
+  that prompt to `createOrchestrator` (model defaults to `qwenRouter`, or
+  `crew.managerModel`) — the manager delegates autonomously rather than the
+  crew enforcing task order (a documented v1 simplification; sequential is the
+  deterministic path).
+- **Engine** (`src/crew/engine.ts`): `runCrew(def, input, deps)` dispatches by
+  `def.process` inside a `withCrewSpan` (`crew.run` root span). Sequential:
+  builds a member-name → `Agent` map (`crewAgentMap`), resolves `runAgentStep`
+  to `deps.runAgentStep` (test seam) or `defaultRunAgentStep(agents,
+  onBeforeDelegate)`, and calls `runWorkflow` — since `runWorkflow` itself
+  never throws (§9), **the sequential path never throws into the caller**.
+  Hierarchical: builds the orchestrator and calls `runOrchestrator`, which
+  *can* `throw` for an unhandled failure that is neither a captured resource
+  error nor a `MaxStepsError` carrying a capability gap (§4/§8) — so **the
+  hierarchical path inherits `runOrchestrator`'s throw-on-unhandled-failure
+  behavior**; `runCrew` as a whole is not unconditionally throw-free. Both
+  paths reuse `runGuardedAgent` (`core/delegate.ts`, Slice-9 guardrails: depth
+  limit + live return cap) and the same live selector via `onBeforeDelegate`.
+- **Telemetry** (`src/telemetry/spans.ts`): `withCrewSpan(crewId, process, fn)`
+  opens the root `crew.run` span (`ATTR.CREW_ID`, `ATTR.CREW_PROCESS`);
+  `ATTR.CREW_TASK_MEMBER` tags which member ran a given task. Nested beneath
+  it: `workflow.run`/`workflow.step` spans (sequential, §9) or
+  `agent.delegation` spans (hierarchical, §3/§8) — so `bun run runs` renders
+  `crew.run → workflow.step → …` or `crew.run → agent.delegation → …`
+  depending on `process`, with no crew-specific viewer changes needed.
+- **CLI entry** (`src/cli/crew.ts`, mirrors `flow.ts`): `bun run crew <name>
+  [input...]` over the `crews/` registry (`crews/index.ts` `CREWS` + `getCrew`,
+  mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential
+  example). `runCrewCli(deps)` follows `runFlow`'s lifecycle: `createRun` →
+  `initRunTelemetry` → `runCrew(def, input, {tools, onBeforeDelegate,
+  runAgentStep})` → on `done`, `writeArtifact('result.txt', <output as text or
+  pretty JSON>)`; on `failed`, `writeArtifact('failed.txt', "task <id>:
+  <message>")` → `shutdown()` in `finally`. `main()` resolves the crew via
+  `getCrew`, mounts file+fetch MCP tools, builds a `createSelectionRuntime()`
+  (§9, shared with `flow.ts`) and passes `onBeforeDelegate` into `runCrewCli`,
+  then prints the crew's final output (or failure) to stdout/stderr. Runs are
+  rendered the same way as any other run: `bun run runs <id>`.
+
+Feeds **Slice 12** (memory/RAG — members will read from it) and **Slice 13**
+(verification — a verifier is just another member/task). Out of scope (v1):
+memory, CrewAI "Flows" (our DAG already is that), planning / batch kickoff /
+human-in-the-loop tasks.
+
+---
+
+## 11. On-disk stores
 
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 
 ---
 
-## 11. Testing strategy
+## 12. Testing strategy
 
 - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
 - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
 - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
 - **MCP** — real stdio round-trip (subprocess server).
-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
 
 ---
 
-## 12. Glossary
+## 13. Glossary
 
 - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
 - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.

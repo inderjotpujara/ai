@@ -16,6 +16,7 @@
     "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
     "discover": "bun run src/cli/discover.ts",
     "flow": "bun run src/cli/flow.ts",
+    "crew": "bun run src/cli/crew.ts",
     "runs": "bun run src/cli/runs.ts"
   },
   "dependencies": {

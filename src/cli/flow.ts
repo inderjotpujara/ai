@@ -3,6 +3,7 @@ import { createFileQaAgent } from '../../agents/file-qa.ts';
 import { createWebFetchAgent } from '../../agents/web-fetch.ts';
 import { getWorkflow } from '../../workflows/index.ts';
 import type { Agent } from '../core/agent-def.ts';
+import type { BeforeDelegate } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
 import { createFetchTools, createFileTools } from '../mcp/client.ts';
 import { createRun, writeArtifact } from '../run/run-store.ts';
@@ -14,6 +15,7 @@ import type {
   WorkflowDef,
   WorkflowOutcome,
 } from '../workflow/types.ts';
+import { createSelectionRuntime } from './select-runtime.ts';
 
 export type FlowDeps = {
   def: WorkflowDef;
@@ -22,6 +24,7 @@ export type FlowDeps = {
   runId: string;
   agents: Record<string, Agent>;
   tools: ToolSet;
+  onBeforeDelegate?: BeforeDelegate; // live model selection
 };
 
 /** The last step's validated output, rendered as text (as-is if string, else pretty JSON). */
@@ -39,7 +42,7 @@ export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
   try {
     return await withWorkflowSpan(deps.def.id, async () => {
       const outcome = await runWorkflow(deps.def, deps.input, {
-        runAgentStep: defaultRunAgentStep(deps.agents),
+        runAgentStep: defaultRunAgentStep(deps.agents, deps.onBeforeDelegate),
         tools: deps.tools,
       });
       annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
@@ -79,28 +82,34 @@ async function main(): Promise<void> {
   try {
     const fetchServer = await createFetchTools();
     try {
-      const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
-      const agents: Record<string, Agent> = {};
-      const fileQa = createFileQaAgent(fileServer.tools);
-      const webFetch = createWebFetchAgent(fetchServer.tools);
-      agents[fileQa.name] = fileQa;
-      agents[webFetch.name] = webFetch;
+      const selection = await createSelectionRuntime();
+      try {
+        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
+        const agents: Record<string, Agent> = {};
+        const fileQa = createFileQaAgent(fileServer.tools);
+        const webFetch = createWebFetchAgent(fetchServer.tools);
+        agents[fileQa.name] = fileQa;
+        agents[webFetch.name] = webFetch;
 
-      const outcome = await runFlow({
-        def,
-        input: rest.join(' ').trim(),
-        runsRoot: 'runs',
-        runId: `flow-${process.pid}`,
-        agents,
-        tools,
-      });
-      if (outcome.kind === 'done') {
-        console.log(lastStepOutputText(def, outcome.output));
-      } else {
-        console.error(
-          `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
-        );
-        process.exitCode = 1;
+        const outcome = await runFlow({
+          def,
+          input: rest.join(' ').trim(),
+          runsRoot: 'runs',
+          runId: `flow-${process.pid}`,
+          agents,
+          tools,
+          onBeforeDelegate: selection.onBeforeDelegate,
+        });
+        if (outcome.kind === 'done') {
+          console.log(lastStepOutputText(def, outcome.output));
+        } else {
+          console.error(
+            `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
+          );
+          process.exitCode = 1;
+        }
+      } finally {
+        await selection.close();
       }
     } finally {
       await fetchServer.close();
