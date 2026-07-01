@@ -32,6 +32,9 @@ export const ATTR = {
   STEP_KIND: 'workflow.step.kind',
   STEP_BRANCH_TAKEN: 'workflow.step.branch.taken',
   STEP_MAP_COUNT: 'workflow.step.map.count',
+  CREW_ID: 'crew.id',
+  CREW_PROCESS: 'crew.process',
+  CREW_TASK_MEMBER: 'crew.task.member',
 } as const;
 
 export type ModelSelectInfo = {
@@ -208,4 +211,18 @@ export function annotateStep(attrs: Record<string, string | number>): void {
   const span = trace.getActiveSpan();
   if (!span) return;
   for (const [k, v] of Object.entries(attrs)) span.setAttribute(k, v);
+}
+
+/** Root span for a crew run. The nested workflow.run/workflow.step (sequential)
+ *  or agent.delegation (hierarchical) spans attach beneath it via active context. */
+export function withCrewSpan<T>(
+  crewId: string,
+  process: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('crew.run', async (span) => {
+    span.setAttribute(ATTR.CREW_ID, crewId);
+    span.setAttribute(ATTR.CREW_PROCESS, process);
+    return fn();
+  });
 }
