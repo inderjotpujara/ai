@@ -28,6 +28,7 @@ function control(over: Partial<RuntimeControl> = {}): RuntimeControl {
     listLoaded: mock(async () => [] as { name: string; sizeBytes: number }[]),
     getModelMax: mock(async () => 262144),
     getModelKvArch: mock(async () => arch),
+    embed: mock(async () => []),
     ...over,
   };
 }

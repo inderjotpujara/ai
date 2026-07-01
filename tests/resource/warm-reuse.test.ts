@@ -40,6 +40,7 @@ test('two agents sharing a model warm it once (reuse the resident copy)', async 
     ),
     getModelMax: mock(async () => 262144),
     getModelKvArch: mock(async () => undefined),
+    embed: mock(async () => []),
   };
   const mgr = createModelManager({
     budgetBytes: 100e9,

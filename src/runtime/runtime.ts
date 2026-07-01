@@ -14,6 +14,7 @@ export type RuntimeControl = {
   listLoaded(): Promise<LoadedModel[]>;
   getModelMax(model: string): Promise<number | undefined>;
   getModelKvArch(model: string): Promise<KvArch | undefined>;
+  embed(model: string, texts: string[]): Promise<number[][]>;
 };
 
 /** A model runtime: builds AI-SDK models and owns their lifecycle + availability. */
