@@ -8,15 +8,18 @@ Mini.
 > **Where this is going:** a local-first, self-owned **n8n × CrewAI** — an
 > agent-workflow platform where you compose role-based agents + tools into
 > workflows, trigger them, watch them run, and let the system extend itself with
-> new agents on demand. Slices 1–7 built the hardware-aware **engine**; the next
-> phase builds the **product** (visibility → workflows/crews + memory/RAG +
-> grounded verification → integration library → agent-builder → triggers). See
+> new agents on demand. Slices 1–7 built the hardware-aware **engine**; the
+> product line is now underway — Phase A's run-viewer (Slice 8) and Phase B's
+> composition guardrails (Slice 9) and workflow/DAG engine (Slice 10) have
+> landed. Remaining Phase B work (crews, memory/RAG, grounded verification) →
+> integration library → agent-builder → triggers is next. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 7 complete — **KV-cache quantization**. `bun run serve` sets
-> `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE=q8_0` (default); the manager
-> sizes context per-model from live arch data (`/api/show`) and warns on arch-risky
-> models. Built on Slice 6's model discovery. See [Roadmap](#roadmap).
+> **Status:** Slice 10 complete — **workflow/DAG engine**. `defineWorkflow()` +
+> `bun run flow <name>` run deterministic, code-first, typed step graphs
+> (agent/tool/branch/map) beside the existing LLM router. Also shipped: Slice 8
+> (OTel run-viewer, `bun run runs`) and Slice 9 (composition guardrails —
+> delegation depth limit + return-size cap). See [Roadmap](#roadmap).
 
 ---
 
@@ -48,6 +51,12 @@ No manual steps. No API keys. Everything runs locally.
 **Model discovery (Slice 6).** `bun run discover` fetches the latest tool-capable GGUF (and MLX, when a local MLX server is running) models from Hugging Face (trusted publishers, sized to your live RAM budget), writes a per-machine `model-images/catalog.json`, and pre-pulls the top fitting model. Normal `chat` runs read an **offline** merge of the bootstrap rungs + locally-installed models + the cached catalog — no network needed. A local MLX server (LM Studio / vllm-mlx at `MLX_BASE_URL`) is discovered + used automatically when running. Vision/audio/video and an uncensored mode are typed-in seams shipped in later slices.
 
 **KV-cache quantization (Slice 7).** Start with `bun run serve` (sets `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE`, default `q8_0` — flash attention is *required* and not auto-enabled on Apple Silicon). KV cache type is **global** (Ollama limitation), but the manager sizes context **per-model from each model's live architecture** (`/api/show`), so q8_0 yields ~2× context (near-lossless on tolerant architectures) and a generalized advisory warns when an *arch-risky* model (small head_dim / MoE) runs under a quantized cache. Override with `AGENT_KV_CACHE_TYPE=f16|q8_0|q4_0`.
+
+**Run-viewer / OpenTelemetry telemetry (Slice 8).** Every run is instrumented as an **OpenTelemetry trace** — root, delegation, and model-lifecycle spans written to `runs/<id>/spans.jsonl`. `bun run runs` lists recent runs, `bun run runs <id>` renders the trace as a terminal timeline, and `bun run runs <id> --follow` tails it live. The exporter is swappable: point `AGENT_OTLP_ENDPOINT` at any OTLP-compatible backend (Jaeger, Tempo, Phoenix, Honeycomb) to get the same signal there with no re-instrumentation. The underlying `src/telemetry/` layer is the shared seam every later subsystem (guardrails, workflows) emits spans into.
+
+**Composition guardrails (Slice 9).** Prerequisites for safe multi-agent depth, enforced via an `AsyncLocalStorage`-based delegation context: a **depth limit** (default 5, guarantees termination, override `AGENT_MAX_DELEGATION_DEPTH`; recursion within the limit is allowed) and a **live return-size cap** (¼ × the calling model's `num_ctx`, override `AGENT_RETURN_CTX_FRACTION`) so a sub-agent can't blow the caller's context budget. Violations surface as soft errors plus an `agent.guardrail.violation` span event rather than a hard crash.
+
+**Workflow / DAG engine (Slice 10).** A second, deterministic orchestration mode alongside the LLM router: `defineWorkflow({id, steps})` builds a code-first, typed, JSON-serializable DAG out of `agent` / `tool` / `branch` / `map` (bounded fan-out) steps, with Zod-validated structured I/O flowing between them. Execution is fail-fast by default, with a per-step `onError: 'continue' | {fallback}` escape hatch. Run one with `bun run flow <name>`; workflows live in the `workflows/` registry and are executed by `runWorkflow()`. Agent steps reuse the Slice 9 guardrails via a shared `runGuardedAgent`, and the engine emits `workflow.run` / `workflow.step` spans into the same telemetry layer. See [`docs/architecture.md`](docs/architecture.md) §9.
 
 ---
 
@@ -81,6 +90,15 @@ first use. Then, in another terminal:
 # Real end-to-end (downloads the specialist model, e.g. qwen3.5:9b, on first run):
 echo "The quick brown fox jumps over the lazy dog." > /tmp/sample.txt
 bun run src/cli/chat.ts "What animal is in /tmp/sample.txt?"
+```
+
+Run a deterministic workflow (fixed steps, not LLM-routed) with `bun run flow`,
+and inspect any run's OTel trace with `bun run runs`:
+
+```sh
+bun run flow fetch-then-summarize "https://example.com"   # run a registered workflow
+bun run runs                                              # list recent runs
+bun run runs <run-id>                                     # render its trace as a timeline
 ```
 
 ---
@@ -179,7 +197,10 @@ interface — no agent code changes. See
 | **5** | **Dynamic model selection** — agents declare a capability requirement (`requires`/`prefer`) instead of a fixed model; registry + selector pick the largest model that fits the live budget; Model Manager loads it; genuine no-fit surfaces as `{kind:'resource'}` | ✅ Done |
 | **6** | **Model discovery** — `runDiscovery` fetches tool-capable GGUF/MLX models from Hugging Face (trusted publishers, sized to live RAM), writes `model-images/catalog.json`, pre-pulls the top fit; offline merge of bootstrap + local + catalog at chat time; Ollama + MLX-server runtimes; four-axis taxonomy (capability/modality, runtime, source, content-policy) | ✅ Done |
 | **7** | **KV-cache quantization** — global `AGENT_KV_CACHE_TYPE` (default q8_0); `OLLAMA_FLASH_ATTENTION=1` required; per-model arch-derived sizing from `/api/show`; generalized arch-risk advisory (small head_dim / MoE) | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**, in phases: **A** see/trust (run-viewer · graceful degradation · eval) → **B** compose (composition guardrails · workflow/crew engine · **memory/RAG** · **grounded verification**) → **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **8** | **Run-viewer / OTel telemetry** (Phase A) — every run is an OpenTelemetry trace (`runs/<id>/spans.jsonl`); `bun run runs` (list / `<id>` timeline / `--follow`); swappable OTLP backend via `AGENT_OTLP_ENDPOINT` | ✅ Done |
+| **9** | **Composition guardrails** (Phase B prerequisite) — `AsyncLocalStorage` delegation context; depth limit (default 5, `AGENT_MAX_DELEGATION_DEPTH`); live return-size cap (¼ × caller `num_ctx`, `AGENT_RETURN_CTX_FRACTION`); soft-error surfacing + `agent.guardrail.violation` span event | ✅ Done |
+| **10** | **Workflow / DAG engine** (Phase B) — `defineWorkflow({id, steps})`, code-first typed DAG; step kinds `agent`/`tool`/`branch`/`map`; Zod-validated step I/O; fail-fast + per-step `onError`; `bun run flow <name>` + `workflows/` registry + `runWorkflow()`; reuses Slice 9 guardrails | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**, continuing Phase B: **crews & roles** → **memory/RAG** → **grounded verification** → **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

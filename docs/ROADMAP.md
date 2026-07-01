@@ -27,9 +27,12 @@ below becomes its own **brainstorm → spec → plan → subagent-driven build**
 ## Where we are vs. the target (the honest gap)
 
 Seven shipped slices built a deep, sophisticated **engine** (hardware-aware
-model/resource management). The **product surface** is still thin: 3 agents
-(`super`, `file-qa`, `web-fetch`), 1 native tool (`read_file`) + 1 mounted MCP
-server (`mcp-server-fetch`). The next phase pivots from *engine* to *product*.
+model/resource management). Three more (Slices 8–10) have since landed the
+first wave of the **product** pivot: an OTel run-viewer, composition
+guardrails, and a deterministic workflow/DAG engine. The **product surface**
+is still thin beyond that: 3 agents (`super`, `file-qa`, `web-fetch`), 1 native
+tool (`read_file`) + 1 mounted MCP server (`mcp-server-fetch`), and no crews,
+memory, or grounded verification yet.
 
 | n8n / CrewAI concept | Our analog | Status |
 |---|---|---|
@@ -38,10 +41,10 @@ server (`mcp-server-fetch`). The next phase pivots from *engine* to *product*.
 | Self-hosted, your infrastructure | local-first, Ollama, Mac Mini | ✅ core premise |
 | Hardware-aware scheduling | Model Manager (live RAM budget, KV quant) | ✅ built (Slices 4–7) |
 | Integration library (n8n's 400+ nodes) | mounted MCP servers | 🟡 1 server — needs a **mount registry + pack** |
-| **Workflow / DAG (deterministic steps)** | **workflow engine** | ❌ **the defining gap** |
+| **Workflow / DAG (deterministic steps)** | **workflow engine** | ✅ **built (Slice 10)** |
 | **Crew (role + goal + task + process)** | crews / roles / tasks | 🟡 composition exists; needs the task/process layer |
-| Structured data between steps | response-format / typed I/O | ❌ not built |
-| Execution view / run history | run-viewer | ❌ not built |
+| Structured data between steps | response-format / typed I/O | ✅ built (Slice 10 — Zod-validated step I/O) |
+| Execution view / run history | run-viewer | ✅ built (Slice 8 — OTel trace + `bun run runs`) |
 | Triggers (webhook / schedule / event) | scheduled & triggered agents | ❌ not built |
 | Create-a-node / create-an-agent | **agent-builder ⭐** | ❌ not built (seam in place) |
 | **Shared agent memory (RAG + vector DB)** | memory subsystem | ❌ **not built — required, Phase B** |
@@ -100,7 +103,7 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 
 | Item | Why now | Depends on |
 |---|---|---|
-| **Run-viewer (`/runs`)** ⭐ | Instruments each run as an **OpenTelemetry trace** (root + delegation + model-lifecycle spans; AI-SDK gives agent/tool/token spans free) to `runs/<id>/spans.jsonl`, rendered as a terminal timeline (`bun run runs`, with `--follow`). Establishes the **extensible `src/telemetry/` layer every later feature emits into** (see the observable-by-default principle above) + a swappable OTLP backend seam. Makes 7 slices of invisible engine **demoable**, and becomes the **debugging surface** you'll need the instant workflows/crews/agent-builder start misrouting. Lowest cost, highest visibility. | run store (Slice 1) |
+| **Run-viewer (`/runs`)** ⭐ — ✅ **shipped (Slice 8)** | Instruments each run as an **OpenTelemetry trace** (root + delegation + model-lifecycle spans; AI-SDK gives agent/tool/token spans free) to `runs/<id>/spans.jsonl`, rendered as a terminal timeline (`bun run runs`, with `--follow`). Establishes the **extensible `src/telemetry/` layer every later feature emits into** (see the observable-by-default principle above) + a swappable OTLP backend seam. Makes 7 slices of invisible engine **demoable**, and becomes the **debugging surface** you'll need the instant workflows/crews/agent-builder start misrouting. Lowest cost, highest visibility. | run store (Slice 1) |
 | **Graceful degradation** | If `uvx` / an MCP server / a model is down, **drop that agent and tell the user** instead of failing the whole CLI. Essential for an always-on autonomous box; today a dead dependency can sink a run. | Slices 2–3 |
 | **Telemetry + eval harness** | Log per-agent latency / tokens / tool-call success; a small harness scoring **routing accuracy** (did the orchestrator pick the right specialist?) **and answer faithfulness / citation-faithfulness** (RAGAS-style: % of claims supported by retrieved evidence; penalize fabricated citations) against a ~100-item golden set. The moment agent-builder adds specialists *and* RAG adds retrieved context, routing quality + groundedness are what break — cheap insurance, measurable. | Slice 2 |
 
@@ -108,8 +111,8 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 
 | Item | Why | Depends on |
 |---|---|---|
-| **Composition guardrails** | **Prerequisite** for any multi-agent depth: delegation **depth limit** + cross-agent **cycle detection** + concise/summarized returns + warm-model reuse. The roadmap has long flagged these as MUST-haves; they must land **before** crews/agent-builder, or deep graphs become a cost/loop footgun (~15× compounding). | Slice 2 |
-| **Workflow / DAG engine** ⭐ | The defining capability we lack vs **both** n8n and CrewAI: **deterministic multi-step orchestration** — a typed DAG of steps (agent call, tool call, branch, map/fan-out) with explicit data flow, instead of one LLM picking one specialist. This is the n8n "workflow" and the CrewAI "sequential process." | guardrails, run store |
+| **Composition guardrails** — ✅ **shipped (Slice 9)** | **Prerequisite** for any multi-agent depth: an `AsyncLocalStorage` delegation context enforcing a **depth limit** (default 5, termination-guaranteed, `AGENT_MAX_DELEGATION_DEPTH`; recursion within the limit is allowed) + a **live return-size cap** (¼ × caller `num_ctx`, `AGENT_RETURN_CTX_FRACTION`) + soft-error surfacing via an `agent.guardrail.violation` span event. The roadmap has long flagged these as MUST-haves; they landed **before** the workflow engine, crews, and agent-builder, so deep graphs don't become a cost/loop footgun (~15× compounding). | Slice 2 |
+| **Workflow / DAG engine** ⭐ — ✅ **shipped (Slice 10)** | The defining capability we lacked vs **both** n8n and CrewAI: **deterministic multi-step orchestration** — `defineWorkflow({id, steps})` builds a code-first, typed, JSON-serializable DAG of steps (`agent` / `tool` / `branch` / `map` fan-out) with Zod-validated data flow between them, instead of one LLM picking one specialist. Fail-fast by default with a per-step `onError: 'continue' \| {fallback}` escape hatch; bounded map concurrency. Run via `bun run flow <name>`, backed by the `workflows/` registry and `runWorkflow()`; agent steps reuse the Slice 9 guardrails through a shared `runGuardedAgent`. This is the n8n "workflow" and the CrewAI "sequential process." | guardrails, run store |
 | **Crews & roles** | The CrewAI layer on top of the engine: agents gain **role + goal**; a **task list** runs under a **process** (sequential pipeline or hierarchical = our orchestrator). Formalizes "a team of agents collaborating on a goal." | workflow engine |
 | **Memory / RAG (vector DB)** ⭐ | **Required, not optional** — a file/doc-based store can't give semantic recall. Local-first & keyless: **Ollama embeddings** (`nomic-embed-text` default; `bge-m3` for long/multilingual docs) + an **embedded on-disk vector store** — recommend **LanceDB** (native TS SDK, disk-based ANN so it scales past RAM, built-in hybrid + reranking; sqlite-vec is the lighter alt but hits a `bun:sqlite`-can't-load-extensions snag on macOS). Best-practice retrieval pipeline: **semantic chunking → hybrid (BM25 + dense, RRF-fused) → rerank → top 5–8**. Long-term/structured memory in `bun:sqlite`. Powers CrewAI-style short/long-term/entity memory; sized & governed by the Model Manager like any other model. See `reference-rag-grounding-findings` memory. | workflow engine, Model Manager |
 | **Grounded generation + verification** ⭐ | **Anti-hallucination as a first-class layer**, not an afterthought — and natural here because a **verifier/critic agent is just another agent** (`asDelegateTool`) and a workflow step. Techniques: **citation enforcement** (every claim cites a retrieved chunk-ID; uncited sentences stripped/rewritten); a **reference-free faithfulness judge** (extract claims → NLI-check each against retrieved chunks → % supported, the RAGAS method); **Corrective RAG** (grade retrieval; weak → rewrite query / re-retrieve before answering); **Chain-of-Verification** for complex multi-step answers; and **abstention** — extends the system's existing *"never hallucinate → report a gap"* stance from "no capability" to "no evidence." Multi-level scrutiny = layered verifier agents over the primary answer. | memory/RAG, workflow engine |
@@ -178,12 +181,13 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 
 ## ⭐ Recommended sequence (critical path to n8n × CrewAI)
 
-1. **Run-viewer** (Phase A) — see the engine work; the cheapest high-value slice and the debugging surface everything later needs.
-2. **Composition guardrails** (Phase B) — small, unblocks safe multi-agent depth.
-3. **Workflow / crew engine + memory (RAG) + grounded verification** (Phase B) — the defining n8n/CrewAI capability we lack; crews need semantic memory (local embeddings + embedded vector DB) to be useful, and RAG without a **faithfulness/verification layer** just hallucinates more confidently — so engine + memory + grounding land together.
-4. **`mcp.json` mount registry + starter pack** (Phase C) — make it genuinely useful; gives workflows things to *do* and agent-builder servers to *suggest*.
-5. **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library).
-6. **Triggers / daemon** (Phase E) — turn workflows into automations (n8n's identity).
+1. ✅ **Run-viewer** (Phase A) — shipped, Slice 8. See the engine work; the cheapest high-value slice and the debugging surface everything later needs.
+2. ✅ **Composition guardrails** (Phase B) — shipped, Slice 9. Small, unblocks safe multi-agent depth.
+3. ✅ **Workflow / DAG engine** (Phase B) — shipped, Slice 10. The defining n8n/CrewAI capability we lacked.
+4. **Crews + memory (RAG) + grounded verification** (Phase B, next) — crews need semantic memory (local embeddings + embedded vector DB) to be useful, and RAG without a **faithfulness/verification layer** just hallucinates more confidently — so crews + memory + grounding land together.
+5. **`mcp.json` mount registry + starter pack** (Phase C) — make it genuinely useful; gives workflows things to *do* and agent-builder servers to *suggest*.
+6. **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library).
+7. **Triggers / daemon** (Phase E) — turn workflows into automations (n8n's identity).
 
 Reliability (graceful degradation, telemetry/eval) folds into Phase A alongside
 the run-viewer. Modalities & memory (Phase F) come in on demand — not before the
