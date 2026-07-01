@@ -113,6 +113,24 @@ export class LanceStore {
     }));
   }
 
+  async getByIds(space: string, ids: string[]): Promise<RetrievalResult[]> {
+    if (ids.length === 0) return [];
+    const db = await this.db();
+    const table = await db.openTable(space);
+    const list = ids.map((i) => `'${escapeSqlLiteral(i)}'`).join(',');
+    const rows = (await table
+      .query()
+      .where(`id IN (${list})`)
+      .toArray()) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: r.id as string,
+      text: r.text as string,
+      source: r.source as string,
+      score: 0,
+      namespace: r.namespace as string,
+    }));
+  }
+
   async count(space: string): Promise<number> {
     const db = await this.db();
     const table = await db.openTable(space);

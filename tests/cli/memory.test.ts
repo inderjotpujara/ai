@@ -16,6 +16,10 @@ function fakeStore() {
       calls.push('recall');
       return [{ id: 'a#0', text: 'hi', source: 'a', score: 0, namespace: '' }];
     },
+    getByIds: async () => {
+      calls.push('getByIds');
+      return [{ id: 'a#0', text: 'hi', source: 'a', score: 0, namespace: '' }];
+    },
     reindex: async () => {
       calls.push('reindex');
     },
