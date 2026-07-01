@@ -40,7 +40,7 @@ export type RecallOptions = {
   kind?: MemoryKind;
   topK?: number; // CEILING (fallback AGENT_MEMORY_TOP_K=6); budget may return fewer
   numCtx?: number; // caller ctx for injection-budget fit; default from ALS
-  rerank?: boolean; // default from AGENT_MEMORY_RERANK (off unless spike passes)
+  rerank?: boolean; // default from AGENT_MEMORY_RERANK (default true; spike passed — see retrieve.ts defaultRerank())
 };
 
 export type MemoryConfig = {

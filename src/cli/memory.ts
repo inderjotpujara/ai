@@ -1,5 +1,6 @@
 import { ProviderKind } from '../core/types.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
+import { makeCrossEncoderReranker } from '../memory/reranker.ts';
 import { createMemoryStore, type MemoryStore } from '../memory/store.ts';
 import type { MemoryConfig } from '../memory/types.ts';
 import { createModelManager } from '../resource/model-manager.ts';
@@ -59,10 +60,16 @@ function makeRealStore(flags: Flags): {
     model,
   });
   const config: MemoryConfig = { embedModel: model };
+  // Cross-encoder rerank spike (Task 13) PASSED under Bun on Apple Silicon, so
+  // it's wired as the default reranker here; `defaultRerank()` in retrieve.ts
+  // still gates actual use behind AGENT_MEMORY_RERANK (default on, '0' = off).
+  // transformers.js manages its own model weights cache — NOT the Ollama Model
+  // Manager used for the chat/embed models above.
   const store = createMemoryStore(config, {
     embedTexts: embedder.embed,
     embedQuery: async (text) => (await embedder.embed([text]))[0] as number[],
     probe: probeEmbedder,
+    reranker: makeCrossEncoderReranker(),
   });
   return { store, manager };
 }

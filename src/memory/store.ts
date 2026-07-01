@@ -6,7 +6,7 @@ import { withMemoryIngestSpan } from '../telemetry/spans.ts';
 import { chunk } from './chunk.ts';
 import { defineMemory, type ResolvedMemoryConfig } from './define.ts';
 import { LanceStore } from './lancedb-store.ts';
-import { type Reranker, retrieve } from './retrieve.ts';
+import { defaultRerank, type Reranker, retrieve } from './retrieve.ts';
 import { SqliteStore } from './sqlite-store.ts';
 import {
   type MemoryConfig,
@@ -135,12 +135,17 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
     ): Promise<RetrievalResult[]> {
       const space = sql.getSpace(opts.space ?? DEFAULT_SPACE);
       if (!space) return []; // abstention: nothing stored yet
-      return retrieve(query, opts, {
-        lance,
-        embedQuery: deps.embedQuery,
-        space,
-        reranker: opts.rerank ? deps.reranker : undefined,
-      });
+      const rerank = opts.rerank ?? defaultRerank();
+      return retrieve(
+        query,
+        { ...opts, rerank },
+        {
+          lance,
+          embedQuery: deps.embedQuery,
+          space,
+          reranker: rerank ? deps.reranker : undefined,
+        },
+      );
     },
 
     async reindex(space: string, newEmbedModel: string): Promise<void> {

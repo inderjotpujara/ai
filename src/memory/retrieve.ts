@@ -23,6 +23,16 @@ function defaultTopK(): number {
 }
 
 /**
+ * Live default for whether recall reranks. Cross-encoder rerank (Task 13 spike,
+ * transformers.js/ONNX under Bun) PASSED on Apple Silicon, so the default is ON;
+ * still fully opt-outable via AGENT_MEMORY_RERANK=0 (e.g. no reranker configured,
+ * cost-sensitive runs, or CI without model weights cached).
+ */
+export function defaultRerank(): boolean {
+  return process.env.AGENT_MEMORY_RERANK !== '0';
+}
+
+/**
  * Retrieval pipeline: embed query → hybrid search candidates → optional rerank
  * → budget-fit pack, capped at topK. Candidate order from `hybridSearch` (best-first,
  * `_distance` ascending) is preserved unless a reranker is applied, which fully
