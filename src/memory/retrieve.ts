@@ -1,6 +1,10 @@
 import { MemoryError } from '../core/errors.ts';
 import { currentDelegationContext } from '../core/guardrails.ts';
-import { withMemoryRecallSpan } from '../telemetry/spans.ts';
+import {
+  recordRerankFailure,
+  recordRerankOutcome,
+  withMemoryRecallSpan,
+} from '../telemetry/spans.ts';
 import { retrievalBudgetChars } from './budget.ts';
 import type { LanceStore } from './lancedb-store.ts';
 import type { RecallOptions, RetrievalResult, SpaceMeta } from './types.ts';
@@ -36,7 +40,10 @@ export function defaultRerank(): boolean {
  * Retrieval pipeline: embed query → hybrid search candidates → optional rerank
  * → budget-fit pack, capped at topK. Candidate order from `hybridSearch` (best-first,
  * `_distance` ascending) is preserved unless a reranker is applied, which fully
- * decides order instead.
+ * decides order instead. If the reranker throws, recall degrades gracefully:
+ * the pre-rerank candidate order is kept and the failure is recorded on the
+ * active span (`memory.rerank_failed` event + `reranked=false`) rather than
+ * propagating out of `retrieve()`.
  */
 export async function retrieve(
   query: string,
@@ -68,7 +75,18 @@ export async function retrieve(
       });
 
       if (opts.rerank && deps.reranker) {
-        candidates = await deps.reranker.rerank(query, candidates);
+        try {
+          candidates = await deps.reranker.rerank(query, candidates);
+          recordRerankOutcome(true);
+        } catch (err) {
+          // Degrade gracefully: keep the pre-rerank (hybridSearch, _distance-
+          // ascending) candidate order and continue — a reranker failure must
+          // never crash recall.
+          recordRerankFailure(err);
+          recordRerankOutcome(false);
+        }
+      } else {
+        recordRerankOutcome(false);
       }
 
       // Budget-fit: pack top-ranked candidates until the live char budget is

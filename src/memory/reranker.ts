@@ -24,19 +24,28 @@ let handlesPromise: Promise<CrossEncoderHandles> | undefined;
 /** Lazily load + cache the tokenizer/model pair. transformers.js manages its own
  * weights cache (NOT the project's Ollama Model Manager) — first call downloads
  * the ONNX weights to its local cache dir; later calls reuse them.
+ *
+ * Retryable: if the load rejects (e.g. transient network failure fetching
+ * weights), the cached promise is reset to `undefined` so the NEXT call
+ * attempts a fresh load instead of re-rejecting with the stale error forever.
  */
 async function loadCrossEncoder(model: string): Promise<CrossEncoderHandles> {
   if (!handlesPromise) {
     handlesPromise = (async () => {
-      const { AutoTokenizer, AutoModelForSequenceClassification } =
-        await import('@huggingface/transformers');
-      const tokenizer = await AutoTokenizer.from_pretrained(model);
-      const seqModel =
-        await AutoModelForSequenceClassification.from_pretrained(model);
-      return {
-        tokenizer: (text, opts) => tokenizer(text, opts),
-        model: (inputs) => seqModel(inputs),
-      } satisfies CrossEncoderHandles;
+      try {
+        const { AutoTokenizer, AutoModelForSequenceClassification } =
+          await import('@huggingface/transformers');
+        const tokenizer = await AutoTokenizer.from_pretrained(model);
+        const seqModel =
+          await AutoModelForSequenceClassification.from_pretrained(model);
+        return {
+          tokenizer: (text, opts) => tokenizer(text, opts),
+          model: (inputs) => seqModel(inputs),
+        } satisfies CrossEncoderHandles;
+      } catch (err) {
+        handlesPromise = undefined;
+        throw err;
+      }
     })();
   }
   return handlesPromise;

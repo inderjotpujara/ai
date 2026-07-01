@@ -62,4 +62,26 @@ describe('retrieve', () => {
     );
     expect(out[0]?.id).toBe('b');
   });
+
+  test('reranker failure degrades to un-reranked candidates instead of throwing', async () => {
+    const deps = {
+      space,
+      embedQuery: async () => [1, 0],
+      lance: {
+        hybridSearch: async () => [cand('a', 'aa', 0.9), cand('b', 'bb', 0.1)],
+      },
+      reranker: {
+        rerank: async (): Promise<RetrievalResult[]> => {
+          throw new Error('reranker exploded');
+        },
+      },
+    };
+    const out = await retrieve(
+      'q',
+      { topK: 2, numCtx: 8192, rerank: true },
+      deps,
+    );
+    // Falls back to hybridSearch's original (best-first) order, unreranked.
+    expect(out.map((r) => r.id)).toEqual(['a', 'b']);
+  });
 });

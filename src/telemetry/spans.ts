@@ -261,6 +261,25 @@ export function withMemoryRecallSpan<T>(
   });
 }
 
+/** Set the actual rerank outcome on the active memory.recall span, overriding
+ * whatever `withMemoryRecallSpan` was seeded with. Call after the rerank
+ * attempt (success or failure) so `reranked` reflects reality, not intent. */
+export function recordRerankOutcome(reranked: boolean): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.setAttribute(ATTR.MEMORY_RERANKED, reranked);
+}
+
+/** Record a rerank failure on the active span so recall degradation is
+ * observable without crashing the caller. */
+export function recordRerankFailure(err: unknown): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.addEvent('memory.rerank_failed', {
+    'error.message': err instanceof Error ? err.message : String(err),
+  });
+}
+
 export type MemoryIngestInfo = {
   space: string;
   source: string;
