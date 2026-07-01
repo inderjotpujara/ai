@@ -39,6 +39,7 @@ graph TD
         runchat["run-chat.ts"]
         selhook["select-hook.ts"]
         runscli["runs.ts · bun run runs"]
+        flow["flow.ts · bun run flow"]
     end
     subgraph CORE["Core · src/core"]
         orch["orchestrator.ts"]
@@ -73,7 +74,14 @@ graph TD
         exporter["jsonl-exporter.ts"]
     end
     subgraph RUN["Run store · src/run"]
+        runstore["run-store.ts"]
         runtrace["run-trace.ts"]
+    end
+    subgraph WF["Workflow · src/workflow"]
+        wftypes["types.ts · StepKind"]
+        wfdefine["define.ts · defineWorkflow"]
+        wfengine["engine.ts · runWorkflow"]
+        wfrunstep["run-step.ts · runStepByKind"]
     end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
@@ -82,6 +90,7 @@ graph TD
     subgraph DECL["Declarations (pure data)"]
         agents["agents/*"]
         models["models/* · BOOTSTRAP"]
+        workflows["workflows/* · WORKFLOWS"]
     end
 
     chat --> runchat
@@ -117,11 +126,22 @@ graph TD
     octl --> images
     runscli --> runtrace
     runtrace --> spansfile
+    flow --> wfengine
+    flow --> runstore
+    flow -. mounts .-> mcpclient
+    flow --> agents
+    flow --> workflows
+    wfengine --> wfrunstep
+    wfrunstep --> delegate
+    wfengine --> spans
+    wfrunstep --> spans
+    wfdefine --> wftypes
+    runstore --> spansfile
 ```
 
 | Layer | Files | Responsibility | Knows about |
 |---|---|---|---|
-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer | everything below |
+| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
 | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
@@ -130,8 +150,8 @@ graph TD
 | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; mount/consume MCP servers | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
-| **Declarations** | `models/`, `agents/` | Data: which model / which agent | nothing (pure data) |
-| **Workflow / DAG** | `src/workflow/` | Pure types + error class for deterministic multi-step workflows (Slice 10) — step model, context-threading, failure policies, DAG validation | Zod (I/O schemas) |
+| **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
+| **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
