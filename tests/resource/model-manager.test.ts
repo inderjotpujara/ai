@@ -254,7 +254,11 @@ test('embedder role: skips /api/generate warm but still installs it', async () =
     model: 'qwen3-embedding:0.6b',
     params: {},
     role: 'embedder',
-    footprint: { approxParamsBillions: 0.6, bytesPerWeight: 1, kvBytesPerToken: 0 },
+    footprint: {
+      approxParamsBillions: 0.6,
+      bytesPerWeight: 1,
+      kvBytesPerToken: 0,
+    },
   });
   expect(f.control.warm).not.toHaveBeenCalled();
   expect(f.control.pull).not.toHaveBeenCalled(); // already "installed" per fakeControl default
@@ -268,7 +272,11 @@ test('embedder role: is tracked as resident (loaded, evictable, skips a second l
     model: 'qwen3-embedding:0.6b',
     params: {},
     role: 'embedder',
-    footprint: { approxParamsBillions: 0.6, bytesPerWeight: 1, kvBytesPerToken: 0 },
+    footprint: {
+      approxParamsBillions: 0.6,
+      bytesPerWeight: 1,
+      kvBytesPerToken: 0,
+    },
   };
   await mgr.ensureReady(embedDecl);
   // unloadAll only unloads models tracked in the manager's own residency map —

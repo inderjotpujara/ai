@@ -4,6 +4,9 @@ node_modules/
 # Run artifacts (per-run dirs + journals)
 runs/
 
+# Memory datastore (LanceDB tables + bun:sqlite; local, never committed). See docs/architecture.md §11
+memory/
+
 # Local model image/blob files (large; never committed). See model-images/README.md
 model-images/*
 !model-images/.gitkeep
