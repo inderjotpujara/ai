@@ -4,6 +4,7 @@ import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { createOrchestrator } from '../core/orchestrator.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
+import { ATTR, annotateStep } from '../telemetry/spans.ts';
 import { defineWorkflow } from '../workflow/define.ts';
 import { StepKind, type WorkflowDef } from '../workflow/types.ts';
 import { effectiveTaskDeps } from './define.ts';
@@ -40,8 +41,10 @@ export function compileToWorkflow(crew: CrewDef): WorkflowDef {
       kind: StepKind.Agent as const,
       agent: task.member,
       dependsOn: deps,
-      input: (ctx: Record<string, unknown>) =>
-        composeTaskInput(task, ctx, deps),
+      input: (ctx: Record<string, unknown>) => {
+        annotateStep({ [ATTR.CREW_TASK_MEMBER]: task.member });
+        return composeTaskInput(task, ctx, deps);
+      },
       output: task.output ?? z.string(),
     };
   });
