@@ -240,6 +240,41 @@ test('per-run failed-pull guard: a successfully pulled model is unaffected on la
   expect(pull).toHaveBeenCalledTimes(1);
 });
 
+test('failed-pull guard: clears when model becomes installed out-of-band (session recovery)', async () => {
+  const pull = mock(async () => {
+    throw new ProviderError('Ollama request to /api/pull failed');
+  });
+  const isInstalled = mock(async () => false);
+  const f = fakes({
+    control: fakeControl({
+      isInstalled,
+      pull,
+    }),
+  });
+  const mgr = createModelManager(f.deps);
+
+  // First call: model not installed, pull fails → added to failedPulls.
+  await expect(mgr.ensureReady(decl('flaky', 4))).rejects.toBeInstanceOf(
+    ProviderError,
+  );
+  expect(pull).toHaveBeenCalledTimes(1);
+
+  // Second call: model still not installed, guard applies → fast-fail, no re-pull.
+  await expect(mgr.ensureReady(decl('flaky', 4))).rejects.toBeInstanceOf(
+    ProviderError,
+  );
+  expect(pull).toHaveBeenCalledTimes(1);
+
+  // Out-of-band install: isInstalled now returns true.
+  isInstalled.mockResolvedValueOnce(true);
+
+  // Third call: model now installed. Guard clears (un-poison), proceeds normally.
+  // The warm call succeeds and proves the model was not fast-failed.
+  await mgr.ensureReady(decl('flaky', 4));
+  expect(pull).toHaveBeenCalledTimes(1); // Still 1, not re-pulled.
+  // Next two are warm calls—no more pulls after the out-of-band install.
+});
+
 test('tight headroom: chosenCtx shrinks to fit, floored & rounded to 1024', async () => {
   // weights(1,1)=1.2e9; kv/token=131072. budget chosen so maxCtxByFit == 8192:
   // headroom-weights = 8192*131072 = 1073741824 → budget = 1073741824 + 1.2e9.

@@ -58,6 +58,12 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
   // cached here (not successes) — there's nothing to invalidate on success, so
   // the simplest correct thing is to just never add a model to this set unless
   // its pull actually failed.
+  // Models whose pull failed this process/session. When a model's pull fails,
+  // it is added to this set to fast-fail subsequent ensureReady calls for ~5 min
+  // instead of re-attempting the slow pull. The guard applies only to PULL,
+  // not warm. An out-of-band install (e.g., manual pull or a prior attempt that
+  // actually completed) clears the guard: if isInstalled returns true, the model
+  // is removed from this set and used normally (session recovery).
   const failedPulls = new Set<string>();
   let tick = 0;
 
@@ -120,7 +126,14 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
     const target = decl.model;
     const desired = decl.params.numCtx ?? MIN_CTX;
 
-    if (!(await c.isInstalled(target))) {
+    const installed = await c.isInstalled(target);
+    if (installed) {
+      // Model is already installed, out-of-band or from a prior attempt that
+      // actually completed. Clear the failed-pull guard (un-poison) and proceed.
+      failedPulls.delete(target);
+    } else {
+      // Model is not installed. If its pull already failed, fast-fail instead of
+      // re-attempting the slow pull.
       if (failedPulls.has(target)) {
         throw new ProviderError(
           `${target}: skipping re-pull after a prior failure this run.`,
