@@ -40,8 +40,13 @@ function parseFlags(argv: string[]): { positional: string[]; flags: Flags } {
   return { positional, flags };
 }
 
-/** Build the real, manager-backed memory store (Ollama embedder via the model manager). */
-function makeRealStore(flags: Flags): MemoryStore {
+/** Build the real, manager-backed memory store (Ollama embedder via the model manager).
+ * Returns both the store and a manager instance for lifecycle management.
+ */
+function makeRealStore(flags: Flags): {
+  store: MemoryStore;
+  manager: ReturnType<typeof createModelManager>;
+} {
   const manager = createModelManager();
   const control = runtimeFor(ProviderKind.Ollama).control;
   const model =
@@ -54,11 +59,12 @@ function makeRealStore(flags: Flags): MemoryStore {
     model,
   });
   const config: MemoryConfig = { embedModel: model };
-  return createMemoryStore(config, {
+  const store = createMemoryStore(config, {
     embedTexts: embedder.embed,
     embedQuery: async (text) => (await embedder.embed([text]))[0] as number[],
     probe: probeEmbedder,
   });
+  return { store, manager };
 }
 
 function usage(): string {
@@ -149,12 +155,21 @@ async function main(): Promise<void> {
   const { flags } = parseFlags(argv.slice(1));
   const run = await createRun('runs', `memory-${process.pid}`);
   const tel = initRunTelemetry(run.dir);
+  let storeAndManager:
+    | { store: MemoryStore; manager: ReturnType<typeof createModelManager> }
+    | undefined;
   try {
     const code = await runMemoryCli(argv, {
-      makeStore: () => makeRealStore(flags),
+      makeStore: () => {
+        storeAndManager = makeRealStore(flags);
+        return storeAndManager.store;
+      },
     });
     process.exitCode = code;
   } finally {
+    if (storeAndManager) {
+      await storeAndManager.manager.unloadAll();
+    }
     await tel.shutdown();
   }
 }
