@@ -1,190 +1,69 @@
-# Task 7 report — LanceDB native-load smoke test + vector store adapter
+# Task 7 Report: `verify()` primitive
 
-(Note: this filename previously held a stale report from an unrelated earlier
-Slice-11 task that happened to reuse the same path. This report replaces it
-and documents Slice 12 Task 7 only.)
+(Note: this filename previously held a stale report from an unrelated
+Slice-12 task — "LanceDB native-load smoke test" — that happened to reuse
+this path. This report replaces it and documents Slice 13 Task 7 only.)
 
-## Summary
+## Implemented
 
-Status: **DONE**. LanceDB's native `.node` binary loads cleanly under Bun on
-Apple Silicon (arm64). This is a clean go for the rest of Slice 12.
+`src/verification/verify.ts` exports:
 
-## What was implemented
-
-- **`package.json`**: added `@lancedb/lancedb@0.30.0` as a direct dependency
-  via `bun add @lancedb/lancedb@0.30.0`. Installed exactly at pinned version
-  (no range). `bun.lock` updated accordingly. Optional platform package
-  `@lancedb/lancedb-darwin-arm64@0.30.0` resolved and installed with the
-  `.node` binary present at
-  `node_modules/@lancedb/lancedb-darwin-arm64/lancedb.darwin-arm64.node`.
-- **`src/memory/lancedb-store.ts`** (new): `LanceStore` class implementing
-  the five required methods — `openOrCreateTable`, `upsert`, `hybridSearch`,
-  `count`, `dropTable` — plus a private lazy `db()` connection accessor.
-- **`tests/memory/lancedb-smoke.test.ts`** (new): TDD smoke test using
-  `bun:test` (confirmed as the repo convention — 82 of 83 existing test
-  files use `bun:test`; only `tests/memory/sqlite-store.test.ts`, from an
-  earlier task on this branch, uses `vitest` and is already broken/orphaned
-  — pre-existing, not touched by this task, noted below).
-
-**Bundler check**: confirmed no esbuild/rollup/vite/tsup config exists
-anywhere in the repo root, and there is no `build` script in `package.json`
-— TS runs directly via `bun`/`tsc --noEmit`. No "external" tweak was
-needed anywhere for the native module.
-
-## Native-load result: PASS
-
-No native binding / `.node` load errors at any point. The only failure seen
-before the adapter existed was the expected `Cannot find module
-'../../src/memory/lancedb-store.ts'` — a plain "module not found," not a
-native-load error — confirming the TDD red state was for the right reason.
-After writing the adapter, the smoke test passed immediately with no native
-warnings or quirks in stdout/stderr.
-
-## FTS/hybrid search: DENSE-ONLY shipped
-
-`hybridSearch()` currently performs **dense vector search only**, despite
-the method name (kept per the stable interface contract from the brief).
-
-Why: the installed 0.30.0 JS API does expose `Index.fts()` (confirmed in
-`node_modules/@lancedb/lancedb/dist/indices.d.ts`) and `Table.search()`
-accepts a `queryType` string (`"vector" | "fts" | "auto"`, per
-`table.d.ts`), so hybrid is *plausibly* reachable. But wiring a real hybrid
-query (fusing vector + FTS ranking, e.g. RRF) is not something the shipped
-`.d.ts` documents cleanly — the type signatures for FTS query types
-(`MatchQuery`, `PhraseQuery`, `BooleanQuery`, etc. in `query.d.ts`) exist
-but there's no documented one-call "hybrid" convenience path exposed at the
-level this adapter needs, and getting it wrong silently (e.g. wrong RRF
-weights, wrong column) is worse than being honest about dense-only for now.
-
-`openOrCreateTable` still opportunistically attempts
-`table.createIndex('text', { config: lancedb.Index.fts() })` wrapped in a
-try/catch, so:
-- If it succeeds, the FTS index exists on disk for a future task to wire up
-  hybrid search against without a schema migration.
-- If it fails for any reason, dense search is completely unaffected (the
-  try/catch swallows and moves on).
-
-In this smoke test's run, FTS index creation did not throw, but I did not
-verify the index is actually used for anything, since `hybridSearch` never
-calls into an FTS query path. Treat "FTS index exists" as unconfirmed/best
-effort, not a load-bearing fact for downstream code.
-
-## Score direction
-
-**Lower score = closer/better** (unchanged from LanceDB's native
-`_distance` convention — mapped directly into `RetrievalResult.score`
-without inversion). This is called out both in the class-level JSDoc on
-`LanceStore` and here explicitly for the next task: **the retrieve pipeline
-must sort/compare ascending by `score`**, not descending. Do NOT assume
-higher-is-better cosine-similarity semantics.
-
-## TDD evidence
-
-**Before the adapter existed** (`bun test tests/memory/lancedb-smoke.test.ts`):
-
-```
-bun test v1.3.11 (af24e281)
-
-tests/memory/lancedb-smoke.test.ts:
-
-# Unhandled error between tests
--------------------------------
-error: Cannot find module '../../src/memory/lancedb-store.ts' from '/Users/inderjotsingh/ai/tests/memory/lancedb-smoke.test.ts'
--------------------------------
-
- 0 pass
- 1 fail
- 1 error
-Ran 1 test across 1 file. [14.00ms]
+```ts
+export async function verify(
+  answer: string,
+  opts: { query: string; space: string; threshold?: number },
+  deps: VerifyDeps,
+): Promise<Verdict>
 ```
 
-This is a plain module-resolution failure, not a native-load error — correct
-red state, no escalation triggered.
+Pipeline:
+1. `decomposeClaims(answer, deps)` (Task 4) → `Claim[]`.
+2. `[...new Set(claims.flatMap((c) => c.citedIds))]` → dedup all cited ids across claims.
+3. `allIds.length ? deps.getByIds(opts.space, allIds) : []` → `RetrievalResult[]`, then `new Map(evidence.map((e) => [e.id, e.text]))` → `evidenceById`.
+4. `deps.ensureJudge(verifyModel())` → `{model, fallback}` (see wiring note below).
+5. `withVerificationSpan({}, () => verifyFaithfulness(claims, evidenceById, judge.model, judge.fallback, threshold, deps))` (Task 5) → `Verdict`, returned as-is.
+6. `threshold = opts.threshold ?? verifyThreshold()` (Task 1 config), computed up front.
 
-**After the adapter was implemented** (same command):
+## How I wired `ensureJudge` / `verifyModel` (ambiguity resolution)
 
+The brief's Step-3 sketch called `deps.ensureJudge(deps.generalModel)`, which the task instructions flagged as wrong: the judge model must be the **configured verify model**, not the general/router model. I implemented it as instructed:
+
+```ts
+import { verifyModel, verifyThreshold } from './config.ts';
+...
+const judge = await deps.ensureJudge(verifyModel());
 ```
-bun test v1.3.11 (af24e281)
 
- 1 pass
- 0 fail
- 2 expect() calls
-Ran 1 test across 1 file. [173.00ms]
-```
+`deps.generalModel` remains untouched by `verify.ts` — it's consumed internally by `decomposeClaims` (Task 4, claim decomposition prompt) and by `verifyFaithfulness`'s fallback path (Task 5, when `fallback: true` grading can route through the general model). `verify.ts` itself never reads `deps.generalModel` directly; it only passes `deps` through to those two functions and calls `ensureJudge` with the config-resolved verify model id (`verifyModel()` → `AGENT_VERIFY_MODEL` env or `'bespoke-minicheck'` default).
 
-## Verification commands run (all green except pre-existing unrelated item)
+I added a third test (beyond the brief's two) that pins this down: `ensureJudge` is asserted to be called with `'bespoke-minicheck'` (not `'g'`, the fixture's `generalModel`), and the `checkClaim` call inside `verifyFaithfulness` is asserted to receive the model id `ensureJudge` resolved to (`'resolved-judge-model'`), not the raw input. This exercises the exact ambiguity called out in the task instructions and would fail if `verify.ts` reverted to `deps.ensureJudge(deps.generalModel)`.
 
-- `bun test tests/memory/lancedb-smoke.test.ts` → 1 pass, 0 fail.
-- `bun run typecheck` → clean except one PRE-EXISTING, UNRELATED error:
-  `tests/memory/sqlite-store.test.ts(1,51): error TS2307: Cannot find
-  module 'vitest'`. Confirmed via `git log` that this file was introduced
-  in the immediately-prior commit on this branch (`903b034 feat(memory):
-  bun:sqlite space registry + doc manifest`) and already used `vitest`
-  before this task touched anything. Not caused by, or fixed by, this task
-  — flagging for slice-level cleanup (likely that file needs to move to
-  `bun:test` like everything else, or add a `vitest` dev dependency —
-  neither is in this task's scope).
-- `bun run lint:file -- src/memory/lancedb-store.ts` → clean (after running
-  `bunx biome check --write` once to apply pure formatting — no logic
-  changes, just brace/line wrapping to match the 2-space/single-quote
-  Biome config).
-- `bun test` (full suite) → **235 pass, 16 skip, 0 fail** across 84 files.
-  No regressions introduced.
+## TDD
 
-## Self-review notes / edge cases considered
+- **RED:** Wrote `tests/verification/verify.test.ts` with the brief's two tests plus the judge-wiring test; ran `bun test tests/verification/verify.test.ts` → failed with `Cannot find module '../../src/verification/verify.ts'` (module didn't exist yet).
+- **GREEN:** Implemented `src/verification/verify.ts` per the plan above; reran → `3 pass, 0 fail, 7 expect() calls`.
 
-- **SQL injection in generated filter/delete predicates**: `id`,
-  `namespace`, and `kind` values are interpolated into SQL-style predicate
-  strings (`delete`, `.where()`). Added `escapeSqlLiteral()` (doubles single
-  quotes) and apply it to every interpolated string value. `kind` is an
-  enum (`MemoryKind`) so its string form is controlled, but I escaped it
-  anyway for defense-in-depth since `String(q.kind)` is technically
-  caller-controlled data at the type level.
-- **Empty `records` array**: `upsert` early-returns on `records.length ===
-  0` to avoid building a malformed empty `IN ()` predicate.
-- **`namespace: ''` semantics**: per `types.ts`, `''` means space-wide (no
-  namespace filter). `hybridSearch` treats `namespace == null || namespace
-  === ''` as "no filter" — confirmed this matches the smoke test, which
-  passes `namespace: ''` and expects to see both space-wide records.
-- **Idempotent upsert**: `upsert` deletes any existing rows matching the
-  incoming ids before `add`-ing, so calling it twice with the same records
-  doesn't duplicate rows. Not explicitly tested here (out of scope for the
-  smoke test) — worth a dedicated test in a later task.
-- **Table existence caching**: `openOrCreateTable` checks `tableNames()`
-  fresh on every call rather than caching a local "known tables" set. This
-  is correct but does one extra round trip on repeated calls to the same
-  space; not a concern at current scale, flagging in case it matters once
-  there are many recall calls per run.
-- **Connection reuse**: `db()` lazily connects once per `LanceStore`
-  instance and reuses the connection — matches the sketch, no change
-  needed there.
-- Did NOT add a `.gitignore` entry for the smoke test's `/tmp/lance-smoke`
-  dir since it's outside the repo and cleaned up via `afterEach`.
+## Files
 
-## Concerns for the next task (retrieve pipeline)
+- `src/verification/verify.ts` (new, 33 lines) — the `verify()` primitive.
+- `tests/verification/verify.test.ts` (new, 3 tests) — brief's 2 tests + 1 added test for the ensureJudge/verifyModel wiring.
 
-1. **Score direction is the single most important thing to carry
-   forward.** `RetrievalResult.score` is a distance (lower = better). If
-   the retrieve pipeline sorts, truncates to `topK`, or applies any
-   score-threshold logic, it must do so ascending. This is the single most
-   likely place for a silent, hard-to-notice bug.
-2. **Dense-only for now.** If the slice plan assumes hybrid (dense + FTS)
-   ranking is available from this layer, that assumption needs to be
-   revisited or a follow-up task scheduled to wire real hybrid search. The
-   FTS index is opportunistically created but never queried.
-3. **No embedding-dimension validation.** `openOrCreateTable(space, dim)`
-   trusts the caller's `dim` and never re-validates it against
-   `SpaceMeta.embedDim` from `sqlite-store` — that authority check, per the
-   `types.ts` comment ("SpaceMeta ... the authority for a space's embedder +
-   dims"), needs to happen in the layer that calls both stores (likely the
-   retrieve/write pipeline), not inside `LanceStore` itself.
-4. **`sqlite-store.test.ts` vitest breakage** (pre-existing, not from this
-   task) will keep failing `bun run typecheck` for anyone touching
-   `docs:check`/`check` pipelines on this branch until it's fixed —
-   flagging so the next task or a docs/cleanup pass doesn't get confused
-   about which errors it introduced versus inherited.
-5. **No retry/backoff or concurrent-writer story** — `LanceStore` assumes
-   single-writer, single-process usage matching the smoke test. If the
-   retrieve pipeline expects concurrent read/write safety guarantees beyond
-   what LanceDB itself provides, that needs explicit design, not assumed
-   from this adapter.
+## Verification run
+
+- `bun test tests/verification/verify.test.ts` → 3 pass, 0 fail, 7 expect() calls.
+- `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
+- `bun run lint:file -- src/verification/verify.ts tests/verification/verify.test.ts` → initially flagged `noExplicitAny` (the brief's literal test snippet typed the fixture as `Partial<any>`/`any`) plus import-order/formatting; fixed by typing the test fixture as `Partial<VerifyDeps> → VerifyDeps` (matching the existing convention in `tests/verification/judge.test.ts`) and running `bunx biome check --write` once to auto-fix import ordering/formatting. Final run: clean, no errors/warnings.
+- `bun run test` (full suite) → **272 pass, 18 skip, 0 fail, 553 expect() calls, 290 tests across 98 files**. No regressions.
+- Commit: `c7e25d5` — `feat(verification): verify() primitive (decompose→evidence→judge)` on branch `slice-13-grounded-verification`. Pre-commit hook (`docs-check`) passed (`verification/` was already a documented subsystem from an earlier task in this slice, so no `architecture.md` update was needed for this task).
+
+## Self-review
+
+- Function is a thin, pure orchestration layer — no I/O beyond what `deps` provides, matching the "primitive stays agnostic" note in the brief.
+- Dedup via `Set` on `citedIds` avoids redundant `getByIds` lookups when multiple claims cite the same id.
+- Short-circuits `getByIds` entirely when there are no cited ids at all (`allIds.length ? ... : []`), avoiding an unnecessary call with an empty array — matches the brief's sketch.
+- `withVerificationSpan({}, ...)` is called with an empty info object, consistent with the brief; `spans.ts` already exposes a `recordVerdict(unsupportedClaims)` helper for annotating the active span post-hoc, which `verify.ts` does not currently call. That's a possible follow-up (e.g. for Task 10's CLI wiring) but wasn't specified as in-scope here and the brief's own sketch left the span info empty too.
+- Deviated from the brief's literal test-fixture typing (`Partial<any>`/`any`) to satisfy the repo's `noExplicitAny` lint rule and match the sibling test file's convention (`Partial<VerifyDeps>` / `VerifyDeps`). Test behavior is unchanged; only the type annotations differ from the brief's inline snippet.
+
+## Concerns
+
+- None blocking. One minor observability gap noted above (span isn't annotated with the computed verdict via `recordVerdict`) — left as-is since it matches the brief's own sketch and wasn't specified as in-scope for Task 7; worth a follow-up if Task 10 (CLI wiring) or a later slice wants richer per-check span attributes.

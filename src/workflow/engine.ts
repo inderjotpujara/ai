@@ -1,5 +1,9 @@
 import { withStepSpan } from '../telemetry/spans.ts';
 import {
+  isUnverifiedMarker,
+  type UnverifiedMarker,
+} from '../verification/expand.ts';
+import {
   autoPersistStepOutput,
   DEFAULT_MAX_PARALLEL,
   runStepByKind,
@@ -18,6 +22,16 @@ export type { WorkflowDeps } from './run-step.ts';
 export { defaultRunAgentStep } from './run-step.ts';
 
 type StepResult = { step: Step; value: unknown } | { step: Step; error: Error };
+
+/** Scan a finished run's context for an abstain marker (a verified step whose
+ *  answer stayed unsupported after bounded correction). First marker wins.
+ *  Mirrors `findUnverified` in src/crew/engine.ts. */
+function findUnverified(ctx: WorkflowContext): UnverifiedMarker | undefined {
+  for (const v of Object.values(ctx)) {
+    if (isUnverifiedMarker(v)) return v;
+  }
+  return undefined;
+}
 
 /** Execute a workflow DAG: topological scheduling with bounded concurrency,
  *  per-step zod output validation, per-step onError policy, and branch skipping. */
@@ -103,5 +117,15 @@ export async function runWorkflow(
   }
 
   if (failure) return failure;
+  const unverified = findUnverified(ctx);
+  if (unverified) {
+    return {
+      kind: 'unverified',
+      failedStepId: unverified.answerStepId,
+      unsupportedClaims: unverified.unsupportedClaims,
+      faithfulness: unverified.faithfulness,
+      draft: unverified.draft,
+    };
+  }
   return { kind: 'done', output: ctx };
 }

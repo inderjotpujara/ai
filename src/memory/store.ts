@@ -164,6 +164,10 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
       await lance.openOrCreateTable(space, dim);
     },
 
+    async getByIds(space: string, ids: string[]): Promise<RetrievalResult[]> {
+      return lance.getByIds(space, ids);
+    },
+
     async stats(): Promise<Record<string, number>> {
       const out: Record<string, number> = {};
       for (const s of sql.listSpaces())

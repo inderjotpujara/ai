@@ -32,6 +32,11 @@ async function postJson(
   }
 }
 
+/** Normalize a model name to include `:latest` if no tag is present. */
+function normalizeModelName(name: string): string {
+  return name.includes(':') ? name : `${name}:latest`;
+}
+
 /** True if `model` appears in `GET /api/tags` (field is `name`, not `model`). */
 export async function isModelInstalled(
   model: string,
@@ -47,7 +52,10 @@ export async function isModelInstalled(
     throw new ProviderError(`Ollama /api/tags returned ${res.status}`);
   }
   const data = (await res.json()) as TagsResponse;
-  return (data.models ?? []).some((m) => m.name === model);
+  const normalizedQuery = normalizeModelName(model);
+  return (data.models ?? []).some(
+    (m) => normalizeModelName(m.name) === normalizedQuery,
+  );
 }
 
 /** Pull a model (blocking, non-streamed). Write field is `model`. */

@@ -1,129 +1,65 @@
-## Task 4: Embeddings port (`RuntimeControl.embed` + probe + manager-backed wrapper)
+## Task 4: Claim decomposition + citation parsing
 
-**Files:**
-- Modify: `src/runtime/runtime.ts` (add `embed` to `RuntimeControl`)
-- Modify: `src/runtime/ollama.ts` (implement `embed`)
-- Modify: `src/runtime/mlx-server.ts` (`embed` throws `MemoryError`)
-- Create: `src/memory/embed.ts`
-- Test: `tests/memory/embed.test.ts`
+**Files:** Create `src/verification/claims.ts`; Test `tests/verification/claims.test.ts`
 
-**Interfaces:**
-- Produces: `RuntimeControl.embed(model: string, texts: string[]): Promise<number[][]>`; `probeEmbedder(model: string, baseUrl?: string): Promise<{ dim: number; maxInput: number }>`; `embedderDecl(model: string): ModelDeclaration` (weights-only: `footprint.kvBytesPerToken = 0`); `makeEmbedder(deps): { embed(texts: string[]): Promise<number[][]> }` that ensure-loads via the Model Manager then calls `control.embed`, wrapped in `withMemoryEmbedSpan`.
-- Consumes: `createOllama` pattern from `src/providers/ollama.ts`; `getModelMaxContext`/`/api/show` pattern from `src/runtime/ollama-control.ts`; `ensureReady` from the Model Manager; `ModelDeclaration` from `src/core/types.ts`.
+**Interfaces:** Produces `parseCitations(text: string): string[]` (regex `\[mem:([^\]]+)\]`, deduped) and `decomposeClaims(answer: string, deps: VerifyDeps): Promise<Claim[]>` (uses `deps.generate(deps.generalModel, prompt)` → parse a JSON array of `{text, citedIds}`; robust to fenced JSON).
 
-- [ ] **Step 1: Write the failing test** (probe parsing + weights-only decl; embed itself is covered live in Task 12's live test)
+- [ ] **Step 1: Failing test** (mock `generate`)
 ```ts
-// tests/memory/embed.test.ts
-import { describe, expect, test } from 'vitest';
-import { embedderDecl } from '../../src/memory/embed.ts';
+// tests/verification/claims.test.ts
+import { describe, expect, test } from 'bun:test';
+import { parseCitations, decomposeClaims } from '../../src/verification/claims.ts';
 
-describe('embedder declaration', () => {
-  test('is weights-only (no KV budget)', () => {
-    const d = embedderDecl('qwen3-embedding:0.6b');
-    expect(d.model).toBe('qwen3-embedding:0.6b');
-    expect(d.footprint.kvBytesPerToken).toBe(0);
-    expect(d.footprint.approxParamsBillions).toBeGreaterThan(0);
+describe('citations + claims', () => {
+  test('parseCitations extracts + dedupes [mem:id]', () => {
+    expect(parseCitations('x [mem:a#0] y [mem:b#1] z [mem:a#0]')).toEqual(['a#0','b#1']);
+    expect(parseCitations('no cites')).toEqual([]);
+  });
+  test('decomposeClaims parses model JSON', async () => {
+    const deps: any = { generalModel: 'm', generate: async () => '```json\n[{"text":"The sky is blue","citedIds":["a#0"]},{"text":"Grass is green","citedIds":[]}]\n```' };
+    const claims = await decomposeClaims('...', deps);
+    expect(claims).toHaveLength(2);
+    expect(claims[0]).toEqual({ text: 'The sky is blue', citedIds: ['a#0'] });
+    expect(claims[1]?.citedIds).toEqual([]);
   });
 });
 ```
-> Inspect `ModelDeclaration` in `src/core/types.ts` and populate `embedderDecl` with the minimum valid fields (provider Ollama, a small `approxParamsBillions` like 0.6, `bytesPerWeight` matching the quant, `kvBytesPerToken: 0`). Adjust the assertion to the real field names if they differ.
 
-- [ ] **Step 2: Run test to verify it fails**
-Run: `bun test tests/memory/embed.test.ts`
-Expected: FAIL (module not found).
-
-- [ ] **Step 3: Add `embed` to `RuntimeControl`** in `src/runtime/runtime.ts`:
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3: Implement `src/verification/claims.ts`**
 ```ts
-// inside RuntimeControl type:
-embed(model: string, texts: string[]): Promise<number[][]>;
-```
+import type { Claim, VerifyDeps } from './types.ts';
 
-- [ ] **Step 4: Implement `embed` in `src/runtime/ollama.ts`** (via AI SDK `embedMany`):
-```ts
-import { embedMany } from 'ai';
-import { createOllama } from 'ollama-ai-provider-v2';
-// baseURL must include /api (see src/providers/ollama.ts)
-async function ollamaEmbed(model: string, texts: string[]): Promise<number[][]> {
-  const ollama = createOllama({ baseURL: 'http://localhost:11434/api' });
-  const { embeddings } = await embedMany({ model: ollama.textEmbeddingModel(model), values: texts });
-  return embeddings;
-}
-// wire ollamaEmbed into the runtime's `control.embed`
-```
-> If `ollama.textEmbeddingModel` isn't the exact accessor in the installed `ollama-ai-provider-v2@3.6.0`, check its exports (`textEmbeddingModel`/`embedding`) and use the correct one.
-
-- [ ] **Step 5: Implement `embed` in `src/runtime/mlx-server.ts`**:
-```ts
-import { MemoryError } from '../core/errors.ts';
-// control.embed:
-async embed(): Promise<number[][]> {
-  throw new MemoryError('embeddings are not supported on the MLX runtime yet');
-}
-```
-
-- [ ] **Step 6: Write `src/memory/embed.ts`**
-```ts
-import { embedderDecl as _decl } from './embed.ts'; // (placeholder note: define below, don't self-import)
-import type { ModelDeclaration } from '../core/types.ts';
-import { ProviderKind } from '../core/types.ts';
-import { withMemoryEmbedSpan } from '../telemetry/spans.ts';
-
-const DEFAULT_BASE = 'http://localhost:11434';
-
-/** Weights-only model declaration for an embedder (no KV cache). */
-export function embedderDecl(model: string): ModelDeclaration {
-  return {
-    model,
-    provider: ProviderKind.Ollama,
-    footprint: { approxParamsBillions: 0.6, bytesPerWeight: 1, kvBytesPerToken: 0 },
-  } as ModelDeclaration; // fill required fields per src/core/types.ts
+export function parseCitations(text: string): string[] {
+  const out: string[] = [];
+  const re = /\[mem:([^\]]+)\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) { const id = m[1]!.trim(); if (!out.includes(id)) out.push(id); }
+  return out;
 }
 
-/** Probe embedder dim + max input via /api/show (mirror getModelMaxContext). */
-export async function probeEmbedder(model: string, baseUrl = DEFAULT_BASE): Promise<{ dim: number; maxInput: number }> {
-  const res = await fetch(`${baseUrl}/api/show`, { method: 'POST', body: JSON.stringify({ model }) });
-  const data = (await res.json()) as { model_info?: Record<string, unknown> };
-  const info = data.model_info ?? {};
-  const arch = info['general.architecture'];
-  if (typeof arch !== 'string') throw new Error(`cannot probe embedder ${model}`);
-  const dim = info[`${arch}.embedding_length`];
-  const maxInput = info[`${arch}.context_length`];
-  return {
-    dim: typeof dim === 'number' ? dim : 768,
-    maxInput: typeof maxInput === 'number' ? maxInput : 2048,
-  };
+function extractJson(raw: string): string {
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = (fence ? fence[1]! : raw).trim();
+  const start = body.indexOf('['); const end = body.lastIndexOf(']');
+  return start >= 0 && end > start ? body.slice(start, end + 1) : body;
 }
 
-export type EmbedderDeps = {
-  ensureReady: (decl: ModelDeclaration) => Promise<number>;
-  control: { embed(model: string, texts: string[]): Promise<number[][]> };
-  model: string;
-};
-
-/** Manager-backed embedder: ensure-loaded (weights-only) then embed, traced. */
-export function makeEmbedder(deps: EmbedderDeps) {
-  return {
-    async embed(texts: string[]): Promise<number[][]> {
-      if (texts.length === 0) return [];
-      await deps.ensureReady(embedderDecl(deps.model));
-      return withMemoryEmbedSpan({ model: deps.model, count: texts.length }, () =>
-        deps.control.embed(deps.model, texts),
-      );
-    },
-  };
+export async function decomposeClaims(answer: string, deps: VerifyDeps): Promise<Claim[]> {
+  const prompt = `Break the ANSWER into atomic factual claims. For each claim, list the memory citation ids it cites, taken ONLY from [mem:<id>] tags that appear with that claim. Return a JSON array of {"text": string, "citedIds": string[]}. No prose.\n\nANSWER:\n${answer}`;
+  const raw = await deps.generate(deps.generalModel, prompt);
+  let parsed: unknown;
+  try { parsed = JSON.parse(extractJson(raw)); } catch { return [{ text: answer, citedIds: parseCitations(answer) }]; }
+  if (!Array.isArray(parsed)) return [{ text: answer, citedIds: parseCitations(answer) }];
+  return parsed
+    .filter((c): c is { text: string; citedIds?: string[] } => !!c && typeof (c as any).text === 'string')
+    .map((c) => ({ text: c.text, citedIds: Array.isArray(c.citedIds) ? c.citedIds.map(String) : [] }));
 }
 ```
-> Remove the bogus self-import line; it's only there to flag "define `embedderDecl` in this file." Fill `embedderDecl` with the REAL required `ModelDeclaration` fields (open `src/core/types.ts`). `MemoryError` import only where used.
+> Fallback (unparseable model output → treat the whole answer as one claim) keeps the primitive robust; it's covered by the "returns something" path, not a placeholder.
 
-- [ ] **Step 7: Run tests + typecheck**
-Run: `bun test tests/memory/embed.test.ts && bun run typecheck`
-Expected: PASS.
-
-- [ ] **Step 8: Commit**
-```bash
-git add src/runtime/runtime.ts src/runtime/ollama.ts src/runtime/mlx-server.ts src/memory/embed.ts tests/memory/embed.test.ts
-git commit -m "feat(memory): embeddings via runtime port (weights-only, manager-backed)"
-```
+- [ ] **Step 4: Run tests + typecheck** → PASS.
+- [ ] **Step 5: Commit** — `git commit -m "feat(verification): claim decomposition + [mem:id] citation parsing"`
 
 ---
 

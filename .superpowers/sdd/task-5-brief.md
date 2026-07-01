@@ -1,111 +1,79 @@
-## Task 5: Live-capped semantic chunker
+## Task 5: Judge (MiniCheck check + faithfulness aggregation + consent-pull)
 
-**Files:**
-- Create: `src/memory/chunk.ts`
-- Test: `tests/memory/chunk.test.ts`
+**Files:** Create `src/verification/judge.ts`; Test `tests/verification/judge.test.ts`
 
 **Interfaces:**
-- Produces: `chunk(text: string, opts: { capTokens: number; embed?: (t: string[]) => Promise<number[][]> }): Promise<Chunk[]>`. Deterministic fixed-size fallback when `embed` is omitted.
-- Consumes: `Chunk` from `types.ts`.
+- Consumes: `VerifyDeps`, `Claim`, `Verdict`, `ClaimVerdict` (Task 1); `RetrievalResult` (memory).
+- Produces: `checkClaim(claim, evidence, judgeModel, deps): Promise<boolean>`; `verifyFaithfulness(claims, evidenceById, judgeModel, fallback, threshold, deps): Promise<Verdict>`; `ensureJudgeModel(deps, ensureFn): Promise<{model,fallback}>` (thin — real consent lives in the CLI dep `deps.ensureJudge`; here just call it).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Failing test** (mock `generate`: MiniCheck answers "Yes"/"No")
 ```ts
-// tests/memory/chunk.test.ts
-import { describe, expect, test } from 'vitest';
-import { chunk } from '../../src/memory/chunk.ts';
+// tests/verification/judge.test.ts
+import { describe, expect, test } from 'bun:test';
+import { checkClaim, verifyFaithfulness } from '../../src/verification/judge.ts';
 
-describe('chunk', () => {
-  test('fixed-size fallback respects capTokens (chars≈tokens×4)', async () => {
-    const text = 'a'.repeat(1000);
-    const chunks = await chunk(text, { capTokens: 50 }); // ~200 chars/chunk
-    expect(chunks.length).toBeGreaterThan(1);
-    for (const c of chunks) expect(c.text.length).toBeLessThanOrEqual(50 * 4);
-    expect(chunks.map((c) => c.ordinal)).toEqual(chunks.map((_, i) => i));
+const yes = { generalModel: 'g', generate: async (_m: string, p: string) => (p.includes('blue') ? 'Yes' : 'No') } as any;
+
+describe('judge', () => {
+  test('checkClaim maps Yes/No → boolean', async () => {
+    expect(await checkClaim('sky is blue', 'the sky is blue', 'j', yes)).toBe(true);
+    expect(await checkClaim('grass is red', 'grass is green', 'j', yes)).toBe(false);
   });
-  test('reassembles to original (fallback, no overlap loss)', async () => {
-    const text = 'one two three four five six seven eight';
-    const chunks = await chunk(text, { capTokens: 4 });
-    expect(chunks.map((c) => c.text).join('')).toContain('one');
-  });
-  test('semantic split calls embed and keeps chunks under cap', async () => {
-    const embed = async (ts: string[]) => ts.map((_, i) => [i % 2, 1 - (i % 2)]); // alternating vectors
-    const text = 'Sentence one. Sentence two. Sentence three. Sentence four.';
-    const chunks = await chunk(text, { capTokens: 100, embed });
-    expect(chunks.length).toBeGreaterThanOrEqual(1);
-    for (const c of chunks) expect(c.text.length).toBeLessThanOrEqual(100 * 4);
+  test('verifyFaithfulness aggregates + thresholds; uncited claim → unsupported', async () => {
+    const claims = [
+      { text: 'sky is blue', citedIds: ['a#0'] },
+      { text: 'grass is red', citedIds: ['b#0'] },
+      { text: 'uncited fact', citedIds: [] },
+    ];
+    const ev = new Map([['a#0','the sky is blue'],['b#0','grass is green']]);
+    const v = await verifyFaithfulness(claims, ev, 'j', false, 0.9, yes);
+    expect(v.claims.find((c) => c.claim==='sky is blue')?.supported).toBe(true);
+    expect(v.claims.find((c) => c.claim==='grass is red')?.supported).toBe(false);
+    expect(v.claims.find((c) => c.claim==='uncited fact')?.supported).toBe(false); // no citation → unsupported
+    expect(v.faithfulness).toBeCloseTo(1/3, 5);
+    expect(v.supported).toBe(false);
+    expect(v.unsupportedClaims).toContain('uncited fact');
   });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-Run: `bun test tests/memory/chunk.test.ts`
-Expected: FAIL (module not found).
-
-- [ ] **Step 3: Write `src/memory/chunk.ts`**
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3: Implement `src/verification/judge.ts`**
 ```ts
-import type { Chunk } from './types.ts';
+import type { Claim, ClaimVerdict, Verdict, VerifyDeps } from './types.ts';
 
-const CHARS_PER_TOKEN = 4;
-
-function fixed(text: string, capChars: number): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < text.length; i += capChars) out.push(text.slice(i, i + capChars));
-  return out;
+/** MiniCheck-style call: (document, claim) → Yes/No. Fallback uses the same shape on the general model. */
+export async function checkClaim(claim: string, evidence: string, judgeModel: string, deps: VerifyDeps): Promise<boolean> {
+  if (!evidence.trim()) return false;
+  const prompt = `Document:\n${evidence}\n\nClaim: ${claim}\n\nIs the claim fully supported by the document? Answer only "Yes" or "No".`;
+  const raw = (await deps.generate(judgeModel, prompt)).trim().toLowerCase();
+  return raw.startsWith('yes');
 }
 
-function cosine(a: number[], b: number[]): number {
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
-}
-
-/** Split into chunks. Semantic (embedding-driven) when `embed` is supplied; else fixed-size. */
-export async function chunk(
-  text: string,
-  opts: { capTokens: number; embed?: (t: string[]) => Promise<number[][]>; threshold?: number },
-): Promise<Chunk[]> {
-  const capChars = Math.max(1, opts.capTokens * CHARS_PER_TOKEN);
-  const clean = text.trim();
-  if (!clean) return [];
-
-  if (!opts.embed) {
-    return fixed(clean, capChars).map((t, i) => ({ text: t, ordinal: i }));
+export async function verifyFaithfulness(
+  claims: Claim[], evidenceById: Map<string, string>, judgeModel: string, fallback: boolean, threshold: number, deps: VerifyDeps,
+): Promise<Verdict> {
+  const verdicts: ClaimVerdict[] = [];
+  for (const c of claims) {
+    if (c.citedIds.length === 0) { verdicts.push({ claim: c.text, citedIds: [], supported: false, reason: 'no citation' }); continue; }
+    const evidence = c.citedIds.map((id) => evidenceById.get(id) ?? '').filter(Boolean).join('\n\n');
+    const supported = await checkClaim(c.text, evidence, judgeModel, deps);
+    verdicts.push({ claim: c.text, citedIds: c.citedIds, supported, reason: supported ? undefined : (evidence ? 'unsupported by cited evidence' : 'cited chunk missing') });
   }
-
-  const sentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
-  if (sentences.length <= 1) return fixed(clean, capChars).map((t, i) => ({ text: t, ordinal: i }));
-
-  const vecs = await opts.embed(sentences);
-  const threshold = opts.threshold ?? 0.5;
-  const chunks: Chunk[] = [];
-  let buf = sentences[0];
-  for (let i = 1; i < sentences.length; i++) {
-    const sim = cosine(vecs[i - 1], vecs[i]);
-    const next = `${buf} ${sentences[i]}`;
-    if (sim < threshold || next.length > capChars) {
-      chunks.push({ text: buf, ordinal: chunks.length });
-      buf = sentences[i];
-    } else {
-      buf = next;
-    }
-  }
-  chunks.push({ text: buf, ordinal: chunks.length });
-  // hard-cap any oversize chunk with the fixed splitter
-  return chunks.flatMap((c) =>
-    c.text.length <= capChars ? [c] : fixed(c.text, capChars).map((t) => ({ text: t, ordinal: 0 })),
-  ).map((c, i) => ({ text: c.text, ordinal: i }));
+  const total = verdicts.length || 1;
+  const supportedCount = verdicts.filter((v) => v.supported).length;
+  const faithfulness = supportedCount / total;
+  return {
+    supported: faithfulness >= threshold,
+    faithfulness,
+    claims: verdicts,
+    unsupportedClaims: verdicts.filter((v) => !v.supported).map((v) => v.claim),
+    usedFallback: fallback,
+  };
 }
 ```
-
-- [ ] **Step 4: Run tests to verify they pass**
-Run: `bun test tests/memory/chunk.test.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-```bash
-git add src/memory/chunk.ts tests/memory/chunk.test.ts
-git commit -m "feat(memory): live-capped semantic chunker with fixed-size fallback"
-```
+- [ ] **Step 4: Run tests + typecheck** → PASS.
+- [ ] **Step 5: Commit** — `git commit -m "feat(verification): MiniCheck claim check + faithfulness aggregation"`
 
 ---
 

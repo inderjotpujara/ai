@@ -1,115 +1,84 @@
-# Task 6 Report: SqliteStore Implementation
+# Task 6 Report: CRAG Grader + Bounded Corrective Retrieve
 
 ## Summary
-Implemented `SqliteStore` class with typed row shapes (no `as any`) for space registry and document manifest in the memory subsystem.
 
-## Implementation Status
-- **Status**: ✅ Complete
-- **Commit**: `903b034` — "feat(memory): bun:sqlite space registry + doc manifest"
+Implemented Task 6 (Grounded Verification / CRAG) following strict TDD. Three functions added to support retrieval grading and corrective retrieval:
 
-## Files Created
-1. **`src/memory/sqlite-store.ts`** (85 lines)
-   - Class `SqliteStore` with 6 public methods
-   - Private `db: Database` field
-   - Two typed row shapes defined at module level
+- **`gradeRetrieval(query, chunks, deps): Promise<CragGrade>`** — Routes model output to CORRECT/AMBIGUOUS/INCORRECT enum
+- **`rewriteQuery(query, deps): Promise<string>`** — Rewrites query via router model, returns first line or falls back to original
+- **`correctiveRetrieve(query, recall, deps): Promise<{query, chunks}>`** — Bounded single-pass corrective flow: rewrite query → re-recall
 
-2. **`tests/memory/sqlite-store.test.ts`** (24 lines)
-   - 2 test cases: space registry + doc dedup
-   - Cleanup: `rmSync` in `afterEach`
+## Files Created/Modified
 
-## TDD Process
+- **`src/verification/crag.ts`** (28 lines) — Implements three export functions
+- **`tests/verification/crag.test.ts`** (31 lines) — Two tests: label→enum mapping, rewrite+recall flow
 
-### RED (Test Failure)
+## TDD Steps
+
+### Step 1 & 2: Failing Tests ✅
+Created test file; ran `bun test` → FAIL (file not found).
+
+### Step 3: Implementation ✅
+Implemented per brief:
+- `gradeRetrieval`: prompt → `generate()` → parse to enum (CORRECT/AMBIGUOUS/INCORRECT)
+- `rewriteQuery`: prompt → `generate()` → `.split('\n')[0]?.trim()` (no non-null assertion; use optional chain)
+- `correctiveRetrieve`: call rewriteQuery → re-recall with rewritten query → return both
+
+### Step 4: GREEN + Lint Clean ✅
 ```
-error: Cannot find module '../../src/memory/sqlite-store.ts'
-```
-Test written first; module not found as expected.
-
-### GREEN (Implementation)
-All tests pass after implementation:
-```
-2 pass
-0 fail
-6 expect() calls
+bun test: 2 pass, 0 fail
+bun run typecheck: pass (no errors)
+bun run lint:file: pass (no warnings/errors)
 ```
 
-### Verification
-- **Tests**: `bun test tests/memory/sqlite-store.test.ts` → ✅ PASS
-- **Lint**: `bun run lint:file -- src/memory/sqlite-store.ts` → ✅ Clean (formatter applied)
-- **Typecheck**: No errors in sqlite-store.ts
+Key fixes:
+- Replaced non-null assertion `[0]!` with optional chain `[0]?`
+- Fixed imports: `type` imports before value imports
+- Fixed string concat to template literal in tests
+- Properly typed `deps` as `VerifyDeps` (not `any`)
 
-## Typed Row Shapes (No `as any`)
-
-Instead of the brief's `as any` pattern, used explicit types:
-
-```ts
-type SpaceRow = {
-  name: string;
-  embed_model: string;      // matches SQL column name
-  embed_dim: number;
-  chunk_cap_tokens: number;
-  created_at: number;
-};
-
-type DocRow = {
-  hash: string;
-};
+### Step 5: Commit ✅
 ```
+fb364bf feat(verification): CRAG retrieval grader + bounded corrective retrieve
+```
+Git hooks ran: `docs-check` passed (no new src subsystems).
 
-All query casts use these types:
-- `getSpace()`: cast result to `SpaceRow | undefined`
-- `listSpaces()`: cast result to `SpaceRow[]`
-- `seenDoc()`: cast result to `DocRow | undefined`
+## Self-Review
 
-This eliminates Biome's `any` lint warnings while keeping SQL column mapping identical to brief.
+**Code Quality:**
+- Functions are small, focused, pure (no side effects)
+- Type-safe: all imports properly typed, no `any` escapes
+- Error handling: fallbacks (e.g., `|| query` if rewrite fails)
 
-## Methods Implemented
+**Test Coverage:**
+- ✅ Label→enum mapping (INCORRECT → CragGrade.Incorrect)
+- ✅ Query rewrite + single re-recall flow
+- Mocks `deps.generate()` + custom `recall()` injected
+- Tests are isolated, deterministic
 
-1. **`constructor(dbPath: string)`**
-   - Creates parent directory recursively
-   - Initializes SQLite database
-   - Creates `spaces` table (PK: name)
-   - Creates `documents` table (PK: source)
-
-2. **`getSpace(name: string): SpaceMeta | undefined`**
-   - Queries single space by name
-   - Transforms snake_case columns to camelCase
-
-3. **`createSpace(m: SpaceMeta): void`**
-   - Inserts or replaces space metadata
-
-4. **`listSpaces(): SpaceMeta[]`**
-   - Returns all spaces as array of `SpaceMeta`
-
-5. **`seenDoc(source: string, hash: string): boolean`**
-   - Checks if source has been ingested with given hash
-   - Used for dedup on subsequent runs
-
-6. **`recordDoc(source: string, hash: string, chunks: number, at: number): void`**
-   - Inserts or replaces document manifest entry
-   - Tracks ingest metadata (chunk count, timestamp)
-
-7. **`close(): void`**
-   - Closes SQLite connection
-
-## Test Coverage
-
-| Test Case | Assertions | Result |
-|-----------|-----------|--------|
-| space create/get is authoritative for embedder | 3 | ✅ PASS |
-| doc dedupe by hash | 3 | ✅ PASS |
-| **Total** | **6** | **✅ PASS** |
-
-## Self-Review Checklist
-
-- ✅ No `as any` — used typed row shapes
-- ✅ Column mapping matches brief exactly (snake_case in SQL, camelCase in return)
-- ✅ Biome lint clean (formatter applied)
-- ✅ Tests pass with bun:test
-- ✅ TDD flow: failing test → implementation → passing tests
-- ✅ Commit message follows project convention
-- ✅ All public methods per brief
-- ✅ Proper cleanup in test afterEach
+**Linting:**
+- No console.log, no type errors, no style violations
+- All imports organized alphabetically
+- Imports split into `type` and value; `type` comes first
 
 ## Concerns
-None. Implementation is straightforward and follows brief specification exactly (with typed row improvements).
+
+**None.** Implementation is clean, follows brief exactly, passes all checks.
+
+## Test Output
+
+```
+bun test v1.3.11
+ 2 pass
+ 0 fail
+ 3 expect() calls
+Ran 2 tests across 1 file. [9.00ms]
+```
+
+---
+
+**Status:** COMPLETE ✅  
+**TDD:** RED → GREEN ✅  
+**Typecheck:** Pass ✅  
+**Lint:** Clean ✅  
+**Commit:** fb364bf ✅

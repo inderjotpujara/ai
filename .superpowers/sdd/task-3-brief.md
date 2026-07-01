@@ -1,98 +1,54 @@
-## Task 3: Telemetry spans (additive)
+## Task 3: `MemoryStore.getByIds`
 
-**Files:**
-- Modify: `src/telemetry/spans.ts`
-- Test: `tests/memory/spans.test.ts`
+**Files:** Modify `src/memory/lancedb-store.ts` (add `getByIds`), `src/memory/store.ts` (expose it); Test `tests/memory/getbyids.test.ts`
 
-**Interfaces:**
-- Produces: `ATTR.MEMORY_SPACE`, `MEMORY_NAMESPACE`, `MEMORY_CANDIDATES`, `MEMORY_RETURNED`, `MEMORY_RERANKED`, `MEMORY_EMBED_MODEL`; `withMemoryRecallSpan<T>(info, fn)`, `withMemoryIngestSpan<T>(info, fn)`, `withMemoryEmbedSpan<T>(info, fn)`.
-- Consumes: the existing `inSpan`/`ATTR` and OTel test provider (`tests/helpers/otel-test-provider.ts`).
+**Interfaces:** Produces `LanceStore.getByIds(space, ids: string[]): Promise<RetrievalResult[]>` and `MemoryStore.getByIds(space, ids)`.
 
-> Follow the EXACT pattern already used by `withWorkflowSpan`/`withStepSpan` in `src/telemetry/spans.ts` (open a span named `memory.recall`/`memory.ingest`/`memory.embed`, set attributes, run `fn`, record errors). Read that file first and mirror it.
-
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Failing test** (real LanceDB, tiny table — mirror `tests/memory/lancedb-smoke.test.ts`)
 ```ts
-// tests/memory/spans.test.ts
-import { describe, expect, test } from 'vitest';
-import { withTestTelemetry } from '../helpers/otel-test-provider.ts';
-import { withMemoryRecallSpan } from '../../src/telemetry/spans.ts';
+// tests/memory/getbyids.test.ts
+import { afterEach, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
+import { LanceStore } from '../../src/memory/lancedb-store.ts';
+import { MemoryKind } from '../../src/memory/types.ts';
 
-describe('memory spans', () => {
-  test('recall span records space + counts', async () => {
-    const spans = await withTestTelemetry(async () => {
-      await withMemoryRecallSpan(
-        { space: 'default', namespace: 'crew:x', candidates: 20, returned: 5, reranked: false },
-        async () => 'ok',
-      );
-    });
-    const s = spans.find((sp) => sp.name === 'memory.recall');
-    expect(s).toBeDefined();
-    expect(s?.attributes['memory.space']).toBe('default');
-    expect(s?.attributes['memory.returned']).toBe(5);
-  });
+const DIR = '/tmp/getbyids-test';
+afterEach(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch {} });
+
+describe('LanceStore.getByIds', () => {
+  test('returns only the requested ids', async () => {
+    const s = new LanceStore(DIR);
+    await s.openOrCreateTable('default', 2);
+    await s.upsert('default', [
+      { id: 'a#0', space: 'default', namespace: '', kind: MemoryKind.Document, text: 'alpha', vector: [1,0], source: 'a', createdAt: 1 },
+      { id: 'b#0', space: 'default', namespace: '', kind: MemoryKind.Document, text: 'beta', vector: [0,1], source: 'b', createdAt: 1 },
+    ]);
+    const got = await s.getByIds('default', ['a#0']);
+    expect(got.map((r) => r.id)).toEqual(['a#0']);
+    expect(got[0]?.text).toBe('alpha');
+    expect(await s.getByIds('default', [])).toEqual([]);
+  }, 60_000);
 });
 ```
-> If the project's OTel test helper has a different name/shape, adapt this test to match `tests/helpers/otel-test-provider.ts` and the way `tests/**` assert on `withWorkflowSpan`.
 
-- [ ] **Step 2: Run test to verify it fails**
-Run: `bun test tests/memory/spans.test.ts`
-Expected: FAIL (`withMemoryRecallSpan` undefined).
-
-- [ ] **Step 3: Extend `ATTR` and add the three span helpers** in `src/telemetry/spans.ts`, mirroring `withStepSpan`:
+- [ ] **Step 2: Run → FAIL** (`getByIds` undefined).
+- [ ] **Step 3: Implement `getByIds`** in `src/memory/lancedb-store.ts` (reuse the file's `escapeSqlLiteral` + query pattern used by `hybridSearch`):
 ```ts
-// add to ATTR object:
-MEMORY_SPACE: 'memory.space',
-MEMORY_NAMESPACE: 'memory.namespace',
-MEMORY_CANDIDATES: 'memory.candidates',
-MEMORY_RETURNED: 'memory.returned',
-MEMORY_RERANKED: 'memory.reranked',
-MEMORY_EMBED_MODEL: 'memory.embed_model',
-
-// new helpers (shape mirrors existing withStepSpan):
-export function withMemoryRecallSpan<T>(
-  info: { space: string; namespace?: string; candidates?: number; returned?: number; reranked?: boolean },
-  fn: () => Promise<T>,
-): Promise<T> {
-  return inSpan('memory.recall', async (span) => {
-    span.setAttribute(ATTR.MEMORY_SPACE, info.space);
-    if (info.namespace) span.setAttribute(ATTR.MEMORY_NAMESPACE, info.namespace);
-    if (info.candidates != null) span.setAttribute(ATTR.MEMORY_CANDIDATES, info.candidates);
-    if (info.returned != null) span.setAttribute(ATTR.MEMORY_RETURNED, info.returned);
-    if (info.reranked != null) span.setAttribute(ATTR.MEMORY_RERANKED, info.reranked);
-    return fn();
-  });
-}
-export function withMemoryIngestSpan<T>(
-  info: { space: string; source: string; chunks?: number }, fn: () => Promise<T>,
-): Promise<T> {
-  return inSpan('memory.ingest', async (span) => {
-    span.setAttribute(ATTR.MEMORY_SPACE, info.space);
-    span.setAttribute('memory.source', info.source);
-    if (info.chunks != null) span.setAttribute('memory.chunks', info.chunks);
-    return fn();
-  });
-}
-export function withMemoryEmbedSpan<T>(
-  info: { model: string; count: number }, fn: () => Promise<T>,
-): Promise<T> {
-  return inSpan('memory.embed', async (span) => {
-    span.setAttribute(ATTR.MEMORY_EMBED_MODEL, info.model);
-    span.setAttribute('memory.count', info.count);
-    return fn();
-  });
+async getByIds(space: string, ids: string[]): Promise<RetrievalResult[]> {
+  if (ids.length === 0) return [];
+  const db = await this.db();
+  const tbl = await db.openTable(space);
+  const list = ids.map((i) => `'${escapeSqlLiteral(i)}'`).join(',');
+  const rows = (await tbl.query().where(`id IN (${list})`).toArray()) as any[];
+  return rows.map((r) => ({ id: r.id, text: r.text, source: r.source, score: 0, namespace: r.namespace }));
 }
 ```
-> Use the real `inSpan` signature from the file. If `inSpan` isn't exported/available, mirror however `withStepSpan` opens its span.
+> Confirm the non-vector query API in the installed `@lancedb/lancedb@0.30.0` (`tbl.query().where(...).toArray()`); if the accessor differs, use the version's real filter-query API. Keep the signature stable. Type the row shape if biome flags `any`.
 
-- [ ] **Step 4: Run tests to verify they pass**
-Run: `bun test tests/memory/spans.test.ts && bun run typecheck`
-Expected: PASS.
+- [ ] **Step 4: Expose on the facade** in `src/memory/store.ts` — add to the returned object: `async getByIds(space: string, ids: string[]) { return lance.getByIds(space, ids); }`
 
-- [ ] **Step 5: Commit**
-```bash
-git add src/telemetry/spans.ts tests/memory/spans.test.ts
-git commit -m "feat(telemetry): memory recall/ingest/embed spans + ATTR.MEMORY_*"
-```
+- [ ] **Step 5: Run tests + typecheck + full suite** → PASS.
+- [ ] **Step 6: Commit** — `git commit -m "feat(memory): getByIds(space, ids) for citation-evidence lookup"`
 
 ---
 

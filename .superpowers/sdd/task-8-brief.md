@@ -1,116 +1,34 @@
-## Task 8: Retrieval pipeline (hybrid → RRF → budget-fit; rerank seam)
+## Task 8: Crew auto-insertion (`verify` flag → verify/branch/corrective/abstain)
 
-**Files:**
-- Create: `src/memory/retrieve.ts`
-- Test: `tests/memory/retrieve.test.ts`
+**Files:** Modify `src/crew/types.ts` (`Task.verify?`, `CrewDef.verify?`, `CrewOutcome` +`unverified`), `src/crew/compile.ts` (insert steps), `src/crew/engine.ts` (map outcome); Test `tests/crew/verify-wiring.test.ts`
 
-**Interfaces:**
-- Produces: `type RetrieveDeps = { lance: Pick<LanceStore,'hybridSearch'>; embedQuery: (t: string) => Promise<number[]>; space: SpaceMeta; reranker?: Reranker }`; `retrieve(query: string, opts: RecallOptions, deps: RetrieveDeps): Promise<RetrievalResult[]>`. `type Reranker = { rerank(query: string, results: RetrievalResult[]): Promise<RetrievalResult[]> }`.
-- Consumes: `retrievalBudgetChars` (Task 2); `withMemoryRecallSpan` (Task 3); `currentDelegationContext` (guardrails); `MemoryError`.
+**Interfaces:** Consumes verify primitive + workflow Branch step. Produces the compiled sub-graph + `{kind:'unverified'}` outcome.
 
-- [ ] **Step 1: Write the failing test**
+> Read `src/crew/compile.ts` + `src/workflow/types.ts` (BranchStep: `predicate`/`whenTrue`/`whenFalse`) first. Keep additive: a task without `verify` compiles exactly as today.
+
+- [ ] **Step 1: Failing test** (mock models via injected deps; assert an unsupported answer yields `unverified`)
 ```ts
-// tests/memory/retrieve.test.ts
-import { describe, expect, test } from 'vitest';
-import { retrieve } from '../../src/memory/retrieve.ts';
-import { MemoryError } from '../../src/core/errors.ts';
-import { MemoryKind, type RetrievalResult, type SpaceMeta } from '../../src/memory/types.ts';
-
-const space: SpaceMeta = { name: 'default', embedModel: 'e', embedDim: 2, chunkCapTokens: 100, createdAt: 1 };
-const cand = (id: string, text: string, score: number): RetrievalResult => ({ id, text, source: 's', score, namespace: '' });
-
-describe('retrieve', () => {
-  test('budget-fit returns fewer than topK when ctx is tight', async () => {
-    const deps = {
-      space,
-      embedQuery: async () => [1, 0],
-      lance: { hybridSearch: async () => [cand('a', 'x'.repeat(400), 0.1), cand('b', 'y'.repeat(400), 0.2)] },
-    };
-    const out = await retrieve('q', { topK: 5, numCtx: 256 }, deps); // budget 0.25*256*4=256 chars
-    expect(out.length).toBe(1);
-    expect(out[0].id).toBe('a');
-  });
-  test('dimension mismatch throws MemoryError', async () => {
-    const deps = { space, embedQuery: async () => [1, 0, 0], lance: { hybridSearch: async () => [] } };
-    await expect(retrieve('q', {}, deps)).rejects.toBeInstanceOf(MemoryError);
-  });
-  test('applies reranker when provided', async () => {
-    const deps = {
-      space,
-      embedQuery: async () => [1, 0],
-      lance: { hybridSearch: async () => [cand('a', 'aa', 0.9), cand('b', 'bb', 0.1)] },
-      reranker: { rerank: async (_q: string, r: RetrievalResult[]) => [...r].reverse() },
-    };
-    const out = await retrieve('q', { topK: 2, numCtx: 8192, rerank: true }, deps);
-    expect(out[0].id).toBe('b');
-  });
-});
+// tests/crew/verify-wiring.test.ts  (sketch — align to runCrew's real deps shape)
+import { describe, expect, test } from 'bun:test';
+import { runCrew } from '../../src/crew/engine.ts';
+// Build a 1-task crew with verify:true, inject a verifyDeps whose judge always says "No"
+// → expect outcome.kind === 'unverified' with unsupportedClaims non-empty.
 ```
+> Flesh out against `runCrew`'s real signature; the assertion is: `verify:true` + failing judge → `{kind:'unverified'}`; `verify:true` + passing judge → `{kind:'done'}`; no `verify` → unchanged.
 
-- [ ] **Step 2: Run test to verify it fails**
-Run: `bun test tests/memory/retrieve.test.ts`
-Expected: FAIL (module not found).
-
-- [ ] **Step 3: Write `src/memory/retrieve.ts`**
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3: Add flags + outcome** to `src/crew/types.ts`:
 ```ts
-import { MemoryError } from '../core/errors.ts';
-import { currentDelegationContext } from '../core/guardrails.ts';
-import { withMemoryRecallSpan } from '../telemetry/spans.ts';
-import { retrievalBudgetChars } from './budget.ts';
-import type { LanceStore } from './lancedb-store.ts';
-import type { RecallOptions, RetrievalResult, SpaceMeta } from './types.ts';
-
-export type Reranker = { rerank(query: string, results: RetrievalResult[]): Promise<RetrievalResult[]> };
-export type RetrieveDeps = {
-  lance: Pick<LanceStore, 'hybridSearch'>;
-  embedQuery: (t: string) => Promise<number[]>;
-  space: SpaceMeta;
-  reranker?: Reranker;
-};
-
-const DEFAULT_TOP_K = () => {
-  const raw = Number(process.env.AGENT_MEMORY_TOP_K);
-  return Number.isInteger(raw) && raw > 0 ? raw : 6;
-};
-
-export async function retrieve(query: string, opts: RecallOptions, deps: RetrieveDeps): Promise<RetrievalResult[]> {
-  const topK = opts.topK ?? DEFAULT_TOP_K();
-  const numCtx = opts.numCtx ?? currentDelegationContext().numCtx;
-  return withMemoryRecallSpan(
-    { space: deps.space.name, namespace: opts.namespace, reranked: !!(opts.rerank && deps.reranker) },
-    async () => {
-      const vector = await deps.embedQuery(query);
-      if (vector.length !== deps.space.embedDim) {
-        throw new MemoryError(`query embedding dim ${vector.length} ≠ space '${deps.space.name}' dim ${deps.space.embedDim}`);
-      }
-      let candidates = await deps.lance.hybridSearch(deps.space.name, {
-        queryVector: vector, queryText: query, namespace: opts.namespace, kind: opts.kind, limit: topK * 4,
-      });
-      if (opts.rerank && deps.reranker) candidates = await deps.reranker.rerank(query, candidates);
-      // budget-fit: pack top-ranked results until the live char budget is spent, capped at topK.
-      const budget = retrievalBudgetChars(numCtx);
-      const out: RetrievalResult[] = [];
-      let used = 0;
-      for (const c of candidates) {
-        if (out.length >= topK) break;
-        if (used + c.text.length > budget && out.length > 0) break;
-        out.push(c); used += c.text.length;
-      }
-      return out;
-    },
-  );
-}
+// Task<O>: add `verify?: boolean;`
+// CrewDef: add `verify?: boolean;` (applies to the final/answer task)
+// CrewOutcome union: add:
+| { kind: 'unverified'; failedTaskId?: string; unsupportedClaims: string[]; faithfulness: number; draft: string }
 ```
+- [ ] **Step 4: Insert the sub-graph** in `src/crew/compile.ts`: for a task with `verify`, after its AgentStep append a verify step (calls the primitive with the task output + query), a Branch on `supported`, a corrective+re-answer+verify₂ path (bounded by `verifyMaxRetries()`), and an abstain terminal. Map the abstain terminal's result to the `unverified` outcome in `src/crew/engine.ts`.
+> This is the largest task; keep the inserted steps small + named (`<taskId>__verify`, `__branch`, `__corrective`, `__verify2`, `__abstain`). Reuse `effectiveTaskDeps`/context threading. If the branch/corrective wiring gets unwieldy, STOP and report DONE_WITH_CONCERNS with the sub-graph shape for review.
 
-- [ ] **Step 4: Run tests to verify they pass**
-Run: `bun test tests/memory/retrieve.test.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-```bash
-git add src/memory/retrieve.ts tests/memory/retrieve.test.ts
-git commit -m "feat(memory): retrieval pipeline (RRF candidates → budget-fit → top-k, rerank seam)"
-```
+- [ ] **Step 5: Run tests + full suite** (existing crew tests unchanged) → PASS.
+- [ ] **Step 6: Commit** — `git commit -m "feat(crew): opt-in verify → branch + bounded CRAG + unverified abstention"`
 
 ---
 

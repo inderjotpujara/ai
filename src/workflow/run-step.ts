@@ -32,6 +32,9 @@ export type WorkflowDeps = {
   /** Default persist-on-completion policy when `memory` is set; a step may
    *  override via its own `persistMemory` flag. Default true. */
   persistMemory?: boolean;
+  /** Optional re-recall used by Verify corrective ops (rewrite → re-recall →
+   *  re-answer). Undefined = corrective retrieval is skipped (re-answer only). */
+  recall?: (query: string) => Promise<unknown[]>;
 };
 
 /** Auto-write a completed step's output to memory, namespaced by workflow id.
@@ -143,6 +146,13 @@ export function runStepByKind(
       annotateStep({ [ATTR.STEP_BRANCH_TAKEN]: taken });
       return Promise.resolve({ taken });
     }
+    case StepKind.Verify:
+      // The op's behavior is fully captured in its closure; the engine just runs
+      // it, handing back the deps it may need (agent re-run / re-recall).
+      return step.run(ctx, {
+        runAgentStep: deps.runAgentStep,
+        recall: deps.recall,
+      });
     case StepKind.Map: {
       const items = step.over(ctx);
       annotateStep({ [ATTR.STEP_MAP_COUNT]: items.length });

@@ -41,6 +41,12 @@ export const ATTR = {
   MEMORY_RETURNED: 'memory.returned',
   MEMORY_RERANKED: 'memory.reranked',
   MEMORY_EMBED_MODEL: 'memory.embed_model',
+  VERIFICATION_SUPPORTED: 'verification.supported',
+  VERIFICATION_FAITHFULNESS: 'verification.faithfulness',
+  VERIFICATION_UNSUPPORTED: 'verification.unsupported_claims',
+  VERIFICATION_CRAG_GRADE: 'verification.crag_grade',
+  VERIFICATION_RETRIES: 'verification.retries',
+  VERIFICATION_FALLBACK: 'verification.fallback',
 } as const;
 
 export type ModelSelectInfo = {
@@ -314,4 +320,39 @@ export function withMemoryEmbedSpan<T>(
     span.setAttribute('memory.count', info.count);
     return fn();
   });
+}
+
+export type VerificationInfo = {
+  supported?: boolean;
+  faithfulness?: number;
+  crag?: string;
+  retries?: number;
+  fallback?: boolean;
+};
+
+/** Span for a grounded-verification check, tagged with the verdict (support/faithfulness/CRAG grade) and retry/fallback outcome. */
+export function withVerificationSpan<T>(
+  info: VerificationInfo,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('verification.check', async (span) => {
+    if (info.supported != null)
+      span.setAttribute(ATTR.VERIFICATION_SUPPORTED, info.supported);
+    if (info.faithfulness != null)
+      span.setAttribute(ATTR.VERIFICATION_FAITHFULNESS, info.faithfulness);
+    if (info.crag) span.setAttribute(ATTR.VERIFICATION_CRAG_GRADE, info.crag);
+    if (info.retries != null)
+      span.setAttribute(ATTR.VERIFICATION_RETRIES, info.retries);
+    if (info.fallback != null)
+      span.setAttribute(ATTR.VERIFICATION_FALLBACK, info.fallback);
+    return fn();
+  });
+}
+
+/** Record unsupported-claim count on the active verification.check span. Call
+ * after the faithfulness check runs so the count reflects the actual verdict. */
+export function recordVerdict(unsupportedClaims: number): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.setAttribute(ATTR.VERIFICATION_UNSUPPORTED, unsupportedClaims);
 }

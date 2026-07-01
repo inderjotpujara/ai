@@ -1,0 +1,215 @@
+[
+  {
+    "id": "grounded-01",
+    "answer": "Raft elects a leader using randomized election timeouts [mem:raft#0].",
+    "evidence": [
+      {
+        "id": "raft#0",
+        "text": "In the Raft consensus algorithm, servers use randomized election timeouts to elect a leader among themselves."
+      }
+    ],
+    "expectedSupported": true
+  },
+  {
+    "id": "grounded-02",
+    "answer": "TCP uses a three-way handshake to establish a connection [mem:tcp#0].",
+    "evidence": [
+      {
+        "id": "tcp#0",
+        "text": "TCP establishes a connection between client and server using a three-way handshake: SYN, SYN-ACK, ACK."
+      }
+    ],
+    "expectedSupported": true
+  },
+  {
+    "id": "grounded-03",
+    "answer": "Photosynthesis converts sunlight into chemical energy stored in glucose [mem:bio#0].",
+    "evidence": [
+      {
+        "id": "bio#0",
+        "text": "Photosynthesis is the process by which plants convert sunlight into chemical energy, storing it as glucose."
+      }
+    ],
+    "expectedSupported": true
+  },
+  {
+    "id": "grounded-04",
+    "answer": "The French Revolution began in 1789 [mem:hist#0]. It led to the end of the monarchy in France [mem:hist#1].",
+    "evidence": [
+      {
+        "id": "hist#0",
+        "text": "The French Revolution began in 1789 with the storming of the Bastille."
+      },
+      {
+        "id": "hist#1",
+        "text": "The revolution eventually led to the end of the monarchy in France and the rise of the republic."
+      }
+    ],
+    "expectedSupported": true
+  },
+  {
+    "id": "grounded-05",
+    "answer": "Python uses indentation to define code blocks [mem:py#0].",
+    "evidence": [
+      {
+        "id": "py#0",
+        "text": "Unlike many languages, Python uses indentation whitespace to define the boundaries of code blocks."
+      }
+    ],
+    "expectedSupported": true
+  },
+  {
+    "id": "grounded-06",
+    "answer": "The mitochondria is the powerhouse of the cell, producing ATP through respiration [mem:cell#0].",
+    "evidence": [
+      {
+        "id": "cell#0",
+        "text": "The mitochondria is often called the powerhouse of the cell because it produces ATP through cellular respiration."
+      }
+    ],
+    "expectedSupported": true
+  },
+  {
+    "id": "grounded-07",
+    "answer": "Kubernetes schedules containers across a cluster of nodes [mem:k8s#0]. It uses pods as the smallest deployable unit [mem:k8s#1].",
+    "evidence": [
+      {
+        "id": "k8s#0",
+        "text": "Kubernetes is a container orchestration system that schedules containers across a cluster of worker nodes."
+      },
+      {
+        "id": "k8s#1",
+        "text": "In Kubernetes, the pod is the smallest deployable unit that can be created and managed."
+      }
+    ],
+    "expectedSupported": true
+  },
+  {
+    "id": "hallucination-01",
+    "answer": "Raft elects a leader using a fixed rotating schedule known in advance by all nodes [mem:raft#0].",
+    "evidence": [
+      {
+        "id": "raft#0",
+        "text": "In the Raft consensus algorithm, servers use randomized election timeouts to elect a leader among themselves."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "hallucination-02",
+    "answer": "TCP establishes a connection using a single-packet handshake with no acknowledgment required [mem:tcp#0].",
+    "evidence": [
+      {
+        "id": "tcp#0",
+        "text": "TCP establishes a connection between client and server using a three-way handshake: SYN, SYN-ACK, ACK."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "hallucination-03",
+    "answer": "Photosynthesis converts sunlight directly into electricity for plant cell motors [mem:bio#0].",
+    "evidence": [
+      {
+        "id": "bio#0",
+        "text": "Photosynthesis is the process by which plants convert sunlight into chemical energy, storing it as glucose."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "hallucination-04",
+    "answer": "The French Revolution began in 1650 [mem:hist#0].",
+    "evidence": [
+      {
+        "id": "hist#0",
+        "text": "The French Revolution began in 1789 with the storming of the Bastille."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "hallucination-05",
+    "answer": "Python requires explicit curly braces to define every code block [mem:py#0].",
+    "evidence": [
+      {
+        "id": "py#0",
+        "text": "Unlike many languages, Python uses indentation whitespace to define the boundaries of code blocks."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "hallucination-06",
+    "answer": "The mitochondria produces glucose directly from sunlight without any respiration process [mem:cell#0].",
+    "evidence": [
+      {
+        "id": "cell#0",
+        "text": "The mitochondria is often called the powerhouse of the cell because it produces ATP through cellular respiration."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "hallucination-07",
+    "answer": "Kubernetes pods are permanent, unschedulable units that never move between nodes once created [mem:k8s#1].",
+    "evidence": [
+      {
+        "id": "k8s#1",
+        "text": "In Kubernetes, the pod is the smallest deployable unit that can be created and managed."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "uncited-01",
+    "answer": "The speed of light in a vacuum is approximately 300,000 kilometers per second.",
+    "evidence": [
+      {
+        "id": "phys#0",
+        "text": "The speed of light in a vacuum is approximately 300,000 kilometers per second, a fundamental constant of physics."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "uncited-02",
+    "answer": "Water boils at 100 degrees Celsius at sea level atmospheric pressure.",
+    "evidence": [
+      {
+        "id": "chem#0",
+        "text": "Water boils at 100 degrees Celsius at standard sea level atmospheric pressure."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "uncited-03",
+    "answer": "The Great Wall of China stretches over thirteen thousand miles across northern China.",
+    "evidence": [
+      {
+        "id": "geo#0",
+        "text": "The Great Wall of China stretches over thirteen thousand miles across northern China."
+      }
+    ],
+    "expectedSupported": false
+  },
+  {
+    "id": "no-evidence-01",
+    "answer": "Neptune is the eighth planet from the sun and has a strong magnetic field [mem:missing#0].",
+    "evidence": [],
+    "expectedSupported": false
+  },
+  {
+    "id": "no-evidence-02",
+    "answer": "The Amazon rainforest produces roughly twenty percent of the world's oxygen [mem:missing#1].",
+    "evidence": [],
+    "expectedSupported": false
+  },
+  {
+    "id": "no-evidence-03",
+    "answer": "Quantum entanglement allows correlated particles to affect each other instantaneously across distance [mem:missing#2].",
+    "evidence": [],
+    "expectedSupported": false
+  }
+]
