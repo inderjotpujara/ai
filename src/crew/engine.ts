@@ -131,9 +131,10 @@ export function runCrew(
         return { kind: 'done', output: outcome.output };
       }
       if (outcome.kind === 'unverified') {
-        // runWorkflow's own scan already found the marker (raw-workflow verify
-        // wiring, Task 9); the crew path's compile-time splice + findUnverified
-        // above is the primary route, but this keeps the mapping total.
+        // PRIMARY path for a crew verify-and-fail: the crew's compile-time splice
+        // writes the abstain marker into ctx, and runWorkflow (Task 9) scans ctx
+        // and returns {kind:'unverified'} directly — so this branch fires, not the
+        // done+findUnverified branch above (which is now a defensive fallback).
         return {
           kind: 'unverified',
           failedTaskId: outcome.failedStepId,
