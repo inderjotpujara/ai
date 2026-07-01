@@ -61,16 +61,25 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
     });
     if (chunks.length === 0) return 0;
     const vectors = await deps.embedTexts(chunks.map((c) => c.text));
-    const records: MemoryRecord[] = chunks.map((c, i) => ({
-      id: `${source}#${c.ordinal}`,
-      space: meta.name,
-      namespace,
-      kind,
-      text: c.text,
-      vector: vectors[i] ?? [],
-      source,
-      createdAt: at,
-    }));
+    if (vectors.length !== chunks.length) {
+      throw new MemoryError(
+        `embedTexts returned ${vectors.length} vectors for ${chunks.length} chunks`,
+      );
+    }
+    const records: MemoryRecord[] = chunks.map((c, i) => {
+      const v = vectors[i];
+      if (!v) throw new MemoryError(`missing vector for chunk ${i}`);
+      return {
+        id: `${source}#${c.ordinal}`,
+        space: meta.name,
+        namespace,
+        kind,
+        text: c.text,
+        vector: v,
+        source,
+        createdAt: at,
+      };
+    });
     await lance.upsert(meta.name, records);
     return records.length;
   }
@@ -104,7 +113,7 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
       const space = o.space ?? DEFAULT_SPACE;
       const text = readFileSync(path, 'utf8');
       const hash = createHash('sha256').update(text).digest('hex');
-      if (sql.seenDoc(path, hash)) return { chunks: 0, skipped: true };
+      if (sql.seenDoc(space, path, hash)) return { chunks: 0, skipped: true };
       return withMemoryIngestSpan({ space, source: path }, async () => {
         const meta = await ensureSpace(space, o.at);
         const n = await writeChunks(
@@ -115,7 +124,7 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
           text,
           o.at,
         );
-        sql.recordDoc(path, hash, n, o.at);
+        sql.recordDoc(space, path, hash, n, o.at);
         return { chunks: n, skipped: false };
       });
     },
@@ -139,6 +148,7 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
       if (!meta) throw new MemoryError(`unknown space '${space}'`);
       // Explicit, destructive: drop + recreate under the new embedder. Re-ingest is the caller's job.
       await lance.dropTable(space).catch(() => {});
+      sql.clearDocsForSpace(space);
       const { dim, maxInput } = await deps.probe(newEmbedModel);
       sql.createSpace({
         ...meta,

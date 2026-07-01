@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createMemoryStore } from '../../src/memory/store.ts';
 import { MemoryKind } from '../../src/memory/types.ts';
 
@@ -50,5 +50,27 @@ describe('MemoryStore', () => {
     const stats = await store.stats();
     expect(stats.default).toBe(1);
     store.close();
+  });
+
+  test('reindex clears the dedupe manifest so re-ingest is not skipped', async () => {
+    const dir = `${DIR}-reindex`;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {}
+    const store = createMemoryStore(
+      { path: dir, embedModel: 'fake' },
+      fakeDeps(),
+    );
+    const filePath = `${dir}/doc.txt`;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(filePath, 'apple pie');
+    await store.ingest(filePath, { space: 'default', at: 1 });
+    await store.reindex('default', 'fake');
+    const result = await store.ingest(filePath, { space: 'default', at: 2 });
+    expect(result.skipped).toBe(false);
+    store.close();
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {}
   });
 });

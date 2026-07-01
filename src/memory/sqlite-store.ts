@@ -25,7 +25,8 @@ export class SqliteStore {
       name TEXT PRIMARY KEY, embed_model TEXT NOT NULL, embed_dim INTEGER NOT NULL,
       chunk_cap_tokens INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
     this.db.run(`CREATE TABLE IF NOT EXISTS documents (
-      source TEXT PRIMARY KEY, hash TEXT NOT NULL, chunks INTEGER NOT NULL, at INTEGER NOT NULL)`);
+      space TEXT NOT NULL, source TEXT NOT NULL, hash TEXT NOT NULL, chunks INTEGER NOT NULL,
+      at INTEGER NOT NULL, PRIMARY KEY (space, source))`);
   }
 
   getSpace(name: string): SpaceMeta | undefined {
@@ -63,20 +64,31 @@ export class SqliteStore {
     }));
   }
 
-  seenDoc(source: string, hash: string): boolean {
+  seenDoc(space: string, source: string, hash: string): boolean {
     const r = this.db
-      .query('SELECT hash FROM documents WHERE source = ?')
-      .get(source) as DocRow | undefined;
+      .query('SELECT hash FROM documents WHERE space = ? AND source = ?')
+      .get(space, source) as DocRow | undefined;
     return !!r && r.hash === hash;
   }
 
-  recordDoc(source: string, hash: string, chunks: number, at: number): void {
-    this.db.run('INSERT OR REPLACE INTO documents VALUES (?,?,?,?)', [
+  recordDoc(
+    space: string,
+    source: string,
+    hash: string,
+    chunks: number,
+    at: number,
+  ): void {
+    this.db.run('INSERT OR REPLACE INTO documents VALUES (?,?,?,?,?)', [
+      space,
       source,
       hash,
       chunks,
       at,
     ]);
+  }
+
+  clearDocsForSpace(space: string): void {
+    this.db.run('DELETE FROM documents WHERE space = ?', [space]);
   }
 
   close(): void {
