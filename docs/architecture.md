@@ -110,6 +110,12 @@ graph TD
     subgraph VERIFY["Verification · src/verification"]
         verifyconf["config.ts · verifyModel/Threshold/MaxRetries/autoPullPolicy"]
         verifytypes["types.ts · VerifyDeps/Verdict/Claim"]
+        verifyclaims["claims.ts · decomposeClaims/parseCitations"]
+        verifyjudge["judge.ts · checkClaim/verifyFaithfulness"]
+        verifycrag["crag.ts · gradeRetrieval/correctiveRetrieve"]
+        verifyprim["verify.ts · verify()"]
+        verifyexpand["expand.ts · expandVerification/StepKind.Verify"]
+        verifydeps["deps.ts · makeVerifyDeps"]
     end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
@@ -200,6 +206,19 @@ graph TD
     memcli --> memembed
     memcli --> memrerank
     memcli --> mgr
+    wfengine --> verifyexpand
+    crewcompile --> verifyexpand
+    verifyexpand --> verifyprim
+    verifyexpand --> verifycrag
+    verifyexpand --> spans
+    verifyprim --> verifyclaims
+    verifyprim --> verifyjudge
+    verifyprim --> spans
+    verifyprim --> memstore
+    verifydeps --> mgr
+    verifydeps --> memstore
+    crewcli --> verifydeps
+    flow --> verifydeps
 ```
 
 | Layer | Files | Responsibility | Knows about |
@@ -217,7 +236,7 @@ graph TD
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
-| **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13 — in progress): grounded verification of agent outputs against retrieved context — CRAG-style claim decomposition, citation checking, and fallback judging (§12 below, full section landing in Task 14) | `resource/model-manager.ts` (ensureJudge) + `memory/types.ts` (RetrievalResult) + `telemetry/spans.ts` |
+| **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -343,12 +362,19 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 **Pure types + execution model for deterministic multi-step workflows.** While the agent loop is *agentic* (an LLM autonomously chooses actions), workflows are *choreographed* — steps run in a defined DAG order, each produces validated output, and branches/maps are explicit.
 
 - **Types** (`src/workflow/types.ts`): 
-  - `enum StepKind { Agent, Tool, Branch, Map }` — the four step kinds
+  - `enum StepKind { Agent, Tool, Branch, Map, Verify }` — the fifth kind,
+    `Verify`, is the additive Slice-13 grounded-verification op (§12); a
+    workflow that never opts in compiles and runs exactly as before.
   - `WorkflowContext` — thread of `{stepId: output}` through a run; maps + branches thread `item`/`index`
-  - Step variants: `AgentStep` (run an agent, input is a prompt), `ToolStep` (call a tool, input is args), `BranchStep` (if-then-else on a predicate), `MapStep` (fan-out per item in a list, run sub-step once per item)
+  - Step variants: `AgentStep` (run an agent, input is a prompt — carries an
+    opt-in `verify?: boolean`, §12), `ToolStep` (call a tool, input is args),
+    `BranchStep` (if-then-else on a predicate), `MapStep` (fan-out per item in
+    a list, run sub-step once per item), `VerifyStep` (§12 — `op: 'verify' |
+    'corrective' | 'pass' | 'abstain'`, only ever produced by
+    `expandVerification`, never authored directly in a workflow definition)
   - `StepError` — per-step failure policy: `'fail'` (fast), `'continue'` (skip on error), `{ fallback }` (use a fallback value)
   - `WorkflowDef` — a named list of steps + metadata
-  - `WorkflowOutcome` — `{ kind: 'done', output }` or `{ kind: 'failed', failedStep, message }`
+  - `WorkflowOutcome` — `{ kind: 'done', output }`, `{ kind: 'failed', failedStep, message }`, or `{ kind: 'unverified', failedStepId, unsupportedClaims, faithfulness, draft }` (§12 — a verify-and-abstain terminal outcome)
   - `effectiveDeps(step, index, steps)` — helper: explicit `dependsOn` or implicit previous-step deps
 
 - **Error class** (`src/core/errors.ts`): `WorkflowError extends FrameworkError` for workflow-specific failures (bad definition, step failure, context mismatch)
@@ -357,7 +383,7 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 
 - **Step runner** (`src/workflow/run-step.ts`): `runStepByKind(step, ctx, deps)` dispatches a step to its kind (agent/tool/branch/map) and returns the *raw*, unvalidated result; `WorkflowDeps` (`runAgentStep`, `tools`, `maxParallel`) is the injected boundary the engine and CLI provide; `mapWithConcurrency` bounds fan-out concurrency for `MapStep` (default cap `DEFAULT_MAX_PARALLEL`, overridable via `AGENT_WORKFLOW_MAX_PARALLEL` or per-map `maxParallel`).
 
-- **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready.
+- **Execution engine** (`src/workflow/engine.ts`): `runWorkflow(def, input, deps)` seeds `ctx = { input }` and runs the DAG wave-by-wave — each wave collects every step whose `effectiveDeps` are `done` (bounded per-wave by `maxParallel`), runs them concurrently inside `withStepSpan`, and validates each raw result against the step's `output` zod schema. A step whose dependency was skipped is itself marked skipped (cascading dead-arm/`continue` propagation through descendants). On step error, the `onError` policy decides the outcome: `'fail'` (default) stops the run and returns `{kind:'failed', failedStep, message}`; `'continue'` marks the step skipped; `{fallback}` seeds `ctx[step.id]` with the fallback value and marks the step *done* (so downstream steps still see it as satisfied). After a `BranchStep` resolves, the non-taken target is added to `skipped`. The engine never throws to its caller — all step errors are caught and resolved through the policy above — and returns `{kind:'done', output: ctx}` once no further step is ready, or `{kind:'unverified', ...}` if the finished context carries a Slice-13 `UnverifiedMarker` (`findUnverified`, §12).
 
 - **Definition + validation** (`src/workflow/define.ts`): `defineWorkflow(def)` validates a `WorkflowDef` at construction time — unique step ids, every `dependsOn`/branch target resolves to a real step, and the dependency graph is acyclic (Kahn's algorithm) — throwing `WorkflowError` on any violation, so a malformed workflow fails fast at import time rather than mid-run.
 
@@ -372,7 +398,7 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 ## 10. Crews & roles (Slice 11)
 
 A CrewAI-style **role/task/process** layer — a **thin composition** over the
-workflow engine (§9, sequential) and the orchestrator (§13 Glossary,
+workflow engine (§9, sequential) and the orchestrator (§15 Glossary,
 hierarchical), **not a new engine**: both processes ultimately run on
 machinery Slices 9/10 already shipped.
 
@@ -451,9 +477,10 @@ machinery Slices 9/10 already shipped.
 
 Optionally feeds **Slice 12** (memory/RAG, §11 below) via `runCrew`'s optional
 `memory: MemoryStore` dep — members read/write it through a bound `recall`
-tool + auto-persisted task output — and **Slice 13** (verification — a
-verifier is just another member/task). Out of scope (v1): CrewAI "Flows" (our
-DAG already is that), planning / batch kickoff / human-in-the-loop tasks.
+tool + auto-persisted task output — and **Slice 13** (verification, §12): a
+crew/task `verify` flag splices the grounded-verification sub-graph into the
+compiled workflow, no new engine required. Out of scope (v1): CrewAI "Flows"
+(our DAG already is that), planning / batch kickoff / human-in-the-loop tasks.
 
 ---
 
@@ -566,9 +593,10 @@ pass one explicitly).
   when nothing is found. Both paths render `NO_MEMORY_FOUND = 'No supporting
   memory found.'` on an empty result — the same *abstain-over-fabricate*
   posture as `report_capability_gap`/`{kind:'resource'}` (§4/§5), extended from
-  "no capability" to "no evidence." **Full faithfulness judging, Corrective
-  RAG, and a verifier layer are Slice 13** — this slice ships only the two
-  primitives (citation tags + abstention) that verification will build on.
+  "no capability" to "no evidence." This slice shipped the two primitives
+  (citation tags + abstention) that **Slice 13's verification layer builds
+  on** — full faithfulness judging, Corrective RAG, and abstention wiring are
+  documented in §12.
 - **Crew/workflow wiring** (`src/crew/engine.ts`, `src/workflow/run-step.ts`):
   both `runCrew`/`runWorkflow` accept an **optional** `memory: MemoryStore` dep.
   When present: each crew member (or, for workflows, nothing automatic — the
@@ -619,14 +647,206 @@ self-contained (no external service to run).
 
 ---
 
-## 12. On-disk stores
+## 12. Verification (Slice 13)
 
-- **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` (human-facing artifacts). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
+A **grounded-verification / anti-hallucination layer** — **`src/verification/`**
+— built directly on the two Slice-12 primitives (citation tags, abstention):
+it checks whether an answer's claims are actually **supported by the memory
+chunks it cites**, and abstains rather than presenting an unsupported answer.
+Composed on existing machinery (Model Manager for the judge model, the
+workflow engine's step/branch mechanics, telemetry) — **not a new engine**.
+
+### The `verify()` primitive (`verify.ts`)
+
+`verify(answer, {query, space, threshold}, deps)`, run inside a
+`verification.check` span:
+
+1. **Decompose** (`claims.ts`, `decomposeClaims`) — the general/router model
+   breaks the answer into atomic `{text, citedIds}` claims via a JSON-array
+   prompt; a malformed/non-JSON response degrades to a **single whole-answer
+   claim** with `citedIds` recovered by regex-parsing `[mem:<id>]` tags
+   (`parseCitations`) — decomposition failure never drops citation evidence.
+2. **Fetch cited evidence** (`deps.getByIds(space, ids)` → `src/memory`'s new
+   `getByIds`, §11) — evidence is **exactly the chunks the answer cites**, not
+   a fresh retrieval. This fuses citation-enforcement with faithfulness
+   checking: a claim with no `[mem:<id>]` tag is unsupported by construction
+   (`reason: 'no citation'`), and a claim whose cited id doesn't resolve to a
+   real chunk is `'cited chunk missing'` — both fail without ever calling the
+   judge model.
+3. **Per-claim judge call** (`judge.ts`, `checkClaim`) — a **MiniCheck-style**
+   `(document, claim) → Yes/No` prompt against the claim's own cited evidence
+   (joined), using the **resolved judge model** (below), not the general
+   model.
+4. **Aggregate** (`verifyFaithfulness`) — `faithfulness = supportedCount /
+   totalClaims`; `supported = faithfulness >= threshold` (default `0.9`,
+   `AGENT_VERIFY_THRESHOLD`). Returns a `Verdict {supported, faithfulness,
+   claims, unsupportedClaims, usedFallback}`.
+
+`recordVerdict(verdict.unsupportedClaims.length)` annotates the
+`verification.check` span after the fact (the span opens before the verdict
+exists, since it wraps the judge-model resolution too).
+
+### Faithfulness judge: a small checker, not a general-LLM judge
+
+The judge model is **`bespoke-minicheck`** (`AGENT_VERIFY_MODEL` fallback-only)
+— a small model **fine-tuned specifically** for the `(document, claim) →
+supported?` task, not the router/general chat model doing double duty as a
+judge. `claims.ts` (decompose) and `crag.ts` (retrieval grading) *do* use
+`deps.generalModel` — only the per-claim faithfulness check is routed to the
+dedicated checker.
+
+### Consent-pull, then fallback — never a hard failure (`deps.ts`)
+
+`ensureJudge(model)` (in `makeVerifyDeps`, the real Ollama/Model-Manager-backed
+`VerifyDeps` factory):
+
+- Already installed → use it directly.
+- Not installed, `AGENT_VERIFY_AUTO_PULL=1` → pull silently, use it.
+- Not installed, default policy (`autoPullPolicy() === 'prompt'`) and stdin is
+  a TTY → **ask the user** (`pull bespoke-minicheck? [y/N]`); yes → pull and
+  use it.
+- Otherwise (declined, `AGENT_VERIFY_AUTO_PULL=0`, or non-interactive) → **fall
+  back to `deps.generalModel`** for judging (`usedFallback: true`) and log a
+  warning. Verification **never hard-fails** because the checker model isn't
+  present — it degrades to a general-model NLI-style judge instead.
+
+### Bounded Corrective RAG (`crag.ts`)
+
+`gradeRetrieval(query, chunks, deps)` asks the general model to grade the
+retrieved context `CORRECT | AMBIGUOUS | INCORRECT` (`CragGrade` enum).
+`correctiveRetrieve(query, recall, deps)` rewrites the query
+(`rewriteQuery`) and re-runs `recall` once. **This is one bounded, unrolled
+corrective step, not a loop** — the workflow/DAG engine (§9) has no native
+looping construct, so CRAG here is expressed as a fixed number of extra
+verify→corrective→verify steps spliced into the graph at construction time
+(see `expand.ts` below), not a runtime `while` over the grade.
+
+### Verify→branch→corrective→abstain sub-graph (`expand.ts`)
+
+`expandVerification(opts)` builds the actual step sequence appended after an
+answering step `T` (types come from the workflow engine's new `StepKind.Verify`,
+§9):
+
+```
+T                        (the existing answer step; caller keeps it)
+T__verify    Verify      verify(ctx[T])                  → Verdict
+T__branch    Branch      supported? → T__pass | T__corrective
+T__pass      Verify(pass)  no-op terminal (accept)
+T__corrective Verify(corrective)  CRAG rewrite → re-recall → re-answer → string
+T__verify2   Verify      verify(ctx[T__corrective])      → Verdict
+T__branch2   Branch      supported? → T__pass2 | T__abstain
+...
+T__abstain   Verify(abstain)  writes an UnverifiedMarker  → marker
+```
+
+With `maxRetries` (default `1`, `AGENT_VERIFY_MAX_RETRIES`) corrective
+attempts, the `(corrective → verify → branch)` block **repeats as a fixed
+unrolled chain** — never a real loop — and the final gate's `whenFalse` always
+routes to the single `abstain` terminal. `maxRetries=0` collapses straight to
+`verify → branch → (pass | abstain)`. A plain task/workflow that never opts
+into `verify` is byte-identical to pre-Slice-13 output — this is purely
+additive.
+
+### Abstention (`{kind:'unverified'}`)
+
+When the final gate fails, `T__abstain` writes an `UnverifiedMarker
+{__unverified: true, answerStepId, unsupportedClaims, faithfulness, draft}`
+into the workflow context instead of the draft answer. `workflow/engine.ts`
+and `crew/engine.ts` scan the finished context for this marker
+(`findUnverified`) and, if present, return `{kind:'unverified', ...}` on
+`WorkflowOutcome`/`CrewOutcome` **in place of** the normal `done` outcome —
+the unsupported draft is captured for inspection but never presented as if it
+were a trustworthy answer, the same abstain-over-fabricate posture as
+`report_capability_gap`/`{kind:'resource'}` (§4/§5) and memory's empty-recall
+abstention (§11).
+
+### Opt-in wiring: `--verify`
+
+Verification is **off by default** and additive at every layer:
+
+- **Types**: `AgentStep.verify?: boolean` (workflow, `src/workflow/types.ts`)
+  and `Task.verify?` / `CrewDef.verify?` (crew, `src/crew/types.ts` — a
+  crew-level `verify: true` is equivalent to setting it on every task).
+- **Compile-time splice**: given `verifyDeps` (workflow: passed to
+  `runWorkflow`; crew: `CrewDeps.verifyDeps`, forwarded into
+  `compileToWorkflow`), a step/task flagged `verify` gets its answer step
+  expanded via `expandVerification` before the DAG is validated — so
+  verification participates in the same construction-time acyclicity checks
+  as everything else.
+- **CLI**: `--verify` on `bun run crew <name>`/`bun run flow <name>`
+  constructs the **real** `VerifyDeps` (`src/cli/verify-runtime.ts`,
+  `makeRealVerifyDeps` — Ollama-backed `generate`, the real memory store's
+  `getByIds`, `ensureJudge` wired to the real runtime control) and forces
+  `verify: true` on every task/step. On an `unverified` outcome, the CLI
+  writes `runs/<id>/unverified.txt` (task id, faithfulness, unsupported
+  claims, the abstained draft) and **exits non-zero** instead of printing the
+  draft as the answer.
+
+### Known limitation: verify is designed for the terminal task
+
+`expandVerification` splices its sub-graph **after** the flagged step, so a
+downstream step that depends on that step's output reads the **original,
+possibly-unverified** context value — the corrective re-answer / abstain
+marker live under new step ids (`T__corrective`, `T__abstain`), not `T`
+itself. Verify is therefore designed for **the terminal answering step** of a
+workflow/crew (where nothing downstream consumes its output); using `verify`
+on a **mid-graph** step is a documented limitation, not a supported pattern,
+in this slice — downstream deps do not automatically see the corrected or
+abstained value.
+
+### Telemetry
+
+`src/telemetry/spans.ts` extends per the standing rule (§7):
+`withVerificationSpan` (`ATTR.VERIFICATION_SUPPORTED` /
+`VERIFICATION_FAITHFULNESS` / `VERIFICATION_CRAG_GRADE` /
+`VERIFICATION_RETRIES` / `VERIFICATION_FALLBACK`) and `recordVerdict`
+(`ATTR.VERIFICATION_UNSUPPORTED`) — so `bun run runs` and any OTLP backend get
+per-claim faithfulness signal for free, nested under `workflow.step`/`crew.run`
+like every other subsystem.
+
+### Eval gate: in-repo golden set, no external framework
+
+`tests/verification/faithfulness.eval.test.ts` runs `verify()` over an
+**in-repo golden set** (`tests/verification/golden/cases.json`, ~15–20 cases
+spanning grounded / hallucinated / uncited / no-evidence categories) with an
+offline stand-in judge — **no RAGAS or other external eval framework** is
+wired in; the gate is our own primitive exercised against our own fixtures.
+`tests/integration/verification.live.test.ts` is a `.live` test
+(`describe.skipIf(!ready)`) that round-trips a real `bespoke-minicheck` pull +
+call, and skips cleanly when the model isn't available rather than failing
+the suite.
+
+### Out of scope (deferred)
+
+Chain-of-Verification (CoVe) for complex multi-step answers, semantic-entropy
+/ SEP-style uncertainty estimation, self-consistency sampling, external eval
+frameworks (RAGAS, etc.), Self-RAG, generation-time citation constraints (this
+slice checks citations post-hoc, it doesn't constrain generation to emit
+them), and per-task `--verify` granularity at the CLI (today `--verify` is
+all-or-nothing across a crew/workflow run).
+
+### Module map additions
+
+```
+verification/ (types, config, claims, judge, crag, verify, expand, deps)
+  ← workflow/engine.ts, crew/engine.ts   (StepKind.Verify, findUnverified → {kind:'unverified'})
+  ← cli/crew.ts, cli/flow.ts             (--verify → makeRealVerifyDeps, unverified.txt)
+  → memory/store.ts (getByIds)           (cited-evidence lookup)
+  → resource/model-manager.ts            (ensureReady for the judge/general model)
+  → runtime (RuntimeControl.isInstalled/pull)  (consent-pull the judge model)
+  → telemetry/spans.ts                   (verification.check span + ATTR.VERIFICATION_*)
+```
+
+---
+
+## 13. On-disk stores
+
+- **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` / `unverified.txt` (human-facing artifacts; the last written on a Slice-13 `--verify` abstention). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 
 ---
 
-## 13. Testing strategy
+## 14. Testing strategy
 
 - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
@@ -634,11 +854,12 @@ self-contained (no external service to run).
 - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
 - **MCP** — real stdio round-trip (subprocess server).
 - **Memory** (`tests/memory/`) — pure unit tests per module (`define`, `budget`, `chunk`, `embed`, `sqlite-store`, `retrieve`, `recall-tool`, `spans`) with injected/mock deps (no Ollama/LanceDB needed for most); `lancedb-smoke.test.ts` exercises the real embedded LanceDB against a temp dir (no network); `reranker.spike.test.ts` is the outcome-gating spike for the transformers.js cross-encoder (records whether it's viable, not a permanent live-skip test); `wiring.test.ts` covers the optional crew/workflow `memory` dep (recall tool binding + auto-persist); `tests/cli/memory.test.ts` drives `runMemoryCli` end-to-end against an injected store; `tests/integration/memory.live.test.ts` needs real Ollama + the embed model pulled.
-- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew`, `memory` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
+- **Verification** (`tests/verification/`) — pure unit tests per module (`verify.test.ts`) with injected `VerifyDeps` (no Ollama needed); `faithfulness.eval.test.ts` is the in-repo golden-set eval gate (`tests/verification/golden/cases.json`, ~15–20 cases, offline stand-in judge — no external eval framework); `tests/crew/verify-wiring.test.ts` + `tests/workflow/verify-wiring.test.ts` cover the compile-time splice + `{kind:'unverified'}` outcome mapping; `tests/integration/verification.live.test.ts` needs a real `bespoke-minicheck` pull.
+- **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew`, `memory`, `verification` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
 
 ---
 
-## 14. Glossary
+## 15. Glossary
 
 - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
 - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.
@@ -649,3 +870,5 @@ self-contained (no external service to run).
 - **Model Manager** — `src/resource/model-manager.ts`; `ensureReady` drives the lifecycle within live budget and returns the chosen context. State keyed by model string ⇒ shared-model agents = one resident copy.
 - **Mounting an MCP server** — `mountMcpServer({command,args})` connects to any stdio MCP server and returns `{tools, close}`. Capability = pointing at a server, not writing tool code. `createFileTools` (native `read_file`) + `createFetchTools` (`uvx mcp-server-fetch`) are presets.
 - **Declaration** — a data file describing a model (provider + name + params + footprint) or an agent. Not weights, not logic.
+- **MiniCheck** — `bespoke-minicheck`, a small model fine-tuned for `(document, claim) → supported?` fact-checking; Slice 13's default faithfulness judge, distinct from the general/router model used elsewhere.
+- **CRAG (Corrective RAG)** — grade retrieved context `CORRECT/AMBIGUOUS/INCORRECT`, and if weak, rewrite the query and re-retrieve once before re-answering. Shipped in Slice 13 as one bounded, unrolled corrective step (not a runtime loop).

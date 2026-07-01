@@ -27,14 +27,17 @@ below becomes its own **brainstorm → spec → plan → subagent-driven build**
 ## Where we are vs. the target (the honest gap)
 
 Seven shipped slices built a deep, sophisticated **engine** (hardware-aware
-model/resource management). Five more (Slices 8–12) have since landed the
+model/resource management). Six more (Slices 8–13) have since landed the
 first wave of the **product** pivot: an OTel run-viewer, composition
 guardrails, a deterministic workflow/DAG engine, a crews & roles layer
-composed on top of it, and a persistent semantic memory layer (LanceDB +
-`bun:sqlite`, optional cross-encoder rerank) crews/workflows can opt into. The
+composed on top of it, a persistent semantic memory layer (LanceDB +
+`bun:sqlite`, optional cross-encoder rerank) crews/workflows can opt into, and
+a grounded-verification layer (claim decomposition, a MiniCheck faithfulness
+judge, bounded Corrective RAG, abstention) that opts a crew/workflow run into
+citation-checked, hallucination-resistant answers via `--verify`. The
 **product surface** is still thin beyond that: 3 agents (`super`, `file-qa`,
 `web-fetch`), 1 native tool (`read_file`) + 1 mounted MCP server
-(`mcp-server-fetch`), and no grounded verification yet.
+(`mcp-server-fetch`), and no first-boot model provisioning yet.
 
 | n8n / CrewAI concept | Our analog | Status |
 |---|---|---|
@@ -50,7 +53,7 @@ composed on top of it, and a persistent semantic memory layer (LanceDB +
 | Triggers (webhook / schedule / event) | scheduled & triggered agents | ❌ not built |
 | Create-a-node / create-an-agent | **agent-builder ⭐** | ❌ not built (seam in place) |
 | **Shared agent memory (RAG + vector DB)** | memory subsystem | ✅ **built (Slice 12)** |
-| **Grounded answers / anti-hallucination** | verification layer (verifier/critic agents) | ❌ **not built — only passive "report a gap" today; Phase B** |
+| **Grounded answers / anti-hallucination** | verification layer (verifier/critic agents) | ✅ **built (Slice 13)** |
 | Reliability / retries | graceful degradation | ❌ not built |
 
 ---
@@ -59,9 +62,12 @@ composed on top of it, and a persistent semantic memory layer (LanceDB +
 > agent we build (and every agent the agent-builder generates) should *prefer
 > abstention over fabrication*: answer from evidence (retrieved context, tool
 > output, the user's files), cite it where it matters, and say "I don't know" or
-> report a gap rather than guess. The system already does this passively
-> (`report_capability_gap`, `{kind:'resource'}`); Phase B makes it active
-> (faithfulness judging, citation enforcement, corrective re-retrieval). This is
+> report a gap rather than guess. The system already did this passively
+> (`report_capability_gap`, `{kind:'resource'}`); Phase B made it active
+> (Slice 13: faithfulness judging via `bespoke-minicheck`, citation
+> enforcement through cited-evidence lookup, bounded corrective re-retrieval,
+> and an explicit `{kind:'unverified'}` abstain outcome, opt-in via
+> `--verify`). This is
 > a property of the whole platform, not a single slice.
 
 > **Cross-cutting design principle — observable by default (extend telemetry as we go).**
@@ -117,7 +123,7 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 | **Workflow / DAG engine** ⭐ — ✅ **shipped (Slice 10)** | The defining capability we lacked vs **both** n8n and CrewAI: **deterministic multi-step orchestration** — `defineWorkflow({id, steps})` builds a code-first, typed, JSON-serializable DAG of steps (`agent` / `tool` / `branch` / `map` fan-out) with Zod-validated data flow between them, instead of one LLM picking one specialist. Fail-fast by default with a per-step `onError: 'continue' \| {fallback}` escape hatch; bounded map concurrency. Run via `bun run flow <name>`, backed by the `workflows/` registry and `runWorkflow()`; agent steps reuse the Slice 9 guardrails through a shared `runGuardedAgent`. This is the n8n "workflow" and the CrewAI "sequential process." | guardrails, run store |
 | **Crews & roles** ⭐ — ✅ **shipped (Slice 11)** | The CrewAI layer on top of the engine, composed (not a new engine): `defineCrew({id, members, tasks, process})` — members carry **role + goal + backstory** (composed into the system prompt, model resolved live by the selector) and a dependent **task list** runs under a **process**, either `sequential` (compiles to a Slice-10 workflow DAG) or `hierarchical` (reuses the orchestrator + an auto manager). Reuses the Slice 9 guardrails; emits `crew.run` / `crew.step` telemetry. Run via `bun run crew <name>`, backed by the `crews/` registry. Formalizes "a team of agents collaborating on a goal." | workflow engine |
 | **Memory / RAG (vector DB)** ⭐ — ✅ **shipped (Slice 12)** | Local-first & keyless: `src/memory/` — **LanceDB** (embedded, table-per-space) + **`bun:sqlite`** (space registry authoritative for embedder+dim, `(space,source)`-scoped ingestion manifest); default embedder `qwen3-embedding:0.6b`, loaded weights-only through the Model Manager. Retrieval pipeline **as shipped**: semantic/fixed chunking → **dense vector search** (FTS index created opportunistically; hybrid BM25+dense fusion **not yet wired** — a deliberate follow-up, not the originally-planned default) → **optional cross-encoder rerank, default-ON** (`transformers.js`/ONNX `Xenova/bge-reranker-base`; the Task-13 viability spike passed on Apple Silicon; `AGENT_MEMORY_RERANK=0` to disable; degrades gracefully to pre-rerank order on failure) → live budget-fit pack. Citation-tagged (`[mem:<id>]`) + explicit abstention (`"No supporting memory found."`) — the anti-hallucination primitives Slice 13 builds on. `bun run memory ingest\|recall\|stats\|reindex`; `runCrew`/`runWorkflow` accept an optional `memory` dep (bound `recall` tool + auto-persist), though the `flow`/`crew` CLIs don't yet construct a real store by default. See `reference-rag-grounding-findings` memory and [`docs/architecture.md`](architecture.md) §11. | workflow engine, Model Manager |
-| **Grounded generation + verification** ⭐ | **Anti-hallucination as a first-class layer**, not an afterthought — and natural here because a **verifier/critic agent is just another agent** (`asDelegateTool`) and a workflow step. Techniques: **citation enforcement** (every claim cites a retrieved chunk-ID; uncited sentences stripped/rewritten); a **reference-free faithfulness judge** (extract claims → NLI-check each against retrieved chunks → % supported, the RAGAS method); **Corrective RAG** (grade retrieval; weak → rewrite query / re-retrieve before answering); **Chain-of-Verification** for complex multi-step answers; and **abstention** — extends the system's existing *"never hallucinate → report a gap"* stance from "no capability" to "no evidence." Multi-level scrutiny = layered verifier agents over the primary answer. | memory/RAG, workflow engine |
+| **Grounded generation + verification** ⭐ — ✅ **shipped (Slice 13)** | **Anti-hallucination as a first-class layer**, not an afterthought: `src/verification/` decomposes an answer into claims (`claims.ts`), fetches **exactly the memory chunks each claim cites** (`getByIds` — fusing citation enforcement with faithfulness checking: an uncited claim is unsupported by construction), and checks each claim against its own evidence with a **reference-free faithfulness judge** — `bespoke-minicheck`, a small model fine-tuned for `(document, claim) → supported?`, consent-pulled on first use and falling back to the general model rather than hard-failing (`judge.ts`, `deps.ts`). **Corrective RAG** grades the retrieval and, if weak, rewrites the query and re-retrieves **once** (a bounded, unrolled step — not a runtime loop, since the workflow engine has no native loop construct) before re-answering (`crag.ts`). **Abstention**: if the final gate still fails, the run returns `{kind:'unverified'}` with the unsupported draft captured but never presented, extending the system's existing *"never hallucinate → report a gap"* stance from "no capability" to "no evidence." Opt-in and additive — a task/crew/workflow flags `verify: true`, or the CLI passes `--verify`, and the compiler splices a verify→branch→corrective→abstain sub-graph (`StepKind.Verify`, `expand.ts`) after the **terminal** answering step (a documented v1 limitation: a mid-graph verified step's downstream deps still see the original, unverified value). Eval gate is an **in-repo golden set** (~20 cases), not an external framework (RAGAS, etc. — deferred). Also deferred: Chain-of-Verification, semantic-entropy/self-consistency uncertainty estimation, Self-RAG, generation-time citation constraints, per-task `--verify` granularity. See [`docs/architecture.md`](architecture.md) §12. | memory/RAG, workflow engine |
 | **Structured / response-format I/O** | Workflows need typed hand-offs between steps (JSON / schema-validated output, markdown, tables). User already confirmed this **will** be needed. Also the substrate for citation enforcement (claims + chunk-IDs are structured). Unlocks reliable step-to-step data flow. | workflow engine |
 
 ## Phase C — Connect it  *(the integration library — n8n's 400 nodes)*
@@ -188,10 +194,11 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 3. ✅ **Workflow / DAG engine** (Phase B) — shipped, Slice 10. The defining n8n/CrewAI capability we lacked.
 4. ✅ **Crews & roles** (Phase B) — shipped, Slice 11. The CrewAI role/task/process layer, composed on the workflow engine + orchestrator.
 5. ✅ **Memory / RAG** (Phase B) — shipped, Slice 12. Persistent semantic memory (LanceDB + `bun:sqlite`, weights-only embedder via the Model Manager, dense retrieval + optional default-on cross-encoder rerank) that crews/workflows can opt into via a `recall` tool + auto-persist.
-6. **Grounded verification** (Phase B, next) — memory alone still lets an agent retrieve-then-hallucinate; a **faithfulness/verification layer** (citation enforcement, a faithfulness judge, Corrective RAG, abstention) closes the loop Slice 12 opened (citation tags + abstention primitives already ship).
-7. **`mcp.json` mount registry + starter pack** (Phase C) — make it genuinely useful; gives workflows things to *do* and agent-builder servers to *suggest*.
-8. **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library).
-9. **Triggers / daemon** (Phase E) — turn workflows into automations (n8n's identity).
+6. ✅ **Grounded verification** (Phase B) — shipped, Slice 13. Closes the retrieve-then-hallucinate loop Slice 12 opened: claim decomposition, cited-evidence lookup, a MiniCheck faithfulness judge (consent-pull + fallback), bounded Corrective RAG, and an explicit abstain outcome, opt-in via `--verify`.
+7. **First-boot model provisioning + downloader** (Slice 14, next) — a fresh clone/machine still needs manual `ollama pull`s for the router, specialists, embedder, and now the verification judge (`bespoke-minicheck`); a guided/automated first-run provisioning flow (detect what's missing, pull it, verify it's usable) removes that friction before the platform is handed to a new machine or a new user.
+8. **`mcp.json` mount registry + starter pack** (Phase C) — make it genuinely useful; gives workflows things to *do* and agent-builder servers to *suggest*.
+9. **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library).
+10. **Triggers / daemon** (Phase E) — turn workflows into automations (n8n's identity).
 
 Reliability (graceful degradation, telemetry/eval) folds into Phase A alongside
 the run-viewer. Modalities & memory (Phase F) come in on demand — not before the
