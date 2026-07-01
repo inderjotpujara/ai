@@ -1,12 +1,21 @@
 import type { RetrievalResult } from '../memory/types.ts';
 
-export enum CragGrade { Correct = 'correct', Ambiguous = 'ambiguous', Incorrect = 'incorrect' }
+export enum CragGrade {
+  Correct = 'correct',
+  Ambiguous = 'ambiguous',
+  Incorrect = 'incorrect',
+}
 
 export type Claim = { text: string; citedIds: string[] };
-export type ClaimVerdict = { claim: string; citedIds: string[]; supported: boolean; reason?: string };
+export type ClaimVerdict = {
+  claim: string;
+  citedIds: string[];
+  supported: boolean;
+  reason?: string;
+};
 export type Verdict = {
   supported: boolean;
-  faithfulness: number;        // 0..1 = supported / total claims
+  faithfulness: number; // 0..1 = supported / total claims
   claims: ClaimVerdict[];
   unsupportedClaims: string[];
   usedFallback: boolean;

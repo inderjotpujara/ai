@@ -10,7 +10,13 @@ describe('verification span', () => {
   test('emits verification.check with supported + faithfulness', async () => {
     const { exporter } = registerTestProvider();
     await withVerificationSpan(
-      { supported: false, faithfulness: 0.5, crag: 'incorrect', retries: 1, fallback: false },
+      {
+        supported: false,
+        faithfulness: 0.5,
+        crag: 'incorrect',
+        retries: 1,
+        fallback: false,
+      },
       async () => 'x',
     );
     const spans = exporter.getFinishedSpans();
