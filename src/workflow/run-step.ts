@@ -1,6 +1,6 @@
 import type { ToolSet } from 'ai';
 import type { Agent } from '../core/agent-def.ts';
-import { runGuardedAgent } from '../core/delegate.ts';
+import { type BeforeDelegate, runGuardedAgent } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
 import { ATTR, annotateStep } from '../telemetry/spans.ts';
 import {
@@ -31,11 +31,12 @@ export type WorkflowDeps = {
  *  then applies the step's onError policy). */
 export function defaultRunAgentStep(
   agents: Record<string, Agent>,
+  onBeforeDelegate?: BeforeDelegate,
 ): WorkflowDeps['runAgentStep'] {
   return async (agentName, task) => {
     const agent = agents[agentName];
     if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
-    const result = await runGuardedAgent(agent, task);
+    const result = await runGuardedAgent(agent, task, onBeforeDelegate);
     if ('error' in result) throw new WorkflowError(result.error);
     return result.text;
   };
