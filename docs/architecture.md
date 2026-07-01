@@ -662,22 +662,35 @@ workflow engine's step/branch mechanics, telemetry) — **not a new engine**.
 `verification.check` span:
 
 1. **Decompose** (`claims.ts`, `decomposeClaims`) — the general/router model
-   breaks the answer into atomic `{text, citedIds}` claims via a JSON-array
-   prompt; a malformed/non-JSON response degrades to a **single whole-answer
-   claim** with `citedIds` recovered by regex-parsing `[mem:<id>]` tags
-   (`parseCitations`) — decomposition failure never drops citation evidence.
-2. **Fetch cited evidence** (`deps.getByIds(space, ids)` → `src/memory`'s new
-   `getByIds`, §11) — evidence is **exactly the chunks the answer cites**, not
-   a fresh retrieval. This fuses citation-enforcement with faithfulness
-   checking: a claim with no `[mem:<id>]` tag is unsupported by construction
-   (`reason: 'no citation'`), and a claim whose cited id doesn't resolve to a
-   real chunk is `'cited chunk missing'` — both fail without ever calling the
-   judge model.
-3. **Per-claim judge call** (`judge.ts`, `checkClaim`) — a **MiniCheck-style**
-   `(document, claim) → Yes/No` prompt against the claim's own cited evidence
-   (joined), using the **resolved judge model** (below), not the general
-   model.
-4. **Aggregate** (`verifyFaithfulness`) — `faithfulness = supportedCount /
+   breaks the answer into atomic claim **texts** via a JSON-array prompt; a
+   malformed/non-JSON response degrades to a **single whole-answer claim**.
+   The LLM-returned `citedIds` on each claim are **not trusted for judging**
+   (see below) — they're kept on the `Claim` type only as decomposition
+   metadata.
+2. **Parse citations deterministically** (`verify.ts`, `parseCitations` from
+   `claims.ts`) — `allIds = parseCitations(answer)` regexes the ANSWER text
+   itself for `[mem:<id>]` tags (stripping the `mem:` prefix). This replaced
+   an earlier approach that unioned each claim's LLM-extracted `citedIds`,
+   which was unreliable: the general model would sometimes return ids
+   *with* the `mem:` prefix still attached (so `getByIds` found nothing) or
+   omit them inconsistently, causing genuinely-grounded answers to be marked
+   unsupported.
+3. **Fetch the evidence pool** (`deps.getByIds(space, allIds)` → `src/memory`'s
+   `getByIds`, §11) — a single pool of **every chunk the answer cites**, not a
+   fresh retrieval and not scoped per-claim. If `allIds` is empty (the answer
+   cites nothing), the pool is empty and every claim is unsupported by
+   construction (`reason: 'no citation'`) without ever calling the judge
+   model — this is what makes an uncited answer abstain.
+4. **Per-claim judge call against the pool** (`judge.ts`, `checkClaim` +
+   `verifyFaithfulness`) — every decomposed claim is checked with the same
+   **MiniCheck-style** `(document, claim) → Yes/No` prompt against the **same
+   pooled evidence string** (`[...evidenceById.values()].join('\n\n')`), using
+   the **resolved judge model** (below), not the general model. Judging
+   against the pool rather than a claim's own (LLM-extracted) `citedIds`
+   avoids re-trusting the unreliable extraction step while still catching
+   unsupported/hallucinated claims — MiniCheck says "No" when the pool
+   doesn't entail the claim.
+5. **Aggregate** (`verifyFaithfulness`) — `faithfulness = supportedCount /
    totalClaims`; `supported = faithfulness >= threshold` (default `0.9`,
    `AGENT_VERIFY_THRESHOLD`). Returns a `Verdict {supported, faithfulness,
    claims, unsupportedClaims, usedFallback}`.

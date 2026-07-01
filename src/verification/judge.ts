@@ -13,6 +13,16 @@ export async function checkClaim(
   return raw.startsWith('yes');
 }
 
+/**
+ * Judges each decomposed claim against a single pooled-evidence string built
+ * from the ANSWER's own deterministically-parsed [mem:<id>] citations (see
+ * verify.ts) — not per-claim `citedIds` recovered by the LLM decomposer.
+ * The general model is unreliable at recovering a claim's own citation ids
+ * (it sometimes returns them with a stray `mem:` prefix, so `getByIds` finds
+ * nothing, or omits them inconsistently), which was previously causing
+ * genuinely-grounded answers to be marked unsupported. Pooling sidesteps
+ * that: every claim is checked against everything the answer actually cited.
+ */
 export async function verifyFaithfulness(
   claims: Claim[],
   evidenceById: Map<string, string>,
@@ -21,31 +31,30 @@ export async function verifyFaithfulness(
   threshold: number,
   deps: VerifyDeps,
 ): Promise<Verdict> {
+  const pooledEvidence = [...evidenceById.values()].join('\n\n');
+  const pooledIds = [...evidenceById.keys()];
   const verdicts: ClaimVerdict[] = [];
   for (const c of claims) {
-    if (c.citedIds.length === 0) {
+    if (!pooledEvidence.trim()) {
       verdicts.push({
         claim: c.text,
-        citedIds: [],
+        citedIds: pooledIds,
         supported: false,
         reason: 'no citation',
       });
       continue;
     }
-    const evidence = c.citedIds
-      .map((id) => evidenceById.get(id) ?? '')
-      .filter(Boolean)
-      .join('\n\n');
-    const supported = await checkClaim(c.text, evidence, judgeModel, deps);
+    const supported = await checkClaim(
+      c.text,
+      pooledEvidence,
+      judgeModel,
+      deps,
+    );
     verdicts.push({
       claim: c.text,
-      citedIds: c.citedIds,
+      citedIds: pooledIds,
       supported,
-      reason: supported
-        ? undefined
-        : evidence
-          ? 'unsupported by cited evidence'
-          : 'cited chunk missing',
+      reason: supported ? undefined : 'unsupported by cited evidence',
     });
   }
   const total = verdicts.length || 1;

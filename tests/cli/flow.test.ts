@@ -14,7 +14,7 @@ const cannedAgent = (name: string) => ({
   description: name,
   model: new MockLanguageModelV3({
     doGenerate: async () => ({
-      content: [{ type: 'text', text: 'summary text' }],
+      content: [{ type: 'text', text: 'summary text [mem:c#0]' }],
       finishReason: { unified: 'stop', raw: undefined },
       usage: {
         inputTokens: {
