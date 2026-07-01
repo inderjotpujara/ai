@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { Agent } from '../../src/core/agent-def.ts';
-import { asDelegateTool, delegateToolName } from '../../src/core/delegate.ts';
+import {
+  asDelegateTool,
+  delegateToolName,
+  runGuardedAgent,
+} from '../../src/core/delegate.ts';
 import {
   runInDelegationContext,
   withRootDelegationContext,
@@ -206,6 +210,17 @@ test('long delegated return is truncated to the caller live cap', async () => {
   }
   expect(result.text.length).toBeLessThan(9000);
   expect(result.text).toContain('…[truncated');
+});
+
+test('runGuardedAgent returns concise text and emits an agent.delegation span', async () => {
+  const result = await withRootDelegationContext(8192, () =>
+    runGuardedAgent(cannedAgent('web_fetch', 'done'), 'summarize'),
+  );
+  expect(result).toEqual({ text: 'done' });
+  const del = spanExporter
+    .getFinishedSpans()
+    .find((s) => s.name === 'agent.delegation');
+  expect(del?.attributes['agent.delegation.target']).toBe('web_fetch');
 });
 
 test('within-depth recursive re-entry of the same agent name is allowed', async () => {
