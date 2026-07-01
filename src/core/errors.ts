@@ -26,3 +26,6 @@ export class ResourceError extends FrameworkError {}
 
 /** A workflow definition or execution error. */
 export class WorkflowError extends FrameworkError {}
+
+/** A crew definition or execution error. */
+export class CrewError extends FrameworkError {}

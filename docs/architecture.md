@@ -83,6 +83,11 @@ graph TD
         wfengine["engine.ts · runWorkflow"]
         wfrunstep["run-step.ts · runStepByKind"]
     end
+    subgraph CREW["Crew · src/crew"]
+        crewtypes["types.ts · CrewMember/Task/CrewProcess"]
+        crewengine["engine.ts · runCrew"]
+        crewrunner["runner.ts · roleDispatch"]
+    end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
         images[("model-images/ + catalog.json")]
@@ -136,6 +141,12 @@ graph TD
     wfengine --> spans
     wfrunstep --> spans
     wfdefine --> wftypes
+    crewengine --> crewrunner
+    crewrunner --> sel
+    crewengine --> spans
+    crewrunner --> spans
+    crewengine --> delegate
+    crewtypes --> wftypes
     runstore --> spansfile
 ```
 
@@ -152,6 +163,7 @@ graph TD
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
 | **Declarations** | `models/`, `agents/`, `workflows/` | Data: which model / which agent / which workflow DAG | nothing (pure data) |
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
+| **Crew / Roles** | `src/crew/` | Team-of-agents orchestration layer (Slice 11): typed crew model + process definition (`types.ts`), execution engine for sequential/hierarchical teams (`engine.ts`), role-based agent selection and task dispatch (`runner.ts`) | `core/delegate.ts` + `workflow/engine.ts` + `resource/selector.ts` |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
