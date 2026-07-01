@@ -1,5 +1,6 @@
 import { withStepSpan } from '../telemetry/spans.ts';
 import {
+  autoPersistStepOutput,
   DEFAULT_MAX_PARALLEL,
   runStepByKind,
   type WorkflowDeps,
@@ -57,6 +58,15 @@ export async function runWorkflow(
             throw new Error(
               `step ${step.id} output failed validation: ${parsed.error.message}`,
             );
+          }
+          if (deps.memory) {
+            await autoPersistStepOutput(deps.memory, {
+              workflowId: def.id,
+              stepId: step.id,
+              output: parsed.data,
+              persist: step.persistMemory ?? deps.persistMemory ?? true,
+              at: Date.now(),
+            });
           }
           return { step, value: parsed.data };
         } catch (cause) {

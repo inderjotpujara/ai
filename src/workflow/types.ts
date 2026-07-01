@@ -24,6 +24,9 @@ type StepBase<O> = {
   output: z.ZodType<O>;
   /** Failure policy; default 'fail'. */
   onError?: StepError;
+  /** Per-step override of the engine's memory auto-write policy. Only takes
+   *  effect when `deps.memory` is set; default true (inherits engine default). */
+  persistMemory?: boolean;
 };
 
 export type AgentStep<O = unknown> = StepBase<O> & {
