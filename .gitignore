@@ -9,6 +9,15 @@ model-images/*
 !model-images/.gitkeep
 !model-images/README.md
 
+# Local scratch / tooling state (per-clone, never committed):
+#   .claude/         — Claude Code local settings (settings.local.json)
+#   .remember/       — `remember` plugin session-memory buffer
+#   .superpowers/    — superpowers SDD scratch (progress ledger, task briefs/reports)
+# .githooks/ is intentionally NOT ignored — it's the shared docs-hard-line enforcement.
+.claude/
+.remember/
+.superpowers/
+
 # Misc
 *.log
 .DS_Store
