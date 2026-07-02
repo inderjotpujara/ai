@@ -20,7 +20,8 @@
     "runs": "bun run src/cli/runs.ts",
     "memory": "bun run src/cli/memory.ts",
     "provision": "bun run src/cli/provision.ts",
-    "mcp": "bun run src/cli/mcp.ts"
+    "mcp": "bun run src/cli/mcp.ts",
+    "agent-builder": "bun run src/cli/agent-builder.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.56",

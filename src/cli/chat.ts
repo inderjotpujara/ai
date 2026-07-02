@@ -1,13 +1,19 @@
 import { createSuperAgent } from '../../agents/super.ts';
 import qwenRouter from '../../models/qwen-router.ts';
 import { BOOTSTRAP } from '../../models/registry.ts';
+import { buildAgent } from '../agent-builder/builder.ts';
+import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
 import { detectMissing } from '../provisioning/detect-missing.ts';
 import { runProvision } from '../provisioning/provisioner.ts';
-import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
+import {
+  askYesNo,
+  interactiveTTY,
+  stdinInput,
+} from '../provisioning/ui/prompt.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
 import {
   effectiveKvBytesPerToken,
@@ -122,6 +128,28 @@ async function main(): Promise<void> {
           console.log(result.text);
         } else if (result.kind === 'gap') {
           console.log(result.message);
+          if (interactiveTTY()) {
+            const wants = await askYesNo(
+              `Propose a new agent for "${result.missingCapability}"?`,
+              { input: stdinInput(), autoYes: false },
+            );
+            if (wants) {
+              const { deps, cleanup } = await makeRealBuilderDeps();
+              try {
+                const built = await buildAgent(
+                  `${result.missingCapability}. Original task: ${task}`,
+                  deps,
+                );
+                if (built.kind === 'written') {
+                  console.log(
+                    `Created "${built.proposal.name}" — re-run your task to use it.`,
+                  );
+                }
+              } finally {
+                await cleanup();
+              }
+            }
+          }
         } else {
           console.error(result.message);
           process.exitCode = 1;
