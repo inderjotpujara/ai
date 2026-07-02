@@ -1144,8 +1144,9 @@ agent-builder will suggest from.
 
 All three CLIs (`chat.ts`, `flow.ts`, `crew.ts`) run the same startup
 sequence via `src/cli/with-mcp-run.ts`'s `withMcpRun` (Slice 16): `createRun`
-→ `initRunTelemetry(run.dir)` → `loadMcpConfig()` → `mountAll(config)`,
-wrapped in `withMcpMountSpan` (§ Telemetry below) — establishing the run dir
+→ `initRunTelemetry(run.dir)` → `loadMcpConfig()` (outside any span) →
+`mountAll(config)`, with only that `mountAll` call wrapped in
+`withMcpMountSpan` (§ Telemetry below) — establishing the run dir
 and its telemetry provider **before** mounting, so the mount span is
 recorded against that run's tracer (see § Telemetry for why the ordering
 matters). Inside `mountAll`, each entry goes through `ensureConsent` — a TTY

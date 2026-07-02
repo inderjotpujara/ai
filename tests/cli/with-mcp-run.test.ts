@@ -3,13 +3,28 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withMcpRun } from '../../src/cli/with-mcp-run.ts';
-import type { McpConfig } from '../../src/mcp/types.ts';
+import { type McpConfig, McpTransportKind } from '../../src/mcp/types.ts';
 
 const EMPTY_CONFIG = {
   entries: [],
   dormant: [],
   warnings: [],
 } as unknown as McpConfig;
+
+const ONE_SERVER_CONFIG: McpConfig = {
+  entries: [
+    {
+      kind: McpTransportKind.Stdio,
+      name: 'x',
+      command: 'echo',
+      args: [],
+      env: {},
+      raw: { command: 'echo', args: [] },
+    },
+  ],
+  dormant: [],
+  warnings: [],
+};
 
 describe('withMcpRun', () => {
   it('creates the run, then the mcp.mount span lands in spans.jsonl (ordering fix)', async () => {
@@ -39,25 +54,34 @@ describe('withMcpRun', () => {
 
   it('closes the registry after the body', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'withmcprun-'));
-    let closed = false;
+    const approvalsFile = join(runsRoot, 'approvals.json');
+    const order: string[] = [];
+    let mountedCount = -1;
     await withMcpRun(
       {
         runsRoot,
         runId: 'r2',
-        config: EMPTY_CONFIG,
+        config: ONE_SERVER_CONFIG,
         mountDeps: {
+          consent: { autoYes: true },
+          approvalsFile,
           mount: async () => ({
             tools: {},
             close: async () => {
-              closed = true;
+              order.push('close');
             },
           }),
         },
       },
-      async () => undefined,
+      async ({ reg }) => {
+        mountedCount = reg.mounted.length;
+        order.push('body');
+      },
     );
-    // empty config mounts nothing, so reg.close() iterates zero servers; assert the call path ran cleanly
-    expect(closed).toBe(false);
+    // guard: the server actually mounted, so `close` running proves something real happened
+    expect(mountedCount).toBe(1);
+    // proves BOTH that close ran and that it ran after the body
+    expect(order).toEqual(['body', 'close']);
     await rm(runsRoot, { recursive: true, force: true });
   });
 });

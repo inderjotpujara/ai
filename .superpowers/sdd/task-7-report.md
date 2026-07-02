@@ -1,69 +1,118 @@
-# Task 7 Report: `verify()` primitive
+# Task 7 Review-Fix Report: strengthen `withMcpRun` close-after-body test + tighten §14/README accuracy (Slice 16 Task 7 review)
 
 (Note: this filename previously held a stale report from an unrelated
-Slice-12 task — "LanceDB native-load smoke test" — that happened to reuse
-this path. This report replaces it and documents Slice 13 Task 7 only.)
+Slice-13 task — "`verify()` primitive". This report replaces it and documents
+the Slice-16 Task-7 final-review fix-up only.)
 
-## Implemented
+## Findings addressed
 
-`src/verification/verify.ts` exports:
+### Finding 1 (Important) — `docs/architecture.md` §16 overstated a weak test
 
-```ts
-export async function verify(
-  answer: string,
-  opts: { query: string; space: string; threshold?: number },
-  deps: VerifyDeps,
-): Promise<Verdict>
+`tests/cli/with-mcp-run.test.ts`'s second case ("closes the registry after
+the body") previously used `EMPTY_CONFIG` (`entries: []`), so `mountAll`
+mounted nothing, the injected `mount.close` mock was never called, and the
+test only asserted `expect(closed).toBe(false)` — a no-op that proved
+nothing about close-after-body ordering, despite §16's claim that this test
+"asserts... the registry is closed after the body runs."
+
+**Fix — strengthened the test so the claim is actually true:**
+- Added `ONE_SERVER_CONFIG`, a real `McpConfig` with one well-formed
+  `StdioServerEntry` (`{ kind: McpTransportKind.Stdio, name: 'x', command:
+  'echo', args: [], env: {}, raw: {...} }`), built from the exact shapes in
+  `src/mcp/types.ts`.
+- Passed `mountDeps: { consent: { autoYes: true }, approvalsFile: <temp file
+  in the test's own tmpdir>, mount: async () => ({ tools: {}, close: async
+  () => { order.push('close'); } }) }` so consent passes and the server
+  actually mounts (`autoYes: true` short-circuits `ensureConsent`'s TTY
+  prompt; a scoped `approvalsFile` avoids touching the repo's
+  `.mcp-approvals.json`).
+- Recorded ordering into `const order: string[] = []`: the body pushes
+  `'body'`, the fake server's `close` pushes `'close'`.
+- Asserted `expect(mountedCount).toBe(1)` (via `reg.mounted.length`,
+  captured inside the body) as a guard that the server actually mounted —
+  so the test would catch a regression where the entry silently fails to
+  mount and `close` trivially "passes" by never running.
+- Asserted `expect(order).toEqual(['body', 'close'])` — proves close ran
+  AND that it ran strictly after the body.
+
+**Verified the strengthened test is load-bearing:** temporarily removed
+`await reg.close();` from `withMcpRun`'s `finally` block in
+`src/cli/with-mcp-run.ts` and reran `bun test tests/cli/with-mcp-run.test.ts`:
+
+```
+error: expect(received).toEqual(expected)
+@@ -2,3 +2,3 @@
+    "body",
+-   "close",
+  ]
+(fail) withMcpRun > closes the registry after the body [1.85ms]
+ 1 pass
+ 1 fail
 ```
 
-Pipeline:
-1. `decomposeClaims(answer, deps)` (Task 4) → `Claim[]`.
-2. `[...new Set(claims.flatMap((c) => c.citedIds))]` → dedup all cited ids across claims.
-3. `allIds.length ? deps.getByIds(opts.space, allIds) : []` → `RetrievalResult[]`, then `new Map(evidence.map((e) => [e.id, e.text]))` → `evidenceById`.
-4. `deps.ensureJudge(verifyModel())` → `{model, fallback}` (see wiring note below).
-5. `withVerificationSpan({}, () => verifyFaithfulness(claims, evidenceById, judge.model, judge.fallback, threshold, deps))` (Task 5) → `Verdict`, returned as-is.
-6. `threshold = opts.threshold ?? verifyThreshold()` (Task 1 config), computed up front.
+Confirms the test fails exactly as expected when the close-after-body
+invariant is broken. Restored the `finally` block immediately after
+(`git diff` on `src/cli/with-mcp-run.ts` is empty — no net change to
+production code). Reran with the restoration in place: `2 pass, 0 fail`.
 
-## How I wired `ensureJudge` / `verifyModel` (ambiguity resolution)
+### Finding 2 (Minor) — `docs/architecture.md` §14 implied `loadMcpConfig()` ran inside the span
 
-The brief's Step-3 sketch called `deps.ensureJudge(deps.generalModel)`, which the task instructions flagged as wrong: the judge model must be the **configured verify model**, not the general/router model. I implemented it as instructed:
+§14's "Load → consent → mount → pin → attach" section read: "`createRun` →
+`initRunTelemetry(run.dir)` → `loadMcpConfig()` → `mountAll(config)`, wrapped
+in `withMcpMountSpan`" — ambiguous as to whether both calls were wrapped. In
+`src/cli/with-mcp-run.ts`, only `mountAll()` runs inside
+`withMcpMountSpan`; `loadMcpConfig()` runs just before it, outside any span.
 
-```ts
-import { verifyModel, verifyThreshold } from './config.ts';
-...
-const judge = await deps.ensureJudge(verifyModel());
-```
+**Fix:** reworded to "`loadMcpConfig()` (outside any span) → `mountAll(config)`,
+with only that `mountAll` call wrapped in `withMcpMountSpan`" — precise about
+scope.
 
-`deps.generalModel` remains untouched by `verify.ts` — it's consumed internally by `decomposeClaims` (Task 4, claim decomposition prompt) and by `verifyFaithfulness`'s fallback path (Task 5, when `fallback: true` grading can route through the general model). `verify.ts` itself never reads `deps.generalModel` directly; it only passes `deps` through to those two functions and calls `ensureJudge` with the config-resolved verify model id (`verifyModel()` → `AGENT_VERIFY_MODEL` env or `'bespoke-minicheck'` default).
+### Finding 3 (Minor) — README `src/cli/` row omitted `with-mcp-run.ts`
 
-I added a third test (beyond the brief's two) that pins this down: `ensureJudge` is asserted to be called with `'bespoke-minicheck'` (not `'g'`, the fixture's `generalModel`), and the `checkClaim` call inside `verifyFaithfulness` is asserted to receive the model id `ensureJudge` resolved to (`'resolved-judge-model'`), not the raw input. This exercises the exact ambiguity called out in the task instructions and would fail if `verify.ts` reverted to `deps.ensureJudge(deps.generalModel)`.
+The Project-structure table's `src/cli/` row listed `chat.ts`, `run-chat.ts`,
+`select-hook.ts`, `selection-notice.ts`, `mcp.ts` but not `with-mcp-run.ts`
+(the Slice-16 run-scope+telemetry+mount helper) — nor `flow.ts`/`crew.ts`,
+already-missing entrypoints referenced elsewhere in the same README.
 
-## TDD
+**Fix:** added `flow.ts` (`bun run flow`), `crew.ts` (`bun run crew`), and
+`with-mcp-run.ts` ("per-run scope + telemetry + mount helper, Slice 16") to
+the row.
 
-- **RED:** Wrote `tests/verification/verify.test.ts` with the brief's two tests plus the judge-wiring test; ran `bun test tests/verification/verify.test.ts` → failed with `Cannot find module '../../src/verification/verify.ts'` (module didn't exist yet).
-- **GREEN:** Implemented `src/verification/verify.ts` per the plan above; reran → `3 pass, 0 fail, 7 expect() calls`.
+## Files changed
 
-## Files
+- `tests/cli/with-mcp-run.test.ts` — strengthened the second test (real
+  mount, ordering assertion) as above; net addition of `ONE_SERVER_CONFIG`
+  and the rewritten test body.
+- `docs/architecture.md` — §14 "Load → consent → mount → pin → attach"
+  paragraph reworded for precision (no other §14/§16 text needed changes;
+  §16's original claim is now true given the strengthened test).
+- `README.md` — `src/cli/` row in the Project-structure table gained
+  `flow.ts`, `crew.ts`, `with-mcp-run.ts`.
+- `src/cli/with-mcp-run.ts` — untouched net (temporarily edited to verify
+  the test's fail-closed property, then restored; `git diff` confirms no
+  change).
 
-- `src/verification/verify.ts` (new, 33 lines) — the `verify()` primitive.
-- `tests/verification/verify.test.ts` (new, 3 tests) — brief's 2 tests + 1 added test for the ensureJudge/verifyModel wiring.
+## Gate results
 
-## Verification run
-
-- `bun test tests/verification/verify.test.ts` → 3 pass, 0 fail, 7 expect() calls.
+- `bun test tests/cli/with-mcp-run.test.ts` → **2 pass, 0 fail, 5 expect()
+  calls**.
+- Regression check (temporarily removing `reg.close()` from `withMcpRun`'s
+  `finally`): **1 pass, 1 fail** — the strengthened test is the one that
+  fails, confirming it actually exercises the close-after-body invariant.
+  Restored before finishing; full pass count returned to 2/2.
+- `bun run docs:check` → `✔ docs-check: living docs present + linked; every
+  src subsystem documented.`
 - `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
-- `bun run lint:file -- src/verification/verify.ts tests/verification/verify.test.ts` → initially flagged `noExplicitAny` (the brief's literal test snippet typed the fixture as `Partial<any>`/`any`) plus import-order/formatting; fixed by typing the test fixture as `Partial<VerifyDeps> → VerifyDeps` (matching the existing convention in `tests/verification/judge.test.ts`) and running `bunx biome check --write` once to auto-fix import ordering/formatting. Final run: clean, no errors/warnings.
-- `bun run test` (full suite) → **272 pass, 18 skip, 0 fail, 553 expect() calls, 290 tests across 98 files**. No regressions.
-- Commit: `c7e25d5` — `feat(verification): verify() primitive (decompose→evidence→judge)` on branch `slice-13-grounded-verification`. Pre-commit hook (`docs-check`) passed (`verification/` was already a documented subsystem from an earlier task in this slice, so no `architecture.md` update was needed for this task).
-
-## Self-review
-
-- Function is a thin, pure orchestration layer — no I/O beyond what `deps` provides, matching the "primitive stays agnostic" note in the brief.
-- Dedup via `Set` on `citedIds` avoids redundant `getByIds` lookups when multiple claims cite the same id.
-- Short-circuits `getByIds` entirely when there are no cited ids at all (`allIds.length ? ... : []`), avoiding an unnecessary call with an empty array — matches the brief's sketch.
-- `withVerificationSpan({}, ...)` is called with an empty info object, consistent with the brief; `spans.ts` already exposes a `recordVerdict(unsupportedClaims)` helper for annotating the active span post-hoc, which `verify.ts` does not currently call. That's a possible follow-up (e.g. for Task 10's CLI wiring) but wasn't specified as in-scope here and the brief's own sketch left the span info empty too.
-- Deviated from the brief's literal test-fixture typing (`Partial<any>`/`any`) to satisfy the repo's `noExplicitAny` lint rule and match the sibling test file's convention (`Partial<VerifyDeps>` / `VerifyDeps`). Test behavior is unchanged; only the type annotations differ from the brief's inline snippet.
+- `bun run lint:file -- "tests/cli/with-mcp-run.test.ts"` → initially flagged
+  an import-order issue (`McpTransportKind, type McpConfig` should sort as
+  `type McpConfig, McpTransportKind`); fixed; final run clean, no
+  errors/warnings.
 
 ## Concerns
 
-- None blocking. One minor observability gap noted above (span isn't annotated with the computed verdict via `recordVerdict`) — left as-is since it matches the brief's own sketch and wasn't specified as in-scope for Task 7; worth a follow-up if Task 10 (CLI wiring) or a later slice wants richer per-check span attributes.
+- None blocking. The strengthened test still uses `mountDeps.mount` as a
+  fake (no real subprocess spawn), consistent with how the existing MCP unit
+  tests inject fakes for consent/mount deps (per §16) — the real-stdio
+  round-trip coverage already lives in `tests/mcp/server.test.ts` and
+  `sqlite-server.test.ts`, so this test correctly stays a fast, deterministic
+  unit test rather than duplicating that coverage.
