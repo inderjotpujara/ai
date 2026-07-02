@@ -1,139 +1,312 @@
-# Task 2 Report: Consent store + hashing + prompt flow (Slice 15)
+# Task 2 Report: Consent interactivity predicate + stdin `end` handling (Slice 16)
+
+> Note: this file previously held a Slice 15 Task 2 report (consent store +
+> hashing). That work already landed and is preserved in git history and in
+> `.superpowers/sdd/progress.md`. This file is overwritten here to hold the
+> current Slice 16 Task 2 report, per this task's brief.
+
+## Status
+
+**DONE**
+**Commit:** `63380483e9d1189f025765291b021e6be629ea34` on branch `slice-16-mcp-telemetry-ordering`
 
 ## What was built
 
-Two new source files and one test file, all verbatim from the brief (with Biome auto-format applied—line-wrapping and import-order only, no logic changes):
+**Bug:** `src/mcp/mount.ts` decided prompt interactivity from `process.stderr.isTTY`
+but read the answer from `process.stdin`. Running `bun run flow … < /dev/null`
+(interactive terminal, stdin redirected) made `stdinInput()`'s promise never
+settle — no `data` ever arrives and there was no `end` handler — so the process
+hung forever waiting on an already-ended stdin.
 
-1. **`src/mcp/consent.ts`** (176 lines)
-   - `specHash(entry)` — SHA256 of canonical raw config fields: stdio `{command, args, envKeys(sorted)}`, HTTP `{url, headerNames(sorted)}`. Hashes NAMES only, never secret VALUES.
-   - `toolsHash(tools)` — SHA256 of sorted `name|description|inputSchemaJson` triples. The rug-pull detection pin.
-   - `type ApprovalRecord` — Approval with `specHash`, optional `toolsHash`, `approvedAt` timestamp, optional `declined` flag.
-   - `readApprovals(path?)` / `writeApprovals(store, path?)` — Atomic read/write to `.mcp-approvals.json` (default path: `process.cwd()`). Write uses temp+rename to prevent corruption on failure. Read degrades gracefully on missing/corrupt file.
-   - `describeEntry(entry)` — Human-readable from raw (unexpanded) config—shows exact command line or URL + header names, never secret values.
-   - `dangerFlags(entry)` — Pattern-based safety check for `sudo`, `rm -rf`, `curl|sh`, `wget|sh`.
-   - `type ConsentDeps` — Dependencies for the consent gate: `store` (read/write), `ask` callback, `isTTY` boolean, `autoYes` flag, `warn` callback.
-   - `ensureConsent(entry, deps)` — Interactive consent gate. Mutates `deps.store`; caller persists it. Non-TTY without `autoYes` skips (returns false) with a warning—NEVER hangs. On first mount or spec-hash drift, prompts with danger flags highlighted. Remembers declines and doesn't re-prompt on same spec.
-   - `pinTools(store, name, hash)` — Records tool-definition hash at mount.
-   - `checkDrift(store, name, hash)` — Detects tool-definition changes (returns true if changed).
+**Fix**, in two files:
 
-2. **`.gitignore` update**
-   - Added `.mcp-approvals.json` to ignored files (machine-local trust store, never committed).
+1. **`src/provisioning/ui/prompt.ts`**:
+   - `stdinInput()` now takes an optional `stream: NodeJS.ReadStream = process.stdin`
+     parameter (was hardcoded to `process.stdin`, making it untestable without
+     real stdin). Its `read()` promise now also listens for the stream's `end`
+     event and resolves `''` on it, alongside the existing `data` handler —
+     both paths share a `cleanup()` that removes both listeners.
+   - New `interactiveTTY(stdin: { isTTY?: boolean } = process.stdin, stderr: { isTTY?: boolean } = process.stderr): boolean`
+     — returns `true` only when **both** are TTYs (`(stdin.isTTY ?? false) && (stderr.isTTY ?? false)`).
+2. **`src/mcp/mount.ts`**:
+   - Imports `interactiveTTY` alongside the existing `askYesNo`, `stdinInput`.
+   - `consent.isTTY` is now `interactiveTTY()` instead of `process.stderr.isTTY ?? false`.
 
-One test file:
-- `tests/mcp/consent.test.ts` (179 lines, 13 tests)
+Test files:
+- **`tests/provisioning/prompt.test.ts`** — new file (didn't exist before). Two
+  `describe` blocks: `interactiveTTY` (4-case truth table) and `stdinInput`
+  (data-resolves case + the new end-resolves-empty regression case).
+- **`tests/mcp/mount-all.test.ts`** — extended with one new `it(...)` inside the
+  existing `describe('mountAll', ...)` block (see file-naming note below).
+
+## File-naming discrepancy: `mount.test.ts` vs `mount-all.test.ts`
+
+The task brief pointed at `tests/mcp/mount.test.ts`, describing it as a file that
+"already imports `mountAll` and builds `McpConfig` fixtures." That description
+does not match the actual `tests/mcp/mount.test.ts` on disk: that file has a
+single `test()` (flat bun:test style, no `describe`) that mounts the real
+`src/mcp/server.ts` stdio subprocess via `mountMcpServer` — no `mountAll` or
+`McpConfig` fixtures at all. It was left untouched.
+
+The file that matches the brief's description (`describe`/`it` style, imports
+`mountAll`, `entry()`/`deps()`/`fakeServer()` fixture helpers, `McpConfig`
+literals) is `tests/mcp/mount-all.test.ts`. The new regression test was added
+there, inside the existing `describe('mountAll', ...)` block, reusing that
+file's own helpers rather than the brief's literal snippet (which used ad hoc
+`mkdtemp`/inline object literals) — keeping the addition idiomatic to the file
+it actually lives in:
+
+```ts
+it('skips consent-gated servers non-interactively without calling ask (no hang)', async () => {
+  let asked = 0;
+  const config: McpConfig = {
+    entries: [entry('needs-consent')],
+    dormant: [],
+    warnings: [],
+  };
+  const reg = await mountAll(
+    config,
+    deps({
+      consent: {
+        isTTY: false,
+        autoYes: false,
+        ask: async () => {
+          asked += 1;
+          return true;
+        },
+      },
+      mount: async () => fakeServer([]),
+    }),
+  );
+  expect(asked).toBe(0);
+  expect(reg.skipped.some((s) => s.name === 'needs-consent')).toBe(true);
+});
+```
+
+## `ensureConsent` non-interactive path — confirmed before writing the test
+
+Per the brief's instruction, read `src/mcp/consent.ts::ensureConsent`
+(lines 136–170) before writing the regression test. Confirmed the
+`isTTY:false && !autoYes && !approved` branch:
+
+```ts
+if (!deps.isTTY) {
+  deps.warn(
+    `MCP server "${entry.name}" is not approved yet and this is not a TTY — skipping (run interactively or set AGENT_MCP_AUTO_APPROVE=1)`,
+  );
+  return false;
+}
+```
+
+returns `false` (skip) directly, without ever calling `deps.ask`. So
+`ensureConsent` itself was already correct and needed no change — the actual
+bug was entirely in how `mount.ts` computed the `isTTY` value it passed in.
+The new `mount-all.test.ts` case is a regression guard that this wiring stays
+intact (with `consent.isTTY: false, autoYes: false`, `ask` must never be
+called and the entry must land in `reg.skipped`), not a test of the fix
+itself — consistent with the brief's expectation that this test would already
+pass before the fix.
 
 ## TDD evidence (RED → GREEN)
 
-**Step 1–2 (Failing tests):**
-- RED: `bun test tests/mcp/consent.test.ts` → error: `Cannot find module '../../src/mcp/consent.ts'`, 0 pass / 1 fail.
+**RED** — before implementing `interactiveTTY` / the updated `stdinInput`:
 
-**Step 3–4 (Implementation + pass):**
-- GREEN: after creating `src/mcp/consent.ts` with exact brief code → 13 pass, 0 fail, 24 expect() calls.
-
-**Step 5–6 (Gitignore + typecheck + lint):**
-- `.gitignore` updated with `.mcp-approvals.json` entry.
-- `bun run typecheck` → clean (tsc --noEmit, no output).
-- `bun run lint:file -- "src/mcp/consent.ts" "tests/mcp/consent.test.ts"` → Checked 2 files. After Biome auto-fix (line-wrapping + import-order only, no logic change):
-  - One linting warning: template string placeholder in test (line 35: `'Bearer ${T}'` → changed to `` `Bearer \${T}` ``).
-  - Final lint run: clean.
-
-**Step 7 (Commit):**
 ```
-git add src/mcp/consent.ts tests/mcp/consent.test.ts .gitignore
-git commit -m "feat(mcp): consent-on-mount store with spec hashing + tool-definition pinning (Slice 15 Task 2)"
-[slice-15-mcp-mounts e9159ad] feat(mcp): consent-on-mount store with spec hashing + tool-definition pinning (Slice 15 Task 2)
- 3 files changed, 358 insertions(+)
+$ bun test tests/provisioning/prompt.test.ts
+bun test v1.3.11 (af24e281)
+
+tests/provisioning/prompt.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+1 | })
+2 | {
+    ^
+SyntaxError: Export named 'interactiveTTY' not found in module '/Users/inderjotsingh/ai/src/provisioning/ui/prompt.ts'.
+      at loadAndEvaluateModule (2:1)
+-------------------------------
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [15.00ms]
 ```
-Pre-commit `docs-check` hook passed (confirmed no living docs broken).
 
-## Test Coverage (13 tests)
+(This confirms the missing export; had the module loaded, the `end` test would
+have hung against the old `stdinInput`, which registered no `end` listener.)
 
-Each test suite covers key consent-store behaviors:
+`tests/mcp/mount-all.test.ts`'s new test was **not** expected to be RED per the
+brief, since it exercises `ensureConsent`'s pre-existing skip path directly,
+not the new predicate. Verified it passed (8/8 in the file) before any
+implementation changes — confirming it's a regression guard, not a bugfix
+test.
 
-**specHash (2 tests)**
-- Stability across secret-value changes (HTTP Authorization header with different bearer token values hash identically).
-- Change detection when spec fields change (command/URL modifications result in different hashes).
+**GREEN** — after implementing `stdinInput`/`interactiveTTY` in `prompt.ts` and
+wiring `interactiveTTY()` into `mount.ts`:
 
-**toolsHash (1 test)**
-- Description change detection (rug-pull pin: tool definition drift triggers new hash).
+```
+$ bun test tests/provisioning/prompt.test.ts tests/mcp/mount-all.test.ts tests/mcp/mount.test.ts
+bun test v1.3.11 (af24e281)
 
-**Approval store round-trip (1 test)**
-- Atomic write/read with temp+rename.
-- Graceful degradation on missing file (returns empty object).
+ 12 pass
+ 0 fail
+ 22 expect() calls
+Ran 12 tests across 3 files. [210.00ms]
+```
 
-**ensureConsent flow (6 tests)**
-- First mount: prompts and records `specHash`.
-- Cached approval: matching spec-hash skips re-prompt.
-- Spec drift: hash mismatch triggers re-prompt.
-- Decline memory: declined servers not re-prompted on same spec.
-- Non-TTY without autoYes: skips silently (returns false, no store mutation).
-- autoYes headless opt-in: approves without prompting.
+No hang; both runs (before and after a subsequent formatting fix) completed
+well under bun's default per-test timeout.
 
-**Drift pinning (1 test)**
-- `pinTools`: records tool hash.
-- `checkDrift`: returns true when hash changed, false when stable.
+## Gate results
 
-**Display + danger (2 tests)**
-- `describeEntry`: shows raw command/URL, never header/env secret values.
-- `dangerFlags`: detects sudo, rm -rf, curl|sh, wget|sh patterns.
+- **`bun run typecheck`** → clean (`tsc --noEmit`, no output/errors).
+- **`bun run lint:file -- "src/provisioning/ui/prompt.ts" "src/mcp/mount.ts" "tests/provisioning/prompt.test.ts" "tests/mcp/mount-all.test.ts"`**
+  → initially flagged 2 formatting-only issues: biome wanted the new 3-name
+  imports (`askYesNo, interactiveTTY, stdinInput`) wrapped across multiple
+  lines rather than on one line. Fixed by wrapping both import statements;
+  re-run → `Checked 4 files in 14ms. No fixes applied.` (clean, no logic
+  changes).
+- **`bun test tests/mcp/ tests/provisioning/`** (full suites, 27 files) →
+  **114 pass, 0 fail, 238 expect() calls**, 35.91s. No regressions in either
+  subsystem.
+- **`bun run docs:check`** ran automatically via the pre-commit hook → passed
+  (`✔ docs-check: living docs present + linked; every src subsystem
+  documented`). No `docs/architecture.md` change was needed: this is a
+  bugfix inside already-documented subsystems (`src/mcp`, `src/provisioning`),
+  not a new subsystem, new mechanism, or externally-visible behavior change
+  at the architecture-doc level — the module boundaries and data flow are
+  unchanged, only the interactivity predicate's correctness.
 
-## Files Changed
+## Files changed
 
-- `src/mcp/consent.ts` (new, 176 lines) — Core consent store implementation.
-- `tests/mcp/consent.test.ts` (new, 179 lines) — Test suite.
-- `.gitignore` (modified) — Added `.mcp-approvals.json`.
+- `src/provisioning/ui/prompt.ts` (modified) — `stdinInput` now takes an
+  optional stream param and handles `end`; added `interactiveTTY`.
+- `src/mcp/mount.ts` (modified) — imports and uses `interactiveTTY()` instead
+  of `process.stderr.isTTY ?? false`.
+- `tests/provisioning/prompt.test.ts` (new, 34 lines) — `interactiveTTY` +
+  `stdinInput` unit tests, exactly per the brief.
+- `tests/mcp/mount-all.test.ts` (modified, +24 lines) — no-hang regression
+  test added to the existing `mountAll` describe block.
 
-**Commit:** `e9159ad` — "feat(mcp): consent-on-mount store with spec hashing + tool-definition pinning (Slice 15 Task 2)" on branch `slice-15-mcp-mounts`.
-
-## Self-Review
-
-- **TDD evidence**: Tests ran RED (module not found) before implementation, then GREEN (13/13) after. Both standalone run and full typecheck/lint verified clean.
-- **Code quality**: 
-  - `bun run typecheck` — clean, no output.
-  - `bun run lint:file` — clean after Biome auto-fix (line-wrapping, import-order only; no logic change).
-  - No `console.log` / `console.*` in `src/mcp/consent.ts`.
-  - No new npm dependencies (only `node:crypto`, `node:fs`, `node:path`, `ai` type imports).
-- **Brief compliance**: 
-  - Code applied verbatim from brief (Step 3).
-  - All function signatures match: `specHash`, `toolsHash`, `readApprovals`/`writeApprovals`, `describeEntry`, `dangerFlags`, `ConsentDeps`, `ensureConsent`, `pinTools`/`checkDrift`.
-  - Atomic file I/O via temp+rename implemented correctly.
-  - Non-TTY degradation (skip with warning, not hang) matches brief's "NEVER a hang" contract.
-  - Raw config hashing (from `entry.raw` field) ensures secrets are NAMES-only, never VALUES.
-- **Linting adjustment**: One template-string warning in test (`'Bearer ${T}'` → `` `Bearer \${T}` ``) to satisfy Biome rule. No behavioral change; test logic identical.
-- **Docs**: Pre-commit `docs:check` hook passed (confirmed no living docs broken by adding files to already-documented `src/mcp/` subsystem). Per project hard-line rule, full docs refresh (architecture.md/README/ROADMAP/Artifact) deferred to **slice close** per usual pattern.
+**Commit:** `63380483e9d1189f025765291b021e6be629ea34` — "fix(mcp): consent
+judges TTY on the stream it reads (stdin) + stdin end resolves empty (Slice 16
+Task 2)" on branch `slice-16-mcp-telemetry-ordering`.
 
 ## Concerns
 
-None. Implementation is clean, brief code applied verbatim with only formatter adjustments (line-wrapping per Biome rules), all 13 tests pass, typecheck clean, lint clean after template-string fix, and pre-commit docs-check passed.
+None blocking. One documentation discrepancy noted above and recorded for
+whoever reviews Slice 16: the brief's file pointer (`tests/mcp/mount.test.ts`)
+didn't match its own description of that file's contents — the file matching
+the description (`mount-all.test.ts`) was used instead, and `mount.test.ts`
+was left untouched.
 
----
+## Review fix: regression guard for `mount.ts`'s `isTTY: interactiveTTY()` wiring
 
-## Security Review Fixes
+**Finding (Important):** the existing no-hang test above (`'skips
+consent-gated servers non-interactively without calling ask (no hang)'`)
+passes `consent: { isTTY: false, ... }` explicitly. Because `mount.ts` spreads
+`...deps.consent` *after* `isTTY: interactiveTTY()` (line ~67), that test's
+own `isTTY: false` always wins — it never exercises `interactiveTTY()` itself.
+Reverting `mount.ts` line 67 back to `isTTY: process.stderr.isTTY ?? false`
+(the pre-Task-2 bug) would leave every existing test green, i.e. there was no
+regression guard on the actual wiring line.
 
-**Review findings (Critical + 2 Important):** Addressed three issues in `src/mcp/consent.ts` and test coverage.
+**Fix:** added one new test to `tests/mcp/mount-all.test.ts`, inside the
+`describe('mountAll', ...)` block, right after the existing no-hang test:
 
-**Critical — toolsHash delimiter-injection collision:**
-- **Issue:** Original code joined attacker-controlled fields with bare `|`: `` `${name}|${description}|${schema}` ``. Two distinct tool sets could hash identically if fields were crafted to exploit the delimiter (e.g., `{ search: {description: 'find|things'} }` vs `{ 'search|find': {description: 'things'} }`), defeating rug-pull detection.
-- **Fix:** Restructured to per-tool JSON serialization: `JSON.stringify([name, description, schemaJson])`. JSON escaping makes delimiter injection impossible. Sorted the resulting strings, joined with `\n`, then sha256—same hash for any tool order.
-- **Code change:** Lines 59–64 in `src/mcp/consent.ts`.
+```ts
+it('stderr-is-TTY but stdin-is-not (cmd < /dev/null) still skips without asking', async () => {
+  // Regression guard for mount.ts's `isTTY: interactiveTTY()` wiring: judging
+  // TTY-ness off `process.stderr.isTTY` alone (the old, buggy wiring) would
+  // read true here and attempt to prompt — which hangs when stdin is closed.
+  // The fix requires BOTH stdin and stderr to be TTYs, so this must skip.
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const stderrDescriptor = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+  Object.defineProperty(process.stderr, 'isTTY', { value: true, configurable: true });
+  try {
+    let asked = 0;
+    let mountCalls = 0;
+    const config: McpConfig = {
+      entries: [entry('needs-consent')],
+      dormant: [],
+      warnings: [],
+    };
+    const reg = await mountAll(
+      config,
+      deps({
+        // Deliberately omit isTTY here so mount.ts's own
+        // `isTTY: interactiveTTY()` wiring is what gets exercised.
+        consent: {
+          autoYes: false,
+          ask: async () => { asked += 1; return true; },
+        },
+        mount: async () => { mountCalls += 1; return fakeServer([]); },
+      }),
+    );
+    expect(asked).toBe(0);
+    expect(mountCalls).toBe(0);
+    expect(reg.skipped.some((s) => s.name === 'needs-consent')).toBe(true);
+  } finally {
+    if (stdinDescriptor) Object.defineProperty(process.stdin, 'isTTY', stdinDescriptor);
+    if (stderrDescriptor) Object.defineProperty(process.stderr, 'isTTY', stderrDescriptor);
+  }
+});
+```
 
-**Important 1 — expanded-value fallbacks in specHash/describeEntry:**
-- **Issue:** Both functions used `raw.command ?? entry.command` / `raw.url ?? entry.url`, which would silently hash/display EXPANDED (possibly secret-bearing) values if `raw` were malformed.
-- **Fix:** Removed fallbacks; now read strictly from `raw`. If required field is missing, throw `new Error(\`malformed raw config for MCP server "${entry.name}"\`)`. Mount layer's per-entry try/catch (next task) degrades it at the boundary.
-- **Code changes:** Lines 23–24, 37–38 (specHash); lines 103–104, 109–110 (describeEntry).
+This scenario (stderr is a TTY, stdin is not — `cmd < /dev/null` on an
+interactive terminal) is the one the bug actually manifests in: judging
+solely on `process.stderr.isTTY` reads `true`, so the old code would attempt
+to prompt (and hang on real stdin). `deps.consent` here deliberately omits
+`isTTY` (only sets `ask` + `autoYes: false`), so `mount.ts`'s own
+`isTTY: interactiveTTY()` line is what actually resolves the value — unlike
+every prior test in the file, which sets `consent.isTTY` explicitly and thus
+short-circuits past that line via the later `...deps.consent` spread.
 
-**Important 2 — coverage gaps:**
-- **Issue:** No test coverage for delimiter-injection rug-pull regression or tool-ordering idempotence. Corrupt store degradation not tested.
-- **Fix:** Added to `tests/mcp/consent.test.ts`:
-  - `describe('toolsHash hardening')` with two tests:
-    - `is not collidable via delimiter injection (rug-pull regression)` — verifies `toolsHash({ search: {description: 'find|things'} })` ≠ `toolsHash({ 'search|find': {description: 'things'} })`.
-    - `is independent of tool listing order` — verifies `toolsHash({alpha, beta})` = `toolsHash({beta, alpha})`.
-  - In `approval store` describe block: `degrades a corrupt store file to {} (re-consent, never crash)` — writes invalid JSON to approval file, confirms `readApprovals()` returns empty object (no crash).
-- Also fixed test fixture: `dangerFlags` test now includes `raw: { command: 'sudo', args: [...] }` to satisfy strict raw-field validation.
+**Regression-catch verification (as required by the review):**
 
-**Verification:**
-- `bun test tests/mcp/consent.test.ts` → 16 pass, 0 fail, 27 expect() calls.
-- `bun run typecheck` → clean.
-- `bun run lint:file -- "src/mcp/consent.ts" "tests/mcp/consent.test.ts"` → clean (after Biome auto-format: line-wrapping only, no logic change).
+1. Reverted `src/mcp/mount.ts` line 67 to the pre-fix
+   `isTTY: process.stderr.isTTY ?? false`, kept everything else unchanged, ran
+   `bun test tests/mcp/mount-all.test.ts`:
 
-**Commit:** `git add src/mcp/consent.ts tests/mcp/consent.test.ts .gitignore && git commit -m "fix(mcp): collision-proof toolsHash via JSON field separation + strict raw-only hashing/display (Slice 15 Task 2 review)"`
+   ```
+   error: expect(received).toBe(expected)
+   Expected: 0
+   Received: 1
+     at tests/mcp/mount-all.test.ts:223:21
+   (fail) mountAll > stderr-is-TTY but stdin-is-not (cmd < /dev/null) still skips without asking [0.65ms]
+   8 pass
+   1 fail
+   ```
+
+   Confirmed FAIL — `asked` became `1` because the buggy wiring read
+   `isTTY: true` (stderr alone) and called `ask`. (The test's fake `ask`
+   resolves immediately rather than reading real stdin, so this failed fast
+   instead of hanging — appropriate for a unit test asserting the wiring
+   itself, since a real hang is exactly what the fix in Task 2 already
+   prevents and is covered by the `stdinInput` `end`-handling tests in
+   `tests/provisioning/prompt.test.ts`.)
+
+2. Restored `src/mcp/mount.ts` line 67 to `isTTY: interactiveTTY()` (`git diff`
+   on the file confirmed byte-for-byte back to the committed fix — empty
+   diff), re-ran the same command:
+
+   ```
+   bun test v1.3.11 (af24e281)
+    9 pass
+    0 fail
+   18 expect() calls
+   Ran 9 tests across 1 file. [54.00ms]
+   ```
+
+   Confirmed PASS — all 9 tests in the file, including the new one.
+
+**Gate results:**
+- `bun test tests/mcp/mount-all.test.ts` → 9 pass, 0 fail.
+- `bun run typecheck` → clean (`tsc --noEmit`, no output).
+- `bun run lint:file -- "tests/mcp/mount-all.test.ts"` → clean
+  (`Checked 1 file in 36ms. No fixes applied.`).
+
+**Files changed:** `tests/mcp/mount-all.test.ts` only (test-only change, no
+production code touched — `src/mcp/mount.ts` is unmodified from the Task 2
+commit).

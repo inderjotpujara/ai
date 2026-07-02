@@ -173,6 +173,65 @@ describe('mountAll', () => {
     expect(asked).toBe(0);
     expect(reg.skipped.some((s) => s.name === 'needs-consent')).toBe(true);
   });
+  it('stderr-is-TTY but stdin-is-not (cmd < /dev/null) still skips without asking', async () => {
+    // Regression guard for mount.ts's `isTTY: interactiveTTY()` wiring: judging
+    // TTY-ness off `process.stderr.isTTY` alone (the old, buggy wiring) would
+    // read true here and attempt to prompt — which hangs when stdin is closed.
+    // The fix requires BOTH stdin and stderr to be TTYs, so this must skip.
+    const stdinDescriptor = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    const stderrDescriptor = Object.getOwnPropertyDescriptor(
+      process.stderr,
+      'isTTY',
+    );
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    try {
+      let asked = 0;
+      let mountCalls = 0;
+      const config: McpConfig = {
+        entries: [entry('needs-consent')],
+        dormant: [],
+        warnings: [],
+      };
+      const reg = await mountAll(
+        config,
+        deps({
+          // Deliberately omit isTTY here so mount.ts's own
+          // `isTTY: interactiveTTY()` wiring is what gets exercised.
+          consent: {
+            autoYes: false,
+            ask: async () => {
+              asked += 1;
+              return true;
+            },
+          },
+          mount: async () => {
+            mountCalls += 1;
+            return fakeServer([]);
+          },
+        }),
+      );
+      expect(asked).toBe(0);
+      expect(mountCalls).toBe(0);
+      expect(reg.skipped.some((s) => s.name === 'needs-consent')).toBe(true);
+    } finally {
+      if (stdinDescriptor) {
+        Object.defineProperty(process.stdin, 'isTTY', stdinDescriptor);
+      }
+      if (stderrDescriptor) {
+        Object.defineProperty(process.stderr, 'isTTY', stderrDescriptor);
+      }
+    }
+  });
 });
 
 describe('warnUnknownAgents', () => {
