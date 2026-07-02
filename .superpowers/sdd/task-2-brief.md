@@ -1,351 +1,349 @@
-### Task 2: Ollama download adapter (NDJSON stream) + supervisor guards
+### Task 2: Consent store + hashing + prompt flow
 
 **Files:**
-- Create: `src/provisioning/ollama-pull.ts` (NDJSON stream parse → normalized events)
-- Create: `src/provisioning/supervisor.ts` (disk-preflight, stall-watchdog, retry/backoff)
-- Create: `src/provisioning/providers/ollama.ts` (the `DownloadProvider`)
-- Test: `tests/provisioning/ollama-pull.test.ts`
-- Test: `tests/provisioning/supervisor.test.ts`
+- Create: `src/mcp/consent.ts`
+- Test: `tests/mcp/consent.test.ts`
 
 **Interfaces:**
-- Consumes: `DownloadProgress`, `DownloadPhase`, `DownloadProvider`, `ProgressTracker` (Task 1); `ProviderKind` (core); `isModelInstalled` (ollama-control).
+- Consumes: `McpServerEntry`, `McpTransportKind` (Task 1); `LineInput`/`askYesNo` (`src/provisioning/ui/prompt.ts`); `node:crypto`, `node:fs`.
 - Produces:
-  - `parseOllamaLine(line: string): { phase: DownloadPhase; digest?: string; completed?: number; total?: number } | null`
-  - `aggregatePull(events, tracker): DownloadProgress` via a stateful `OllamaPullAggregator` class: `feed(line: string): DownloadProgress | null`.
-  - `type PreflightInput = { requiredBytes: number; freeBytes: number; headroomBytes?: number }`; `checkDiskSpace(i: PreflightInput): { ok: boolean; shortfallBytes: number }`
-  - `withRetry<T>(fn: (signal: AbortSignal) => Promise<T>, opts: { attempts: number; baseMs: number; capMs: number; jitter: () => number; onRetry?: (n: number) => void }): Promise<T>`
-  - `class StallWatchdog` — `constructor(timeoutMs, now?, onStall: () => void)`; `beat(bytes: number): void`; `stop(): void` (drives an internal timer; abstracted for tests via injected `now` + manual `tick`).
-  - `createOllamaProvider(opts?: { baseUrl?: string }): DownloadProvider`
+  - `specHash(entry: McpServerEntry): string` — sha256 over canonical raw fields: stdio `{command,args,envKeys(sorted)}`, http `{url,headerNames(sorted)}` from the RAW config (unexpanded — no secret values).
+  - `toolsHash(tools: ToolSet): string` — sha256 over sorted `name|description|inputSchemaJson` triples.
+  - `type ApprovalRecord = { specHash: string; toolsHash?: string; approvedAt: string; declined?: boolean }`
+  - `readApprovals(path?: string): Record<string, ApprovalRecord>` / `writeApprovals(store, path?): void` (atomic temp+rename; default path `join(process.cwd(), '.mcp-approvals.json')`)
+  - `describeEntry(entry: McpServerEntry): string` — the exact untruncated raw command line or URL + header names.
+  - `dangerFlags(entry: McpServerEntry): string[]`
+  - `type ConsentDeps = { store: Record<string, ApprovalRecord>; ask: (q: string) => Promise<boolean>; isTTY: boolean; autoYes: boolean; warn: (msg: string) => void }`
+  - `ensureConsent(entry: McpServerEntry, deps: ConsentDeps): Promise<boolean>` — mutates `deps.store`; caller persists.
+  - `pinTools(store, name, hash): void`; `checkDrift(store, name, hash): boolean` (true = drift).
 
-- [ ] **Step 1: Write failing tests for NDJSON line parsing (detect by field presence, not verb).**
+- [ ] **Step 1: Write the failing tests**
 
 ```ts
-// tests/provisioning/ollama-pull.test.ts
+// tests/mcp/consent.test.ts
 import { describe, expect, it } from 'bun:test';
-import { parseOllamaLine, OllamaPullAggregator } from '../../src/provisioning/ollama-pull.ts';
-import { DownloadPhase } from '../../src/provisioning/types.ts';
-import { ProgressTracker } from '../../src/provisioning/progress-tracker.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  type ApprovalRecord,
+  checkDrift,
+  dangerFlags,
+  describeEntry,
+  ensureConsent,
+  pinTools,
+  readApprovals,
+  specHash,
+  toolsHash,
+  writeApprovals,
+} from '../../src/mcp/consent.ts';
+import { type McpServerEntry, McpTransportKind } from '../../src/mcp/types.ts';
 
-describe('parseOllamaLine', () => {
-  it('maps "pulling manifest" to Resolving', () => {
-    expect(parseOllamaLine('{"status":"pulling manifest"}')?.phase).toBe(DownloadPhase.Resolving);
+const stdio: McpServerEntry = {
+  kind: McpTransportKind.Stdio, name: 'ft', command: 'bun',
+  args: ['run', 's.ts'], env: {}, raw: { command: 'bun', args: ['run', 's.ts'] },
+};
+const http: McpServerEntry = {
+  kind: McpTransportKind.Http, name: 'gh', url: 'https://x.test/mcp',
+  headers: { Authorization: 'Bearer SECRET' },
+  raw: { type: 'http', url: 'https://x.test/mcp', headers: { Authorization: 'Bearer ${T}' } },
+};
+
+describe('specHash', () => {
+  it('is stable and ignores header VALUES', () => {
+    const other = { ...http, headers: { Authorization: 'Bearer DIFFERENT' } };
+    expect(specHash(http)).toBe(specHash(other));
   });
-  it('treats presence of digest+total+completed as Downloading regardless of verb', () => {
-    const r = parseOllamaLine('{"status":"pulling 12ab","digest":"sha256:12ab","total":100,"completed":40}');
-    expect(r?.phase).toBe(DownloadPhase.Downloading);
-    expect(r?.completed).toBe(40);
-    expect(r?.digest).toBe('sha256:12ab');
-  });
-  it('maps "verifying sha256 digest" to Verifying', () => {
-    expect(parseOllamaLine('{"status":"verifying sha256 digest"}')?.phase).toBe(DownloadPhase.Verifying);
-  });
-  it('maps "success" to Done', () => {
-    expect(parseOllamaLine('{"status":"success"}')?.phase).toBe(DownloadPhase.Done);
-  });
-  it('returns null for a blank line', () => {
-    expect(parseOllamaLine('')).toBeNull();
+  it('changes when the command changes', () => {
+    expect(specHash(stdio)).not.toBe(specHash({ ...stdio, command: 'sh', raw: { command: 'sh' } }));
   });
 });
 
-describe('OllamaPullAggregator', () => {
-  it('aggregates per-layer completed/total by replacing (not summing) per digest', () => {
-    const agg = new OllamaPullAggregator(new ProgressTracker('m', () => 0));
-    agg.feed('{"status":"pulling manifest"}');
-    agg.feed('{"digest":"a","total":100,"completed":50}');
-    agg.feed('{"digest":"b","total":100,"completed":10}');
-    const p = agg.feed('{"digest":"a","total":100,"completed":90}'); // replaces a=50 → 90
-    expect(p?.bytesCompleted).toBe(100); // 90 + 10
-    expect(p?.bytesTotal).toBe(200);
+describe('toolsHash', () => {
+  it('changes when a description changes (rug-pull signal)', () => {
+    const a = toolsHash({ t: { description: 'safe', inputSchema: undefined } } as never);
+    const b = toolsHash({ t: { description: 'EVIL', inputSchema: undefined } } as never);
+    expect(a).not.toBe(b);
+  });
+});
+
+describe('approval store', () => {
+  it('round-trips atomically and degrades on missing file', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'mcp-appr-')), '.mcp-approvals.json');
+    expect(readApprovals(path)).toEqual({});
+    const store: Record<string, ApprovalRecord> = {
+      ft: { specHash: 'h', approvedAt: '2026-07-02T00:00:00Z' },
+    };
+    writeApprovals(store, path);
+    expect(readApprovals(path)).toEqual(store);
+  });
+});
+
+describe('ensureConsent', () => {
+  const deps = (over: Partial<Parameters<typeof ensureConsent>[1]>) => ({
+    store: {}, ask: async () => true, isTTY: true, autoYes: false, warn: () => {}, ...over,
+  });
+  it('prompts and records approval on first mount', async () => {
+    const d = deps({});
+    expect(await ensureConsent(stdio, d)).toBe(true);
+    expect(d.store.ft?.specHash).toBe(specHash(stdio));
+  });
+  it('skips silently-approved on matching hash without re-prompting', async () => {
+    let asked = 0;
+    const d = deps({
+      store: { ft: { specHash: specHash(stdio), approvedAt: 'x' } },
+      ask: async () => { asked++; return true; },
+    });
+    expect(await ensureConsent(stdio, d)).toBe(true);
+    expect(asked).toBe(0);
+  });
+  it('re-prompts when the spec hash changed', async () => {
+    let asked = 0;
+    const d = deps({
+      store: { ft: { specHash: 'stale', approvedAt: 'x' } },
+      ask: async () => { asked++; return true; },
+    });
+    await ensureConsent(stdio, d);
+    expect(asked).toBe(1);
+  });
+  it('remembers a decline and does not re-prompt on same spec', async () => {
+    const d = deps({ ask: async () => false });
+    expect(await ensureConsent(stdio, d)).toBe(false);
+    expect(d.store.ft?.declined).toBe(true);
+    let asked = 0;
+    const d2 = deps({ store: d.store, ask: async () => { asked++; return true; } });
+    expect(await ensureConsent(stdio, d2)).toBe(false);
+    expect(asked).toBe(0);
+  });
+  it('non-TTY without autoYes skips (returns false) and never asks', async () => {
+    let asked = 0;
+    const d = deps({ isTTY: false, ask: async () => { asked++; return true; } });
+    expect(await ensureConsent(stdio, d)).toBe(false);
+    expect(asked).toBe(0);
+    expect(d.store.ft).toBeUndefined(); // a skip is not a decline
+  });
+  it('autoYes approves without prompting (headless opt-in)', async () => {
+    const d = deps({ isTTY: false, autoYes: true, ask: async () => false });
+    expect(await ensureConsent(stdio, d)).toBe(true);
+  });
+});
+
+describe('drift pinning', () => {
+  it('pinTools records, checkDrift detects a change', () => {
+    const store: Record<string, ApprovalRecord> = { ft: { specHash: 'h', approvedAt: 'x' } };
+    pinTools(store, 'ft', 'toolsA');
+    expect(checkDrift(store, 'ft', 'toolsA')).toBe(false);
+    expect(checkDrift(store, 'ft', 'toolsB')).toBe(true);
+  });
+});
+
+describe('display + danger', () => {
+  it('describeEntry shows raw command and never header values', () => {
+    expect(describeEntry(stdio)).toContain('bun run s.ts');
+    const d = describeEntry(http);
+    expect(d).toContain('https://x.test/mcp');
+    expect(d).not.toContain('SECRET');
+  });
+  it('flags dangerous patterns', () => {
+    const risky: McpServerEntry = {
+      kind: McpTransportKind.Stdio, name: 'r', command: 'sudo',
+      args: ['rm', '-rf', '/'], env: {}, raw: {},
+    };
+    expect(dangerFlags(risky).length).toBeGreaterThan(0);
   });
 });
 ```
 
-- [ ] **Step 2: Run, verify fail.**
+- [ ] **Step 2: Run to verify fail**
 
-Run: `bun test tests/provisioning/ollama-pull.test.ts`
+Run: `bun test tests/mcp/consent.test.ts`
 Expected: FAIL (module missing).
 
-- [ ] **Step 3: Create `src/provisioning/ollama-pull.ts`.**
+- [ ] **Step 3: Create `src/mcp/consent.ts`**
 
 ```ts
-import { type DownloadProgress, DownloadPhase } from './types.ts';
-import type { ProgressTracker } from './progress-tracker.ts';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { ToolSet } from 'ai';
+import { type McpServerEntry, McpTransportKind } from './types.ts';
 
-type OllamaEvent = { status?: string; digest?: string; total?: number; completed?: number };
-type ParsedLine = { phase: DownloadPhase; digest?: string; completed?: number; total?: number };
+export type ApprovalRecord = {
+  specHash: string;
+  toolsHash?: string;
+  approvedAt: string;
+  declined?: boolean;
+};
 
-/** Parse one NDJSON line. Detect a layer download by PRESENCE of digest+total+completed. */
-export function parseOllamaLine(line: string): ParsedLine | null {
-  const trimmed = line.trim();
-  if (trimmed === '') return null;
-  let ev: OllamaEvent;
+function sha256(s: string): string {
+  return createHash('sha256').update(s).digest('hex');
+}
+
+/** Hash the server's identity from RAW config fields — env/header NAMES only,
+ *  never values, so secrets are neither hashed nor stored. */
+export function specHash(entry: McpServerEntry): string {
+  if (entry.kind === McpTransportKind.Http) {
+    const raw = entry.raw as { url?: string; headers?: Record<string, string> };
+    return sha256(JSON.stringify({
+      url: raw.url ?? entry.url,
+      headerNames: Object.keys(raw.headers ?? {}).sort(),
+    }));
+  }
+  const raw = entry.raw as { command?: string; args?: string[]; env?: Record<string, string> };
+  return sha256(JSON.stringify({
+    command: raw.command ?? entry.command,
+    args: raw.args ?? entry.args,
+    envKeys: Object.keys(raw.env ?? {}).sort(),
+  }));
+}
+
+/** Hash the mounted tool definitions — the rug-pull pin. */
+export function toolsHash(tools: ToolSet): string {
+  const parts = Object.entries(tools)
+    .map(([name, t]) => {
+      let schema = '';
+      try {
+        const s = (t as { inputSchema?: { jsonSchema?: unknown } }).inputSchema;
+        schema = JSON.stringify(s?.jsonSchema ?? null);
+      } catch {
+        schema = 'unserializable';
+      }
+      return `${name}|${(t as { description?: string }).description ?? ''}|${schema}`;
+    })
+    .sort();
+  return sha256(parts.join('\n'));
+}
+
+export function approvalsPath(): string {
+  return join(process.cwd(), '.mcp-approvals.json');
+}
+
+export function readApprovals(
+  path: string = approvalsPath(),
+): Record<string, ApprovalRecord> {
   try {
-    ev = JSON.parse(trimmed) as OllamaEvent;
+    if (!existsSync(path)) return {};
+    return JSON.parse(readFileSync(path, 'utf8')) as Record<string, ApprovalRecord>;
   } catch {
-    return null;
-  }
-  if (ev.digest && typeof ev.total === 'number' && typeof ev.completed === 'number') {
-    return { phase: DownloadPhase.Downloading, digest: ev.digest, completed: ev.completed, total: ev.total };
-  }
-  const s = ev.status ?? '';
-  if (s === 'success') return { phase: DownloadPhase.Done };
-  if (s.startsWith('verifying')) return { phase: DownloadPhase.Verifying };
-  if (s.startsWith('writing') || s.startsWith('removing')) return { phase: DownloadPhase.Finalizing };
-  return { phase: DownloadPhase.Resolving };
-}
-
-/** Stateful aggregator: per-digest replace, sum across digests, feed a ProgressTracker. */
-export class OllamaPullAggregator {
-  private layers = new Map<string, { completed: number; total: number }>();
-  constructor(private readonly tracker: ProgressTracker) {}
-
-  feed(line: string): DownloadProgress | null {
-    const parsed = parseOllamaLine(line);
-    if (!parsed) return null;
-    if (parsed.phase === DownloadPhase.Downloading && parsed.digest) {
-      this.layers.set(parsed.digest, { completed: parsed.completed ?? 0, total: parsed.total ?? 0 });
-    }
-    let completed = 0;
-    let total = 0;
-    for (const l of this.layers.values()) {
-      completed += l.completed;
-      total += l.total;
-    }
-    return this.tracker.update(parsed.phase, completed, total > 0 ? total : null);
-  }
-}
-```
-
-- [ ] **Step 4: Run, verify pass.**
-
-Run: `bun test tests/provisioning/ollama-pull.test.ts`
-Expected: PASS (6 tests).
-
-- [ ] **Step 5: Write failing tests for supervisor guards.**
-
-```ts
-// tests/provisioning/supervisor.test.ts
-import { describe, expect, it } from 'bun:test';
-import { checkDiskSpace, withRetry } from '../../src/provisioning/supervisor.ts';
-
-describe('checkDiskSpace', () => {
-  it('fails when required + headroom exceeds free', () => {
-    const r = checkDiskSpace({ requiredBytes: 900, freeBytes: 1000, headroomBytes: 200 });
-    expect(r.ok).toBe(false);
-    expect(r.shortfallBytes).toBe(100); // 900+200 - 1000
-  });
-  it('passes with sufficient free space', () => {
-    expect(checkDiskSpace({ requiredBytes: 500, freeBytes: 1000, headroomBytes: 200 }).ok).toBe(true);
-  });
-});
-
-describe('withRetry', () => {
-  it('retries a failing fn then succeeds, calling onRetry each time', async () => {
-    let calls = 0;
-    const retries: number[] = [];
-    const out = await withRetry(
-      async () => { calls++; if (calls < 3) throw new Error('boom'); return 'ok'; },
-      { attempts: 5, baseMs: 0, capMs: 0, jitter: () => 0, onRetry: (n) => retries.push(n) },
-    );
-    expect(out).toBe('ok');
-    expect(calls).toBe(3);
-    expect(retries).toEqual([1, 2]);
-  });
-  it('rethrows after exhausting attempts', async () => {
-    await expect(
-      withRetry(async () => { throw new Error('always'); }, { attempts: 2, baseMs: 0, capMs: 0, jitter: () => 0 }),
-    ).rejects.toThrow('always');
-  });
-});
-```
-
-- [ ] **Step 6: Run, verify fail; then create `src/provisioning/supervisor.ts`.**
-
-```ts
-export type PreflightInput = { requiredBytes: number; freeBytes: number; headroomBytes?: number };
-
-const DEFAULT_HEADROOM = 2 * 1024 ** 3; // 2 GB slack over the sum of downloads
-
-/** Disk-space preflight: Ollama does not do this and fails mid-download. */
-export function checkDiskSpace(i: PreflightInput): { ok: boolean; shortfallBytes: number } {
-  const need = i.requiredBytes + (i.headroomBytes ?? DEFAULT_HEADROOM);
-  const shortfall = need - i.freeBytes;
-  return { ok: shortfall <= 0, shortfallBytes: Math.max(0, shortfall) };
-}
-
-/** Full-jitter exponential backoff retry. Idempotent re-invocation is the retry primitive. */
-export async function withRetry<T>(
-  fn: (signal: AbortSignal) => Promise<T>,
-  opts: { attempts: number; baseMs: number; capMs: number; jitter: () => number; onRetry?: (n: number) => void },
-): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < opts.attempts; attempt++) {
-    const ctrl = new AbortController();
-    try {
-      return await fn(ctrl.signal);
-    } catch (err) {
-      lastErr = err;
-      const next = attempt + 1;
-      if (next >= opts.attempts) break;
-      opts.onRetry?.(next);
-      const backoff = Math.min(opts.capMs, opts.baseMs * 2 ** attempt);
-      const delay = Math.floor(opts.jitter() * backoff);
-      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  throw lastErr;
-}
-
-/** Aborts a download whose byte count hasn't advanced within `timeoutMs`. */
-export class StallWatchdog {
-  private lastBytes = -1;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private stalledSince: number | null = null;
-  constructor(
-    private readonly timeoutMs: number,
-    private readonly onStall: () => void,
-    private readonly now: () => number = () => Date.now(),
-  ) {}
-  beat(bytes: number): void {
-    if (bytes > this.lastBytes) {
-      this.lastBytes = bytes;
-      this.stalledSince = null;
-    } else if (this.stalledSince === null) {
-      this.stalledSince = this.now();
-    }
-  }
-  /** Call on a timer (or manually in tests); fires onStall past the timeout. */
-  tick(): void {
-    if (this.stalledSince !== null && this.now() - this.stalledSince >= this.timeoutMs) {
-      this.onStall();
-    }
-  }
-  start(intervalMs: number): void {
-    this.timer = setInterval(() => this.tick(), intervalMs);
-  }
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-  }
-}
-```
-
-- [ ] **Step 7: Run, verify pass.**
-
-Run: `bun test tests/provisioning/supervisor.test.ts`
-Expected: PASS (4 tests).
-
-- [ ] **Step 8: Create `src/provisioning/providers/ollama.ts` (the DownloadProvider; streams `/api/pull`, supervised).**
-
-```ts
-import { ProviderError } from '../../core/errors.ts';
-import { ProviderKind } from '../../core/types.ts';
-import { isModelInstalled } from '../../resource/ollama-control.ts';
-import { OllamaPullAggregator } from '../ollama-pull.ts';
-import { ProgressTracker } from '../progress-tracker.ts';
-import { StallWatchdog, withRetry } from '../supervisor.ts';
-import { type DownloadProgress, DownloadPhase, type DownloadProvider } from '../types.ts';
-
-const DEFAULT_BASE_URL = 'http://localhost:11434';
-const STALL_MS = 90_000; // longer than Ollama's own 30s per-part watchdog
-
-/** Stream one /api/pull attempt, feeding normalized progress until success or error. */
-async function streamPull(
-  baseUrl: string,
-  model: string,
-  onProgress: (p: DownloadProgress) => void,
-  outer: AbortSignal,
-): Promise<void> {
-  const ctrl = new AbortController();
-  const onAbort = () => ctrl.abort();
-  outer.addEventListener('abort', onAbort);
-  const watchdog = new StallWatchdog(STALL_MS, () => ctrl.abort());
-  watchdog.start(5_000);
-  try {
-    const res = await fetch(`${baseUrl}/api/pull`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, stream: true }),
-      signal: ctrl.signal,
-    });
-    if (!res.ok || !res.body) throw new ProviderError(`Ollama /api/pull returned ${res.status}`);
-    const agg = new OllamaPullAggregator(new ProgressTracker(model));
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() ?? '';
-      for (const line of lines) {
-        const p = agg.feed(line);
-        if (p) {
-          watchdog.beat(p.bytesCompleted);
-          onProgress(p);
-          if (p.phase === DownloadPhase.Done) return;
-        }
-      }
-    }
-  } finally {
-    watchdog.stop();
-    outer.removeEventListener('abort', onAbort);
+    return {}; // corrupt store → re-consent, never crash
   }
 }
 
-export function createOllamaProvider(opts: { baseUrl?: string } = {}): DownloadProvider {
-  const baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
-  return {
-    kind: ProviderKind.Ollama,
-    async download(modelRef, { onProgress, signal }) {
-      await withRetry(() => streamPull(baseUrl, modelRef, onProgress, signal), {
-        attempts: 6,
-        baseMs: 1_000,
-        capMs: 45_000,
-        jitter: () => 0.5 + Math.random() / 2, // full-ish jitter, kind to the registry
-        onRetry: (n) => onProgress({
-          modelRef, phase: DownloadPhase.Resolving, bytesCompleted: 0, bytesTotal: null,
-          percent: null, speedBytesPerSec: null, error: `retry ${n}`,
-        }),
-      });
-      // Confirm the install actually landed before declaring done.
-      if (!(await isModelInstalled(modelRef, baseUrl))) {
-        throw new ProviderError(`Ollama reported success but ${modelRef} is not installed`);
-      }
-    },
+/** Atomic write (temp + rename) so a failure never corrupts the trust store. */
+export function writeApprovals(
+  store: Record<string, ApprovalRecord>,
+  path: string = approvalsPath(),
+): void {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(store, null, 2));
+  renameSync(tmp, path);
+}
+
+/** The exact, untruncated thing that will run — from RAW config (unexpanded),
+ *  so secrets injected via ${VAR} are never displayed. */
+export function describeEntry(entry: McpServerEntry): string {
+  if (entry.kind === McpTransportKind.Http) {
+    const raw = entry.raw as { url?: string; headers?: Record<string, string> };
+    const names = Object.keys(raw.headers ?? {});
+    return `${raw.url ?? entry.url}${names.length > 0 ? `  (headers: ${names.join(', ')})` : ''}`;
+  }
+  const raw = entry.raw as { command?: string; args?: string[] };
+  return [raw.command ?? entry.command, ...(raw.args ?? entry.args)].join(' ');
+}
+
+const DANGER_PATTERNS: [RegExp, string][] = [
+  [/\bsudo\b/, 'runs as sudo'],
+  [/\brm\s+-rf?\b/, 'recursive delete'],
+  [/curl[^|]*\|\s*(ba|z)?sh/, 'pipes a download into a shell'],
+  [/wget[^|]*\|\s*(ba|z)?sh/, 'pipes a download into a shell'],
+];
+
+export function dangerFlags(entry: McpServerEntry): string[] {
+  const text = describeEntry(entry);
+  return DANGER_PATTERNS.filter(([re]) => re.test(text)).map(([, why]) => why);
+}
+
+export type ConsentDeps = {
+  store: Record<string, ApprovalRecord>;
+  ask: (question: string) => Promise<boolean>;
+  isTTY: boolean;
+  autoYes: boolean;
+  warn: (msg: string) => void;
+};
+
+/** Consent gate for one entry. Mutates deps.store; the caller persists it.
+ *  Non-TTY without autoYes = skip (false) with a warning — NEVER a hang. */
+export async function ensureConsent(
+  entry: McpServerEntry,
+  deps: ConsentDeps,
+): Promise<boolean> {
+  const hash = specHash(entry);
+  const existing = deps.store[entry.name];
+  if (existing?.specHash === hash) return !existing.declined;
+  if (deps.autoYes) {
+    deps.store[entry.name] = { specHash: hash, approvedAt: new Date().toISOString() };
+    return true;
+  }
+  if (!deps.isTTY) {
+    deps.warn(`MCP server "${entry.name}" is not approved yet and this is not a TTY — skipping (run interactively or set AGENT_MCP_AUTO_APPROVE=1)`);
+    return false;
+  }
+  const flags = dangerFlags(entry);
+  const danger = flags.length > 0 ? `\n  ⚠ ${flags.join('; ')}` : '';
+  const changed = existing ? ' (configuration CHANGED since last approval)' : '';
+  const ok = await deps.ask(
+    `Mount MCP server "${entry.name}"${changed}?\n  ${describeEntry(entry)}${danger}\n  It will run with this process's privileges.`,
+  );
+  deps.store[entry.name] = {
+    specHash: hash,
+    approvedAt: new Date().toISOString(),
+    ...(ok ? {} : { declined: true }),
   };
+  return ok;
+}
+
+export function pinTools(
+  store: Record<string, ApprovalRecord>,
+  name: string,
+  hash: string,
+): void {
+  const rec = store[name];
+  if (rec) rec.toolsHash = hash;
+}
+
+/** True when the server's tool definitions changed since they were pinned. */
+export function checkDrift(
+  store: Record<string, ApprovalRecord>,
+  name: string,
+  hash: string,
+): boolean {
+  const pinned = store[name]?.toolsHash;
+  return pinned !== undefined && pinned !== hash;
 }
 ```
 
-Note: `Math.random()` is fine in `src/` runtime code (the `Math.random` restriction applies only to Workflow scripts). Digest-mismatch recovery (rm + delete partial blob + re-pull) is exercised in the live-verify step (Step 10); the retry loop + install-confirm covers the automated path.
+- [ ] **Step 4: Run to verify pass**
 
-- [ ] **Step 9: Typecheck, lint, run all provisioning unit tests.**
+Run: `bun test tests/mcp/consent.test.ts`
+Expected: PASS (13 tests).
 
-Run: `bun run typecheck && bun run lint:file -- "src/provisioning/**/*.ts" && bun test tests/provisioning/`
-Expected: clean + all PASS.
+- [ ] **Step 5: Add `.mcp-approvals.json` to `.gitignore`**
 
-- [ ] **Step 10: LIVE-VERIFY (Ollama) — this is the merge gate for the adapter.**
+Append to `.gitignore` (after the `# Misc` block):
 
-Run (with `ollama serve` up):
-```bash
-bun run - <<'TS'
-import { createOllamaProvider } from './src/provisioning/providers/ollama.ts';
-import { ProgressBar } from './src/provisioning/ui/progress-bar.ts';
-const p = createOllamaProvider();
-const bar = new ProgressBar(process.stderr, process.stderr.isTTY ?? false);
-const ctrl = new AbortController();
-await p.download('qwen3-embedding:0.6b', { onProgress: (x) => bar.render(x), signal: ctrl.signal });
-bar.done(p as any); console.error('\nDONE');
-TS
 ```
-Expected: a live-updating bar reaching 100%, `[done]`, then `DONE`. Verify `ollama list` shows the model. Then delete it (`ollama rm qwen3-embedding:0.6b`) and re-run to confirm re-provisioning works. Record the result in the SDD ledger.
+# MCP mount trust store (machine-local approvals; never committed). See docs/architecture.md §14
+.mcp-approvals.json
+```
 
-- [ ] **Step 11: Commit.**
+- [ ] **Step 6: Typecheck + lint + commit**
+
+Run: `bun run typecheck && bun run lint:file -- "src/mcp/consent.ts" "tests/mcp/consent.test.ts"`
+Expected: clean.
 
 ```bash
-git add src/provisioning/ollama-pull.ts src/provisioning/supervisor.ts src/provisioning/providers/ollama.ts tests/provisioning/ollama-pull.test.ts tests/provisioning/supervisor.test.ts
-git commit -m "feat(provisioning): Ollama download adapter + supervisor guards, live-verified (Slice 14 Task 2)"
+git add src/mcp/consent.ts tests/mcp/consent.test.ts .gitignore
+git commit -m "feat(mcp): consent-on-mount store with spec hashing + tool-definition pinning (Slice 15 Task 2)"
 ```
 
 ---

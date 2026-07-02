@@ -1,384 +1,434 @@
-### Task 4: Provisioner orchestration + `provision` CLI + auto-detect hook
+### Task 4: `bun:sqlite` server + starter pack + `bun run mcp` CLI
 
 **Files:**
-- Create: `src/provisioning/provisioner.ts` (orchestration: detect → discover → fit → enrich → consent → download → verify)
-- Create: `src/provisioning/registry.ts` (`providerFor(kind)` + `catalogSourcesFor(host)`)
-- Create: `src/provisioning/detect-missing.ts` (which declared models aren't installed)
-- Create: `src/cli/provision.ts` (the `bun run provision` entry)
-- Modify: `package.json` (add `"provision": "bun run src/cli/provision.ts"`)
-- Modify: `src/cli/chat.ts` (auto-detect hook: offer provisioning when required models missing)
-- Test: `tests/provisioning/provisioner.test.ts`
-- Test: `tests/provisioning/detect-missing.test.ts`
+- Create: `src/mcp/sqlite-server.ts`
+- Create: `src/mcp/pack.ts`
+- Create: `src/cli/mcp.ts`
+- Modify: `package.json` (add `"mcp"` script)
+- Test: `tests/mcp/sqlite-server.test.ts`
+- Test: `tests/mcp/pack.test.ts`
+- Test: `tests/mcp/cli-add.test.ts`
 
 **Interfaces:**
-- Consumes: `detectHost` (discovery/host); `fitAndRank`/`FitCandidate` (fit); catalog sources + `withSnapshotFallback` (Task 3); `DownloadProvider` (Task 1–2); `askYesNo`/`selectModels`/`stdinInput` + `ProgressBar` (Task 1); `isModelInstalled` (ollama-control); `enrichSize` (defined here).
+- Consumes: `mountMcpServer` (Task 3); `PackEntry` (Task 1); `loadMcpConfig`/`defaultConfigPath` (Task 1).
 - Produces:
-  - `type ProvisionResult = { downloaded: string[]; declined: string[]; failed: Array<{ model: string; error: string }>; deferred: string[] }`
-  - `runProvision(opts: { deps?: ProvisionDeps; autoYes?: boolean }): Promise<ProvisionResult>`
-  - `type ProvisionDeps = { detectHost; catalogSources; providerFor; enrichSize; ui }` (all injectable for tests)
-  - `providerFor(kind: ProviderKind): DownloadProvider`
-  - `detectMissing(declared: ModelDeclaration[], isInstalled: (m: string) => Promise<boolean>): Promise<ModelDeclaration[]>`
+  - `src/mcp/sqlite-server.ts` — stdio MCP server, DB path = `process.argv[2] ?? ':memory:'`; tools `query` (SELECT → rows JSON), `execute` (statement → `{changes}`), `schema` (tables + columns).
+  - `STARTER_PACK: PackEntry[]` · `getPackEntry(name: string): PackEntry | undefined` · `packByCapability(cap: string): PackEntry[]`
+  - `addPackEntry(name: string, configPath?: string): { ok: boolean; message: string }` (exported from `src/cli/mcp.ts` for tests; atomic temp+rename write, creates the file if absent, refuses to overwrite an existing same-name entry).
 
-- [ ] **Step 1: Write failing test for `detectMissing`.**
+- [ ] **Step 1: Write the failing sqlite round-trip test (REAL stdio mount)**
 
 ```ts
-// tests/provisioning/detect-missing.test.ts
-import { describe, expect, it } from 'bun:test';
-import { detectMissing } from '../../src/provisioning/detect-missing.ts';
-import { ProviderKind } from '../../src/core/types.ts';
+// tests/mcp/sqlite-server.test.ts
+import { expect, test } from 'bun:test';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mountMcpServer } from '../../src/mcp/client.ts';
 
-const decl = (model: string) => ({ provider: ProviderKind.Ollama, model, params: {}, role: 'x', footprint: { approxParamsBillions: 4, bytesPerWeight: 0.6 } });
-
-describe('detectMissing', () => {
-  it('returns only the declared models that are not installed', async () => {
-    const installed = new Set(['a']);
-    const out = await detectMissing([decl('a'), decl('b')], async (m) => installed.has(m));
-    expect(out.map((d) => d.model)).toEqual(['b']);
+// Real subprocess round-trip against our own bun:sqlite server. No network.
+test('sqlite MCP server: schema/execute/query round-trip', async () => {
+  const db = join(mkdtempSync(join(tmpdir(), 'mcp-sqlite-')), 't.db');
+  const { tools, close } = await mountMcpServer({
+    command: 'bun',
+    args: ['run', 'src/mcp/sqlite-server.ts', db],
   });
+  try {
+    expect(tools.query).toBeDefined();
+    expect(tools.execute).toBeDefined();
+    expect(tools.schema).toBeDefined();
+    const exec = tools.execute as { execute: (a: unknown, o: unknown) => Promise<unknown> };
+    const opts = { toolCallId: 't', messages: [] };
+    await exec.execute({ sql: 'CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)' }, opts);
+    await exec.execute({ sql: "INSERT INTO notes (body) VALUES ('hello')" }, opts);
+    const q = tools.query as { execute: (a: unknown, o: unknown) => Promise<unknown> };
+    const res = (await q.execute({ sql: 'SELECT body FROM notes' }, opts)) as {
+      content: { type: string; text: string }[];
+    };
+    expect(res.content[0]?.text).toContain('hello');
+  } finally {
+    await close();
+  }
 });
 ```
 
-- [ ] **Step 2: Run, verify fail; then create `src/provisioning/detect-missing.ts`.**
+- [ ] **Step 2: Run to verify fail**
+
+Run: `bun test tests/mcp/sqlite-server.test.ts`
+Expected: FAIL (server file missing → mount error).
+
+- [ ] **Step 3: Create `src/mcp/sqlite-server.ts`**
 
 ```ts
-import type { ModelDeclaration } from '../core/types.ts';
+import { Database } from 'bun:sqlite';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
 
-/** The declared models not yet installed — the set provisioning offers to pull. */
-export async function detectMissing(
-  declared: ModelDeclaration[],
-  isInstalled: (model: string) => Promise<boolean>,
-): Promise<ModelDeclaration[]> {
-  const missing: ModelDeclaration[] = [];
-  for (const d of declared) {
-    if (!(await isInstalled(d.model))) missing.push(d);
-  }
-  return missing;
+const dbPath = process.argv[2] ?? ':memory:';
+const db = new Database(dbPath);
+
+const server = new McpServer({ name: 'sqlite-tools', version: '0.1.0' });
+
+function textResult(text: string, isError = false) {
+  return { content: [{ type: 'text' as const, text }], ...(isError ? { isError: true } : {}) };
 }
+
+server.registerTool(
+  'query',
+  {
+    title: 'SQL Query',
+    description: `Run a read-only SQL SELECT against the ${dbPath} SQLite database and return rows as JSON.`,
+    inputSchema: { sql: z.string() },
+  },
+  async ({ sql }) => {
+    try {
+      const rows = db.query(sql).all();
+      return textResult(JSON.stringify(rows, null, 2));
+    } catch (cause) {
+      return textResult(`query failed: ${(cause as Error).message}`, true);
+    }
+  },
+);
+
+server.registerTool(
+  'execute',
+  {
+    title: 'SQL Execute',
+    description: 'Run a writing SQL statement (CREATE/INSERT/UPDATE/DELETE) and return the change count.',
+    inputSchema: { sql: z.string() },
+  },
+  async ({ sql }) => {
+    try {
+      const r = db.run(sql);
+      return textResult(JSON.stringify({ changes: r.changes }));
+    } catch (cause) {
+      return textResult(`execute failed: ${(cause as Error).message}`, true);
+    }
+  },
+);
+
+server.registerTool(
+  'schema',
+  {
+    title: 'DB Schema',
+    description: 'List all tables and their columns in the database.',
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const tables = db
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        .all() as { name: string }[];
+      const out = tables.map((t) => ({
+        table: t.name,
+        columns: db.query(`PRAGMA table_info(${JSON.stringify(t.name)})`).all(),
+      }));
+      return textResult(JSON.stringify(out, null, 2));
+    } catch (cause) {
+      return textResult(`schema failed: ${(cause as Error).message}`, true);
+    }
+  },
+);
+
+await server.connect(new StdioServerTransport());
 ```
 
-- [ ] **Step 3: Run, verify pass.**
+- [ ] **Step 4: Run to verify pass**
 
-Run: `bun test tests/provisioning/detect-missing.test.ts`
+Run: `bun test tests/mcp/sqlite-server.test.ts`
 Expected: PASS.
 
-- [ ] **Step 4: Write failing test for `runProvision` (fully injected deps; asserts consent + download + degrade).**
+- [ ] **Step 5: Write the failing pack + CLI-add tests**
 
 ```ts
-// tests/provisioning/provisioner.test.ts
+// tests/mcp/pack.test.ts
 import { describe, expect, it } from 'bun:test';
-import { runProvision } from '../../src/provisioning/provisioner.ts';
-import { ProviderKind } from '../../src/core/types.ts';
-import { DownloadPhase } from '../../src/provisioning/types.ts';
+import { STARTER_PACK, getPackEntry, packByCapability } from '../../src/mcp/pack.ts';
 
-const host = { totalRamBytes: 24e9, liveBudgetBytes: 8e9, runtimes: [ProviderKind.Ollama] };
-const cand = (model: string, size: number) => ({
-  provider: ProviderKind.Ollama, model, params: {}, role: 'x',
-  footprint: { approxParamsBillions: 4, bytesPerWeight: 0.6 },
-  repo: model, fileSizeBytes: size, downloads: 1, installed: false,
-});
-
-function deps(overrides = {}) {
-  const downloaded: string[] = [];
-  return {
-    downloaded,
-    detectHost: async () => host,
-    catalogSources: [{ name: 's', appliesTo: () => true, listCandidates: async () => [cand('qwen3.5:4b', 3e9)] }],
-    providerFor: () => ({
-      kind: ProviderKind.Ollama,
-      download: async (m: string, o: any) => {
-        o.onProgress({ modelRef: m, phase: DownloadPhase.Done, bytesCompleted: 3e9, bytesTotal: 3e9, percent: 100, speedBytesPerSec: 1 });
-        downloaded.push(m);
-      },
-    }),
-    enrichSize: async (c: any) => c.fileSizeBytes,
-    freeDiskBytes: async () => 500e9,
-    ui: { askYesNo: async () => true, selectModels: async (items: any[]) => items.filter((i) => i.recommended), bar: { render() {}, done() {} } },
-    ...overrides,
-  };
-}
-
-describe('runProvision', () => {
-  it('downloads the consented recommended model', async () => {
-    const d = deps();
-    const res = await runProvision({ deps: d, autoYes: false });
-    expect(res.downloaded).toEqual(['qwen3.5:4b']);
-    expect(d.downloaded).toEqual(['qwen3.5:4b']);
+describe('starter pack', () => {
+  it('has the 12 curated entries with unique names', () => {
+    expect(STARTER_PACK).toHaveLength(12);
+    expect(new Set(STARTER_PACK.map((e) => e.name)).size).toBe(12);
   });
-
-  it('records nothing downloaded when consent is declined', async () => {
-    const res = await runProvision({ deps: deps({ ui: { askYesNo: async () => false, selectModels: async () => [], bar: { render() {}, done() {} } }) }, autoYes: false });
-    expect(res.downloaded).toEqual([]);
+  it('every entry has a description and ≥1 capability', () => {
+    for (const e of STARTER_PACK) {
+      expect(e.description.length).toBeGreaterThan(0);
+      expect(e.capabilities.length).toBeGreaterThan(0);
+    }
   });
-
-  it('degrades: a failing download is recorded in failed, others still proceed', async () => {
-    const d = deps({
-      catalogSources: [{ name: 's', appliesTo: () => true, listCandidates: async () => [cand('good', 3e9), cand('bad', 3e9)] }],
-      providerFor: () => ({
-        kind: ProviderKind.Ollama,
-        download: async (m: string) => { if (m === 'bad') throw new Error('pull failed'); },
-      }),
-      ui: { askYesNo: async () => true, selectModels: async (items: any[]) => items, bar: { render() {}, done() {} } },
-    });
-    const res = await runProvision({ deps: d, autoYes: false });
-    expect(res.failed.map((f) => f.model)).toContain('bad');
-    expect(res.downloaded).toContain('good');
+  it('is queryable by capability (the agent-builder palette)', () => {
+    expect(packByCapability('web-search').map((e) => e.name)).toEqual(['brave-search', 'exa-search']);
+    expect(packByCapability('sql')[0]?.name).toBe('sqlite');
+  });
+  it('keyed entries declare requiresEnv and reference ${VAR} in the server value', () => {
+    const gh = getPackEntry('github');
+    expect(gh?.requiresEnv).toEqual(['GITHUB_PAT']);
+    expect(JSON.stringify(gh?.server)).toContain('${GITHUB_PAT}');
+  });
+  it('never emits archived @modelcontextprotocol invocations (2025 prune)', () => {
+    const all = JSON.stringify(STARTER_PACK);
+    for (const dead of ['server-postgres', 'server-sqlite', 'server-brave-search', 'server-puppeteer', 'server-github']) {
+      expect(all).not.toContain(dead);
+    }
   });
 });
 ```
 
-- [ ] **Step 5: Run, verify fail; then create `src/provisioning/provisioner.ts`.**
-
 ```ts
-import type { HostCapabilities, Candidate, CatalogSource } from '../discovery/catalog-source.ts';
-import type { ProviderKind } from '../core/types.ts';
-import { fitAndRank, type FitCandidate } from './fit.ts';
-import { checkDiskSpace } from './supervisor.ts';
-import { type DownloadProgress, type DownloadProvider } from './types.ts';
+// tests/mcp/cli-add.test.ts
+import { describe, expect, it } from 'bun:test';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { addPackEntry } from '../../src/cli/mcp.ts';
 
-export type ProvisionResult = {
-  downloaded: string[];
-  declined: string[];
-  failed: Array<{ model: string; error: string }>;
-  deferred: string[];
-};
+const tmpConfig = () => join(mkdtempSync(join(tmpdir(), 'mcp-add-')), 'mcp.json');
 
-export type ProvisionUi = {
-  askYesNo: (q: string) => Promise<boolean>;
-  selectModels: (items: FitCandidate[]) => Promise<FitCandidate[]>;
-  bar: { render: (p: DownloadProgress) => void; done: (p: DownloadProgress) => void };
-};
-
-export type ProvisionDeps = {
-  detectHost: () => Promise<HostCapabilities>;
-  catalogSources: CatalogSource[];
-  providerFor: (kind: ProviderKind) => DownloadProvider;
-  enrichSize: (c: Candidate) => Promise<number>;
-  freeDiskBytes: () => Promise<number>;
-  ui: ProvisionUi;
-};
-
-/** Orchestrates the first-boot flow. All deps injectable; degrade-never-crash. */
-export async function runProvision(
-  opts: { deps: ProvisionDeps; autoYes?: boolean },
-): Promise<ProvisionResult> {
-  const { deps } = opts;
-  const result: ProvisionResult = { downloaded: [], declined: [], failed: [], deferred: [] };
-
-  const host = await deps.detectHost();
-
-  // 1) Discover across applicable sources; degrade per-source (a throw yields []).
-  const query = { budgetBytes: host.liveBudgetBytes, hostTotalRamBytes: host.totalRamBytes };
-  const lists = await Promise.all(
-    deps.catalogSources
-      .filter((s) => s.appliesTo(host))
-      .map((s) => s.listCandidates(query).catch(() => [] as Candidate[])),
-  );
-  const candidates = lists.flat();
-
-  // 2) Fit-filter + rank; recommended pre-marked.
-  const ranked = fitAndRank(candidates, host.liveBudgetBytes);
-  if (ranked.length === 0) return result;
-
-  // 3) Enrich sizes for the shown set (lazy; degrade to existing size on failure).
-  for (const c of ranked) {
-    if (c.fileSizeBytes <= 0) {
-      try {
-        c.fileSizeBytes = await deps.enrichSize(c);
-      } catch {
-        /* leave as-is; UI shows best-effort size */
-      }
-    }
-  }
-
-  // 4) Consent: per-model selection (recommended pre-selected).
-  const selected = await deps.ui.selectModels(ranked);
-  if (selected.length === 0) return result;
-
-  // 5) Disk preflight over the selected set.
-  const required = selected.reduce((s, c) => s + Math.max(c.fileSizeBytes, c.estimatedBytes), 0);
-  const free = await deps.freeDiskBytes();
-  const pre = checkDiskSpace({ requiredBytes: required, freeBytes: free });
-  if (!pre.ok) {
-    const ok = await deps.ui.askYesNo(
-      `Need ~${Math.round(required / 1e9)}GB but only ~${Math.round(free / 1e9)}GB free (short ~${Math.round(pre.shortfallBytes / 1e9)}GB). Continue anyway?`,
-    );
-    if (!ok) {
-      for (const c of selected) result.declined.push(c.model);
-      return result;
-    }
-  }
-
-  // 6) Sequential download with a live bar; degrade-never-crash per model.
-  const ctrl = new AbortController();
-  for (const c of selected) {
-    try {
-      const provider = deps.providerFor(c.provider);
-      await provider.download(c.model, { onProgress: (p) => deps.ui.bar.render(p), signal: ctrl.signal });
-      result.downloaded.push(c.model);
-    } catch (err) {
-      result.failed.push({ model: c.model, error: (err as Error).message });
-    }
-  }
-  return result;
-}
+describe('addPackEntry', () => {
+  it('creates mcp.json with the pack entry when absent', () => {
+    const path = tmpConfig();
+    const r = addPackEntry('git', path);
+    expect(r.ok).toBe(true);
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    expect(parsed.mcpServers.git.command).toBe('uvx');
+  });
+  it('appends into an existing mcp.json without disturbing other entries', () => {
+    const path = tmpConfig();
+    writeFileSync(path, JSON.stringify({ mcpServers: { keep: { command: 'bun' } } }));
+    addPackEntry('time', path);
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    expect(parsed.mcpServers.keep.command).toBe('bun');
+    expect(parsed.mcpServers.time.command).toBe('uvx');
+  });
+  it('refuses to overwrite an existing entry of the same name', () => {
+    const path = tmpConfig();
+    writeFileSync(path, JSON.stringify({ mcpServers: { git: { command: 'custom' } } }));
+    const r = addPackEntry('git', path);
+    expect(r.ok).toBe(false);
+    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.git.command).toBe('custom');
+  });
+  it('reports unknown pack names', () => {
+    expect(addPackEntry('nonsense', tmpConfig()).ok).toBe(false);
+  });
+});
 ```
 
-- [ ] **Step 6: Run, verify pass.**
+- [ ] **Step 6: Run to verify fail; create `src/mcp/pack.ts`**
 
-Run: `bun test tests/provisioning/provisioner.test.ts`
-Expected: PASS (3 tests).
-
-- [ ] **Step 7: Create `src/provisioning/registry.ts` (wire real providers + sources; no test — thin composition of tested units).**
+Run: `bun test tests/mcp/pack.test.ts tests/mcp/cli-add.test.ts` — Expected: FAIL.
 
 ```ts
-import { ProviderKind } from '../core/types.ts';
-import type { Candidate, CatalogSource, HostCapabilities } from '../discovery/catalog-source.ts';
-import { createHfCatalogSource } from './catalog/hf-catalog.ts';
-import { createOllamaCatalogSource, ollamaManifestSize } from './catalog/ollama-catalog.ts';
-import { createSnapshotSource, withSnapshotFallback } from './catalog/snapshot-source.ts';
-import { hfTreeSize } from './catalog/hf-catalog.ts';
-import { createOllamaProvider } from './providers/ollama.ts';
-import { createHfFetchProvider } from './providers/hf-fetch.ts'; // Task 5
-import { createLmStudioProvider } from './providers/lmstudio.ts'; // Task 5
-import type { DownloadProvider } from './types.ts';
+// src/mcp/pack.ts
+import type { PackEntry } from './types.ts';
 
-export function providerFor(kind: ProviderKind): DownloadProvider {
-  switch (kind) {
-    case ProviderKind.Ollama:
-      return createOllamaProvider();
-    case ProviderKind.MlxServer:
-      return createHfFetchProvider(ProviderKind.MlxServer); // MLX snapshot via HF
-    default:
-      return createOllamaProvider();
-  }
-}
-
-export function catalogSourcesFor(_host: HostCapabilities): CatalogSource[] {
-  const snap = createSnapshotSource();
-  return [
-    withSnapshotFallback(createOllamaCatalogSource(), snap),
-    withSnapshotFallback(createHfCatalogSource(ProviderKind.MlxServer), snap),
-  ];
-}
-
-/** Lazy size enrichment routed by provider. */
-export async function enrichSize(c: Candidate): Promise<number> {
-  if (c.provider === ProviderKind.Ollama) {
-    const [model, tag = 'latest'] = c.model.split(':');
-    return ollamaManifestSize(model, tag);
-  }
-  return hfTreeSize(c.repo, {}); // MLX snapshot sum
-}
-```
-
-Note: `createHfFetchProvider` / `createLmStudioProvider` are Task 5. This file imports them so Task 5 completes the wiring; until then, comment those two imports and the `MlxServer` case to keep Task 4 self-contained (re-enable in Task 5, Step 9).
-
-- [ ] **Step 8: Create `src/cli/provision.ts`.**
-
-```ts
-import { detectHost } from '../discovery/host.ts';
-import { catalogSourcesFor, enrichSize, providerFor } from '../provisioning/registry.ts';
-import { runProvision } from '../provisioning/provisioner.ts';
-import { ProgressBar } from '../provisioning/ui/progress-bar.ts';
-import { askYesNo, selectModels, stdinInput } from '../provisioning/ui/prompt.ts';
-import { formatBytes } from '../provisioning/ui/format.ts';
-
-async function freeDiskBytes(): Promise<number> {
-  // statfs on the models volume; conservative fallback keeps preflight non-fatal.
-  try {
-    const { statfs } = await import('node:fs/promises');
-    const s = await statfs(process.env.OLLAMA_MODELS ?? process.cwd());
-    return s.bavail * s.bsize;
-  } catch {
-    return Number.MAX_SAFE_INTEGER;
-  }
-}
-
-async function main(): Promise<void> {
-  const autoYes = process.env.AGENT_PROVISION_AUTO_YES === '1';
-  const input = stdinInput();
-  const bar = new ProgressBar(process.stderr, process.stderr.isTTY ?? false);
-  const host = await detectHost();
-  const result = await runProvision({
-    autoYes,
-    deps: {
-      detectHost: async () => host,
-      catalogSources: catalogSourcesFor(host),
-      providerFor,
-      enrichSize,
-      freeDiskBytes,
-      ui: {
-        askYesNo: (q) => askYesNo(q, { input, autoYes }),
-        selectModels: (items) =>
-          selectModels(items, {
-            input,
-            autoYes,
-            label: (c) => `${c.model}  (${formatBytes(c.fileSizeBytes || c.estimatedBytes)})`,
-          }),
-        bar,
-      },
+/** The curated starter pack (2026-07 verified: only maintained servers; the
+ *  official sqlite/postgres/brave/puppeteer/github packages were archived in
+ *  2025 and must not be emitted). This is the palette the agent-builder
+ *  (Phase D) suggests from — keep capabilities accurate. */
+export const STARTER_PACK: PackEntry[] = [
+  {
+    name: 'file-tools',
+    description: 'In-repo read_file server (this framework).',
+    capabilities: ['files'],
+    server: { command: 'bun', args: ['run', 'src/mcp/server.ts'], agents: ['file_qa'] },
+  },
+  {
+    name: 'sqlite',
+    description: 'In-repo SQLite server on bun:sqlite (query/execute/schema).',
+    capabilities: ['sql'],
+    server: { command: 'bun', args: ['run', 'src/mcp/sqlite-server.ts', 'data/agent.db'] },
+  },
+  {
+    name: 'filesystem',
+    description: 'Official filesystem server (scoped to listed directories).',
+    capabilities: ['files'],
+    server: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '.'] },
+  },
+  {
+    name: 'memory',
+    description: 'Official knowledge-graph memory server.',
+    capabilities: ['memory'],
+    server: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'] },
+  },
+  {
+    name: 'sequential-thinking',
+    description: 'Official structured step-by-step reasoning server.',
+    capabilities: ['reasoning'],
+    server: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-sequential-thinking'] },
+  },
+  {
+    name: 'fetch',
+    description: 'Official web-fetch server (keyless; requires uvx).',
+    capabilities: ['http'],
+    server: { command: 'uvx', args: ['mcp-server-fetch'], agents: ['web_fetch'] },
+  },
+  {
+    name: 'git',
+    description: 'Official git server (log/diff/status on local repos).',
+    capabilities: ['vcs'],
+    server: { command: 'uvx', args: ['mcp-server-git'] },
+  },
+  {
+    name: 'time',
+    description: 'Official time/timezone server.',
+    capabilities: ['time'],
+    server: { command: 'uvx', args: ['mcp-server-time'] },
+  },
+  {
+    name: 'playwright',
+    description: 'Microsoft Playwright browser automation (downloads browsers on first run).',
+    capabilities: ['browser'],
+    server: { command: 'npx', args: ['@playwright/mcp@latest'] },
+  },
+  {
+    name: 'github',
+    description: "GitHub's official remote server (Streamable HTTP; needs a PAT).",
+    capabilities: ['vcs'],
+    requiresEnv: ['GITHUB_PAT'],
+    server: {
+      type: 'http',
+      url: 'https://api.githubcopilot.com/mcp/',
+      headers: { Authorization: 'Bearer ${GITHUB_PAT}' },
     },
-  });
-  console.error(
-    `\nProvisioned: ${result.downloaded.length} · declined: ${result.declined.length} · failed: ${result.failed.length}`,
-  );
-  if (result.failed.length > 0) process.exitCode = 1;
+  },
+  {
+    name: 'brave-search',
+    description: "Brave's official web-search server (needs BRAVE_API_KEY).",
+    capabilities: ['web-search'],
+    requiresEnv: ['BRAVE_API_KEY'],
+    server: {
+      command: 'npx',
+      args: ['-y', '@brave/brave-search-mcp-server'],
+      env: { BRAVE_API_KEY: '${BRAVE_API_KEY}' },
+    },
+  },
+  {
+    name: 'exa-search',
+    description: 'Exa semantic web-search server (needs EXA_API_KEY).',
+    capabilities: ['web-search'],
+    requiresEnv: ['EXA_API_KEY'],
+    server: {
+      command: 'npx',
+      args: ['-y', 'exa-mcp-server'],
+      env: { EXA_API_KEY: '${EXA_API_KEY}' },
+    },
+  },
+];
+
+export function getPackEntry(name: string): PackEntry | undefined {
+  return STARTER_PACK.find((e) => e.name === name);
 }
 
-await main();
+export function packByCapability(cap: string): PackEntry[] {
+  return STARTER_PACK.filter((e) => e.capabilities.includes(cap));
+}
 ```
 
-- [ ] **Step 9: Add the `provision` script to `package.json`.**
-
-Modify `package.json` scripts (after `"memory": ...`):
-```json
-    "memory": "bun run src/cli/memory.ts",
-    "provision": "bun run src/cli/provision.ts"
-```
-
-- [ ] **Step 10: Wire the auto-detect hook into `src/cli/chat.ts`.**
-
-Read `src/cli/chat.ts` around the `createModelManager()` / `ensureReady` block (lines ~30–40 per the seam map). Before the first `ensureReady`, add a guarded offer (import `detectMissing`, `isModelInstalled`, `runProvision` deps). Minimal, non-invasive:
+- [ ] **Step 7: Create `src/cli/mcp.ts`**
 
 ```ts
-// near the top of chat.ts main(), before ensureReady:
-import { isModelInstalled } from '../resource/ollama-control.ts';
-import { detectMissing } from '../provisioning/detect-missing.ts';
-import { BOOTSTRAP } from '../../models/registry.ts';
-import { runProvision } from '../provisioning/provisioner.ts';
-import { catalogSourcesFor, enrichSize, providerFor } from '../provisioning/registry.ts';
-// ... (ProgressBar + prompt imports as in provision.ts)
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { defaultConfigPath, loadMcpConfig } from '../mcp/config.ts';
+import { STARTER_PACK, getPackEntry } from '../mcp/pack.ts';
 
-const missing = await detectMissing(BOOTSTRAP, (m) => isModelInstalled(m));
-if (missing.length > 0 && (process.stderr.isTTY ?? false)) {
-  const ok = await askYesNo(
-    `${missing.length} required model(s) not installed: ${missing.map((m) => m.model).join(', ')}. Provision now?`,
-    { input: stdinInput(), autoYes: process.env.AGENT_PROVISION_AUTO_YES === '1' },
-  );
-  if (ok) {
-    const host = await detectHost();
-    await runProvision({ deps: { /* same wiring as provision.ts */ } });
+/** Copy a starter-pack entry into mcp.json (atomic write; never overwrites). */
+export function addPackEntry(
+  name: string,
+  configPath: string = defaultConfigPath(),
+): { ok: boolean; message: string } {
+  const pack = getPackEntry(name);
+  if (!pack) {
+    return { ok: false, message: `unknown pack entry "${name}" — run \`bun run mcp list\`` };
+  }
+  let root: { mcpServers?: Record<string, unknown> } = {};
+  if (existsSync(configPath)) {
+    try {
+      root = JSON.parse(readFileSync(configPath, 'utf8')) as typeof root;
+    } catch (cause) {
+      return { ok: false, message: `mcp.json is not valid JSON: ${(cause as Error).message}` };
+    }
+  }
+  const servers = root.mcpServers ?? {};
+  if (servers[name]) {
+    return { ok: false, message: `"${name}" already exists in ${configPath} — edit it directly` };
+  }
+  servers[name] = pack.server;
+  const tmp = `${configPath}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ ...root, mcpServers: servers }, null, 2)}\n`);
+  renameSync(tmp, configPath);
+  const keyNote = pack.requiresEnv?.length
+    ? ` (dormant until ${pack.requiresEnv.join(', ')} is set)`
+    : '';
+  return { ok: true, message: `added "${name}" to ${configPath}${keyNote}` };
+}
+
+function list(): void {
+  const cfg = loadMcpConfig();
+  const inConfig = new Set([
+    ...cfg.entries.map((e) => e.name),
+    ...cfg.dormant.map((d) => d.name),
+  ]);
+  console.log('Starter pack (bun run mcp add <name>):\n');
+  for (const e of STARTER_PACK) {
+    const state = inConfig.has(e.name) ? '✓ in mcp.json' : ' ';
+    const key = e.requiresEnv?.length ? ` 🔑 ${e.requiresEnv.join(',')}` : '';
+    console.log(`  [${state}] ${e.name}  (${e.capabilities.join(', ')})${key}\n        ${e.description}`);
   }
 }
+
+function status(): void {
+  const cfg = loadMcpConfig();
+  for (const w of cfg.warnings) console.error(`⚠ ${w}`);
+  console.log(`Configured servers (${defaultConfigPath()}):\n`);
+  for (const e of cfg.entries) {
+    const scope = e.agents ? `agents: ${e.agents.join(', ')}` : 'agents: all';
+    console.log(`  active   ${e.name}  (${e.kind}; ${scope})`);
+  }
+  for (const d of cfg.dormant) {
+    console.log(`  dormant  ${d.name}  (set ${d.missingVars.join(', ')})`);
+  }
+}
+
+function main(): void {
+  const [cmd, arg] = process.argv.slice(2);
+  if (cmd === 'list') return list();
+  if (cmd === 'status') return status();
+  if (cmd === 'add' && arg) {
+    const r = addPackEntry(arg);
+    (r.ok ? console.log : console.error)(r.message);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
+  console.error('Usage: bun run mcp <list|status|add <name>>');
+  process.exitCode = 1;
+}
+
+if (import.meta.main) main();
 ```
 
-Keep it behind the TTY + consent gate so non-interactive `chat` runs are unaffected. Factor the shared deps-wiring from `provision.ts` into a small `src/provisioning/cli-deps.ts` helper to avoid duplication (DRY) and import it in both.
+- [ ] **Step 8: Add the script to `package.json`**
 
-- [ ] **Step 11: Typecheck, lint, run full provisioning suite.**
+In the `scripts` block, after `"provision"`:
 
-Run: `bun run typecheck && bun run lint:file -- "src/provisioning/**/*.ts" "src/cli/provision.ts" "src/cli/chat.ts" && bun test tests/provisioning/`
-Expected: clean + all PASS.
+```json
+    "provision": "bun run src/cli/provision.ts",
+    "mcp": "bun run src/cli/mcp.ts"
+```
 
-- [ ] **Step 12: LIVE-VERIFY the end-to-end CLI (Ollama).**
+- [ ] **Step 9: Run to verify pass**
 
-Run: with `ollama serve` up and (temporarily) a model uninstalled — `AGENT_PROVISION_AUTO_YES=1 bun run provision`.
-Expected: detects host (24 GB), lists fitting candidates, downloads the recommended set with a live bar, prints the summary, exit 0. Confirm with `ollama list`. Record in the SDD ledger.
+Run: `bun test tests/mcp/pack.test.ts tests/mcp/cli-add.test.ts tests/mcp/sqlite-server.test.ts`
+Expected: PASS (all). Also smoke: `bun run mcp list` prints the 12 entries.
 
-- [ ] **Step 13: Commit.**
+- [ ] **Step 10: Typecheck + lint + commit**
+
+Run: `bun run typecheck && bun run lint:file -- "src/mcp/sqlite-server.ts" "src/mcp/pack.ts" "src/cli/mcp.ts"`
+Expected: clean.
 
 ```bash
-git add src/provisioning/provisioner.ts src/provisioning/registry.ts src/provisioning/detect-missing.ts src/provisioning/cli-deps.ts src/cli/provision.ts src/cli/chat.ts package.json tests/provisioning/provisioner.test.ts tests/provisioning/detect-missing.test.ts
-git commit -m "feat(provisioning): provisioner orchestration + provision CLI + auto-detect hook, live-verified (Slice 14 Task 4)"
+git add src/mcp/sqlite-server.ts src/mcp/pack.ts src/cli/mcp.ts package.json tests/mcp/sqlite-server.test.ts tests/mcp/pack.test.ts tests/mcp/cli-add.test.ts
+git commit -m "feat(mcp): bun:sqlite server + capability-tagged starter pack + bun run mcp CLI (Slice 15 Task 4)"
 ```
 
 ---
