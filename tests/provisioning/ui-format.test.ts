@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
-import { formatBytes, formatSpeed, formatEta, renderProgressLine } from '../../src/provisioning/ui/format.ts';
 import { DownloadPhase } from '../../src/provisioning/types.ts';
+import {
+  formatBytes,
+  formatEta,
+  formatSpeed,
+  renderProgressLine,
+} from '../../src/provisioning/ui/format.ts';
 
 describe('formatters', () => {
   it('formats bytes human-readably', () => {
@@ -18,8 +23,12 @@ describe('formatters', () => {
   });
   it('renders a progress line with model, percent, size, speed', () => {
     const line = renderProgressLine({
-      modelRef: 'qwen3.5:4b', phase: DownloadPhase.Downloading,
-      bytesCompleted: 500_000_000, bytesTotal: 1_000_000_000, percent: 50, speedBytesPerSec: 1_048_576,
+      modelRef: 'qwen3.5:4b',
+      phase: DownloadPhase.Downloading,
+      bytesCompleted: 500_000_000,
+      bytesTotal: 1_000_000_000,
+      percent: 50,
+      speedBytesPerSec: 1_048_576,
     });
     expect(line).toContain('qwen3.5:4b');
     expect(line).toContain('50%');

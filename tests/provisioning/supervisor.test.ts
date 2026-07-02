@@ -1,14 +1,28 @@
 import { describe, expect, it } from 'bun:test';
-import { checkDiskSpace, withRetry, StallWatchdog } from '../../src/provisioning/supervisor.ts';
+import {
+  checkDiskSpace,
+  StallWatchdog,
+  withRetry,
+} from '../../src/provisioning/supervisor.ts';
 
 describe('checkDiskSpace', () => {
   it('fails when required + headroom exceeds free', () => {
-    const r = checkDiskSpace({ requiredBytes: 900, freeBytes: 1000, headroomBytes: 200 });
+    const r = checkDiskSpace({
+      requiredBytes: 900,
+      freeBytes: 1000,
+      headroomBytes: 200,
+    });
     expect(r.ok).toBe(false);
     expect(r.shortfallBytes).toBe(100); // 900+200 - 1000
   });
   it('passes with sufficient free space', () => {
-    expect(checkDiskSpace({ requiredBytes: 500, freeBytes: 1000, headroomBytes: 200 }).ok).toBe(true);
+    expect(
+      checkDiskSpace({
+        requiredBytes: 500,
+        freeBytes: 1000,
+        headroomBytes: 200,
+      }).ok,
+    ).toBe(true);
   });
 });
 
@@ -17,8 +31,18 @@ describe('withRetry', () => {
     let calls = 0;
     const retries: number[] = [];
     const out = await withRetry(
-      async () => { calls++; if (calls < 3) throw new Error('boom'); return 'ok'; },
-      { attempts: 5, baseMs: 0, capMs: 0, jitter: () => 0, onRetry: (n) => retries.push(n) },
+      async () => {
+        calls++;
+        if (calls < 3) throw new Error('boom');
+        return 'ok';
+      },
+      {
+        attempts: 5,
+        baseMs: 0,
+        capMs: 0,
+        jitter: () => 0,
+        onRetry: (n) => retries.push(n),
+      },
     );
     expect(out).toBe('ok');
     expect(calls).toBe(3);
@@ -26,7 +50,12 @@ describe('withRetry', () => {
   });
   it('rethrows after exhausting attempts', async () => {
     await expect(
-      withRetry(async () => { throw new Error('always'); }, { attempts: 2, baseMs: 0, capMs: 0, jitter: () => 0 }),
+      withRetry(
+        async () => {
+          throw new Error('always');
+        },
+        { attempts: 2, baseMs: 0, capMs: 0, jitter: () => 0 },
+      ),
     ).rejects.toThrow('always');
   });
   it('resolves the backoff delay promptly when the signal is already aborted', async () => {
@@ -36,8 +65,17 @@ describe('withRetry', () => {
     const start = Date.now();
     await expect(
       withRetry(
-        async () => { calls++; throw new Error('boom'); },
-        { attempts: 3, baseMs: 5_000, capMs: 5_000, jitter: () => 1, signal: ctrl.signal },
+        async () => {
+          calls++;
+          throw new Error('boom');
+        },
+        {
+          attempts: 3,
+          baseMs: 5_000,
+          capMs: 5_000,
+          jitter: () => 1,
+          signal: ctrl.signal,
+        },
       ),
     ).rejects.toThrow();
     const elapsed = Date.now() - start;
@@ -50,7 +88,13 @@ describe('StallWatchdog', () => {
   it('fires onStall when no byte progress is made past timeoutMs', () => {
     let now = 0;
     let stalls = 0;
-    const wd = new StallWatchdog(1000, () => { stalls++; }, () => now);
+    const wd = new StallWatchdog(
+      1000,
+      () => {
+        stalls++;
+      },
+      () => now,
+    );
     wd.beat(100); // first beat: advances from initial -1, sets a baseline
     now = 500;
     wd.beat(100); // no advance from 100 → starts the stall clock at now=500
@@ -61,7 +105,13 @@ describe('StallWatchdog', () => {
   it('does not fire when a beat with larger bytes resets the stall before timeout', () => {
     let now = 0;
     let stalls = 0;
-    const wd = new StallWatchdog(1000, () => { stalls++; }, () => now);
+    const wd = new StallWatchdog(
+      1000,
+      () => {
+        stalls++;
+      },
+      () => now,
+    );
     wd.beat(0);
     now = 500;
     wd.beat(100); // progress resets stalledSince
@@ -70,7 +120,11 @@ describe('StallWatchdog', () => {
     expect(stalls).toBe(0);
   });
   it('stop() is safe to call even if start() was never called', () => {
-    const wd = new StallWatchdog(1000, () => {}, () => 0);
+    const wd = new StallWatchdog(
+      1000,
+      () => {},
+      () => 0,
+    );
     expect(() => wd.stop()).not.toThrow();
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { createHfFetchProvider } from '../../src/provisioning/providers/hf-fetch.ts';
 import { ProviderKind } from '../../src/core/types.ts';
+import { createHfFetchProvider } from '../../src/provisioning/providers/hf-fetch.ts';
 import { DownloadPhase } from '../../src/provisioning/types.ts';
 
 function streamingResponse(chunks: Uint8Array[], total: number): Response {
@@ -10,14 +10,18 @@ function streamingResponse(chunks: Uint8Array[], total: number): Response {
       c.close();
     },
   });
-  return new Response(body, { status: 200, headers: { 'content-length': String(total) } });
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-length': String(total) },
+  });
 }
 
 describe('createHfFetchProvider', () => {
   it('emits Downloading progress that reaches Done', async () => {
     const chunk = new Uint8Array(1000);
     const provider = createHfFetchProvider(ProviderKind.MlxServer, {
-      fetchImpl: (async () => streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
       sha256: async () => 'deadbeef',
     });
     const phases: DownloadPhase[] = [];

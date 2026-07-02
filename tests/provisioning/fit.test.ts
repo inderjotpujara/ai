@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'bun:test';
-import { fitAndRank } from '../../src/provisioning/fit.ts';
 import { ProviderKind } from '../../src/core/types.ts';
+import { fitAndRank } from '../../src/provisioning/fit.ts';
 
 const cand = (model: string, params: number, size: number) => ({
-  provider: ProviderKind.Ollama, model, params: {}, role: 'x',
+  provider: ProviderKind.Ollama,
+  model,
+  params: {},
+  role: 'x',
   footprint: { approxParamsBillions: params, bytesPerWeight: 0.6 },
-  repo: model, fileSizeBytes: size, downloads: 100, installed: false,
+  repo: model,
+  fileSizeBytes: size,
+  downloads: 100,
+  installed: false,
 });
 
 describe('fitAndRank', () => {

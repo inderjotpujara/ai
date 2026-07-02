@@ -10,7 +10,7 @@ describe('ProgressTracker', () => {
   });
 
   it('clamps percent monotonic when the source reports backwards', () => {
-    let now = 0;
+    const now = 0;
     const t = new ProgressTracker('m', () => now);
     t.update(DownloadPhase.Downloading, 80, 100); // 80%
     const p = t.update(DownloadPhase.Downloading, 60, 100); // source went backwards
