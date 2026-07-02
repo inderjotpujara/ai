@@ -1,6 +1,5 @@
 import type { ToolSet } from 'ai';
-import { createFileQaAgent } from '../../agents/file-qa.ts';
-import { createWebFetchAgent } from '../../agents/web-fetch.ts';
+import { AGENTS, agentNames } from '../../agents/index.ts';
 import { getWorkflow } from '../../workflows/index.ts';
 import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
@@ -129,10 +128,11 @@ async function main(): Promise<void> {
       try {
         const tools: ToolSet = reg.merged;
         const agents: Record<string, Agent> = {};
-        const fileQa = createFileQaAgent(reg.forAgent('file_qa'));
-        const webFetch = createWebFetchAgent(reg.forAgent('web_fetch'));
-        agents[fileQa.name] = fileQa;
-        agents[webFetch.name] = webFetch;
+        for (const name of agentNames()) {
+          const factory = AGENTS[name];
+          if (!factory) throw new Error(`unknown agent: ${name}`);
+          agents[name] = factory(reg.forAgent(name));
+        }
         warnUnknownAgents(config, Object.keys(agents), (m) => console.error(m));
 
         const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;

@@ -28,7 +28,9 @@ describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
       await writeFile(filePath, 'The capital of France is Paris.');
       const { tools, close } = await createFileTools();
       try {
-        const orchestrator = createSuperAgent(tools, {});
+        const orchestrator = createSuperAgent((name) =>
+          name === 'file_qa' ? tools : {},
+        );
         const run = await createRun(runsRoot, 'live-1');
         const tel = initRunTelemetry(run.dir);
         try {

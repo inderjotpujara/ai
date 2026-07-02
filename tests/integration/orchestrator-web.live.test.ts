@@ -21,7 +21,9 @@ describe.skipIf(!ready)(
       const fileServer = await createFileTools();
       const fetchServer = await createFetchTools();
       try {
-        const orch = createSuperAgent(fileServer.tools, fetchServer.tools);
+        const orch = createSuperAgent((name) =>
+          name === 'file_qa' ? fileServer.tools : fetchServer.tools,
+        );
         const result = await runOrchestrator(
           orch,
           'Summarize the page at https://example.com in one sentence.',

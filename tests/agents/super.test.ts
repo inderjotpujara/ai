@@ -4,9 +4,8 @@ import qwenRouter from '../../models/qwen-router.ts';
 import { CAPABILITY_GAP_TOOL } from '../../src/core/capability-gap.ts';
 
 test('super agent exposes delegate tools for both specialists and the gap tool', () => {
-  const fileTools = { read_file: { description: 'x' } } as never;
-  const fetchTools = { fetch: { description: 'x' } } as never;
-  const sup = createSuperAgent(fileTools, fetchTools);
+  const toolsFor = () => ({ read_file: { description: 'x' } }) as never;
+  const sup = createSuperAgent(toolsFor);
   const toolNames = Object.keys(sup.tools);
   expect(toolNames).toContain('delegate_to_file_qa');
   expect(toolNames).toContain('delegate_to_web_fetch');
@@ -15,10 +14,7 @@ test('super agent exposes delegate tools for both specialists and the gap tool',
 });
 
 test('super agent uses the small router model', () => {
-  const sup = createSuperAgent(
-    { read_file: {} } as never,
-    { fetch: {} } as never,
-  );
+  const sup = createSuperAgent(() => ({ read_file: {} }) as never);
   // model is a resolved LanguageModel for qwen3:4b
   expect((sup.model as { modelId?: string }).modelId).toBe(qwenRouter.model);
 });

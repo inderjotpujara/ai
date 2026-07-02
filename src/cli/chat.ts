@@ -108,8 +108,7 @@ async function main(): Promise<void> {
       { runsRoot: 'runs', runId: `run-${process.pid}` },
       async ({ run, reg }) => {
         const orchestrator = createSuperAgent(
-          reg.forAgent('file_qa'),
-          reg.forAgent('web_fetch'),
+          (name) => reg.forAgent(name),
           onBeforeDelegate,
         );
         const result = await runChat({
