@@ -149,6 +149,30 @@ describe('mountAll', () => {
     expect(reg2.skipped[0]?.reason).toContain('drift');
     await reg2.close();
   });
+  it('skips consent-gated servers non-interactively without calling ask (no hang)', async () => {
+    let asked = 0;
+    const config: McpConfig = {
+      entries: [entry('needs-consent')],
+      dormant: [],
+      warnings: [],
+    };
+    const reg = await mountAll(
+      config,
+      deps({
+        consent: {
+          isTTY: false,
+          autoYes: false,
+          ask: async () => {
+            asked += 1;
+            return true;
+          },
+        },
+        mount: async () => fakeServer([]),
+      }),
+    );
+    expect(asked).toBe(0);
+    expect(reg.skipped.some((s) => s.name === 'needs-consent')).toBe(true);
+  });
 });
 
 describe('warnUnknownAgents', () => {

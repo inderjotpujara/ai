@@ -1,19 +1,40 @@
 /** Minimal line reader so prompts are testable without real stdin. */
 export type LineInput = { read: () => Promise<string> };
 
-export function stdinInput(): LineInput {
+export function stdinInput(
+  stream: NodeJS.ReadStream = process.stdin,
+): LineInput {
   return {
     read: () =>
       new Promise((resolve) => {
-        const onData = (d: Buffer) => {
-          process.stdin.off('data', onData);
-          process.stdin.pause();
+        const cleanup = (): void => {
+          stream.off('data', onData);
+          stream.off('end', onEnd);
+        };
+        const onData = (d: Buffer): void => {
+          cleanup();
+          stream.pause();
           resolve(d.toString().trim());
         };
-        process.stdin.resume();
-        process.stdin.on('data', onData);
+        const onEnd = (): void => {
+          cleanup();
+          resolve('');
+        };
+        stream.resume();
+        stream.on('data', onData);
+        stream.on('end', onEnd);
       }),
   };
+}
+
+/** Interactive prompting is safe only when the stream we WRITE the question to
+ *  (stderr) and the stream we READ the answer from (stdin) are both TTYs.
+ *  Judging on stderr alone lets `cmd < /dev/null` hang on an ended stdin. */
+export function interactiveTTY(
+  stdin: { isTTY?: boolean } = process.stdin,
+  stderr: { isTTY?: boolean } = process.stderr,
+): boolean {
+  return (stdin.isTTY ?? false) && (stderr.isTTY ?? false);
 }
 
 export async function askYesNo(
