@@ -55,6 +55,11 @@ export const ATTR = {
   PROVISION_FAILED_COUNT: 'provision.failed_count',
   PROVISION_DEFERRED_VERIFY: 'provision.deferred_verify',
   PROVISION_SNAPSHOT_FALLBACK: 'provision.snapshot_fallback',
+  TOOL_NAME: 'gen_ai.tool.name',
+  MCP_SERVER: 'mcp.server',
+  MCP_TRANSPORT: 'mcp.transport',
+  MCP_TOOL_COUNT: 'mcp.tool.count',
+  MCP_MOUNT_OUTCOME: 'mcp.mount.outcome',
 } as const;
 
 export type ModelSelectInfo = {
@@ -383,5 +388,46 @@ export function withProvisionSpan<T>(
     span.setAttribute(ATTR.PROVISION_BYTES_TOTAL, info.bytesTotal);
     span.setAttribute(ATTR.PROVISION_SNAPSHOT_FALLBACK, info.snapshotFallback);
     return fn(span);
+  });
+}
+
+/** Span for one engine-level tool call (StepKind.Tool) — closes the gap where
+ *  direct tool dispatch ran uninstrumented (agent-internal tool calls are
+ *  already covered by AI-SDK experimental_telemetry). */
+export function withToolSpan<T>(
+  toolName: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('workflow.tool', async (span) => {
+    span.setAttribute(ATTR.TOOL_NAME, toolName);
+    return fn();
+  });
+}
+
+/** Root span for an MCP mount pass; the body records one event per server. */
+export function withMcpMountSpan<T>(
+  fn: (
+    record: (name: string, outcome: string, toolCount?: number) => void,
+  ) => Promise<T>,
+): Promise<T> {
+  return inSpan('mcp.mount', async (span) => {
+    let servers = 0;
+    const record = (
+      name: string,
+      outcome: string,
+      toolCount?: number,
+    ): void => {
+      servers += 1;
+      span.addEvent('mcp.server.mount', {
+        [ATTR.MCP_SERVER]: name,
+        [ATTR.MCP_MOUNT_OUTCOME]: outcome,
+        ...(toolCount !== undefined
+          ? { [ATTR.MCP_TOOL_COUNT]: toolCount }
+          : {}),
+      });
+    };
+    const out = await fn(record);
+    span.setAttribute(ATTR.MCP_TOOL_COUNT, servers);
+    return out;
   });
 }

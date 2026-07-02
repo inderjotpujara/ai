@@ -2,9 +2,11 @@ import type { ToolSet } from 'ai';
 import { getCrew } from '../../crews/index.ts';
 import { type CrewDeps, runCrew } from '../crew/engine.ts';
 import type { CrewDef, CrewOutcome } from '../crew/types.ts';
-import { createFetchTools, createFileTools } from '../mcp/client.ts';
+import { loadMcpConfig } from '../mcp/config.ts';
+import { mountAll } from '../mcp/mount.ts';
 import { createRun, writeArtifact } from '../run/run-store.ts';
 import { initRunTelemetry } from '../telemetry/provider.ts';
+import { withMcpMountSpan } from '../telemetry/spans.ts';
 import type { VerifyDeps } from '../verification/types.ts';
 import { createSelectionRuntime } from './select-runtime.ts';
 import { makeRealVerifyDeps } from './verify-runtime.ts';
@@ -84,55 +86,57 @@ async function main(): Promise<void> {
   }
   const { positional, verify } = parseArgs(rest);
 
-  const fileServer = await createFileTools();
+  const config = loadMcpConfig();
+  const reg = await withMcpMountSpan(async (record) => {
+    const r = await mountAll(config);
+    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
+    for (const s of r.skipped) record(s.name, s.reason);
+    for (const d of config.dormant) record(d.name, 'dormant');
+    return r;
+  });
   try {
-    const fetchServer = await createFetchTools();
+    const selection = await createSelectionRuntime();
     try {
-      const selection = await createSelectionRuntime();
+      const tools: ToolSet = reg.merged;
+      const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
       try {
-        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
-        const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
-        try {
-          const outcome = await runCrewCli({
-            def,
-            input: positional.join(' ').trim(),
-            runsRoot: 'runs',
-            runId: `crew-${process.pid}`,
-            tools,
-            onBeforeDelegate: selection.onBeforeDelegate,
-            verifyDeps: verifyRuntime?.verifyDeps,
-          });
-          if (outcome.kind === 'done') {
-            console.log(
-              typeof outcome.output === 'string'
-                ? outcome.output
-                : JSON.stringify(outcome.output, null, 2),
-            );
-          } else if (outcome.kind === 'unverified') {
-            console.error(
-              `Crew abstained at ${outcome.failedTaskId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
-            );
-            process.exitCode = 1;
-          } else {
-            console.error(
-              `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
-            );
-            process.exitCode = 1;
-          }
-        } finally {
-          if (verifyRuntime) {
-            verifyRuntime.store.close();
-            await verifyRuntime.manager.unloadAll();
-          }
+        const outcome = await runCrewCli({
+          def,
+          input: positional.join(' ').trim(),
+          runsRoot: 'runs',
+          runId: `crew-${process.pid}`,
+          tools,
+          onBeforeDelegate: selection.onBeforeDelegate,
+          verifyDeps: verifyRuntime?.verifyDeps,
+        });
+        if (outcome.kind === 'done') {
+          console.log(
+            typeof outcome.output === 'string'
+              ? outcome.output
+              : JSON.stringify(outcome.output, null, 2),
+          );
+        } else if (outcome.kind === 'unverified') {
+          console.error(
+            `Crew abstained at ${outcome.failedTaskId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
+          );
+          process.exitCode = 1;
+        } else {
+          console.error(
+            `Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`,
+          );
+          process.exitCode = 1;
         }
       } finally {
-        await selection.close();
+        if (verifyRuntime) {
+          verifyRuntime.store.close();
+          await verifyRuntime.manager.unloadAll();
+        }
       }
     } finally {
-      await fetchServer.close();
+      await selection.close();
     }
   } finally {
-    await fileServer.close();
+    await reg.close();
   }
 }
 

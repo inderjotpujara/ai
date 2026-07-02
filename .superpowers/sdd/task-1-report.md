@@ -1,82 +1,192 @@
-# Task 1 Report — Progress protocol, DownloadProvider interface, dep-free UI (Slice 14)
+# Task 1 Report: mcp.json config loader
 
-**Branch:** `slice-14-provisioning`
-**Commit:** `75799d6` — `feat(provisioning): progress protocol + tracker + dep-free UI (Slice 14 Task 1)`
+## Summary
 
-## What was built
+Successfully implemented the MCP configuration loader with types, validation, and environment variable expansion. All 8 tests pass, typecheck and linting are clean.
 
-Exactly the brief's five source files, verbatim code, plus the required doc stub:
+## What Was Done
 
-- `src/provisioning/types.ts` — `DownloadPhase` enum (string enum, matches repo style), `DownloadProgress` type, `DownloadProvider` type (depends on `ProviderKind` from `src/core/types.ts`).
-- `src/provisioning/progress-tracker.ts` — `ProgressTracker` class: monotonic percent clamp (`maxPercent` never regresses) + EWMA speed (`EWMA_ALPHA = 0.3`) derived from byte/time deltas via an injectable `now()` clock for testability.
-- `src/provisioning/ui/format.ts` — `formatBytes`, `formatSpeed`, `formatEta`, `renderProgressLine`.
-- `src/provisioning/ui/progress-bar.ts` — `ProgressBar` class, thin I/O wrapper (TTY `\r` rewrite vs. non-TTY line-per-update), untested per brief (delegates all logic to tested `renderProgressLine`).
-- `src/provisioning/ui/prompt.ts` — `LineInput` type, `stdinInput()` real adapter, `askYesNo`, `selectModels` (generic over `{ recommended: boolean }`), all testable via injected fake input.
+1. **Created `src/mcp/types.ts`** — Contains:
+   - `enum McpTransportKind` for Stdio and Http transport kinds
+   - `stdioEntrySchema` and `httpEntrySchema` zod validators
+   - Type definitions for `StdioServerEntry`, `HttpServerEntry`, `McpServerEntry`, `McpConfig`, and `PackEntry`
 
-Also updated `docs/architecture.md` (required by the repo's pre-commit `docs:check` hook, which fails on any undocumented `src/<subsystem>`): added a `PROV` subgraph node in the module-map Mermaid diagram and a **Provisioning** row in the module table, marked "Slice 14 — in progress, Task 1 of N" — mirroring the exact precedent set by Slice 13's first commit (`4639b3d`), which added a minimal, honest stub for `src/verification/` on its first commit rather than waiting for the slice-close docs pass. This is a structural presence stub only; the full README/ROADMAP/Artifact refresh is deferred to the slice's closing docs commit per repo convention (confirmed via `git log` — e.g. `c8b0da7 docs: bring all four surfaces current through Slice 13`).
+2. **Created `src/mcp/config.ts`** — Contains:
+   - `expandVars(value, env)` function to expand `${VAR}` and `${VAR:-default}` patterns in strings
+   - `expandRecord()` helper to expand all values in a record
+   - `defaultConfigPath()` to return the config path from env or default to `mcp.json` in cwd
+   - `loadMcpConfig(path, env)` to load, validate, and parse `mcp.json` with graceful degradation
 
-## TDD evidence (RED → GREEN)
+3. **Created `tests/mcp/config.test.ts`** — Comprehensive test suite with 8 tests covering:
+   - Variable expansion with env vars
+   - Default values in variable expansion
+   - Reporting missing variables
+   - Parsing stdio and http entries with agents
+   - Marking entries with missing env vars as dormant (not failed)
+   - Skipping malformed entries with warnings
+   - Supporting VS-Code-style "servers" root with a warning
+   - Graceful degradation on missing/corrupt files
 
-1. **ProgressTracker**
-   - RED: `bun test tests/provisioning/progress-tracker.test.ts` → `error: Cannot find module '../../src/provisioning/progress-tracker.ts'` (0 pass / 1 fail / 1 error).
-   - Implemented `types.ts` + `progress-tracker.ts`.
-   - GREEN: `4 pass, 0 fail, 4 expect() calls`.
-
-2. **Formatters**
-   - RED: `bun test tests/provisioning/ui-format.test.ts` → `error: Cannot find module '../../src/provisioning/ui/format.ts'` (0 pass / 1 fail / 1 error).
-   - Implemented `ui/format.ts`.
-   - GREEN: `4 pass, 0 fail, 9 expect() calls`.
-
-3. **Prompts**
-   - RED: `bun test tests/provisioning/ui-prompt.test.ts` → `error: Cannot find module '../../src/provisioning/ui/prompt.ts'` (0 pass / 1 fail / 1 error).
-   - Implemented `ui/prompt.ts`.
-   - GREEN: `6 pass, 0 fail, 6 expect() calls`.
-
-4. **ProgressBar** — no test per brief (thin wrapper over tested `renderProgressLine`); created directly.
-
-## Final verification (pristine run, pre-commit)
+## Test Results
 
 ```
-$ bun test tests/provisioning/
-14 pass, 0 fail, 19 expect() calls — Ran 14 tests across 3 files.
+bun test v1.3.11 (af24e281)
 
-$ bun run typecheck
-$ tsc --noEmit    (clean, no output)
-
-$ bun run lint:file -- src/provisioning/
-$ biome check src/provisioning/
-Checked 5 files in 3ms. No fixes applied.   (clean)
-
-$ bun run docs:check
-✔ docs-check: living docs present + linked; every src subsystem documented.
+ 8 pass
+ 0 fail
+ 15 expect() calls
+Ran 8 tests across 1 file. [35.00ms]
 ```
 
-Pre-commit hook (`bun run docs:check`) ran automatically on `git commit` and passed.
+## Deviations from the Brief
 
-## Files changed
+The code from the brief required formatting and linting adjustments to pass the project's biome linter:
 
-- `src/provisioning/types.ts` (new)
-- `src/provisioning/progress-tracker.ts` (new)
-- `src/provisioning/ui/format.ts` (new)
-- `src/provisioning/ui/progress-bar.ts` (new)
-- `src/provisioning/ui/prompt.ts` (new)
-- `tests/provisioning/progress-tracker.test.ts` (new)
-- `tests/provisioning/ui-format.test.ts` (new)
-- `tests/provisioning/ui-prompt.test.ts` (new)
-- `docs/architecture.md` (modified — Provisioning subsystem stub, see above)
+1. **Template string escaping in tests**: Test descriptions and data strings containing `${VAR}` patterns that would be interpreted as template string placeholders were escaped using template literal syntax: `it(${'$'}{VAR})` to avoid the `noTemplateCurlyInString` linter warning. This is semantically equivalent to the brief's code but linter-compliant.
 
-## Self-review findings
+2. **Line formatting in config.ts**: Three long lines exceeding the line length limit were broken across multiple lines:
+   - Error message in the JSON parse catch block
+   - VS-Code-style servers warning message
+   - Schema validation error message
 
-- **Code fidelity:** all five source files match the brief's code verbatim, with one required deviation: `bunx biome check --write` (repo's own formatter/import-organizer) reformatted multi-line ternaries/chains and reordered/retyped two imports (`import type` for type-only imports, alphabetical import-name ordering). No logic changed — confirmed by re-running all tests/typecheck after the auto-fix. I additionally hand-removed one genuinely-unused import (`DownloadPhase` in `ui/format.ts` — the brief's own snippet imports it but never references it; `renderProgressLine` uses `p.phase` as a plain string in the template literal, not the enum). This was a lint-driven correction, not a design change.
-  - **NOTE for the brief/reviewer:** the brief's Step 7 code block imports `DownloadPhase` in `format.ts` but never uses it — biome's `noUnusedImports` flags this as an error (not a warning) under this repo's config, so it cannot be committed verbatim. Removing the unused import is the only faithful fix; flagging this discrepancy explicitly since the instructions said "use the exact code ... verbatim."
-- **No console.log** left in `src/provisioning/` (grep confirmed empty).
-- **No new dependency** added — `package.json`/`bun.lock` untouched (confirmed via git status before commit).
-- **Enum-over-string-literal-union style**: `DownloadPhase` is a string enum, matching CLAUDE.md's code-style rule.
-- **Explicit `.ts` import extensions**: all imports use `.ts`, matching repo convention.
-- **Docs hard line**: pre-commit's `docs:check` (structural: "every src subsystem documented") would otherwise block this commit, since it runs unconditionally with no `DOCS_OK` bypass baked into the script (unlike pre-push, which does respect `DOCS_OK=1`). Resolved by adding a minimal, accurate architecture.md stub following the exact precedent of Slice 13's first commit — not a full slice-close docs pass (README/ROADMAP/Artifact are correctly deferred to the slice's closing commit, per repo convention observed in `git log`).
-- **Scope discipline**: did not stage or touch pre-existing unstaged changes to `.remember/now.md` or `.superpowers/sdd/task-1-brief.md` (present in git status before this task began) — kept the commit scoped exactly to Task 1's files + the required doc stub.
+These formatting changes are cosmetic and do not alter functionality.
 
-## Concerns
+## Verification Checklist
 
-- None blocking. One minor documented discrepancy (unused `DownloadPhase` import in the brief's `format.ts` snippet) was corrected per lint, as noted above — worth a heads-up to whoever authored the brief in case later tasks' snippets have the same copy-paste artifact.
-- The architecture.md stub is intentionally minimal ("Task 1 of N") since Tasks 2+ (Ollama/HF/LM-Studio adapters) don't exist yet; it will need expanding as those land, and the full README/ROADMAP/Artifact refresh is still owed at slice-close.
+- ✅ Tests pass (8/8)
+- ✅ Typecheck passes (`bun run typecheck`)
+- ✅ Linter passes (`bun run lint:file`)
+- ✅ No console.log statements in src/
+- ✅ Code follows project conventions (type over interface, early returns, small focused files)
+- ✅ Zod v4 used as specified (no new dependencies)
+- ✅ Committed with exact message from brief
+
+## Commit
+
+```
+SHA: 8351751
+Message: feat(mcp): mcp.json types + validated loader with env expansion and per-entry degrade (Slice 15 Task 1)
+```
+
+---
+
+# Task 1 Review — MCP Config Validation Fix Report
+
+## Summary of Changes
+
+Fixed two critical issues found in Task 1 code review (Slice 15, Task 1 review feedback):
+
+### Issue 1: Branch-Targeted Schema Validation
+**File:** `src/mcp/config.ts`
+
+**Problem:** Plain zod union on `serverEntrySchema` reported only generic "Invalid input" error, hiding the actual validation failure reason (e.g., missing `command` field).
+
+**Solution:**
+- Detect HTTP-like entries (`url` or `type` field present) vs. stdio entries
+- Route to the appropriate schema (`httpEntrySchema` or `stdioEntrySchema`)
+- Extract field path and detailed error message from zod
+- Warning now reads: `mcp.json entry "bad" is invalid and was skipped: at "command" Invalid input: expected string, received undefined`
+
+**Changes:**
+- Import `httpEntrySchema` and `stdioEntrySchema` explicitly (now exported in types.ts)
+- Added `isHttpLike()` branch detector
+- Updated entry validation loop to use branch-targeted parse
+- Adjusted `toEntry()` parameter type to union of explicit schemas
+- Kept `serverEntrySchema` exported in types.ts (backwards compatibility)
+
+### Issue 2: Regression Tests for `entry.raw` Security Property
+**File:** `tests/mcp/config.test.ts`
+
+**Problem:** No test coverage for the critical security property that `entry.raw` preserves the as-written (unexpanded) config value for consent hashing.
+
+**Solution:** Added two regression tests:
+1. **"keeps raw unexpanded while expanding the live fields"** — verifies that `raw` contains `${TOKEN}` while live fields expand to `secret-value`
+2. **"malformed-entry warning names the actual problem"** — verifies that warnings identify the specific invalid field (not generic "Invalid input")
+
+## Test Results
+
+```
+bun test tests/mcp/config.test.ts
+ 10 pass
+ 0 fail
+ 22 expect() calls
+Ran 10 tests across 1 file. [34.00ms]
+```
+
+All tests pass, including the two new regression tests (8 original + 2 new = 10 total).
+
+## Lint & Type Check
+
+```
+bun run typecheck     — ✓ pass (no errors)
+bun run lint:file    — ✓ pass (no errors)
+```
+
+## Files Modified
+
+- `src/mcp/config.ts` — branch-targeted validation + imports
+- `src/mcp/types.ts` — exports already present, no changes needed
+- `tests/mcp/config.test.ts` — added 2 regression tests
+
+## Fix Commit
+
+```
+Message: fix(mcp): branch-targeted config validation errors + raw-unexpanded regression test (Slice 15 Task 1 review)
+```
+
+---
+
+# Task 1 Re-Review Fix — Union Tolerance with Fallback Parse
+
+## Summary of Regression
+
+The previous fix (branch-targeted validation) introduced a regression: the `isHttpLike()` detector routes entries by the presence of `'url'` or `'type'` keys, but this breaks VS Code–convention entries like `{ "type": "stdio", "command": "bun", "args": [...] }` because the presence of the `'type'` key alone triggers httpEntrySchema, which rejects 'stdio' as an invalid type value.
+
+Symmetrically, a stdio entry with a stray `url` key would fail if it doesn't match the http schema structure.
+
+## Solution: Fallback Parse with Union Tolerance
+
+**File:** `src/mcp/config.ts`
+
+Added a schema fallback: if the primary schema (routed by `isHttpLike()`) fails, attempt parsing with the alternate schema before reporting an error. This restores the union tolerance of the original `z.union` approach while keeping branch-targeted error messages.
+
+**Changes:**
+- Compute both schemas: primary and fallback
+- Try primary schema first
+- On failure, try fallback schema
+- Only report error if both fail (preserving detailed error from primary)
+
+**Test Coverage:**
+Added two regression tests to `tests/mcp/config.test.ts`:
+1. **"accepts an explicit type:'stdio' entry (VS Code convention) as stdio"** — validates that `{ type: 'stdio', command: '...', args: [...] }` is accepted
+2. **"accepts a stdio entry carrying a stray url key (union tolerance)"** — validates that union tolerance works (stray keys don't cause parse failure)
+
+## Test Results
+
+```
+bun test tests/mcp/config.test.ts
+ 12 pass
+ 0 fail
+ 26 expect() calls
+Ran 12 tests across 1 file. [38.00ms]
+```
+
+All 12 tests pass: 10 original + 2 new regression tests. The existing test "malformed-entry warning names the actual problem" still passes, confirming error messages remain accurate.
+
+## Lint & Type Check
+
+```
+bun run typecheck    — ✓ pass
+bun run lint:file    — ✓ pass
+```
+
+## Files Modified
+
+- `src/mcp/config.ts` — fallback parse logic + formatting
+- `tests/mcp/config.test.ts` — 2 regression tests + formatting
+
+## Re-Review Commit
+
+```
+Message: fix(mcp): restore union tolerance with schema fallback in config validation (Slice 15 Task 1 re-review)
+```

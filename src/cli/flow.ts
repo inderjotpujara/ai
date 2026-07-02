@@ -5,10 +5,16 @@ import { getWorkflow } from '../../workflows/index.ts';
 import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
-import { createFetchTools, createFileTools } from '../mcp/client.ts';
+import { loadMcpConfig } from '../mcp/config.ts';
+import { mountAll, warnUnknownAgents } from '../mcp/mount.ts';
 import { createRun, writeArtifact } from '../run/run-store.ts';
 import { initRunTelemetry } from '../telemetry/provider.ts';
-import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
+import {
+  ATTR,
+  annotateStep,
+  withMcpMountSpan,
+  withWorkflowSpan,
+} from '../telemetry/spans.ts';
 import type { VerifyDeps } from '../verification/types.ts';
 import { defineWorkflow } from '../workflow/define.ts';
 import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
@@ -129,58 +135,61 @@ async function main(): Promise<void> {
   }
   const { positional, verify } = parseArgs(rest);
 
-  const fileServer = await createFileTools();
+  const config = loadMcpConfig();
+  const reg = await withMcpMountSpan(async (record) => {
+    const r = await mountAll(config);
+    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
+    for (const s of r.skipped) record(s.name, s.reason);
+    for (const d of config.dormant) record(d.name, 'dormant');
+    return r;
+  });
   try {
-    const fetchServer = await createFetchTools();
+    const selection = await createSelectionRuntime();
     try {
-      const selection = await createSelectionRuntime();
-      try {
-        const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };
-        const agents: Record<string, Agent> = {};
-        const fileQa = createFileQaAgent(fileServer.tools);
-        const webFetch = createWebFetchAgent(fetchServer.tools);
-        agents[fileQa.name] = fileQa;
-        agents[webFetch.name] = webFetch;
+      const tools: ToolSet = reg.merged;
+      const agents: Record<string, Agent> = {};
+      const fileQa = createFileQaAgent(reg.forAgent('file_qa'));
+      const webFetch = createWebFetchAgent(reg.forAgent('web_fetch'));
+      agents[fileQa.name] = fileQa;
+      agents[webFetch.name] = webFetch;
+      warnUnknownAgents(config, Object.keys(agents), (m) => console.error(m));
 
-        const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
-        try {
-          const outcome = await runFlow({
-            def,
-            input: positional.join(' ').trim(),
-            runsRoot: 'runs',
-            runId: `flow-${process.pid}`,
-            agents,
-            tools,
-            onBeforeDelegate: selection.onBeforeDelegate,
-            verifyDeps: verifyRuntime?.verifyDeps,
-          });
-          if (outcome.kind === 'done') {
-            console.log(lastStepOutputText(def, outcome.output));
-          } else if (outcome.kind === 'unverified') {
-            console.error(
-              `Workflow abstained at ${outcome.failedStepId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
-            );
-            process.exitCode = 1;
-          } else {
-            console.error(
-              `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
-            );
-            process.exitCode = 1;
-          }
-        } finally {
-          if (verifyRuntime) {
-            verifyRuntime.store.close();
-            await verifyRuntime.manager.unloadAll();
-          }
+      const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
+      try {
+        const outcome = await runFlow({
+          def,
+          input: positional.join(' ').trim(),
+          runsRoot: 'runs',
+          runId: `flow-${process.pid}`,
+          agents,
+          tools,
+          onBeforeDelegate: selection.onBeforeDelegate,
+          verifyDeps: verifyRuntime?.verifyDeps,
+        });
+        if (outcome.kind === 'done') {
+          console.log(lastStepOutputText(def, outcome.output));
+        } else if (outcome.kind === 'unverified') {
+          console.error(
+            `Workflow abstained at ${outcome.failedStepId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
+          );
+          process.exitCode = 1;
+        } else {
+          console.error(
+            `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
+          );
+          process.exitCode = 1;
         }
       } finally {
-        await selection.close();
+        if (verifyRuntime) {
+          verifyRuntime.store.close();
+          await verifyRuntime.manager.unloadAll();
+        }
       }
     } finally {
-      await fetchServer.close();
+      await selection.close();
     }
   } finally {
-    await fileServer.close();
+    await reg.close();
   }
 }
 

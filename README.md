@@ -12,26 +12,26 @@ Mini.
 > product line is now underway — Phase A's run-viewer (Slice 8) and Phase B's
 > composition guardrails (Slice 9), workflow/DAG engine (Slice 10), crews &
 > roles (Slice 11), memory/RAG (Slice 12), grounded verification (Slice 13),
-> and first-boot model provisioning (Slice 14) have landed. An integration
-> library → agent-builder → triggers is next. See
-> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> first-boot model provisioning (Slice 14), and a declarative MCP mount
+> registry + starter pack (Slice 15) have landed. Agent-builder → triggers is
+> next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 14 complete — **first-boot provisioning + runtime-agnostic
-> downloader**. `src/provisioning/` gets a fresh clone/machine from zero
-> models to a working setup without manual `ollama pull`s: detect the host →
-> discover fitting models (dynamic per-runtime catalog query with a
-> committed-snapshot fallback) → hardware-fit rank → **per-model consent** →
-> download through a **runtime-agnostic `DownloadProvider`** with a live
-> progress bar (bytes/%/speed/ETA) → disk-space preflight + stall/retry
-> supervisor guards, degrading (never crashing) per source and per model.
-> **Ollama is live-verified end-to-end; LM Studio, llama.cpp, and MLX ship
-> contract-tested with live-verify explicitly deferred** (not installed on the
-> dev machine) — logged, not silent. Run it with `bun run provision`, or let
-> the optional, TTY-gated `chat.ts` auto-detect hook offer it when a declared
-> model is missing. Also shipped: Slice 8 (OTel run-viewer, `bun run runs`),
-> Slice 9 (composition guardrails — delegation depth limit + return-size cap),
-> Slice 10 (workflow/DAG engine, `bun run flow <name>`), Slice 11 (crews &
-> roles, `bun run crew <name>`), Slice 12 (memory/RAG, `bun run memory
+> **Status:** Slice 15 complete — **`mcp.json` mount registry + starter
+> pack**. `src/mcp/` replaces Slice 3's two hardcoded mounts with a
+> declarative registry: a committed `mcp.json` (standard `mcpServers` shape +
+> a per-server `agents` scoping field) is loaded and **consent-gated** per
+> server (TTY prompt or `AGENT_MCP_AUTO_APPROVE=1` headless), then mounted and
+> its tool definitions **hashed and pinned** against later drift (a
+> rug-pull check). A **12-entry curated starter pack** (`bun run mcp
+> list|status|add <name>`) covers files/SQL/memory/reasoning/web-fetch/
+> git/time/browser/GitHub/web-search — keyless entries mount immediately,
+> key-gated ones (GitHub, Brave, Exa) stay **dormant** until their env var is
+> set. Also shipped: Slice 14 (first-boot provisioning + runtime-agnostic
+> downloader, Ollama live-verified; LM Studio/llama.cpp/MLX contract-tested,
+> live-verify deferred), Slice 8 (OTel run-viewer, `bun run runs`), Slice 9
+> (composition guardrails — delegation depth limit + return-size cap), Slice
+> 10 (workflow/DAG engine, `bun run flow <name>`), Slice 11 (crews & roles,
+> `bun run crew <name>`), Slice 12 (memory/RAG, `bun run memory
 > ingest|recall|stats|reindex`), and Slice 13 (grounded verification,
 > `--verify`). See [Roadmap](#roadmap).
 
@@ -79,6 +79,8 @@ No manual steps. No API keys. Everything runs locally.
 **Grounded verification (Slice 13).** An anti-hallucination layer, `src/verification/`, built directly on Slice 12's citation tags and abstention primitive — not a new engine. `verify()` decomposes an answer into atomic claims, fetches **exactly the memory chunks each claim cites** (`getByIds`), and checks every claim against its own cited evidence with **`bespoke-minicheck`** — a small model fine-tuned for `(document, claim) → supported?` fact-checking, distinct from the general/router model that still handles decomposition and retrieval grading. The judge model is **consent-pulled** on first use (prompted interactively, or `AGENT_VERIFY_AUTO_PULL=1`/`0` to force); if it's unavailable, verification falls back to the general model rather than hard-failing. A **bounded Corrective RAG** step (grades retrieval and, if weak, rewrites the query and re-answers; re-retrieval happens when a `recall` dependency is wired — the current `--verify` CLI path re-answers without fresh retrieval, a documented follow-up) runs once by default before the final gate; if the answer still isn't faithful (`faithfulness < 0.9` by default), the system **abstains** — `{kind:'unverified'}` — instead of presenting an unsupported draft. It's opt-in and additive: flag a task/crew/workflow `verify: true`, or pass `--verify` to `bun run crew <name>`/`bun run flow <name>`, and the compiler splices a verify→branch→corrective→abstain sub-graph after the answering step (`StepKind.Verify`); everything else compiles unchanged. An abstention writes `runs/<id>/unverified.txt` and exits non-zero. Designed for the **terminal** answering step of a run — a documented limitation, not yet per-mid-step. The eval gate is an **in-repo golden set** (~20 cases), no external framework. See [`docs/architecture.md`](docs/architecture.md) §12.
 
 **First-boot provisioning (Slice 14).** A first-boot / on-demand model provisioning layer, `src/provisioning/`, that gets weights onto disk without manual `ollama pull`s — it does not replace the Model Manager; provisioning just makes sure the bytes are present for `ensureReady` to pick up on the next normal run. `bun run provision` runs the flow: detect the host → discover fitting models (a dynamic per-runtime catalog query, degrading per-source to a committed `snapshot.json` on a throw or empty result) → `fitAndRank` by hardware fit → **per-model consent** (recommended pre-selected, nothing downloads without an explicit yes) → a disk-space preflight + stall/retry supervisor guards (`checkDiskSpace`, `withRetry`, `StallWatchdog`) → sequential downloads through a runtime-agnostic `DownloadProvider` with one live progress bar, each model's failure caught individually so one bad pull never aborts the rest. Three adapters exist behind that interface: **Ollama is live-verified end-to-end** (a real pull to 100%, idempotent re-provision); **the shared HuggingFace fetcher (llama.cpp GGUF + MLX snapshot) and LM Studio are contract-tested only, with live-verify explicitly deferred** pending a runtime install — and the HF fetcher specifically is shape-complete but not yet download-complete (it streams and counts bytes but doesn't persist them to disk or compute a real checksum yet). LM Studio's delegating adapter is implemented + contract-tested but not yet routed via `providerFor` — it shares the `MlxServer` kind today; wiring it is a logged follow-on. Degrade-never-crash applies per catalog source and per model. A non-invasive, TTY-gated `chat.ts` auto-detect hook offers the same flow when a declared model is missing, and the run emits an `agent.model.provision` telemetry span (candidate/selected/byte counts, downloaded/failed outcome). See [`docs/architecture.md`](docs/architecture.md) §13.
+
+**MCP mount registry & starter pack (Slice 15).** Slice 3's two hardcoded mounts (`createFileTools`/`createFetchTools`) are replaced by a **declarative registry**, `src/mcp/`: a committed `mcp.json` (the standard `mcpServers` shape, plus a per-server `agents` field for scoping) is read by `loadMcpConfig()` (per-entry degrade — a bad entry warns and is skipped, one needing an unset env var goes `dormant`) and mounted by `mountAll()`. Every mount is **consent-gated** — a TTY prompt shows the exact command/URL before it runs (or `AGENT_MCP_AUTO_APPROVE=1` for headless/CI), and its tool definitions are **hashed and pinned** so a server that changes its tools after approval (a "rug-pull") gets caught and re-prompted rather than silently trusted. A **12-entry curated starter pack** — `bun run mcp list|status|add <name>` — covers files (`file-tools`, `filesystem`), SQL (`sqlite`, SELECT-gated `query` + `execute`), memory, sequential-thinking, web-fetch, git, time, browser (Playwright), GitHub, and web-search (Brave/Exa); key-gated entries stay dormant until their env var is set. A live eval (`tests/mcp/eval-scoping.test.ts`) checks that a `file_qa`-scoped agent reliably picks `read_file` over a merged toolset's distractors. See [`docs/architecture.md`](docs/architecture.md) §14.
 
 ---
 
@@ -168,8 +170,8 @@ they're reusable across other agent tools (Claude Code, Cursor, …).
 | `src/discovery/` | `discover.ts` + `build-registry.ts` (offline registry merge), `catalog-source.ts` + `huggingface-gguf.ts` + `huggingface-mlx.ts` + `hf-client.ts` (HF catalogs), `host.ts` (machine detect), `catalog-cache.ts`, `quant.ts`, `sources.ts` |
 | `src/run/` | `run-store.ts` (run dirs + artifacts), `journal.ts` (resumable JSONL log) |
 | `src/tools/` | `read-file.ts` — the `read_file` tool |
-| `src/mcp/` | `server.ts` (exposes tools over MCP), `client.ts` (consumes them) |
-| `src/cli/` | `chat.ts` (entrypoint), `run-chat.ts` (testable orchestration), `select-hook.ts` (selector-driven `onBeforeDelegate`), `selection-notice.ts` (per-delegation notice) |
+| `src/mcp/` | `types.ts`/`config.ts` (`mcp.json` registry, per-entry degrade), `consent.ts` (spec/tools-hash pinning, `.mcp-approvals.json`), `mount.ts` (`mountAll`, per-agent slices), `pack.ts` (12-entry starter pack), `client.ts` (`mountMcpServer` primitive), `server.ts`/`sqlite-server.ts` (in-repo servers) |
+| `src/cli/` | `chat.ts` (entrypoint), `run-chat.ts` (testable orchestration), `select-hook.ts` (selector-driven `onBeforeDelegate`), `selection-notice.ts` (per-delegation notice), `mcp.ts` (`bun run mcp list\|status\|add`) |
 | `models/` | model **declarations** (data, not weights) — `qwen-fast.ts`, `qwen-router.ts`, `registry.ts` (bootstrap capability ladder) |
 | `agents/` | agent definitions — **all agents live here** ([readme](agents/README.md)) |
 | `model-images/` | local model blob files (git-ignored, [readme](model-images/README.md)) |
@@ -228,7 +230,8 @@ interface — no agent code changes. See
 | **12** | **Memory / RAG** (Phase B) — `src/memory/`: two-tier store (LanceDB table-per-space + `bun:sqlite` space registry/document manifest); weights-only embedder (`qwen3-embedding:0.6b`) loaded via the Model Manager; dense-vector retrieval → optional cross-encoder rerank (default-on, graceful degradation) → live budget-fit pack; citation-tagged + abstaining `recall` tool; `bun run memory ingest\|recall\|stats\|reindex`; optional crew/workflow `memory` dep (bound `recall` tool + auto-persist) | ✅ Done |
 | **13** | **Grounded verification** (Phase B) — `src/verification/`: claim decomposition + cited-evidence lookup (`getByIds`) → per-claim MiniCheck faithfulness judge (`bespoke-minicheck`, consent-pull + general-model fallback) → bounded Corrective RAG (rewrite + re-answer; re-recall when `recall` wired; CLI path re-answers without retrieval—documented follow-up, once) → abstain on fail (`{kind:'unverified'}`); opt-in `--verify` on `bun run crew`/`flow` splices a verify→branch→corrective→abstain sub-graph (`StepKind.Verify`) after the terminal answering step; writes `runs/<id>/unverified.txt` + non-zero exit on abstention; in-repo golden-set eval gate (no external framework) | ✅ Done |
 | **14** | **First-boot provisioning + downloader** (Phase A/ops) — `src/provisioning/`: runtime-agnostic `DownloadProvider` abstraction (Ollama live-verified; LM Studio/llama.cpp/MLX contract-tested, live-verify deferred) + unified progress protocol; two-phase catalog discovery (dynamic per-runtime query + committed-snapshot fallback); hardware-fit ranking + per-model consent; disk preflight + stall/retry supervisor guards; `bun run provision` + a non-invasive `chat.ts` auto-detect hook | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **15** | **`mcp.json` mount registry + starter pack** (Phase C) — `src/mcp/`: declarative registry (`config.ts`, per-server `agents` scoping) replaces Slice 3's hardcoded mounts; consent-gated mounting with spec-hash/tools-hash pinning against tool-definition drift (`consent.ts`, `mount.ts`); 12-entry curated starter pack (`pack.ts`, `bun run mcp list\|status\|add`); registry wired into all three CLIs (`chat`/`flow`/`crew`); live scoping eval (`tests/mcp/eval-scoping.test.ts`) | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **D** grow (**agent-builder ⭐**, or a Codex-delegate follow-on) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

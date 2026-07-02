@@ -4,7 +4,7 @@ import { type BeforeDelegate, runGuardedAgent } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import { MemoryKind } from '../memory/types.ts';
-import { ATTR, annotateStep } from '../telemetry/spans.ts';
+import { ATTR, annotateStep, withToolSpan } from '../telemetry/spans.ts';
 import {
   type MapSubStep,
   type Step,
@@ -121,7 +121,7 @@ async function runLeaf(
   }
   const tool = deps.tools[sub.tool];
   if (!tool?.execute) throw new WorkflowError(`unknown tool: ${sub.tool}`);
-  return callTool(tool, sub.input(ctx), callId);
+  return withToolSpan(sub.tool, () => callTool(tool, sub.input(ctx), callId));
 }
 
 /** Dispatch a step to its kind runner. Returns the RAW result; the engine
@@ -139,7 +139,9 @@ export function runStepByKind(
       if (!tool?.execute) {
         return Promise.reject(new WorkflowError(`unknown tool: ${step.tool}`));
       }
-      return callTool(tool, step.input(ctx), step.id);
+      return withToolSpan(step.tool, () =>
+        callTool(tool, step.input(ctx), step.id),
+      );
     }
     case StepKind.Branch: {
       const taken = step.predicate(ctx) ? 'whenTrue' : 'whenFalse';

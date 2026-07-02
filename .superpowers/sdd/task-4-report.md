@@ -1,143 +1,150 @@
-# Task 4 Report: Provisioner orchestration + `provision` CLI + auto-detect hook (Slice 14)
+# Task 4 Report: `bun:sqlite` server + starter pack + `bun run mcp` CLI (Slice 15)
+
+## Summary
+
+Implemented all components in TDD order per brief (Steps 1–10). Followed constraints: no new npm deps, string `${VAR}` literals (dormancy handles unset keys), no archived @modelcontextprotocol packages.
 
 ## What was built
 
-Followed the brief's steps in order (TDD for testable units; thin composition for wiring).
+1. **`src/mcp/sqlite-server.ts`** (70 lines) — stdio MCP server on bun:sqlite
+   - DB path from `process.argv[2]` (defaults `:memory:`)
+   - Tools: `query` (SELECT → rows JSON), `execute` (statement → {changes}), `schema` (tables + columns)
+   - Error handling via textResult(err.message, isError=true)
+   - No console.log (not CLI, kept silent per brief)
 
-1. **`src/provisioning/detect-missing.ts`** — `detectMissing(declared, isInstalled)`: filters declared `ModelDeclaration[]` down to those not yet installed. Verbatim from brief.
-2. **`src/provisioning/provisioner.ts`** — `runProvision({ deps, autoYes })`: orchestrates detect-host → discover (per-source degrade-to-[] on throw) → `fitAndRank` → lazy `enrichSize` for zero-size candidates → consent via `ui.selectModels` → disk preflight (`checkDiskSpace`, re-consent on shortfall) → sequential download per model with per-model degrade-never-crash (`result.failed`). Exports `ProvisionResult`, `ProvisionUi`, `ProvisionDeps`. Verbatim from brief.
-3. **`src/provisioning/registry.ts`** — `providerFor(kind)`, `catalogSourcesFor(host)`, `enrichSize(candidate)`. Wires the real Ollama provider/catalog/snapshot-fallback sources from Tasks 1–3. **Task-5 stubs** (see below) applied exactly as instructed since `providers/hf-fetch.ts` and `providers/lmstudio.ts` don't exist yet.
-4. **`src/provisioning/cli-deps.ts`** (DRY helper, per the brief's explicit note to factor shared wiring) — `buildProvisionDeps(host, { autoYes })` builds the full `ProvisionDeps` (catalog sources, provider, enrichSize, freeDiskBytes via `node:fs/promises` `statfs` with `Number.MAX_SAFE_INTEGER` fallback, and the UI trio wired to `stdinInput`/`askYesNo`/`selectModels`/`ProgressBar`). Re-exports `detectHost`. Used by both `provision.ts` and `chat.ts`'s hook — no duplicated wiring block.
-5. **`src/cli/provision.ts`** — the `bun run provision` entry: reads `AGENT_PROVISION_AUTO_YES` env, detects host once, calls `runProvision` with `cli-deps`-built deps, prints the `Provisioned: N · declined: N · failed: N` summary to stderr, sets `process.exitCode = 1` if anything failed.
-6. **`package.json`** — added `"provision": "bun run src/cli/provision.ts"` after `"memory"`.
-7. **`src/cli/chat.ts`** — added `maybeAutoProvision()`, called at the very top of `main()` before `createModelManager()` / the first `ensureReady`. Guarded by `process.stderr.isTTY ?? false` (returns immediately if not a TTY, so non-interactive `chat` runs are fully unaffected) **and** explicit consent via `askYesNo` (respecting `AGENT_PROVISION_AUTO_YES`). Uses `detectMissing(BOOTSTRAP, isModelInstalled)` to compute the gap, and on consent calls `runProvision` with the same `cli-deps` wiring as `provision.ts`.
+2. **`src/mcp/pack.ts`** (100 lines) — curated starter-pack catalog (12 entries)
+   - Exported: `STARTER_PACK[]`, `getPackEntry(name)`, `packByCapability(cap)`
+   - Entries: file-tools, sqlite, filesystem, memory, sequential-thinking, fetch, git, time, playwright, github, brave-search, exa-search
+   - Keyed entries (github, brave-search, exa-search) use literal `${VAR}` strings (dormancy handles unset keys at load time)
+   - Added `// biome-ignore lint/suspicious/noTemplateCurlyInString` comments for intentional placeholders
+   - Never emits archived packages (server-postgres/server-sqlite/server-brave-search/server-puppeteer/server-github)
 
-## Task-5 stubs left (with markers)
+3. **`src/cli/mcp.ts`** (70 lines) — CLI with three commands
+   - `bun run mcp list` — shows all 12 starter-pack entries, their capabilities, and status (✓ if configured)
+   - `bun run mcp status` — shows active/dormant configured servers from mcp.json
+   - `bun run mcp add <name>` — adds pack entry to mcp.json (atomic temp+rename write)
+   - Exported: `addPackEntry(name, configPath?)` for tests
+   - Refuses to overwrite existing same-name entries
+   - Console.log allowed per brief for CLI output
 
-In `src/provisioning/registry.ts`:
-```ts
-import { createOllamaProvider } from './providers/ollama.ts';
-// Task 5: re-enable — HF-fetch and LM Studio download providers don't exist yet.
-// import { createHfFetchProvider } from './providers/hf-fetch.ts';
-// import { createLmStudioProvider } from './providers/lmstudio.ts';
-```
-and in `providerFor`:
-```ts
-export function providerFor(kind: ProviderKind): DownloadProvider {
-  switch (kind) {
-    case ProviderKind.Ollama:
-      return createOllamaProvider();
-    // Task 5: re-enable — MLX snapshot download via HF.
-    // case ProviderKind.MlxServer:
-    //   return createHfFetchProvider(ProviderKind.MlxServer);
-    default:
-      return createOllamaProvider();
-  }
-}
-```
-`catalogSourcesFor` keeps `createHfCatalogSource(ProviderKind.MlxServer)` (Task 3, exists) wrapped in `withSnapshotFallback` — no stubbing needed there per the brief's note.
+4. **`package.json`** — added `"mcp": "bun run src/cli/mcp.ts"` script after `provision`
 
-## Unit tests: RED → GREEN evidence
+5. **Tests** (all passing):
+   - `sqlite-server.test.ts` (1 test) — real subprocess round-trip via mountMcpServer: schema/execute/query
+   - `pack.test.ts` (5 tests) — 12 unique entries, descriptions, ≥1 capability each, queryable by capability, keyed env refs, no archived packages
+   - `cli-add.test.ts` (4 tests) — creates mcp.json when absent, appends without disturbing existing entries, refuses overwrite, rejects unknown names
 
-**`detect-missing.test.ts`** (RED before file existed):
-```
-error: Cannot find module '../../src/provisioning/detect-missing.ts' ...
-0 pass / 1 fail
-```
-GREEN after implementing:
-```
-1 pass
-0 fail
-1 expect() calls
-```
+## Lint & Type Audit
 
-**`provisioner.test.ts`** (RED before file existed):
+**Issues encountered:**
+- Template string placeholders (`${GITHUB_PAT}`, etc.) flagged as suspicious → added biome-ignore comments (dormancy contract, per brief's note on string ${VAR} handling)
+- Import sorting in mcp.ts (`STARTER_PACK, getPackEntry` → sorted to `getPackEntry, STARTER_PACK`)
+- Void return statements (`return func()` where func returns void) → changed to separate call + `return;`
+- Formatting (line breaks, indentation) → applied `biome --fix` to all 3 src files
+
+**Results:**
+- Typecheck: ✅ clean (0 errors)
+- Lint: ✅ clean (0 errors/warnings after fixes; `biome check src/mcp/sqlite-server.ts src/mcp/pack.ts src/cli/mcp.ts`)
+- Format: ✅ clean (biome --fix applied and verified)
+
+## Test Results
+
 ```
-error: Cannot find module '../../src/provisioning/provisioner.ts' ...
-0 pass / 1 fail
-```
-GREEN after implementing (3 tests: consented download, declined-consent no-op, degrade-on-failed-download):
-```
-3 pass
-0 fail
-5 expect() calls
+Ran 10 tests across 3 files
+10 pass, 0 fail, 46 expect() calls
+
+sqlite-server.test.ts:   1 pass
+pack.test.ts:            5 pass
+cli-add.test.ts:         4 pass
 ```
 
-Full provisioning suite after all changes:
+**Smoke test:** `bun run mcp list` outputs all 12 starter-pack entries with names, capabilities, descriptions, and env-key markers (🔑) for keyed entries.
+
+## Commit
+
 ```
-bun test tests/provisioning/
-45 pass
-0 fail
-67 expect() calls
-Ran 45 tests across 11 files.
-```
-
-`bun run typecheck` — clean (no errors).
-
-`bun run lint:file -- src/provisioning/provisioner.ts src/provisioning/registry.ts src/provisioning/detect-missing.ts src/provisioning/cli-deps.ts src/cli/provision.ts src/cli/chat.ts` — clean, 0 errors/warnings on all `src/` files touched.
-
-Note: `provisioner.test.ts` (verbatim brief spec) uses `any` in 4 spots inside the mock `deps()` helper (matching the brief's exact test code). Biome flags these as `lint/suspicious/noExplicitAny` **warnings** (exit code 0, not blocking) — consistent with other pre-existing test files in the suite carrying the same warning class (e.g. `tests/resource/ollama-control.test.ts:29`). No `src/` file has any lint findings.
-
-A repo-wide `bun run lint` surfaces pre-existing formatting/organize-imports issues in Task 1–3 test files (`fit.test.ts`, `hf-catalog.test.ts`, `ollama-pull.test.ts`, `snapshot-source.test.ts`, `supervisor.test.ts`, `ui-format.test.ts`, `progress-tracker.test.ts`) that predate this task and were not touched here — confirmed by scoping `biome check` to only the Task-4 file set, which is fully clean.
-
-## LIVE-VERIFY (Step 12) — observed output
-
-Precondition: `ollama serve` already up at `localhost:11434` (confirmed via `curl localhost:11434/api/tags`). Host has several models pre-installed (qwen3.5:9b, qwen3.5:4b, qwen2.5:7b-instruct, qwen2.5vl:7b, gemma4:26b, bespoke-minicheck, qwen3-embedding:0.6b).
-
-1. Uninstalled the target model:
-```
-$ ollama rm qwen3-embedding:0.6b
-deleted 'qwen3-embedding:0.6b'
+[slice-15-mcp-mounts 62898f8] feat(mcp): bun:sqlite server + capability-tagged starter pack + bun run mcp CLI (Slice 15 Task 4)
+7 files changed, 400 insertions(+)
+- src/mcp/sqlite-server.ts
+- src/mcp/pack.ts
+- src/cli/mcp.ts
+- package.json
+- tests/mcp/sqlite-server.test.ts
+- tests/mcp/pack.test.ts
+- tests/mcp/cli-add.test.ts
 ```
 
-2. Ran the live CLI:
-```
-$ AGENT_PROVISION_AUTO_YES=1 bun run provision
-qwen3.5:9b    ?%  0 B  —  ETA —  [resolving]
-qwen3.5:9b  100%  6.1 GB/6.1 GB  4.5 GB/s  ETA 0s  [downloading]
-qwen3.5:9b  100%  6.1 GB/6.1 GB  3.2 GB/s  ETA 0s  [downloading]
-qwen3.5:9b  100%  6.1 GB/6.1 GB  3.2 GB/s  ETA 0s  [downloading]
-qwen3.5:9b  100%  6.1 GB/6.1 GB  3.2 GB/s  ETA 0s  [downloading]
-qwen3.5:9b  100%  6.1 GB/6.1 GB  3.2 GB/s  ETA 0s  [verifying]
-qwen3.5:9b  100%  6.1 GB/6.1 GB  3.2 GB/s  ETA 0s  [finalizing]
-qwen3.5:9b  100%  6.1 GB/6.1 GB  3.2 GB/s  ETA 0s  [done]
+Pre-commit docs-check hook passed ✅
 
-Provisioned: 1 · declined: 0 · failed: 0
-```
-Exit code: 0.
+## Code Quality
 
-**Observed behavior note:** `runProvision`'s discovery pipeline (`catalogSourcesFor` → `fitAndRank`) recommends the best-fitting *catalog* candidate for the detected 24 GB host/live-budget — it does not consult `detectMissing`/`BOOTSTRAP` (that gap-check is wired separately, only in the `chat.ts` auto-detect hook, per the brief's design). On this host the top-ranked recommended candidate happened to be `qwen3.5:9b` (already installed), not the just-removed `qwen3-embedding:0.6b`. Ollama's `/api/pull` is idempotent on an already-present model — it re-verified the manifest/layers and confirmed install rather than re-downloading from scratch, which is why the bar completed quickly. This is correct, spec-conformant behavior for the standalone `provision` CLI (whole-catalog recommendation), not a defect — but it does mean `bun run provision` alone did not restore `qwen3-embedding:0.6b` (that is the chat.ts auto-detect hook's job for a specific declared model).
-
-3. Confirmed with `ollama list` immediately after: `qwen3.5:9b` present (freshly re-confirmed, timestamp updated), all other pre-existing models intact.
-
-4. **Environment restoration:** manually re-pulled `qwen3-embedding:0.6b` via `ollama pull qwen3-embedding:0.6b` after the live-verify to leave the host as found (it is a pre-existing repo dependency used elsewhere for embeddings, unrelated to this task). Confirmed present again via `ollama list`.
-
-Full end-to-end result: **detects host, lists fitting candidates, downloads (verifies) the recommended set with a live bar, prints the summary, exits 0** — all per the brief's Step 12 expectation. The one nuance is that "the recommended set" is drawn from the live/snapshot catalog ranked by fit, not specifically from the model that was uninstalled — this matches the documented separation of concerns (`runProvision` = general first-boot/top-up flow over the catalog; `detectMissing` + the `chat.ts` hook = the declared-model gap-fill flow), so this is reported as DONE, not DONE_WITH_CONCERNS, with the nuance flagged for visibility.
-
-## Files changed
-
-- Created: `src/provisioning/provisioner.ts`
-- Created: `src/provisioning/registry.ts`
-- Created: `src/provisioning/detect-missing.ts`
-- Created: `src/provisioning/cli-deps.ts`
-- Created: `src/cli/provision.ts`
-- Created: `tests/provisioning/provisioner.test.ts`
-- Created: `tests/provisioning/detect-missing.test.ts`
-- Modified: `package.json` (added `provision` script)
-- Modified: `src/cli/chat.ts` (added `maybeAutoProvision()` hook, called first in `main()`)
+- **No console.log in src/mcp/** (silent servers per brief)
+- **Console.log in src/cli/mcp.ts** (CLI output, allowed)
+- **Type over interface** throughout (PackEntry used from Task 1)
+- **Early returns** used consistently
+- **addPackEntry:** atomic write (temp → rename, no overwrites)
+- **String ${VAR} handling:** literal strings, dormancy layer resolves at load time
+- **No new npm deps:** uses bun:sqlite natively
+- **Exports for tests:** `addPackEntry` exported from cli/mcp.ts for test suite
 
 ## Self-review
 
-- All brief code used verbatim except the documented Task-5 import/case stubs.
-- `providerFor`'s `default` branch falls back to `createOllamaProvider()` rather than throwing — matches the brief's exact Step 7 code (kept as-is; pre-existing brief behavior) and is consistent with "degrade, never crash."
-- `cli-deps.ts` fully eliminates the wiring duplication between `provision.ts` and `chat.ts`'s hook — both call the identical `buildProvisionDeps(host, { autoYes })`.
-- `chat.ts`'s hook is a no-op whenever `process.stderr.isTTY` is falsy (covers piped/CI/non-interactive invocations) and additionally requires explicit `askYesNo` consent (or `AGENT_PROVISION_AUTO_YES=1`) before calling `runProvision` — satisfies "never speculatively download models."
-- Degrade-never-crash verified by the third provisioner unit test (`bad` model's rejected download lands in `result.failed`; `good` still completes) and structurally by the `try/catch` around each `provider.download` call and around per-source `listCandidates`.
-- No new npm dependency; `node:fs/promises` `statfs` used with a `Number.MAX_SAFE_INTEGER` fallback exactly as specified; raw `fetch` only (inherited from Task 1–3 provider/catalog code, untouched).
-- No `console.log` introduced in `src/`; all CLI output uses `console.error`, matching `chat.ts`'s existing convention.
-- `type`/`enum` conventions followed; no new `interface`; `ProviderKind` remains the existing string enum.
+- All brief code (Steps 1–10) implemented in order: test-first → code → pass → lint → commit
+- Brief constraints honored: `${VAR}` literals, no archived packages, no new deps, dormancy-ready
+- sqlite-server test: real subprocess mount (mountMcpServer) with three tools tested end-to-end
+- pack test: 12-entry validation, capability queries, keyed-entry env refs, archived-package rejection
+- cli-add test: file creation, appending, refusal to overwrite, unknown-name handling
+- Lint issues fixed with biome-ignore comments (intended behavior for dormancy) + formatting
+- No concerns or workarounds needed
 
-## Concerns
+## Review Fixes
 
-- None blocking. The one behavioral nuance (provision CLI recommends by catalog-fit, not by the specific missing model) is documented above and is consistent with the brief's stated design (detectMissing is only consumed by the chat.ts auto-detect hook, not by `runProvision` itself).
-- Pre-existing lint warnings/errors in unrelated Task 1–3 test files surfaced by a full-repo `bun run lint` run were not introduced by this task and were left untouched, per scope.
+### Defect 1 — `query` tool write enforcement (Task 4 review)
+
+**Issue:** The `query` tool claimed to be read-only but enforced nothing—a DELETE would execute via `db.query(sql).all()`.
+
+**Fix:** Added gate before executing query:
+```ts
+const trimmed = sql.trim();
+if (!/^select\b/i.test(trimmed)) {
+  return textResult('query only accepts SELECT statements; use the execute tool for writes', true);
+}
+```
+
+Updated description to be precise: "Run a SQL SELECT against the ${dbPath} SQLite database and return rows as JSON. Only SELECT statements are accepted; use execute for writes."
+
+### Defect 2 — `schema` tool identifier quoting (Task 4 review)
+
+**Issue:** Table introspection used `JSON.stringify(t.name)` to quote identifiers. JSON backslash-escaping is not SQLite identifier quoting; breaks on legal names containing a double quote.
+
+**Fix:** Replaced with proper SQLite identifier quoting:
+```ts
+columns: db
+  .query(`PRAGMA table_info("${t.name.replace(/"/g, '""')}")`)
+  .all(),
+```
+
+This correctly escapes embedded quotes as `""` per SQLite identifier syntax.
+
+### Regression Tests Added
+
+Extended `sqlite-server.test.ts` with four new assertions (after baseline SELECT, before close):
+
+1. **Write rejection:** `query` rejects DELETE; returns `isError: true`
+2. **Survival test:** Deleted row still exists (DELETE didn't execute)
+3. **Quoted identifiers:** `schema` handles table names with embedded double quotes; introspection succeeds and includes both the weird-named table and the notes table in output
+4. **Invalid SQL:** Malformed SQL in `execute` surfaces as `isError: true`, not a throw
+
+**Test results:**
+```
+bun test v1.3.11
+1 pass, 0 fail, 10 expect() calls
+```
+
+All new assertions passed.
+
+### Quality Audit
+
+- **Typecheck:** ✅ clean (0 errors)
+- **Lint:** ✅ clean (0 errors/warnings; biome check passed)
+- **Format:** ✅ clean (formatter applied and verified)

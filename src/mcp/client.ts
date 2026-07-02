@@ -9,16 +9,28 @@ export type McpServerSpec = {
   env?: Record<string, string>;
 };
 
-/** A mounted server's tools plus a handle to stop its subprocess. */
+/** A remote Streamable-HTTP MCP server (static headers; OAuth is a follow-on). */
+export type McpHttpSpec = {
+  type: 'http';
+  url: string;
+  headers?: Record<string, string>;
+};
+
+export type McpMountSpec = McpServerSpec | McpHttpSpec;
+
+/** A mounted server's tools plus a handle to stop its subprocess/connection. */
 export type MountedServer = { tools: ToolSet; close: () => Promise<void> };
 
-/** Connect to ANY stdio MCP server and expose its tools. The integration primitive. */
+/** Connect to ANY stdio or Streamable-HTTP MCP server and expose its tools.
+ *  The integration primitive. */
 export async function mountMcpServer(
-  spec: McpServerSpec,
+  spec: McpMountSpec,
 ): Promise<MountedServer> {
-  const client = await createMCPClient({
-    transport: new StdioMCPTransport(spec),
-  });
+  const transport =
+    'url' in spec
+      ? ({ type: 'http', url: spec.url, headers: spec.headers } as const)
+      : new StdioMCPTransport(spec);
+  const client = await createMCPClient({ transport });
   const tools = await client.tools();
   return { tools, close: () => client.close() };
 }
