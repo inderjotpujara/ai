@@ -1,3 +1,4 @@
+import type { z } from 'zod';
 import type { ModelRequirement } from '../core/types.ts';
 
 /** A curated-pack MCP server the generated agent needs, scoped to that agent. */
@@ -20,3 +21,9 @@ export type BuildResult =
   | { kind: 'declined' }
   | { kind: 'invalid'; issues: ValidationIssue[] }
   | { kind: 'abandoned'; reason: string };
+
+/** Structured-generation seam so the pure units never import the AI SDK.
+ *  The real impl (deps.ts) wraps `generateObject` with a live model. */
+export type BuilderModel = {
+  object: <T>(args: { schema: z.ZodType<T>; prompt: string }) => Promise<T>;
+};
