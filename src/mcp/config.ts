@@ -1,13 +1,17 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  httpEntrySchema,
   type McpConfig,
   type McpServerEntry,
   McpTransportKind,
-  serverEntrySchema,
+  stdioEntrySchema,
 } from './types.ts';
 
 const VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+
+const isHttpLike = (v: unknown): boolean =>
+  typeof v === 'object' && v !== null && ('url' in v || 'type' in v);
 
 /** Expand ${VAR} / ${VAR:-default}; report vars that are unset with no default. */
 export function expandVars(
@@ -75,10 +79,13 @@ export function loadMcpConfig(
     return cfg;
   }
   for (const [name, raw] of Object.entries(servers)) {
-    const parsed = serverEntrySchema.safeParse(raw);
+    const schema = isHttpLike(raw) ? httpEntrySchema : stdioEntrySchema;
+    const parsed = schema.safeParse(raw);
     if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const where = issue?.path?.length ? ` at "${issue.path.join('.')}"` : '';
       cfg.warnings.push(
-        `mcp.json entry "${name}" is invalid and was skipped: ${parsed.error.issues[0]?.message ?? 'schema mismatch'}`,
+        `mcp.json entry "${name}" is invalid and was skipped:${where} ${issue?.message ?? 'schema mismatch'}`,
       );
       continue;
     }
@@ -95,7 +102,9 @@ export function loadMcpConfig(
 
 function toEntry(
   name: string,
-  data: import('zod').infer<typeof serverEntrySchema>,
+  data:
+    | import('zod').infer<typeof httpEntrySchema>
+    | import('zod').infer<typeof stdioEntrySchema>,
   raw: unknown,
   env: Record<string, string | undefined>,
   missing: string[],

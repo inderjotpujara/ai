@@ -83,4 +83,34 @@ describe('loadMcpConfig', () => {
     const corrupt = writeConfig('{not json');
     expect(loadMcpConfig(corrupt, {}).warnings.length).toBeGreaterThan(0);
   });
+  it('keeps raw unexpanded while expanding the live fields (consent-hash security property)', () => {
+    const path = writeConfig({
+      mcpServers: {
+        s: { command: 'bun', args: [`${'$'}{TOKEN}`] },
+        h: {
+          type: 'http',
+          url: 'https://x.test',
+          headers: { A: `Bearer ${'$'}{TOKEN}` },
+        },
+      },
+    });
+    const cfg = loadMcpConfig(path, { TOKEN: 'secret-value' });
+    const [s, h] = cfg.entries;
+    if (s?.kind !== McpTransportKind.Stdio) throw new Error('expected stdio');
+    expect(s.args).toEqual(['secret-value']);
+    expect(JSON.stringify(s.raw)).toContain(`${'$'}{TOKEN}`);
+    expect(JSON.stringify(s.raw)).not.toContain('secret-value');
+    if (h?.kind !== McpTransportKind.Http) throw new Error('expected http');
+    expect(h.headers.A).toBe('Bearer secret-value');
+    expect(JSON.stringify(h.raw)).not.toContain('secret-value');
+  });
+  it('malformed-entry warning names the actual problem, not "Invalid input"', () => {
+    const path = writeConfig({ mcpServers: { bad: { args: ['x'] } } });
+    const w =
+      loadMcpConfig(path, {}).warnings.find((x) => x.includes('bad')) ?? '';
+    expect(w).toContain('command');
+    expect(w).not.toBe(
+      'mcp.json entry "bad" is invalid and was skipped: Invalid input',
+    );
+  });
 });
