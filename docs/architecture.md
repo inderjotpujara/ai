@@ -264,7 +264,7 @@ graph TD
 
 | Layer | Files | Responsibility | Knows about |
 |---|---|---|---|
-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`) | everything below |
+| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts`), errors | AI SDK + telemetry |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
 | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters; `createModel` per declaration | AI SDK + provider HTTP |
@@ -275,7 +275,7 @@ graph TD
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
 | **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example) | nothing (pure data) |
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
-| **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
+| **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — both `main()`s now run their whole scope inside `withMcpRun` (`with-mcp-run.ts`, Slice 16, §14), which owns `createRun` → `initRunTelemetry` → mount before handing the run body a `run: RunHandle`: `runCrewCli` → `writeArtifact('result.txt'\|'failed.txt')`, with `shutdown()` happening in `withMcpRun`'s `finally`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
 | **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
 | **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`) → sequential downloads through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`) with a unified progress protocol; three adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF + MLX) and LM Studio contract-tested only, live-verify deferred** (HF-fetch does not yet persist bytes to disk); dependency-free UI (`ui/`); CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (`ProviderKind`), `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
@@ -299,9 +299,10 @@ sequenceDiagram
     participant Ollama
 
     User->>CLI: task (argv)
-    CLI->>CLI: buildRegistry() (offline merge) + loadMcpConfig() → consent gate → mountAll()
-    CLI->>RunChat: runChat({orchestrator, task, runId})
-    RunChat->>Tel: initRunTelemetry(runDir) — OTel provider → spans.jsonl
+    CLI->>CLI: buildRegistry() (offline merge)
+    CLI->>Tel: withMcpRun: createRun → initRunTelemetry(runDir) — OTel provider → spans.jsonl
+    CLI->>CLI: withMcpRun: loadMcpConfig() → consent gate → mountAll() (mcp.mount span, now inside the run's tracer — Slice 16)
+    CLI->>RunChat: runChat({orchestrator, task, run})
     RunChat->>Guard: withRootDelegationContext(routerNumCtx)
     RunChat->>Tel: withRunSpan("agent.run")
     RunChat->>Orch: runOrchestrator(orchestrator, task)
@@ -470,7 +471,7 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 
 - **Registry** (`workflows/index.ts`, `workflows/fetch-then-summarize.ts`): `WORKFLOWS: Record<string, WorkflowDef>` + `getWorkflow(name)` — mirrors `models/registry.ts`. `fetch-then-summarize` is the reference example: a `tool` step (`fetch`, via `mcp-server-fetch`) feeding a `web_fetch` `agent` step that summarizes the fetched content.
 
-- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `runFlow(deps)` follows the same lifecycle as `runChat`: `createRun` → `initRunTelemetry` → `withWorkflowSpan(def.id, …)` wrapping `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it; `shutdown()` in `finally`. `main()` loads `mcp.json` via `loadMcpConfig()` and mounts the registry with `mountAll()` (consent-gated per §14), builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, resolves the workflow via `getWorkflow`, builds the shared live-selection runtime (below) and prints the last step's output (or the failure) to stdout/stderr — closing the selection runtime, then the mounted registry in `finally`.
+- **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `main()` resolves the workflow via `getWorkflow`, then calls `withMcpRun` (`src/cli/with-mcp-run.ts`, Slice 16; see §14), which owns `createRun` → `initRunTelemetry` → `loadMcpConfig()`+`mountAll()` (consent-gated per §14) in that order and hands the body a `run: RunHandle`. The body builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, builds the shared live-selection runtime (below), and calls `runFlow(deps)` with that `run`. `runFlow(deps)` itself wraps `withWorkflowSpan(def.id, …)` around `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it. `main()` prints the last step's output (or the failure) to stdout/stderr, closing the selection runtime in `finally`; `withMcpRun`'s own `finally` closes the mounted registry and shuts down telemetry.
 
 - **Shared live-selection runtime** (`src/cli/select-runtime.ts`, Slice 11 Task 7): `createSelectionRuntime(opts?)` extracts `chat.ts`'s inline manager + offline `buildRegistry()` + `createSelectHook` + one-line selection `notify` into a single reusable async factory, returning `{ onBeforeDelegate, capture, close }`. `close()` calls `manager.unloadAll()`. Both `flow.ts`'s and `crew.ts`'s `main()` build one runtime per CLI invocation (nested inside the mounted MCP registry, closed in `finally`) and thread `onBeforeDelegate` into `defaultRunAgentStep`/`runCrew` respectively — so a workflow agent step or a crew member is resolved to the largest model that fits the *live* RAM budget at delegation time, the same guarantee `chat.ts` gives its orchestrator. `chat.ts` itself is left with its original inline wiring in this slice; deduping it against `select-runtime.ts` is a follow-up.
 
@@ -546,16 +547,19 @@ machinery Slices 9/10 already shipped.
 - **CLI entry** (`src/cli/crew.ts`, mirrors `flow.ts`): `bun run crew <name>
   [input...]` over the `crews/` registry (`crews/index.ts` `CREWS` + `getCrew`,
   mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential
-  example). `runCrewCli(deps)` follows `runFlow`'s lifecycle: `createRun` →
-  `initRunTelemetry` → `runCrew(def, input, {tools, onBeforeDelegate,
-  runAgentStep})` → on `done`, `writeArtifact('result.txt', <output as text or
-  pretty JSON>)`; on `failed`, `writeArtifact('failed.txt', "task <id>:
-  <message>")` → `shutdown()` in `finally`. `main()` resolves the crew via
-  `getCrew`, loads `mcp.json` and mounts the registry via `loadMcpConfig()` +
-  `mountAll()` (consent-gated per §14), builds a `createSelectionRuntime()`
-  (§9, shared with `flow.ts`) and passes `onBeforeDelegate` into `runCrewCli`,
-  then prints the crew's final output (or failure) to stdout/stderr. Runs are
-  rendered the same way as any other run: `bun run runs <id>`.
+  example). `main()` resolves the crew via `getCrew`, then calls `withMcpRun`
+  (`src/cli/with-mcp-run.ts`, Slice 16; see §14), which owns `createRun` →
+  `initRunTelemetry` → `loadMcpConfig()`+`mountAll()` (consent-gated per §14)
+  in that order and hands the body a `run: RunHandle`. The body builds a
+  `createSelectionRuntime()` (§9, shared with `flow.ts`) and calls
+  `runCrewCli(deps)` with that `run` and `onBeforeDelegate`. `runCrewCli(deps)`
+  itself calls `runCrew(def, input, {tools, onBeforeDelegate, runAgentStep})`
+  → on `done`, `writeArtifact('result.txt', <output as text or pretty JSON>)`;
+  on `failed`, `writeArtifact('failed.txt', "task <id>: <message>")`. `main()`
+  prints the crew's final output (or failure) to stdout/stderr, closing the
+  selection runtime in `finally`; `withMcpRun`'s own `finally` closes the
+  mounted registry and shuts down telemetry. Runs are rendered the same way
+  as any other run: `bun run runs <id>`.
 
 Optionally feeds **Slice 12** (memory/RAG, §11 below) via `runCrew`'s optional
 `memory: MemoryStore` dep — members read/write it through a bound `recall`
@@ -1139,13 +1143,23 @@ agent-builder will suggest from.
 ### Load → consent → mount → pin → attach
 
 All three CLIs (`chat.ts`, `flow.ts`, `crew.ts`) run the same startup
-sequence: `loadMcpConfig()` → `mountAll(config)`, wrapped in
-`withMcpMountSpan` (§ Telemetry below). Inside `mountAll`, each entry goes
-through `ensureConsent` — a TTY prompt showing the exact command/URL (from
-`raw`, so secrets behind `${VAR}` are never displayed) plus any danger flags;
-non-interactively (no TTY) it skips with a warning unless
-`AGENT_MCP_AUTO_APPROVE=1` (the CI/headless path, also used by the Slice-15
-Task-6 live-verify below). An approved entry is mounted, its live tool
+sequence via `src/cli/with-mcp-run.ts`'s `withMcpRun` (Slice 16): `createRun`
+→ `initRunTelemetry(run.dir)` → `loadMcpConfig()` → `mountAll(config)`,
+wrapped in `withMcpMountSpan` (§ Telemetry below) — establishing the run dir
+and its telemetry provider **before** mounting, so the mount span is
+recorded against that run's tracer (see § Telemetry for why the ordering
+matters). Inside `mountAll`, each entry goes through `ensureConsent` — a TTY
+prompt showing the exact command/URL (from `raw`, so secrets behind `${VAR}`
+are never displayed) plus any danger flags. Interactivity is judged by
+`interactiveTTY()` (`src/provisioning/ui/prompt.ts`, Slice 16), which
+requires **both** stdin (the stream the answer is read from) and stderr (the
+stream the question is written to) to be TTYs — judging on stderr alone let
+`cmd < /dev/null` hang on an already-ended stdin; `stdinInput()` also now
+resolves `''` on the stream's `end` event instead of leaving the read
+promise pending forever, closing that hang from the other side too.
+Non-interactively it skips with a warning unless `AGENT_MCP_AUTO_APPROVE=1`
+(the CI/headless path, also used by the Slice-15 Task-6 live-verify below).
+An approved entry is mounted, its live tool
 definitions are hashed and pinned (or, if a previously-pinned hash no longer
 matches, re-approval is requested — `list_changed` notifications are not
 handled; **pinning + optional re-prompt is the posture** for detecting a
@@ -1211,25 +1225,31 @@ more often).
 one mount pass in an `mcp.mount` span; the callback records one
 `mcp.server.mount` event per server (`mcp.server`, `mcp.mount.outcome` —
 `mounted`/`dormant`/a skip reason —, and `mcp.tool.count` when mounted), and
-the span itself gets `mcp.tool.count` set to the server count at the end.
-`ATTR.MCP_TRANSPORT` is defined in the `ATTR` registry but **not yet set on
-any span** — a follow-up, not a current signal.
+the span itself gets two attributes set at the end (both corrected in
+Slice 16): `mcp.server.count` — the number of servers actually mounted —
+and `mcp.tool.count` — the **sum** of those mounted servers' tool counts
+(previously this held a raw per-call record count with no clear meaning).
 
-**Known gap, found by this slice's live-verify (Task 6), not yet fixed:**
-in all three CLIs, `withMcpMountSpan`/`mountAll` run in `main()` **before**
-`createRun`/`initRunTelemetry` (which only happen inside `runFlow`/
-`runChat`/`runCrewCli`) register that run's `BasicTracerProvider`. The
-`mcp.mount` span is therefore created against whatever tracer is globally
-active at that point — the OTel no-op default on a fresh process — and does
-**not** currently appear in `runs/<id>/spans.jsonl`, even though
-`workflow.tool`/`ai.toolCall` spans (created later, once the run's provider
-is registered) do. This mirrors the CLI's pre-existing sequence (§3: mount
-already ran before `initRunTelemetry` prior to Slice 15; Slice 15 just added
-a span to that already-early step), so it's a pre-existing ordering gap that
-Slice 15's new instrumentation exposed rather than introduced. Filed as a
-Slice 15 follow-up (see `docs/ROADMAP.md`) — the fix is to either hoist
-run-dir/telemetry creation into each CLI's `main()` before mounting, or move
-the mount call inside `runFlow`/`runChat`/`runCrewCli`.
+**Run-telemetry ordering (fixed, Slice 16):** `src/cli/with-mcp-run.ts`'s
+`withMcpRun(opts, body)` now owns the per-run CLI scope end to end, in one
+place, in this order: `createRun` → `initRunTelemetry(run.dir)` →
+`withMcpMountSpan(mountAll(...))` → `body({run, reg, config})` → `finally {
+reg.close(); tel.shutdown() }`. Because the run's `BasicTracerProvider` is
+registered **before** `mountAll` runs, the `mcp.mount` span (and its
+`mcp.server.mount` events) is created against that run's tracer and reaches
+`runs/<id>/spans.jsonl` alongside `workflow.tool`/`ai.toolCall`/`agent.run`.
+Previously (Slice 15), each CLI's `main()` ran `withMcpMountSpan`/`mountAll`
+**before** calling `createRun`/`initRunTelemetry` (which only happened
+inside `runFlow`/`runChat`/`runCrewCli`), so the mount span was recorded
+against whatever tracer was globally active at that point — the OTel no-op
+default on a fresh process — and never appeared in the run's span file. All
+three CLIs' `main()`s now call `withMcpRun` and their run functions
+(`runFlow`/`runCrewCli`/`runChat`) now take a `run: RunHandle` from the
+caller instead of creating one themselves, so the ordering invariant lives
+in this one helper rather than being duplicated (and previously
+mis-ordered) three times. `ATTR.MCP_TRANSPORT` is defined in the `ATTR`
+registry but **not yet set on any span** — a follow-up, not a current
+signal.
 
 ### Live-verify (Slice 15 Task 6)
 
@@ -1268,7 +1288,7 @@ on this machine — logged-deferred per the ledger.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
 - **Telemetry** — `tests/helpers/otel-test-provider.ts` `registerTestProvider()` (InMemory exporter); asserts spans/events/attrs; a Bun ALS-nesting smoke test.
 - **Resource / Ollama control** — `fetch` mocked; bodies/URLs asserted; warm-reuse regression (two agents, one warm).
-- **MCP** (`tests/mcp/`) — pure unit tests per module (`types` via `config`/`consent`/`mount`/`pack`) with injected fakes for consent/mount deps; **real stdio subprocess round-trips** against both in-repo servers (`server.test.ts` for `read_file`, `sqlite-server.test.ts` for `query`/`execute`/`schema` on a temp-dir `bun:sqlite` file); a **real HTTP round-trip** (`mount-http.test.ts` spins up a local `node:http` + `StreamableHTTPServerTransport` server and mounts it over Streamable HTTP, no subprocess); `cli-add.test.ts` drives `bun run mcp add` end-to-end against a temp `mcp.json`; `tool-span.test.ts` asserts `withToolSpan`/`withMcpMountSpan` pass results through and propagate errors against the no-op tracer (no provider registered); `tool-span-emission.test.ts` registers a real `registerTestProvider()`-backed provider and asserts the actual emission — `withToolSpan` produces a `workflow.tool` span with `gen_ai.tool.name` set, and `withMcpMountSpan` produces an `mcp.mount` span carrying an `mcp.server.mount` event with `mcp.server`/`mcp.mount.outcome`; `eval-scoping.test.ts` is the live, Ollama-gated scoping eval (§14).
+- **MCP** (`tests/mcp/`) — pure unit tests per module (`types` via `config`/`consent`/`mount`/`pack`) with injected fakes for consent/mount deps; **real stdio subprocess round-trips** against both in-repo servers (`server.test.ts` for `read_file`, `sqlite-server.test.ts` for `query`/`execute`/`schema` on a temp-dir `bun:sqlite` file); a **real HTTP round-trip** (`mount-http.test.ts` spins up a local `node:http` + `StreamableHTTPServerTransport` server and mounts it over Streamable HTTP, no subprocess); `cli-add.test.ts` drives `bun run mcp add` end-to-end against a temp `mcp.json`; `tool-span.test.ts` asserts `withToolSpan`/`withMcpMountSpan` pass results through and propagate errors against the no-op tracer (no provider registered); `tool-span-emission.test.ts` registers a real `registerTestProvider()`-backed provider and asserts the actual emission — `withToolSpan` produces a `workflow.tool` span with `gen_ai.tool.name` set, and `withMcpMountSpan` produces an `mcp.mount` span carrying an `mcp.server.mount` event with `mcp.server`/`mcp.mount.outcome`; `eval-scoping.test.ts` is the live, Ollama-gated scoping eval (§14); `tests/cli/with-mcp-run.test.ts` (Slice 16) asserts the ordering fix directly against a real JSONL file — after `withMcpRun`, `runs/<id>/spans.jsonl` contains an `mcp.mount` span — and that the registry is closed after the body runs.
 - **Memory** (`tests/memory/`) — pure unit tests per module (`define`, `budget`, `chunk`, `embed`, `sqlite-store`, `retrieve`, `recall-tool`, `spans`) with injected/mock deps (no Ollama/LanceDB needed for most); `lancedb-smoke.test.ts` exercises the real embedded LanceDB against a temp dir (no network); `reranker.spike.test.ts` is the outcome-gating spike for the transformers.js cross-encoder (records whether it's viable, not a permanent live-skip test); `wiring.test.ts` covers the optional crew/workflow `memory` dep (recall tool binding + auto-persist); `tests/cli/memory.test.ts` drives `runMemoryCli` end-to-end against an injected store; `tests/integration/memory.live.test.ts` needs real Ollama + the embed model pulled.
 - **Verification** (`tests/verification/`) — pure unit tests per module (`verify.test.ts`) with injected `VerifyDeps` (no Ollama needed); `faithfulness.eval.test.ts` is the in-repo golden-set eval gate (`tests/verification/golden/cases.json`, ~15–20 cases, offline stand-in judge — no external eval framework); `tests/crew/verify-wiring.test.ts` + `tests/workflow/verify-wiring.test.ts` cover the compile-time splice + `{kind:'unverified'}` outcome mapping; `tests/integration/verification.live.test.ts` needs a real `bespoke-minicheck` pull.
 - **Provisioning** (`tests/provisioning/`) — pure unit tests per module (`fit`, `supervisor`, `progress-tracker`, `provisioner`, `ollama-pull`, `ollama-catalog`, `hf-catalog`, `snapshot-source`, `hf-fetch`, `lmstudio`, `ui-format`, `ui-prompt`, `detect-missing`) with injected fakes (no real network/runtime for any of them); `eval.test.ts` is the fit-selection golden set across RAM tiers plus a telemetry-emission assertion for `agent.model.provision` (`registerTestProvider`). Ollama's adapter is additionally **live-verified** in the Slice-14 ledger (fresh pull to 100%, idempotent re-provision); the HF-fetch and LM Studio adapters are contract-tested only — no `*.live.test.ts` exists yet for provisioning pending a runtime install.
