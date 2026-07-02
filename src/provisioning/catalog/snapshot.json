@@ -1,0 +1,50 @@
+[
+  {
+    "provider": "Ollama",
+    "model": "qwen3.5:4b",
+    "repo": "qwen3.5",
+    "quant": "Q4_K_M",
+    "params_billions": 4,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 3000000000,
+    "downloads": 100000,
+    "role": "routing / orchestration",
+    "capabilities": ["tools"]
+  },
+  {
+    "provider": "Ollama",
+    "model": "qwen3.5:9b",
+    "repo": "qwen3.5",
+    "quant": "Q4_K_M",
+    "params_billions": 9,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 6600000000,
+    "downloads": 100000,
+    "role": "general reasoning + tool use",
+    "capabilities": ["tools"]
+  },
+  {
+    "provider": "Ollama",
+    "model": "qwen3-embedding:0.6b",
+    "repo": "qwen3-embedding",
+    "quant": "Q4_K_M",
+    "params_billions": 0.6,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 640000000,
+    "downloads": 50000,
+    "role": "embeddings",
+    "capabilities": []
+  },
+  {
+    "provider": "Ollama",
+    "model": "bespoke-minicheck",
+    "repo": "bespoke-minicheck",
+    "quant": "Q4_K_M",
+    "params_billions": 7,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 4700000000,
+    "downloads": 20000,
+    "role": "faithfulness judge",
+    "capabilities": []
+  }
+]

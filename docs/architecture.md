@@ -42,6 +42,7 @@ graph TD
         runscli["runs.ts · bun run runs"]
         flow["flow.ts · bun run flow"]
         crewcli["crew.ts · bun run crew"]
+        provcli["provision.ts · bun run provision"]
     end
     subgraph CORE["Core · src/core"]
         orch["orchestrator.ts"]
@@ -116,6 +117,23 @@ graph TD
         verifyprim["verify.ts · verify()"]
         verifyexpand["expand.ts · expandVerification/StepKind.Verify"]
         verifydeps["deps.ts · makeVerifyDeps"]
+    end
+    subgraph PROV["Provisioning · src/provisioning"]
+        provisioner["provisioner.ts · runProvision"]
+        provfit["fit.ts · fitAndRank"]
+        provreg["registry.ts · providerFor/catalogSourcesFor/enrichSize"]
+        provsup["supervisor.ts · checkDiskSpace/withRetry/StallWatchdog"]
+        provollama["providers/ollama.ts · live-verified"]
+        provhf["providers/hf-fetch.ts · GGUF+MLX, disk-write deferred"]
+        provlmstudio["providers/lmstudio.ts · not yet wired into providerFor"]
+        provcatollama["catalog/ollama-catalog.ts"]
+        provcathf["catalog/hf-catalog.ts"]
+        provcatsnap["catalog/snapshot-source.ts · degrade-never-crash"]
+        provtypes["types.ts · DownloadPhase/DownloadProgress/DownloadProvider"]
+        provtracker["progress-tracker.ts · ProgressTracker (monotonic % + EWMA speed)"]
+        provformat["ui/format.ts · formatBytes/formatSpeed/formatEta/renderProgressLine"]
+        provbar["ui/progress-bar.ts · ProgressBar (TTY vs non-TTY render)"]
+        provprompt["ui/prompt.ts · askYesNo/selectModels (testable stdin)"]
     end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
@@ -219,6 +237,20 @@ graph TD
     verifydeps --> memstore
     crewcli --> verifydeps
     flow --> verifydeps
+    provcli --> provisioner
+    chat -. optional auto-detect .-> provisioner
+    provisioner --> provfit
+    provisioner --> provreg
+    provisioner --> provsup
+    provisioner --> spans
+    provfit --> hw
+    provreg --> provollama
+    provreg --> provhf
+    provreg --> provcatollama
+    provreg --> provcathf
+    provreg --> provcatsnap
+    provcatollama --> provcatsnap
+    provcathf --> provcatsnap
 ```
 
 | Layer | Files | Responsibility | Knows about |
@@ -237,6 +269,7 @@ graph TD
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
 | **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
+| **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`) → sequential downloads through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`) with a unified progress protocol; three adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF + MLX) and LM Studio contract-tested only, live-verify deferred** (HF-fetch does not yet persist bytes to disk); dependency-free UI (`ui/`); CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (`ProviderKind`), `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -283,6 +316,45 @@ sequenceDiagram
 ```
 
 A delegation that would exceed depth 5 returns a **soft** `{error}` the orchestrator can adapt to (not a crash); recursion (a repeated agent name) is allowed — depth is the bound. Every step above is captured as a nested OTel span.
+
+### 3a. Provisioning flow (first-boot / `bun run provision`, Slice 14)
+
+Provisioning is a **separate, optional pre-flow** — it is not part of every
+`chat` run above. It runs either as its own CLI entry point or via an
+optional, TTY-gated auto-detect hook inside `chat.ts`; it is never invoked
+inline on a normal chat turn.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as cli/provision.ts
+    participant Prov as provisioning/provisioner.ts
+    participant Cat as CatalogSource(s)
+    participant Fit as fit.ts
+    participant UI as ui/prompt.ts
+    participant Sup as supervisor.ts
+    participant DP as DownloadProvider(s)
+
+    User->>CLI: bun run provision
+    CLI->>Prov: runProvision({deps})
+    Prov->>Prov: detectHost()
+    Prov->>Cat: listCandidates(query) per applicable source
+    Note over Cat: withSnapshotFallback — a source throw or<br/>empty list degrades to the committed snapshot.json
+    Cat-->>Prov: Candidate[]
+    Prov->>Fit: fitAndRank(candidates, liveBudgetBytes)
+    Fit-->>Prov: FitCandidate[] (recommended pre-marked)
+    Prov->>UI: selectModels(ranked) — per-model consent
+    UI-->>Prov: selected[]
+    Prov->>Sup: checkDiskSpace(required, free)
+    Sup-->>Prov: ok | shortfall (prompts "continue anyway?")
+    loop each selected model, sequential
+        Prov->>DP: download(modelRef, {onProgress, signal})
+        DP-->>Prov: progress events → live bar; Done or throw (caught → result.failed)
+    end
+    Prov-->>CLI: ProvisionResult {downloaded, declined, failed}
+    CLI-->>User: "Provisioned: N · declined: N · failed: N"
+    Note over User,DP: chat.ts has an optional, TTY+consent-gated auto-detect<br/>hook (maybeAutoProvision) that calls this same runProvision path<br/>when a declared model is missing — never invoked inline mid-turn.
+```
 
 ---
 
@@ -398,7 +470,7 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 ## 10. Crews & roles (Slice 11)
 
 A CrewAI-style **role/task/process** layer — a **thin composition** over the
-workflow engine (§9, sequential) and the orchestrator (§15 Glossary,
+workflow engine (§9, sequential) and the orchestrator (§16 Glossary,
 hierarchical), **not a new engine**: both processes ultimately run on
 machinery Slices 9/10 already shipped.
 
@@ -855,14 +927,191 @@ verification/ (types, config, claims, judge, crag, verify, expand, deps)
 
 ---
 
-## 13. On-disk stores
+## 13. Provisioning (Slice 14)
+
+A **first-boot / on-demand model provisioning layer** — **`src/provisioning/`**
+— that discovers which local models fit the host, gets per-model consent, and
+downloads them through a runtime-agnostic adapter with live progress. It does
+**not** replace the Model Manager (§4/§5): provisioning only gets weights onto
+disk / into the Ollama store; the existing `ensureReady`/selector path is what
+loads and serves a model once it's present. `runProvision` never calls
+`ensureReady` itself.
+
+**Live-verify status (read this before trusting any adapter claim below):
+Ollama is live-verified end-to-end** (Tasks 2 and 4 — fresh `qwen3.5:9b` /
+`qwen3-embedding:0.6b` pulls to 100%, delete+re-provision idempotent). **LM
+Studio, llama.cpp, and MLX are contract-tested only — live-verify is
+deferred**, since none of those runtimes is installed on the dev machine
+(tracked as a Slice-14 follow-on in `docs/ROADMAP.md`, not a silent gap).
+
+### Two-tier `DownloadProvider` model (`types.ts`)
+
+`DownloadPhase` (`Resolving → Downloading → Verifying → Finalizing → Done |
+Failed`) and `DownloadProgress` (`modelRef, phase, bytesCompleted, bytesTotal
+| null, percent | null, speedBytesPerSec | null, error?`) form one normalized
+progress protocol every adapter emits. `DownloadProvider = { kind:
+ProviderKind, download(modelRef, {onProgress, signal}) }` — one adapter per
+runtime, injectable, so the orchestrator and tests never see runtime-specific
+shapes.
+
+### The adapters (`src/provisioning/providers/`)
+
+- **`ollama.ts`** (`createOllamaProvider`) — streams `/api/pull{stream:
+  true}`, normalizes lines via `OllamaPullAggregator`/`ProgressTracker`
+  (`ollama-pull.ts`, `progress-tracker.ts`), wraps the attempt in a
+  `StallWatchdog` (aborts a stalled transfer) plus `withRetry` full-jitter
+  abortable backoff (`supervisor.ts`), throws `ProviderError` on an in-band
+  `{error}` line, and confirms the install actually landed
+  (`isModelInstalled`) before declaring success. **Live-verified.**
+- **`hf-fetch.ts`** (`createHfFetchProvider`) — a runtime-agnostic HTTP
+  downloader shared by llama.cpp (GGUF single-file, `repo::file` modelRef
+  convention) and MLX (whole-snapshot, bare `repo` modelRef). **Contract-tested
+  only; shape-complete, not download-complete**: it streams the HF resolve
+  response, counts bytes, and reports Resolving → Downloading → Verifying →
+  Done — but it reads the body via `reader.read()` and **discards the bytes**;
+  there is no `.part` file and no atomic rename, so **nothing is persisted to
+  disk yet**. The `Verifying` phase calls an injected `sha256(path)` only if
+  the caller supplies one; the default path has no hash step, and even a
+  supplied hash would be computed over a file that generally doesn't exist,
+  since nothing was written. **You cannot download a GGUF or MLX model to disk
+  with this adapter today** — the real disk-write + real SHA256 verification
+  are deferred to the live-verify pass once a real runtime is installed.
+- **`lmstudio.ts`** (`createLmStudioProvider`) — POSTs
+  `/api/v1/models/download`, polls job status, normalizes into the same
+  progress protocol. **Contract-tested only, live-verify deferred** (LM
+  Studio not installed on the dev machine). The REST surface it targets is
+  undocumented/best-effort per research at authoring time, not a stable
+  public API. It is **not wired into `registry.ts`'s `providerFor`** — LM
+  Studio isn't a distinct `ProviderKind` (it shares `MlxServer` with the
+  HF-fetch adapter), so `providerFor(MlxServer)` currently resolves to
+  `createHfFetchProvider`, not `createLmStudioProvider`. The LM Studio adapter
+  exists and is tested but is not yet reachable from the orchestrated flow —
+  a real integration decision (which adapter serves `MlxServer` on which host)
+  is part of the deferred live-verify work.
+
+### Two-phase catalog discovery + snapshot fallback (`catalog/`, `registry.ts`)
+
+`catalogSourcesFor(host)` wires two dynamic, per-runtime sources, each wrapped
+in `withSnapshotFallback`:
+
+- **`ollama-catalog.ts`** — `createOllamaCatalogSource` lists a community
+  JSON catalog (list-only, `fileSizeBytes: 0` placeholders); `ollamaManifestSize`
+  sums the real registry manifest's `layers[].size` (+`config.size`) for
+  authoritative pre-pull sizing once a candidate is enriched.
+- **`hf-catalog.ts`** — `createHfCatalogSource` searches the HF models API
+  (`gguf`/`mlx` filter by kind); `hfTreeSize` sums the HF tree API's file
+  sizes for a single file or a whole snapshot. `HF_TOKEN` is env-fallback-only
+  (anonymous if absent).
+- **`snapshot.json` + `snapshot-source.ts`** — 4 committed bootstrap entries
+  with real recorded sizes (`qwen3.5:4b`, `qwen3.5:9b`, `qwen3-embedding:0.6b`,
+  `bespoke-minicheck`). `withSnapshotFallback(source, snap)` degrades to the
+  snapshot on a source **throw or an empty list** — degrade-never-crash, and
+  discovery still works offline or when an upstream catalog is unreachable.
+
+Discovery is a **dynamic, per-runtime query with a committed-snapshot floor**,
+not a purely static list.
+
+### Fit + rank (`fit.ts`)
+
+`fitAndRank(candidates, budgetBytes)` computes `estimatedBytes = max(
+fileSizeBytes, estimateModelBytes({paramsBillions, bytesPerWeight,
+contextTokens: 8192, kvBytesPerToken}))` (weights + KV at a **fixed 8192-token
+sizing context**, not the live `num_ctx` — a deliberate simplification so
+ranking doesn't depend on which agent asks), filters to `fitsBudget`, ranks by
+`footprint.approxParamsBillions` descending, and marks the top-per-`ProviderKind`
+candidate `recommended` — **skipping unenriched 0/0 placeholders** so a
+phantom, never-sized catalog entry is never auto-preselected.
+
+### Supervisor guards (`supervisor.ts`)
+
+`checkDiskSpace` (shortfall/headroom preflight — Ollama itself doesn't
+preflight disk and fails mid-download), `withRetry` (full-jitter exponential
+backoff, abortable via `AbortSignal`), `StallWatchdog` (aborts a download
+whose byte count hasn't advanced within a timeout).
+
+### Orchestration (`provisioner.ts`, `runProvision`)
+
+`detectHost()` → discover across applicable catalog sources (per-source
+`.catch(() => [])` degrade) → `fitAndRank` → **early-return if nothing fits**
+→ lazily enrich sizes for the ranked set → per-model consent via
+`deps.ui.selectModels` (recommended pre-selected) → **early-return if nothing
+selected** → disk preflight (`checkDiskSpace`; short-on-space prompts
+"continue anyway?", declining is a third early-return) → **sequential**
+downloads with one live progress bar, each model's failure caught
+individually into `result.failed` so one bad pull never crashes the run or
+blocks the rest. All dependencies are injectable (`ProvisionDeps`) for
+testability. The three early-return paths (nothing fits / nothing selected /
+declined preflight) are no-op runs and deliberately do **not** open a
+provisioning span — only an actual download attempt does.
+
+### Dependency-free UI (`src/provisioning/ui/`)
+
+`format.ts` (byte/speed/ETA formatting), `progress-bar.ts` (TTY `\r`-rewrite
+vs non-TTY line-per-update), `prompt.ts` (`askYesNo`/`selectModels`, testable
+via injected stdin, `autoYes` short-circuit for `AGENT_PROVISION_AUTO_YES=1`).
+
+### CLI + auto-detect hook
+
+`bun run provision` (`src/cli/provision.ts`) is the explicit entry point.
+`cli-deps.ts` has the shared `buildProvisionDeps`/`freeDiskBytes` wiring reused
+by both `provision.ts` and a `chat.ts` auto-detect hook
+(`maybeAutoProvision`): TTY + consent gated via `detectMissing` (comparing
+`BOOTSTRAP` declarations against `isModelInstalled`) — it only nudges when
+something declared is missing, and only in an interactive terminal; it never
+silently downloads. **Consent before pull is a hard product rule** here
+(never speculative).
+
+### Telemetry
+
+`src/telemetry/spans.ts` extends per the standing rule (§7):
+`withProvisionSpan` opens an `agent.model.provision` span around the download
+loop only, tagged up front with `ATTR.PROVISION_CANDIDATE_COUNT`/
+`PROVISION_SELECTED_COUNT`/`PROVISION_BYTES_TOTAL`/`PROVISION_SNAPSHOT_FALLBACK`
+and updated after the loop with `PROVISION_DOWNLOADED_COUNT`/
+`PROVISION_FAILED_COUNT`. `snapshotFallback` is currently always recorded as
+`false` from `runProvision` — the provisioner itself doesn't see whether a
+`catalogSourcesFor`/`withSnapshotFallback` source actually fell back
+internally (that decision is made inside `registry.ts`/`snapshot-source.ts`
+and isn't threaded back out); this is an honest default, not a fabricated
+plumbing path, and is a candidate for a future refinement rather than
+something this slice claims to track precisely today.
+
+### Data flow
+
+`bun run provision` (CLI) or the `chat.ts` auto-detect hook →
+`Provisioner.runProvision` → `CatalogSource`s (discovery, with snapshot
+fallback) + `DownloadProvider`s (`registry.ts` `providerFor`) → on success,
+weights are on disk / in the Ollama store, available for
+`RuntimeControl`/`resource/model-manager.ts`'s `ensureReady` (§4/§5) to pick
+up on the **next** normal chat/crew/workflow run. Provisioning does not itself
+call `ensureReady`.
+
+### Module map additions
+
+```
+provisioning/ (types, fit, provisioner, registry, supervisor, progress-tracker,
+               providers/{ollama,hf-fetch,lmstudio}, catalog/{ollama-catalog,
+               hf-catalog,snapshot-source,snapshot.json}, ui/{format,
+               progress-bar,prompt}, cli-deps, detect-missing, ollama-pull)
+  ← cli/provision.ts                     (bun run provision → runProvision)
+  ← cli/chat.ts                          (maybeAutoProvision, TTY+consent gated, optional)
+  → resource/footprint.ts, resource/hardware.ts  (fit.ts: estimateModelBytes, fitsBudget)
+  → resource/ollama-control.ts           (providers/ollama.ts: isModelInstalled confirm)
+  → discovery/catalog-source.ts          (Candidate/CatalogSource/HostCapabilities types)
+  → core/types.ts                        (ProviderKind)
+  → telemetry/spans.ts                   (agent.model.provision span + ATTR.PROVISION_*)
+```
+
+---
+
+## 14. On-disk stores
 
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` / `unverified.txt` (human-facing artifacts; the last written on a Slice-13 `--verify` abstention). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 
 ---
 
-## 14. Testing strategy
+## 15. Testing strategy
 
 - **Agent loop / core** — `MockLanguageModelV3` (no model needed); step-ceiling → `MaxStepsError`.
 - **Guardrails** — pure unit tests (depth allow/reject, recursion-allowed, live `returnCapChars`, `concise`, ALS propagation) + a synthetic multi-hop `delegate.test.ts` (an agent given a delegate tool) proving over-depth soft-error + event and the live cap, since real multi-hop isn't reachable yet.
@@ -871,11 +1120,12 @@ verification/ (types, config, claims, judge, crag, verify, expand, deps)
 - **MCP** — real stdio round-trip (subprocess server).
 - **Memory** (`tests/memory/`) — pure unit tests per module (`define`, `budget`, `chunk`, `embed`, `sqlite-store`, `retrieve`, `recall-tool`, `spans`) with injected/mock deps (no Ollama/LanceDB needed for most); `lancedb-smoke.test.ts` exercises the real embedded LanceDB against a temp dir (no network); `reranker.spike.test.ts` is the outcome-gating spike for the transformers.js cross-encoder (records whether it's viable, not a permanent live-skip test); `wiring.test.ts` covers the optional crew/workflow `memory` dep (recall tool binding + auto-persist); `tests/cli/memory.test.ts` drives `runMemoryCli` end-to-end against an injected store; `tests/integration/memory.live.test.ts` needs real Ollama + the embed model pulled.
 - **Verification** (`tests/verification/`) — pure unit tests per module (`verify.test.ts`) with injected `VerifyDeps` (no Ollama needed); `faithfulness.eval.test.ts` is the in-repo golden-set eval gate (`tests/verification/golden/cases.json`, ~15–20 cases, offline stand-in judge — no external eval framework); `tests/crew/verify-wiring.test.ts` + `tests/workflow/verify-wiring.test.ts` cover the compile-time splice + `{kind:'unverified'}` outcome mapping; `tests/integration/verification.live.test.ts` needs a real `bespoke-minicheck` pull.
+- **Provisioning** (`tests/provisioning/`) — pure unit tests per module (`fit`, `supervisor`, `progress-tracker`, `provisioner`, `ollama-pull`, `ollama-catalog`, `hf-catalog`, `snapshot-source`, `hf-fetch`, `lmstudio`, `ui-format`, `ui-prompt`, `detect-missing`) with injected fakes (no real network/runtime for any of them); `eval.test.ts` is the fit-selection golden set across RAM tiers plus a telemetry-emission assertion for `agent.model.provision` (`registerTestProvider`). Ollama's adapter is additionally **live-verified** in the Slice-14 ledger (fresh pull to 100%, idempotent re-provision); the HF-fetch and LM Studio adapters are contract-tested only — no `*.live.test.ts` exists yet for provisioning pending a runtime install.
 - **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew`, `memory`, `verification` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server).
 
 ---
 
-## 15. Glossary
+## 16. Glossary
 
 - **Agents-as-tools** — the orchestrator (`agents/super.ts` via `createOrchestrator`) exposes `delegate_to_<name>(task)` tools wrapping sub-agents + `report_capability_gap`. Routing = the router model's tool choice. `runOrchestrator` returns `{answer|gap|resource}` (resource/gap take precedence over an answer, read from `steps` even when the step guard trips).
 - **Run** — one invocation under `runs/<id>/`: an OTel trace (`spans.jsonl`) + text artifacts.

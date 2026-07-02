@@ -11,29 +11,29 @@ Mini.
 > new agents on demand. Slices 1–7 built the hardware-aware **engine**; the
 > product line is now underway — Phase A's run-viewer (Slice 8) and Phase B's
 > composition guardrails (Slice 9), workflow/DAG engine (Slice 10), crews &
-> roles (Slice 11), memory/RAG (Slice 12), and grounded verification
-> (Slice 13) have landed. First-boot model provisioning + a downloader →
-> integration library → agent-builder → triggers is next. See
+> roles (Slice 11), memory/RAG (Slice 12), grounded verification (Slice 13),
+> and first-boot model provisioning (Slice 14) have landed. An integration
+> library → agent-builder → triggers is next. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 13 complete — **grounded verification**. `src/verification/`
-> adds an anti-hallucination layer on top of Slice 12's citation-tagged recall:
-> `verify()` decomposes an answer into claims, fetches **exactly the memory
-> chunks it cites** (`getByIds`), and checks each claim against its own
-> evidence with a small fine-tuned faithfulness judge (`bespoke-minicheck`,
-> consent-pull on first use, falling back to the general model rather than
-> hard-failing when declined/offline). A bounded Corrective RAG step
-> (rewrite and re-answer; re-recall when a `recall` dependency is wired; the
-> current `--verify` CLI path re-answers without fresh retrieval—a documented
-> follow-up) runs once before the system **abstains**
-> — surfacing `{kind:'unverified'}` instead of presenting an unsupported
-> answer. Opt in per crew/workflow run with `--verify` on `bun run crew`/`bun
-> run flow`; an abstention writes `runs/<id>/unverified.txt` and exits
-> non-zero. Also shipped: Slice 8 (OTel run-viewer, `bun run runs`), Slice 9
-> (composition guardrails — delegation depth limit + return-size cap), Slice 10
-> (workflow/DAG engine, `bun run flow <name>`), Slice 11 (crews & roles,
-> `bun run crew <name>`), and Slice 12 (memory/RAG, `bun run memory
-> ingest|recall|stats|reindex`). See [Roadmap](#roadmap).
+> **Status:** Slice 14 complete — **first-boot provisioning + runtime-agnostic
+> downloader**. `src/provisioning/` gets a fresh clone/machine from zero
+> models to a working setup without manual `ollama pull`s: detect the host →
+> discover fitting models (dynamic per-runtime catalog query with a
+> committed-snapshot fallback) → hardware-fit rank → **per-model consent** →
+> download through a **runtime-agnostic `DownloadProvider`** with a live
+> progress bar (bytes/%/speed/ETA) → disk-space preflight + stall/retry
+> supervisor guards, degrading (never crashing) per source and per model.
+> **Ollama is live-verified end-to-end; LM Studio, llama.cpp, and MLX ship
+> contract-tested with live-verify explicitly deferred** (not installed on the
+> dev machine) — logged, not silent. Run it with `bun run provision`, or let
+> the optional, TTY-gated `chat.ts` auto-detect hook offer it when a declared
+> model is missing. Also shipped: Slice 8 (OTel run-viewer, `bun run runs`),
+> Slice 9 (composition guardrails — delegation depth limit + return-size cap),
+> Slice 10 (workflow/DAG engine, `bun run flow <name>`), Slice 11 (crews &
+> roles, `bun run crew <name>`), Slice 12 (memory/RAG, `bun run memory
+> ingest|recall|stats|reindex`), and Slice 13 (grounded verification,
+> `--verify`). See [Roadmap](#roadmap).
 
 ---
 
@@ -77,6 +77,8 @@ No manual steps. No API keys. Everything runs locally.
 **Memory / RAG (Slice 12).** A persistent semantic memory layer, `src/memory/`, composed on top of the Model Manager (weights-only embedder loading), the guardrails delegation context (injection budget), and telemetry — not a new resource mechanism. A two-tier store: **LanceDB** (embedded vector DB, one table per named *space*) + **`bun:sqlite`** (a space registry that's the authority for that space's embedder+dimension, and a `(space, source)`-scoped document ingestion manifest so re-ingesting an unchanged file is a no-op). Default embedder `qwen3-embedding:0.6b`. Retrieval is **dense vector search today** (an FTS index is created opportunistically but hybrid BM25+dense fusion isn't wired up yet) → an **optional cross-encoder rerank, on by default** (`transformers.js`/ONNX, `Xenova/bge-reranker-base` — the viability spike passed on Apple Silicon; disable with `AGENT_MEMORY_RERANK=0`; a reranker failure degrades gracefully to the pre-rerank order rather than crashing) → a live budget-fit pack sized off the caller's `num_ctx`. Results are citation-tagged (`[mem:<id>]`) and recall abstains explicitly (`"No supporting memory found."`) rather than fabricating — the two anti-hallucination primitives that Slice 13's verification layer builds on. Drive it directly with `bun run memory ingest|recall|stats|reindex`, or opt a crew/workflow into a bound `recall` tool + auto-persisted task/step output via an optional `memory` dependency. See [`docs/architecture.md`](docs/architecture.md) §11.
 
 **Grounded verification (Slice 13).** An anti-hallucination layer, `src/verification/`, built directly on Slice 12's citation tags and abstention primitive — not a new engine. `verify()` decomposes an answer into atomic claims, fetches **exactly the memory chunks each claim cites** (`getByIds`), and checks every claim against its own cited evidence with **`bespoke-minicheck`** — a small model fine-tuned for `(document, claim) → supported?` fact-checking, distinct from the general/router model that still handles decomposition and retrieval grading. The judge model is **consent-pulled** on first use (prompted interactively, or `AGENT_VERIFY_AUTO_PULL=1`/`0` to force); if it's unavailable, verification falls back to the general model rather than hard-failing. A **bounded Corrective RAG** step (grades retrieval and, if weak, rewrites the query and re-answers; re-retrieval happens when a `recall` dependency is wired — the current `--verify` CLI path re-answers without fresh retrieval, a documented follow-up) runs once by default before the final gate; if the answer still isn't faithful (`faithfulness < 0.9` by default), the system **abstains** — `{kind:'unverified'}` — instead of presenting an unsupported draft. It's opt-in and additive: flag a task/crew/workflow `verify: true`, or pass `--verify` to `bun run crew <name>`/`bun run flow <name>`, and the compiler splices a verify→branch→corrective→abstain sub-graph after the answering step (`StepKind.Verify`); everything else compiles unchanged. An abstention writes `runs/<id>/unverified.txt` and exits non-zero. Designed for the **terminal** answering step of a run — a documented limitation, not yet per-mid-step. The eval gate is an **in-repo golden set** (~20 cases), no external framework. See [`docs/architecture.md`](docs/architecture.md) §12.
+
+**First-boot provisioning (Slice 14).** A first-boot / on-demand model provisioning layer, `src/provisioning/`, that gets weights onto disk without manual `ollama pull`s — it does not replace the Model Manager; provisioning just makes sure the bytes are present for `ensureReady` to pick up on the next normal run. `bun run provision` runs the flow: detect the host → discover fitting models (a dynamic per-runtime catalog query, degrading per-source to a committed `snapshot.json` on a throw or empty result) → `fitAndRank` by hardware fit → **per-model consent** (recommended pre-selected, nothing downloads without an explicit yes) → a disk-space preflight + stall/retry supervisor guards (`checkDiskSpace`, `withRetry`, `StallWatchdog`) → sequential downloads through a runtime-agnostic `DownloadProvider` with one live progress bar, each model's failure caught individually so one bad pull never aborts the rest. Three adapters exist behind that interface: **Ollama is live-verified end-to-end** (a real pull to 100%, idempotent re-provision); **the shared HuggingFace fetcher (llama.cpp GGUF + MLX snapshot) and LM Studio are contract-tested only, with live-verify explicitly deferred** pending a runtime install — and the HF fetcher specifically is shape-complete but not yet download-complete (it streams and counts bytes but doesn't persist them to disk or compute a real checksum yet). LM Studio's delegating adapter is implemented + contract-tested but not yet routed via `providerFor` — it shares the `MlxServer` kind today; wiring it is a logged follow-on. Degrade-never-crash applies per catalog source and per model. A non-invasive, TTY-gated `chat.ts` auto-detect hook offers the same flow when a declared model is missing, and the run emits an `agent.model.provision` telemetry span (candidate/selected/byte counts, downloaded/failed outcome). See [`docs/architecture.md`](docs/architecture.md) §13.
 
 ---
 
@@ -225,7 +227,8 @@ interface — no agent code changes. See
 | **11** | **Crews & roles** (Phase B) — `defineCrew({id, members, tasks, process})`; members with role/goal/backstory (live model selection) + tasks with `dependsOn`; `sequential` (compiles to a Slice-10 workflow) and `hierarchical` (orchestrator + auto manager) processes; `bun run crew <name>` + `crews/` registry; reuses Slice 9 guardrails; live model selection also wired into the `flow` CLI via shared `src/cli/select-runtime.ts` | ✅ Done |
 | **12** | **Memory / RAG** (Phase B) — `src/memory/`: two-tier store (LanceDB table-per-space + `bun:sqlite` space registry/document manifest); weights-only embedder (`qwen3-embedding:0.6b`) loaded via the Model Manager; dense-vector retrieval → optional cross-encoder rerank (default-on, graceful degradation) → live budget-fit pack; citation-tagged + abstaining `recall` tool; `bun run memory ingest\|recall\|stats\|reindex`; optional crew/workflow `memory` dep (bound `recall` tool + auto-persist) | ✅ Done |
 | **13** | **Grounded verification** (Phase B) — `src/verification/`: claim decomposition + cited-evidence lookup (`getByIds`) → per-claim MiniCheck faithfulness judge (`bespoke-minicheck`, consent-pull + general-model fallback) → bounded Corrective RAG (rewrite + re-answer; re-recall when `recall` wired; CLI path re-answers without retrieval—documented follow-up, once) → abstain on fail (`{kind:'unverified'}`); opt-in `--verify` on `bun run crew`/`flow` splices a verify→branch→corrective→abstain sub-graph (`StepKind.Verify`) after the terminal answering step; writes `runs/<id>/unverified.txt` + non-zero exit on abstention; in-repo golden-set eval gate (no external framework) | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **Slice 14 — first-boot model provisioning + downloader** (make a fresh clone/machine usable without manual `ollama pull` steps) → **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **14** | **First-boot provisioning + downloader** (Phase A/ops) — `src/provisioning/`: runtime-agnostic `DownloadProvider` abstraction (Ollama live-verified; LM Studio/llama.cpp/MLX contract-tested, live-verify deferred) + unified progress protocol; two-phase catalog discovery (dynamic per-runtime query + committed-snapshot fallback); hardware-fit ranking + per-model consent; disk preflight + stall/retry supervisor guards; `bun run provision` + a non-invasive `chat.ts` auto-detect hook | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **C** connect (`mcp.json` mount registry · integration pack) → **D** grow (**agent-builder ⭐**) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

@@ -37,7 +37,9 @@ judge, bounded Corrective RAG, abstention) that opts a crew/workflow run into
 citation-checked, hallucination-resistant answers via `--verify`. The
 **product surface** is still thin beyond that: 3 agents (`super`, `file-qa`,
 `web-fetch`), 1 native tool (`read_file`) + 1 mounted MCP server
-(`mcp-server-fetch`), and no first-boot model provisioning yet.
+(`mcp-server-fetch`) — first-boot model provisioning ships in Slice 14
+(Ollama live-verified; LM Studio/llama.cpp/MLX contract-tested, live-verify
+deferred).
 
 | n8n / CrewAI concept | Our analog | Status |
 |---|---|---|
@@ -181,8 +183,19 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 
 ## Alternate runtimes & the Mac Mini era
 
-- **Dedicated MLX-server / LM Studio adapters** — behind the same AI SDK `LanguageModel` interface: persistent KV-cache (omlx) or high concurrency (vMLX) for heavy agent loops when Ollama's sequential serving isn't enough.
-- **Raw `llama.cpp`-server adapter** — low-level control (custom sampling/flags) if ever needed; Ollama stays the default.
+> **Slice 14 lays the download half of these.** Slice 14 ships a runtime-agnostic
+> `DownloadProvider` + `CatalogSource` for **all four** runtimes (Ollama, LM Studio,
+> llama.cpp, MLX). What remains for LM Studio & llama.cpp — **explicitly deferred, must
+> be included in future** — is (a) standing them up as full **`ProviderKind` inference
+> runtimes** (chat/completions wiring behind the AI SDK `LanguageModel` interface, not
+> just download), and (b) **live-verifying their download adapters** once installed on a
+> test machine (Slice 14 verifies Ollama live; the other three ship contract-tested with
+> live-verify logged-deferred). LM Studio's delegating adapter is implemented + contract-tested
+> but not yet routed via `providerFor` — it shares the `MlxServer` kind today; wiring it is a
+> logged follow-on.
+
+- **Dedicated MLX-server / LM Studio adapters** — behind the same AI SDK `LanguageModel` interface: persistent KV-cache (omlx) or high concurrency (vMLX) for heavy agent loops when Ollama's sequential serving isn't enough. *(Download side lands in Slice 14; inference wiring + live-verify deferred — see note above.)*
+- **Raw `llama.cpp`-server adapter** — low-level control (custom sampling/flags) if ever needed; Ollama stays the default. *(Download side lands in Slice 14; inference wiring + live-verify deferred.)*
 - **Bigger models on the Mac Mini** — >32 GB unified memory hosts larger specialists (`qwen3.5:14b+`, `llama4:scout` long-context); the Model Manager already budgets to the host, so it's mostly a declaration change.
 
 ---
@@ -195,7 +208,7 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 4. ✅ **Crews & roles** (Phase B) — shipped, Slice 11. The CrewAI role/task/process layer, composed on the workflow engine + orchestrator.
 5. ✅ **Memory / RAG** (Phase B) — shipped, Slice 12. Persistent semantic memory (LanceDB + `bun:sqlite`, weights-only embedder via the Model Manager, dense retrieval + optional default-on cross-encoder rerank) that crews/workflows can opt into via a `recall` tool + auto-persist.
 6. ✅ **Grounded verification** (Phase B) — shipped, Slice 13. Closes the retrieve-then-hallucinate loop Slice 12 opened: claim decomposition, cited-evidence lookup, a MiniCheck faithfulness judge (consent-pull + fallback), bounded Corrective RAG, and an explicit abstain outcome, opt-in via `--verify`.
-7. **First-boot model provisioning + downloader** (Slice 14, next) — a fresh clone/machine still needs manual `ollama pull`s for the router, specialists, embedder, and now the verification judge (`bespoke-minicheck`); a guided/automated first-run provisioning flow (detect what's missing, pull it, verify it's usable) removes that friction before the platform is handed to a new machine or a new user.
+7. ✅ **shipped, Slice 14** — **First-boot model provisioning + runtime-agnostic downloader**. A fresh clone/machine used to need manual `ollama pull`s for the router, specialists, embedder, and the verification judge (`bespoke-minicheck`); `bun run provision` (plus a non-invasive `chat.ts` auto-detect hook) now runs a guided flow (detect hardware → discover fitting models → per-model consent → download with a **live progress UI** [bytes/%/speed/ETA] → hand off to `ensureReady` on the next normal run), removing that friction. Built **runtime-agnostic** behind a `DownloadProvider` abstraction + unified progress protocol covering **all four runtimes** (Ollama + LM Studio delegating; llama.cpp + MLX via one shared HuggingFace fetcher) — LM Studio's delegating adapter is implemented + contract-tested but not yet routed via `providerFor` — it shares the `MlxServer` kind today; wiring it is a logged follow-on. Discovery is **dynamic per-runtime query with a committed-snapshot fallback** (Ollama registry-manifest sizes; HF tree sizes; LM Studio SDK). Also removes the root cause of the Slice-13 selector crash (declaring models without guaranteeing install). **Live-verified on Ollama** (only runtime installed on the dev machine); **LM Studio / llama.cpp / MLX adapters ship contract-tested with live-verify explicitly deferred + logged** (see Deferred items below) — never a silent skip; the HF-fetch adapter is additionally shape-complete but not yet disk-persisting (no `.part`+rename, placeholder SHA256), a gap folded into the same deferred live-verify pass. Spec: `docs/superpowers/specs/2026-07-01-slice-14-provisioning-design.md`.
 8. **`mcp.json` mount registry + starter pack** (Phase C) — make it genuinely useful; gives workflows things to *do* and agent-builder servers to *suggest*.
 9. **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library).
 10. **Triggers / daemon** (Phase E) — turn workflows into automations (n8n's identity).
@@ -211,3 +224,15 @@ product core exists.
 - Migrate `biome.json` off the deprecated `recommended` field.
 - **Per-slice Minor review findings** are recorded in `.superpowers/sdd/progress.md` (the SDD ledger) as each slice completes — e.g. run-journal O(n²) append, `runAgent.providerOptions` cross-package type, gap `message` hardcoded English. Sweep opportunistically; none blocking.
 - **Hardware/context-aware guardrails for deeper composition** (recorded constraint): the workflow/crew/fan-out slices MUST bound delegation depth, add cross-agent cycle detection, reuse warm models (shared-model agents = one resident copy), keep returned answers concise, and schedule concurrency within the Model Manager's budget. Cost compounds ~15× for naive orchestrator-workers — depth/fan-out are bounded deliberately.
+
+### Slice 14 follow-ons (deferred deliberately — MUST be included in future, not dropped)
+
+Recorded so nothing is silently lost (see the Slice-14 spec §13 + `provisioning-runtime-agnostic` memory):
+- **Live-verify the LM Studio / llama.cpp / MLX download adapters** once each runtime is installed on a test machine (Slice 14 verifies only Ollama live; the other three ship contract-tested with live-verify logged-deferred). This is a standing obligation, not optional.
+- **HF-fetch disk persistence + real SHA256** (`src/provisioning/providers/hf-fetch.ts`) — more specific and more severe than the general live-verify gap above: the adapter today streams the HTTP response and reports Resolving→Downloading→Verifying→Done, but it **reads and discards the bytes** (no `.part` file, no atomic rename) and the `Verifying` phase's SHA256 check is a no-op placeholder unless a caller injects a hash function (and even then, over a path that generally doesn't exist). A live-verify pass for llama.cpp/MLX would fail outright today, not just be unverified — implement the actual write-to-disk + rename + real hash before attempting that live-verify pass.
+- **Stand up LM Studio & llama.cpp as full `ProviderKind` inference runtimes** (chat/completions wiring, not just download) — see "Alternate runtimes" above.
+- **Wire `createLmStudioProvider` into `registry.ts`'s `providerFor`** — it exists and is contract-tested but is not currently reachable from `runProvision` (LM Studio shares `ProviderKind.MlxServer` with the HF-fetch adapter, and `providerFor(MlxServer)` resolves to HF-fetch today); decide the real routing once LM Studio is installed for live-verify.
+- **`gpustack/gguf-parser-go`** for remote-header size + VRAM estimate across backends — deferred (Go binary; HF-tree + Ollama-manifest sizes + `footprint.ts` VRAM suffice for now).
+- **Snapshot-catalog refresh automation** — periodic job regenerating the committed snapshot from live APIs (manual/scripted refresh until then).
+- **Parallel multi-model downloads** (multi-bar) — Slice 14 ships sequential-with-one-bar.
+- **Live Metal `recommendedMaxWorkingSetSize` read** instead of the tier-fraction heuristic; and bumping bootstrap `bytesPerWeight` 0.56 → ~0.6 for Q4_K_M realism (fold in with fit-tuning).
