@@ -4,6 +4,7 @@ import type {
   CatalogSource,
   HostCapabilities,
 } from '../discovery/catalog-source.ts';
+import { ATTR, withProvisionSpan } from '../telemetry/spans.ts';
 import { type FitCandidate, fitAndRank } from './fit.ts';
 import { checkDiskSpace } from './supervisor.ts';
 import type { DownloadProgress, DownloadProvider } from './types.ts';
@@ -97,18 +98,36 @@ export async function runProvision(opts: {
   }
 
   // 6) Sequential download with a live bar; degrade-never-crash per model.
-  const ctrl = new AbortController();
-  for (const c of selected) {
-    try {
-      const provider = deps.providerFor(c.provider);
-      await provider.download(c.model, {
-        onProgress: (p) => deps.ui.bar.render(p),
-        signal: ctrl.signal,
-      });
-      result.downloaded.push(c.model);
-    } catch (err) {
-      result.failed.push({ model: c.model, error: (err as Error).message });
-    }
-  }
-  return result;
+  return withProvisionSpan(
+    {
+      candidateCount: ranked.length,
+      selectedCount: selected.length,
+      bytesTotal: required,
+      snapshotFallback: false,
+    },
+    async (span) => {
+      const ctrl = new AbortController();
+      for (const c of selected) {
+        try {
+          const provider = deps.providerFor(c.provider);
+          await provider.download(c.model, {
+            onProgress: (p) => deps.ui.bar.render(p),
+            signal: ctrl.signal,
+          });
+          result.downloaded.push(c.model);
+        } catch (err) {
+          result.failed.push({
+            model: c.model,
+            error: (err as Error).message,
+          });
+        }
+      }
+      span.setAttribute(
+        ATTR.PROVISION_DOWNLOADED_COUNT,
+        result.downloaded.length,
+      );
+      span.setAttribute(ATTR.PROVISION_FAILED_COUNT, result.failed.length);
+      return result;
+    },
+  );
 }

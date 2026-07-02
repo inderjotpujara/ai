@@ -47,6 +47,14 @@ export const ATTR = {
   VERIFICATION_CRAG_GRADE: 'verification.crag_grade',
   VERIFICATION_RETRIES: 'verification.retries',
   VERIFICATION_FALLBACK: 'verification.fallback',
+  PROVISION_RUNTIME: 'provision.runtime',
+  PROVISION_CANDIDATE_COUNT: 'provision.candidate_count',
+  PROVISION_SELECTED_COUNT: 'provision.selected_count',
+  PROVISION_BYTES_TOTAL: 'provision.bytes_total',
+  PROVISION_DOWNLOADED_COUNT: 'provision.downloaded_count',
+  PROVISION_FAILED_COUNT: 'provision.failed_count',
+  PROVISION_DEFERRED_VERIFY: 'provision.deferred_verify',
+  PROVISION_SNAPSHOT_FALLBACK: 'provision.snapshot_fallback',
 } as const;
 
 export type ModelSelectInfo = {
@@ -355,4 +363,25 @@ export function recordVerdict(unsupportedClaims: number): void {
   const span = trace.getActiveSpan();
   if (!span) return;
   span.setAttribute(ATTR.VERIFICATION_UNSUPPORTED, unsupportedClaims);
+}
+
+export type ProvisionSpanInfo = {
+  candidateCount: number;
+  selectedCount: number;
+  bytesTotal: number;
+  snapshotFallback: boolean;
+};
+
+/** Root span for a first-boot provisioning run (Slice 14). */
+export function withProvisionSpan<T>(
+  info: ProvisionSpanInfo,
+  fn: (span: Span) => Promise<T>,
+): Promise<T> {
+  return inSpan('agent.model.provision', async (span) => {
+    span.setAttribute(ATTR.PROVISION_CANDIDATE_COUNT, info.candidateCount);
+    span.setAttribute(ATTR.PROVISION_SELECTED_COUNT, info.selectedCount);
+    span.setAttribute(ATTR.PROVISION_BYTES_TOTAL, info.bytesTotal);
+    span.setAttribute(ATTR.PROVISION_SNAPSHOT_FALLBACK, info.snapshotFallback);
+    return fn(span);
+  });
 }
