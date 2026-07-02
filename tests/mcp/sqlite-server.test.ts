@@ -75,3 +75,25 @@ test('sqlite MCP server: schema/execute/query round-trip', async () => {
     await close();
   }
 });
+
+// Regression: bun:sqlite doesn't create parent directories for a file path;
+// a bare clone's first mount of the `sqlite` pack entry (default
+// `data/agent.db`) previously failed for this reason. The server must
+// mkdir -p the db's directory before opening it.
+test('sqlite MCP server: mounts when the db path is in a non-existent nested dir', async () => {
+  const nestedDb = join(
+    mkdtempSync(join(tmpdir(), 'mcp-sqlite-nested-')),
+    'nested/deeper/t.db',
+  );
+  const { tools, close } = await mountMcpServer({
+    command: 'bun',
+    args: ['run', 'src/mcp/sqlite-server.ts', nestedDb],
+  });
+  try {
+    expect(tools.query).toBeDefined();
+    expect(tools.execute).toBeDefined();
+    expect(tools.schema).toBeDefined();
+  } finally {
+    await close();
+  }
+});

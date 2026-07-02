@@ -100,3 +100,44 @@ Both fixes maintain the accuracy hard-line: docs now match the real Slice-15 reg
 - **GitHub remote-HTTP live-verify** — logged-deferred (no `GITHUB_PAT`). Recorded in ledger.
 - **Snapshot Artifact regen (4th surface)** — controller's responsibility per task briefing; owed post-review (needs the MCP-registry node/edges, "Mounted deliberately" concept card, `mcp` Terminal scenario, footer "15 slices · 417 tests").
 - **Gap 1 + Gap 2 fixes** — ROADMAP "Slice 15 follow-ons".
+
+## Whole-branch final-review fix pass (verdict: MERGE WITH FIXES)
+
+The whole-branch review returned **MERGE WITH FIXES** with exactly two required changes. Both applied here, in the same fix commit.
+
+### Fix 1 (merge-blocking, docs hard line) — §16 claimed a span-emission test that didn't exist
+
+`docs/architecture.md` §16 said `tool-span.test.ts` "asserts `withToolSpan`/`withMcpMountSpan` emit `workflow.tool`/`mcp.mount` with the right attrs/events via `registerTestProvider()`" — but the real `tests/mcp/tool-span.test.ts` only exercises the no-op tracer (no provider registered) and asserts pass-through + error propagation, never span emission. Made the claim true rather than watering down the doc:
+
+- Added **`tests/mcp/tool-span-emission.test.ts`** (new file, kept separate from `tool-span.test.ts` since that file's tests deliberately rely on the no-op-tracer/no-provider-registered state — following the pattern already used across the suite, e.g. `tests/telemetry/spans.test.ts`, `tests/verification/spans.test.ts`). It calls `registerTestProvider()` from `tests/helpers/otel-test-provider.ts` in `beforeEach` (shuts the provider down + resets the exporter in `afterEach`) and asserts:
+  - `withToolSpan('read_file', …)` produces a finished span named `workflow.tool` with `attributes[ATTR.TOOL_NAME] === 'read_file'` (`gen_ai.tool.name`).
+  - `withMcpMountSpan(record => { record('sqlite', 'mounted', 3); … })` produces a finished span named `mcp.mount` carrying an `mcp.server.mount` event whose `attributes[ATTR.MCP_SERVER] === 'sqlite'` and `attributes[ATTR.MCP_MOUNT_OUTCOME] === 'mounted'`.
+- Updated the §16 sentence in `docs/architecture.md` to precisely match what's shipped: `tool-span.test.ts` is now described as the no-op pass-through/error-propagation test, and the new `tool-span-emission.test.ts` is described as asserting the real emission (span names + `gen_ai.tool.name` / `mcp.server` / `mcp.mount.outcome`).
+
+### Fix 2 (recommended, bundled) — sqlite pack entry couldn't mount on a bare clone
+
+This is exactly Gap 2 from the live-verify above, now fixed pre-merge rather than left as a follow-on:
+
+- `src/mcp/sqlite-server.ts`: before opening the `Database`, for any `dbPath !== ':memory:'` the server now calls `mkdirSync(dirname(dbPath), { recursive: true })` (added `import { mkdirSync } from 'node:fs'` and `import { dirname } from 'node:path'`). A bare clone's first `bun run mcp add sqlite` mount (default `data/agent.db`) now succeeds without a manual `mkdir -p data`.
+- `tests/mcp/sqlite-server.test.ts`: added a second test, "mounts when the db path is in a non-existent nested dir" — mounts against `join(mkdtempSync(...), 'nested/deeper/t.db')` (a multi-level nested path that does not exist ahead of time) and asserts `tools.query`/`execute`/`schema` are all defined, proving the `mkdirSync` recursive-create actually runs.
+- `docs/ROADMAP.md` "Slice 15 follow-ons": struck through the "`sqlite` pack entry needs `data/` to pre-exist" bullet's claim and reworded it in place (not deleted, since the ledger references it) to state it was fixed pre-merge in this final review, with the mechanism and the new covering test named.
+- `docs/architecture.md`: updated the §14 `server.ts`/`sqlite-server.ts` module-list sentence (previously said the default entry "must exist as a directory first" / needs a manual `mkdir -p data`) to instead describe the `mkdirSync(dirname(dbPath), { recursive: true })` fix. Also updated the §14 "Live-verify" paragraph's sentence about the `sqlite` entry failing to mount in all three Task-6 live runs, appending that this was fixed pre-merge in this final review and no longer reproduces.
+
+### Gate run (post-fix)
+
+```
+bun run docs:check   → ✔ docs-check: living docs present + linked; every src subsystem documented.
+bun run typecheck    → tsc --noEmit, exit 0, no output
+bun run lint         → Checked 229 files, 0 errors, 8 warnings (identical pre-existing warning set verified via `git stash`/`git stash pop` diff — none introduced by this fix; two import-order errors introduced by the new files were fixed in-place before this final run)
+bun test tests/mcp/ tests/workflow/
+  → tests/mcp/eval-scoping.test.ts: [eval] scoped 4/4 vs merged 4/4 (read_file tasks)
+  → 76 pass / 0 fail / 176 expect() calls across 17 files [32.52s]
+```
+
+Covering suites for both fixes: `tests/mcp/tool-span-emission.test.ts` (new, Fix 1) + `tests/mcp/tool-span.test.ts` (unaffected no-op tests, still pass) for the span-emission claim; `tests/mcp/sqlite-server.test.ts` (extended, Fix 2) for the mkdir fix. All 17 files under `tests/mcp/` + `tests/workflow/` green.
+
+### Commit
+
+One commit, `fix(mcp): span-emission test makes §16 claim true + sqlite server auto-creates db dir (Slice 15 final review)`, containing: `tests/mcp/tool-span-emission.test.ts` (new), `tests/mcp/sqlite-server.test.ts`, `src/mcp/sqlite-server.ts`, `docs/architecture.md`, `docs/ROADMAP.md`, this report.
+
+No other changes made — fix set was exactly the two items in the review verdict, nothing else touched.

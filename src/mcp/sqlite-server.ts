@@ -1,9 +1,17 @@
 import { Database } from 'bun:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
 const dbPath = process.argv[2] ?? ':memory:';
+// bun:sqlite does not create parent directories for a file path; a bare
+// clone's first mount of the `sqlite` pack entry (default `data/agent.db`)
+// would otherwise fail. `:memory:` has no directory to create.
+if (dbPath !== ':memory:') {
+  mkdirSync(dirname(dbPath), { recursive: true });
+}
 const db = new Database(dbPath);
 
 const server = new McpServer({ name: 'sqlite-tools', version: '0.1.0' });
