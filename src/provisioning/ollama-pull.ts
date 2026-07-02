@@ -6,12 +6,14 @@ type OllamaEvent = {
   digest?: string;
   total?: number;
   completed?: number;
+  error?: string;
 };
 type ParsedLine = {
   phase: DownloadPhase;
   digest?: string;
   completed?: number;
   total?: number;
+  error?: string;
 };
 
 /** Parse one NDJSON line. Detect a layer download by PRESENCE of digest+total+completed. */
@@ -23,6 +25,9 @@ export function parseOllamaLine(line: string): ParsedLine | null {
     ev = JSON.parse(trimmed) as OllamaEvent;
   } catch {
     return null;
+  }
+  if (typeof ev.error === 'string' && ev.error !== '') {
+    return { phase: DownloadPhase.Failed, error: ev.error };
   }
   if (
     ev.digest &&
@@ -64,10 +69,14 @@ export class OllamaPullAggregator {
       completed += l.completed;
       total += l.total;
     }
-    return this.tracker.update(
+    const update = this.tracker.update(
       parsed.phase,
       completed,
       total > 0 ? total : null,
     );
+    if (parsed.phase === DownloadPhase.Failed) {
+      return { ...update, phase: DownloadPhase.Failed, error: parsed.error };
+    }
+    return update;
   }
 }

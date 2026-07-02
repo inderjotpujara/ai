@@ -22,6 +22,11 @@ describe('parseOllamaLine', () => {
   it('returns null for a blank line', () => {
     expect(parseOllamaLine('')).toBeNull();
   });
+  it('maps an in-band {"error":...} line to Failed with the error message', () => {
+    const r = parseOllamaLine('{"error":"digest mismatch, file must be downloaded again"}');
+    expect(r?.phase).toBe(DownloadPhase.Failed);
+    expect(r?.error).toBe('digest mismatch, file must be downloaded again');
+  });
 });
 
 describe('OllamaPullAggregator', () => {
@@ -33,5 +38,12 @@ describe('OllamaPullAggregator', () => {
     const p = agg.feed('{"digest":"a","total":100,"completed":90}'); // replaces a=50 → 90
     expect(p?.bytesCompleted).toBe(100); // 90 + 10
     expect(p?.bytesTotal).toBe(200);
+  });
+  it('surfaces an in-band error line as a Failed progress event carrying the error', () => {
+    const agg = new OllamaPullAggregator(new ProgressTracker('m', () => 0));
+    agg.feed('{"digest":"a","total":100,"completed":50}');
+    const p = agg.feed('{"error":"digest mismatch, file must be downloaded again"}');
+    expect(p?.phase).toBe(DownloadPhase.Failed);
+    expect(p?.error).toBe('digest mismatch, file must be downloaded again');
   });
 });

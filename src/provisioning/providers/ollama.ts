@@ -50,6 +50,9 @@ async function streamPull(
           watchdog.beat(p.bytesCompleted);
           onProgress(p);
           if (p.phase === DownloadPhase.Done) return;
+          if (p.phase === DownloadPhase.Failed) {
+            throw new ProviderError(p.error ?? 'Ollama pull failed');
+          }
         }
       }
     }
@@ -71,6 +74,7 @@ export function createOllamaProvider(
         baseMs: 1_000,
         capMs: 45_000,
         jitter: () => 0.5 + Math.random() / 2, // full-ish jitter, kind to the registry
+        signal,
         onRetry: (n) =>
           onProgress({
             modelRef,
