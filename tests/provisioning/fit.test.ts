@@ -23,4 +23,17 @@ describe('fitAndRank', () => {
     expect(out.find((c) => c.model === 'b')?.recommended).toBe(true);
     expect(out.find((c) => c.model === 'a')?.recommended).toBe(false);
   });
+  it('never recommends a lone 0-params/0-size placeholder candidate', () => {
+    const out = fitAndRank([cand('placeholder', 0, 0)], 1e12);
+    expect(out.map((c) => c.model)).toEqual(['placeholder']);
+    expect(out.find((c) => c.model === 'placeholder')?.recommended).toBe(false);
+  });
+  it('recommends the real candidate over a 0/0 placeholder for the same provider', () => {
+    const out = fitAndRank(
+      [cand('placeholder', 0, 0), cand('real', 7, 5e9)],
+      8e9,
+    );
+    expect(out.find((c) => c.model === 'real')?.recommended).toBe(true);
+    expect(out.find((c) => c.model === 'placeholder')?.recommended).toBe(false);
+  });
 });

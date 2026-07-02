@@ -42,10 +42,16 @@ export function fitAndRank(
     );
   const seen = new Set<ProviderKind>();
   for (const c of fitting) {
+    if (hasNoSizingSignal(c)) continue;
     if (!seen.has(c.provider)) {
       c.recommended = true;
       seen.add(c.provider);
     }
   }
   return fitting;
+}
+
+/** True for unenriched placeholder candidates (pre-Task-4 enrichment) with no real size or param evidence. */
+function hasNoSizingSignal(c: Candidate): boolean {
+  return c.fileSizeBytes <= 0 && c.footprint.approxParamsBillions <= 0;
 }
