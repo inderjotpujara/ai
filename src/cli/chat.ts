@@ -1,9 +1,14 @@
 import { createSuperAgent } from '../../agents/super.ts';
 import qwenRouter from '../../models/qwen-router.ts';
+import { BOOTSTRAP } from '../../models/registry.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { createFetchTools, createFileTools } from '../mcp/client.ts';
+import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
+import { detectMissing } from '../provisioning/detect-missing.ts';
+import { runProvision } from '../provisioning/provisioner.ts';
+import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
 import {
   effectiveKvBytesPerToken,
@@ -20,12 +25,29 @@ import { runChat } from './run-chat.ts';
 import { createSelectHook } from './select-hook.ts';
 import { formatSelectionNotice } from './selection-notice.ts';
 
+/** Non-invasive first-boot offer: only fires interactively, and only on explicit consent. */
+async function maybeAutoProvision(): Promise<void> {
+  if (!(process.stderr.isTTY ?? false)) return;
+  const autoYes = process.env.AGENT_PROVISION_AUTO_YES === '1';
+  const missing = await detectMissing(BOOTSTRAP, (m) => isModelInstalled(m));
+  if (missing.length === 0) return;
+  const ok = await askYesNo(
+    `${missing.length} required model(s) not installed: ${missing.map((m) => m.model).join(', ')}. Provision now?`,
+    { input: stdinInput(), autoYes },
+  );
+  if (!ok) return;
+  const host = await detectHost();
+  await runProvision({ autoYes, deps: buildProvisionDeps(host, { autoYes }) });
+}
+
 async function main(): Promise<void> {
   const task = process.argv.slice(2).join(' ').trim();
   if (task.length === 0) {
     console.error('Usage: bun run src/cli/chat.ts "<your request>"');
     process.exit(1);
   }
+
+  await maybeAutoProvision();
 
   const manager = createModelManager();
   // Warm + pin the small router model the orchestrator runs on.

@@ -18,7 +18,8 @@
     "flow": "bun run src/cli/flow.ts",
     "crew": "bun run src/cli/crew.ts",
     "runs": "bun run src/cli/runs.ts",
-    "memory": "bun run src/cli/memory.ts"
+    "memory": "bun run src/cli/memory.ts",
+    "provision": "bun run src/cli/provision.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.56",
