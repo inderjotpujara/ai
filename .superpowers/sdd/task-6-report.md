@@ -1,142 +1,88 @@
-# Task 6 Report: CRAG Grader + Bounded Corrective Retrieve
+# Slice 15 · Task 6 report — scoping eval + docs (all four surfaces) + live-verify
 
-## Summary
+**Branch:** `slice-15-mcp-mounts`
+**Commits:** `f9cbe46` — `docs(mcp): Slice 15 architecture §14 + README/ROADMAP + scoping eval + SDD ledger (Slice 15 Task 6)`; `dd8d271` — `chore(sdd): record Slice 15 Task 6 commit sha in ledger`
+**Gate:** `bun run docs:check` ✔ · `bun run typecheck` ✔ · `bun run lint` ✔ (exit 0; 8 pre-existing warnings, none from this diff) · `bun test` **417 pass / 2 skip / 0 fail / 895 expect() calls across 126 files** (416 baseline + 1 new eval test; re-verified after a Biome format pass)
 
-Implemented Task 6 (Grounded Verification / CRAG) following strict TDD. Three functions added to support retrieval grading and corrective retrieval:
+*(This file previously held the stale Slice-13 CRAG Task-6 report — already flagged in the S14 ledger entry as "STALE task-6-report.md (unrelated CRAG content)" — and is now overwritten with the current slice's report, which is the intended per-slice reuse of these brief/report paths.)*
 
-- **`gradeRetrieval(query, chunks, deps): Promise<CragGrade>`** — Routes model output to CORRECT/AMBIGUOUS/INCORRECT enum
-- **`rewriteQuery(query, deps): Promise<string>`** — Rewrites query via router model, returns first line or falls back to original
-- **`correctiveRetrieve(query, recall, deps): Promise<{query, chunks}>`** — Bounded single-pass corrective flow: rewrite query → re-recall
+## What was executed, per brief step
 
-## Files Created/Modified
+1. **Step 1 — scoping eval** (`tests/mcp/eval-scoping.test.ts`): created verbatim from the brief. Biome required a formatting-only rewrite (`lint -- --write`: line-width wraps on `noop`/`firstToolPicked`/`describe.skipIf` — zero logic change; the pre-format version had already passed live). Ollama was up, so the eval **ran live**, not skipped — see "Eval results" below.
+2. **Step 2 — live-verify**: full sequence run against real Ollama with `AGENT_MCP_AUTO_APPROVE=1` (non-TTY shell; the designed headless consent path). Evidence below. `mcp.json` reverted via `git checkout mcp.json` and `.mcp-approvals.json` deleted afterward — both confirmed (`git diff HEAD -- mcp.json` empty; `ls .mcp-approvals.json` → no such file).
+3. **Step 3 — `docs/architecture.md`**: new `## 14. MCP mount registry & starter pack (Slice 15)` inserted after §13 Provisioning; On-disk stores → §15, Testing strategy → §16, Glossary → §17; the single internal cross-ref to the old §16 (Crews section, "the orchestrator (§16 Glossary…") updated to §17 — a repo-wide grep for `§14|§15|§16` found no other stale refs outside `docs/superpowers/` historical plans/specs (deliberately untouched — they are point-in-time records). §2 Mermaid: `mcpconfig`/`mcpmount`/`mcppack` nodes added to the MCP subgraph, `mcp.json · registry` node added to Declarations, the three `chat`/`flow`/`crewcli` dotted `-. mounts .->` edges rerouted from `mcpclient` to `mcpmount` (plus solid `→ mcpconfig` edges), `agents -. hold tools .-> mcpclient` kept, `mcpmount --> mcpclient` + `mcpconfig --> mcpjson` added. §3 sequence line changed to `buildRegistry() (offline merge) + loadMcpConfig() → consent gate → mountAll()`. Layer-table **Tools / MCP** row now names config/consent/mount/pack (+ the two in-repo servers). §16 Testing strategy MCP bullet expanded to name the real HTTP round-trip (`mount-http.test.ts`), both stdio subprocess round-trips (`server.test.ts`, `sqlite-server.test.ts`), `cli-add`, `tool-span`, and the eval. Glossary "Mounting an MCP server" entry rewritten (registry + pack replace the presets; consent + pinning mentioned).
+4. **Step 4 — `README.md`**: Status line → Slice 15 complete; intro paragraph tense-corrected; slice-table row 15 added (✅ Done); new "MCP mount registry & starter pack (Slice 15)" feature paragraph after the Slice-14 one (registry + consent/pinning + 12-entry pack + `bun run mcp` CLI, §14 link); "Next" row → Phase D agent-builder (or a Codex-delegate follow-on). Additionally corrected two rows the brief didn't list but that were stale against this slice's code (accuracy hard-line): the project-structure table's `src/mcp/` row (was "server.ts + client.ts" only) and `src/cli/` row (missing `mcp.ts`).
+5. **Step 5 — `docs/ROADMAP.md`**: Phase-C table — mount registry and starter pack both `✅ shipped (Slice 15)` (Codex backup left open; pack row notes Postgres/shell deliberately excluded — no maintained official server / needs sandboxing); gap-table Integration-library row `🟡 1 server…` → `✅ mcp.json registry + 12-entry pack (Slice 15)`; recommended-sequence item 8 → `✅ shipped, Slice 15` with detail + spec link; product-surface prose (lines 38–42) rewritten (registry + pack replace "1 native tool + 1 mounted server"); new `### Slice 15 follow-ons (deferred deliberately — MUST be included in future, not dropped)` mirroring spec §12's seven items (Codex delegate · OAuth `authProvider` · live official-registry query v0.1/GA-pending · shell server/sandboxing · `list_changed`/notifications — pinning+re-prompt is the posture · roots/sampling spec-deprecated · spec-2026-07-28/TS-SDK-v2 migration) **plus two live-verify-discovered items** (below).
+6. **Step 6 — SDD ledger + gate + commit**: dense S15 Task 6 entry appended to `.superpowers/sdd/progress.md` per house format (live-verify results, both gaps, logged-deferred items, doc-surface inventory, gate numbers); full gate run in order (docs:check → typecheck → lint → full `bun test`, ~4 min); committed with the brief's exact message.
+7. **Step 7 — Artifact regen**: **skipped per controller instruction** — the controller regenerates the snapshot Artifact. Not silently dropped: recorded in the ledger entry and here.
 
-- **`src/verification/crag.ts`** (28 lines) — Implements three export functions
-- **`tests/verification/crag.test.ts`** (31 lines) — Two tests: label→enum mapping, rewrite+recall flow
-
-## TDD Steps
-
-### Step 1 & 2: Failing Tests ✅
-Created test file; ran `bun test` → FAIL (file not found).
-
-### Step 3: Implementation ✅
-Implemented per brief:
-- `gradeRetrieval`: prompt → `generate()` → parse to enum (CORRECT/AMBIGUOUS/INCORRECT)
-- `rewriteQuery`: prompt → `generate()` → `.split('\n')[0]?.trim()` (no non-null assertion; use optional chain)
-- `correctiveRetrieve`: call rewriteQuery → re-recall with rewritten query → return both
-
-### Step 4: GREEN + Lint Clean ✅
-```
-bun test: 2 pass, 0 fail
-bun run typecheck: pass (no errors)
-bun run lint:file: pass (no warnings/errors)
-```
-
-Key fixes:
-- Replaced non-null assertion `[0]!` with optional chain `[0]?`
-- Fixed imports: `type` imports before value imports
-- Fixed string concat to template literal in tests
-- Properly typed `deps` as `VerifyDeps` (not `any`)
-
-### Step 5: Commit ✅
-```
-fb364bf feat(verification): CRAG retrieval grader + bounded corrective retrieve
-```
-Git hooks ran: `docs-check` passed (no new src subsystems).
-
-## Self-Review
-
-**Code Quality:**
-- Functions are small, focused, pure (no side effects)
-- Type-safe: all imports properly typed, no `any` escapes
-- Error handling: fallbacks (e.g., `|| query` if rewrite fails)
-
-**Test Coverage:**
-- ✅ Label→enum mapping (INCORRECT → CragGrade.Incorrect)
-- ✅ Query rewrite + single re-recall flow
-- Mocks `deps.generate()` + custom `recall()` injected
-- Tests are isolated, deterministic
-
-**Linting:**
-- No console.log, no type errors, no style violations
-- All imports organized alphabetically
-- Imports split into `type` and value; `type` comes first
-
-## Concerns
-
-**None.** Implementation is clean, follows brief exactly, passes all checks.
-
-## Test Output
+## Eval results (Step 1, ran live)
 
 ```
-bun test v1.3.11
- 2 pass
- 0 fail
- 3 expect() calls
-Ran 2 tests across 1 file. [9.00ms]
+bun test tests/mcp/eval-scoping.test.ts
+[eval] scoped 4/4 vs merged 4/4 (read_file tasks)
+1 pass / 0 fail  [31.63s]
 ```
 
----
+- Model: `qwen3.5:9b` (`models/qwen-fast.ts`), confirmed pulled via `/api/tags` before running.
+- Assertion (`scopedHits ≥ 3/4`) **passed** at 4/4.
+- **Honest note:** the merged set also hit 4/4 — at this model scale **no scoped-vs-merged degradation was measured**. The eval therefore demonstrates that scoping doesn't regress and establishes a logged comparison baseline; it does **not** demonstrate a scoping accuracy *benefit* in this run (a weaker/router-class model would be expected to show the gap). `docs/architecture.md` §14 "Scoping eval" states exactly this — the doc does not oversell the result.
 
-**Status:** COMPLETE ✅  
-**TDD:** RED → GREEN ✅  
-**Typecheck:** Pass ✅  
-**Lint:** Clean ✅  
-**Commit:** fb364bf ✅
+## Live-verify evidence (Step 2)
 
-## Final-review fix (#1 bar.done + #2 docs honesty)
+All runs with `AGENT_MCP_AUTO_APPROVE=1` (non-TTY shell — interactive consent prompts cannot fire here; that is the designed headless path). **The interactive TTY consent-prompt UX is deferred to the user's own first interactive run** — recorded here, in the ledger, and in arch.md §14.
 
-Applied two whole-branch-review fixes to Slice 14 provisioning (branch `slice-14-provisioning`, base HEAD `92f3500`). Scope was strictly these two items — nothing else touched.
+| Command | Outcome |
+|---|---|
+| `bun run mcp list` | All **12** pack entries rendered, with `✓ in mcp.json` markers on file-tools/fetch and 🔑 markers on github/brave-search/exa-search |
+| `bun run mcp add git` / `add sqlite` | Both `added "<name>" to …/mcp.json`, exit 0; mcp.json round-tripped correctly |
+| `bun run mcp status` | `active file-tools (stdio; agents: file_qa)` · `active fetch (stdio; agents: web_fetch)` · `active git (stdio; agents: all)` · `active sqlite (stdio; agents: all)` |
+| `bun run flow fetch-then-summarize "https://example.com"` | Mounted file-tools/fetch/git (sqlite failed — Gap 2 below, degraded per-entry as designed); fetch worked via the registry; correct 3-bullet summary produced; `runs/flow-13706/` written |
+| `bun run src/cli/chat.ts "what is in package.json?"` | Router delegated to `file_qa`; `file_qa`'s toolset (verified in `spans.jsonl` `ai.prompt.tools`) = `read_file` + the unscoped git server's 13 tools — the `forAgent` slice semantics working exactly as specified (scoped `fetch` correctly absent). Agent called `read_file` but chose path `/package.json` → ENOENT → honest "path doesn't exist" answer. A model-prompting/path issue, **not** a registry defect. `runs/run-16992/` written |
+| `bun run crew research-crew "local-first AI agents"` | Same registry mounted; 2-task sequential crew (gather → brief) completed with a correct result; `runs/crew-18036/` written |
 
-### Fix #1 (Important) — `bar.done()` on terminal progress event
+- **Approvals persist / no re-prompt:** `.mcp-approvals.json` was created on the first mounting run (4 records; `file-tools`/`fetch`/`git` with `specHash`+`toolsHash`+`approvedAt`; `sqlite` with `specHash` only — it never mounted, so no tools were pinned, which is itself correct behavior). Subsequent runs (chat, crew) reused the records without re-consenting — verified across 3 mounting runs.
+- **Traces:** `workflow.tool` span present in `runs/flow-13706/spans.jsonl` ✔; `ai.toolCall`/`ai.generateText` spans present in all runs ✔; **`mcp.mount` span absent from every run's spans.jsonl** ✘ → investigated, root-caused, documented as Gap 1 below (the brief's expectation "traces show `mcp.mount` + `workflow.tool` spans" is half-met, honestly recorded rather than papered over).
+- **GitHub remote HTTP: logged-deferred.** `GITHUB_PAT` is not set on this machine (checked `${GITHUB_PAT:+yes}` → no), so the `github` entry was never activated (correctly dormant-eligible) and the Streamable-HTTP remote path was not live-verified. Recorded in the ledger per the brief's instruction. (The HTTP transport itself is covered by the real in-process HTTP round-trip test, `tests/mcp/mount-http.test.ts`.)
+- **Cleanup:** `.mcp-approvals.json` deleted; `git checkout mcp.json` restored the committed 2-entry default; both re-verified before committing.
 
-**Problem:** `src/provisioning/provisioner.ts`'s `onProgress` callback (in the sequential download loop, step 6 of `runProvision`) routed every `DownloadProgress` event — including the terminal `Done`/`Failed` phase — through `deps.ui.bar.render(p)`. In TTY mode, `ProgressBar.render()` (`src/provisioning/ui/progress-bar.ts`) writes `\r\x1b[2K<line>` with no trailing newline, so the "100%" finish line for each model was clobbered by the next model's first `\r` write (and the very last model's line was clobbered by the summary output). `ProgressBar.done()` exists specifically to emit the final line *with* a trailing `\n`, but was never called.
+## Two gaps found by live-verify (documented, deliberately not fixed in Task 6)
 
-**Fix (TDD: red → green):**
-1. Added a failing test first in `tests/provisioning/provisioner.test.ts`: extended the fake `ui.bar` to record every `render()` and `done()` call into `barEvents.{render,done}` arrays, and changed the fake provider to emit one intermediate `Downloading` event followed by the terminal `Done` event. New test `'calls bar.done() on the terminal Done event, bar.render() for intermediate events'` asserts `barEvents.render` has exactly 1 entry (the `Downloading` phase) and `barEvents.done` has exactly 1 entry (the `Done` phase).
-   - Confirmed RED: `expect(d.barEvents.render).toHaveLength(1)` failed with `Received length: 2` (both events were going through `render`).
-2. Implemented the fix in `src/provisioning/provisioner.ts`: imported `DownloadPhase` from `./types.ts` (added to the existing `import type { DownloadProgress, DownloadProvider } from './types.ts'`, now split into a value + type import), and changed the `onProgress` callback to:
-   ```ts
-   onProgress: (p) =>
-     p.phase === DownloadPhase.Done || p.phase === DownloadPhase.Failed
-       ? deps.ui.bar.done(p)
-       : deps.ui.bar.render(p),
-   ```
-3. Confirmed GREEN: all 4 tests in `provisioner.test.ts` pass (the 3 pre-existing consent/degrade tests untouched in behavior, plus the new one).
+### Gap 1 — `mcp.mount` span never lands in `runs/<id>/spans.jsonl` (real integration bug, pre-existing ordering exposed by new instrumentation)
 
-### Fix #2 (Minor) — stop implying LM Studio is routed via `providerFor`
+- **Symptom:** in all four live runs, `spans.jsonl` contained `workflow.tool`/`crew.run`/`ai.*` spans but **never** `mcp.mount`.
+- **Root cause:** all three CLIs mount **before** the per-run tracer provider exists:
+  - `src/cli/flow.ts:139` — `withMcpMountSpan(...)` in `main()`; but `initRunTelemetry` is only called at `src/cli/flow.ts:75` inside `runFlow` (via `createRun` at :74).
+  - `src/cli/chat.ts:109` — `withMcpMountSpan(...)` in `main()`; `initRunTelemetry` at `src/cli/run-chat.ts:20` inside `runChat`.
+  - `src/cli/crew.ts:90` — `withMcpMountSpan(...)` in `main()`; `initRunTelemetry` at `src/cli/crew.ts:30` inside `runCrewCli`.
+  - `src/telemetry/provider.ts:37-53` (`initRunTelemetry`) is what registers the `BasicTracerProvider`; before it runs, `withMcpMountSpan`'s `inSpan` executes against OTel's global **no-op** tracer, so the span is created, never exported, and lost.
+- **Why not fixed here:** Task 6's declared scope is eval + docs + ledger + gate; the fix is a 3-file CLI-sequence refactor (hoist `createRun`/`initRunTelemetry` into each `main()` before mounting, or move mounting inside `runFlow`/`runChat`/`runCrewCli`) that touches the exported `FlowDeps`/`CrewCliDeps` shapes other tests depend on — wrong risk profile at the tail of a slice, and the ordering itself **pre-dates Slice 15** (arch.md §3 already showed "mount MCP tools" before `initRunTelemetry` in the pre-Slice-15 flow; Task 5 added a span to that already-early step). Owning it as a current, honestly-stated limitation — not deflecting to "Task 5's bug": Task 5's tests verified the span emits under `registerTestProvider()` (true) but no task verified it lands in a real run's file until this live-verify. That is exactly the class of bug the live-verify gate exists to catch.
+- **Where recorded:** `docs/architecture.md` §14 "Telemetry" (a "Known gap" paragraph — states plainly that `mcp.mount` does **not** currently appear in `runs/<id>/spans.jsonl` and why), `docs/ROADMAP.md` "Slice 15 follow-ons" bullet with the fix options, and the SDD ledger entry.
 
-**Problem:** `docs/architecture.md` §13 already honestly notes LM Studio's adapter is implemented + contract-tested but not reachable via `providerFor` (it shares `ProviderKind.MlxServer` with the HF-fetch provider, so `providerFor(MlxServer)` resolves to `createHfFetchProvider`). `README.md` and `docs/ROADMAP.md`, however, described the download protocol as covering "all four runtimes" / "LM Studio delegating" without that caveat — a soft overclaim on two hard-line docs surfaces.
+### Gap 2 — `sqlite` pack entry's default DB path fails on a bare checkout (UX polish, not a correctness bug)
 
-**Exact clauses added** (same sentence, reused verbatim in both files to match tone):
-> "LM Studio's delegating adapter is implemented + contract-tested but not yet routed via `providerFor` — it shares the `MlxServer` kind today; wiring it is a logged follow-on."
+- **Symptom:** every mounting run printed `SQLiteError: unable to open database file (SQLITE_CANTOPEN)` then `MCP server "sqlite" failed to mount: Connection closed`; the other three servers mounted fine (per-entry degrade worked exactly as designed — no crash, no cross-contamination).
+- **Root cause:** `src/mcp/pack.ts:24` ships the entry as `args: ['run', 'src/mcp/sqlite-server.ts', 'data/agent.db']`, and `src/mcp/sqlite-server.ts:7` (`new Database(dbPath)`) — `bun:sqlite` does not create parent directories, and `data/` does not exist in the repo (untracked, no `.gitkeep`). First mount on a bare clone therefore always fails until `mkdir -p data`.
+- **Where recorded:** arch.md §14 module list (sqlite-server bullet states the precondition), ROADMAP "Slice 15 follow-ons" bullet, ledger. Candidate fixes for the follow-up: `mkdirSync(dirname(dbPath), {recursive:true})` in the server, or defaulting the pack entry to `:memory:`.
 
-- **`README.md`** — appended to the Slice-14 Status paragraph (the sentence ending "...doesn't persist them to disk or compute a real checksum yet)."), right after the three-adapters description.
-- **`docs/ROADMAP.md`** — added in two spots:
-  1. The "Alternate runtimes & the Mac Mini era" blockquote (the "**Slice 14 lays the download half of these**" note that says `DownloadProvider` + `CatalogSource` cover "**all four**" runtimes) — clause appended after the existing live-verify-deferred sentence.
-  2. Recommended-sequence item 7 ("✅ shipped, Slice 14 — First-boot model provisioning..."), inline after the "**all four runtimes** (Ollama + LM Studio delegating; llama.cpp + MLX via one shared HuggingFace fetcher)" clause.
+## Docs-accuracy self-audit (re-read each doc claim against the code as committed)
 
-No existing deferred-verify statements or the "Slice 14 follow-ons" section were removed or weakened — this only adds the routing caveat alongside them (ROADMAP.md line ~232 already had a more detailed version of this same fact under "Deferred items," which was left untouched).
+- **"12 entries"** — counted in `src/mcp/pack.ts` `STARTER_PACK` (file-tools, sqlite, filesystem, memory, sequential-thinking, fetch, git, time, playwright, github, brave-search, exa-search) and confirmed rendered by `bun run mcp list`. ✔
+- **`ATTR.MCP_TRANSPORT` "defined but not emitted"** — `src/telemetry/spans.ts:60` defines it; grep shows no `setAttribute`/`addEvent` uses it. §14 Telemetry says exactly "defined … but **not yet set on any span**". ✔
+- **sqlite `query` tool "SELECT-gated"** — `src/mcp/sqlite-server.ts:27` `/^select\b/i` prefix gate confirmed; everywhere the docs mention the sqlite server they say SELECT-only `query` + separate `execute`. ✔
+- **Secrets never stored/displayed** — `src/mcp/consent.ts:20-46` (`specHash` hashes env-key/header **names** only, from `raw`) and `:100-112` (`describeEntry` renders `raw`, unexpanded). §14's pinning section matches. ✔
+- **Non-TTY consent = skip-with-warning, never hang** — `src/mcp/consent.ts:150-155`. §14 says exactly that, naming `AGENT_MCP_AUTO_APPROVE=1`. ✔
+- **`createFileTools`/`createFetchTools` "no longer called by any CLI"** — grep over `src/`: only defined in `client.ts`, referenced nowhere else in `src/` (test callers only). Glossary + §14 both phrase it as "still in `client.ts` but no longer called by any CLI". ✔
+- **`forAgent` semantics ("unscoped entries + entries listing this agent")** — `src/mcp/mount.ts:154-161`; independently confirmed live via `run-16992`'s `ai.prompt.tools` (file_qa saw read_file + all 13 git tools, not fetch). ✔
+- **Drift/rug-pull re-prompt path** — `src/mcp/mount.ts:106-125` (`checkDrift` → re-ask on TTY / auto-yes passes / non-TTY declines + closes the just-mounted server). §14 wording matches, including the "or, non-interactively without auto-approve, declines and skips" branch. ✔
+- **Eval claims** — §14 reports scoped 4/4 AND merged 4/4 and explicitly says the comparison "did not demonstrate a scoped-vs-merged accuracy *gap* on this occasion". Not overstated. ✔
+- **Mermaid edges vs real imports** — `chat.ts`/`flow.ts`/`crew.ts` all import `loadMcpConfig` (config.ts) + `mountAll` (mount.ts); `mount.ts` imports `client.ts`; `config.ts` reads `mcp.json`. The added edges (`{chat,flow,crewcli} → mcpconfig`, `-. mounts .-> mcpmount`, `mcpmount → mcpclient`, `mcpconfig → mcpjson`) match; `mcppack` is intentionally left node-only in the graph (its consumers are `cli/mcp.ts` + the future agent-builder, and `src/cli/mcp.ts` has no node in the §2 map — consistent with `memory.ts`/`runs.ts` granularity). ✔
+- **Testing-strategy §16 bullet** — every named test file exists in `tests/mcp/` and does what's claimed (verified `mount-http.test.ts` really runs a `node:http` + `StreamableHTTPServerTransport` server; `sqlite-server.test.ts` really uses a tmpdir DB file). ✔
+- **Live-verify paragraph in §14** — matches this report's evidence table 1:1, including the failures. ✔
 
-### `bun run check` (final gate)
+## Deferred / owed items (explicit)
 
-```
-$ bun run docs:check && bun run typecheck && bun run lint && bun run test
-✔ docs-check: living docs present + linked; every src subsystem documented.
-$ tsc --noEmit                     → clean, no errors
-$ biome check .                    → 6 pre-existing noExplicitAny warnings (all pre-dating this change,
-                                      in tests/provisioning/{provisioner,snapshot-source}.test.ts and
-                                      tests/resource/ollama-control.test.ts); 0 errors
-$ bun test
- 367 pass
- 2 skip
- 0 fail
- 772 expect() calls
-Ran 369 tests across 117 files. [144.77s]
-```
-Exit code: 0. `tests/provisioning/provisioner.test.ts` alone: 4 pass, 0 fail. `tests/provisioning/` full suite: 54 pass, 0 fail.
-
-All 4 `noExplicitAny` warnings in `provisioner.test.ts` (lines 45, 65, 69, 131 post-edit) pre-date this change — verified via `git show HEAD:tests/provisioning/provisioner.test.ts` — no new lint issues introduced.
-
-### Commit
-
-`fix(provisioning): call bar.done() on terminal progress + honest LM-Studio-not-routed docs (Slice 14 final review)`
+- **Interactive TTY consent-prompt UX** — not exercisable from this non-TTY session; deferred to the user's first interactive run. Recorded in ledger + arch.md §14.
+- **GitHub remote-HTTP live-verify** — logged-deferred (no `GITHUB_PAT`). Recorded in ledger.
+- **Snapshot Artifact regen (4th surface)** — controller's responsibility per task briefing; owed post-review (needs the MCP-registry node/edges, "Mounted deliberately" concept card, `mcp` Terminal scenario, footer "15 slices · 417 tests").
+- **Gap 1 + Gap 2 fixes** — ROADMAP "Slice 15 follow-ons".
