@@ -1,0 +1,194 @@
+import type { ToolSet } from 'ai';
+import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
+import {
+  type McpMountSpec,
+  type MountedServer,
+  mountMcpServer,
+} from './client.ts';
+import {
+  type ApprovalRecord,
+  approvalsPath,
+  type ConsentDeps,
+  checkDrift,
+  ensureConsent,
+  pinTools,
+  readApprovals,
+  toolsHash,
+  writeApprovals,
+} from './consent.ts';
+import {
+  type McpConfig,
+  type McpServerEntry,
+  McpTransportKind,
+} from './types.ts';
+
+export type MountedRegistry = {
+  /** Every mounted tool (workflow tool-steps dispatch by name against this). */
+  merged: ToolSet;
+  /** The slice an agent sees: unscoped entries + entries listing this agent. */
+  forAgent(name: string): ToolSet;
+  mounted: { name: string; toolCount: number }[];
+  skipped: { name: string; reason: string }[];
+  close(): Promise<void>;
+};
+
+export type MountAllDeps = {
+  mount?: (spec: McpMountSpec) => Promise<MountedServer>;
+  consent?: Partial<ConsentDeps>;
+  approvalsFile?: string;
+  warn?: (msg: string) => void;
+};
+
+function toSpec(entry: McpServerEntry): McpMountSpec {
+  if (entry.kind === McpTransportKind.Http) {
+    return { type: 'http', url: entry.url, headers: entry.headers };
+  }
+  return { command: entry.command, args: entry.args, env: entry.env };
+}
+
+/** Mount every approved config entry; consent-gate first, pin tool definitions
+ *  after. Per-entry degrade: one failure never blocks the others. */
+export async function mountAll(
+  config: McpConfig,
+  deps: MountAllDeps = {},
+): Promise<MountedRegistry> {
+  const warn = deps.warn ?? ((m: string) => console.warn(m));
+  const mount = deps.mount ?? mountMcpServer;
+  const approvalsFile = deps.approvalsFile ?? approvalsPath();
+  const store: Record<string, ApprovalRecord> = readApprovals(approvalsFile);
+  const input = stdinInput();
+  const consent: ConsentDeps = {
+    store,
+    ask: (q) => askYesNo(q, { input, autoYes: false }),
+    isTTY: process.stderr.isTTY ?? false,
+    autoYes: process.env.AGENT_MCP_AUTO_APPROVE === '1',
+    warn,
+    ...deps.consent,
+  };
+
+  for (const w of config.warnings) warn(w);
+  for (const d of config.dormant) {
+    warn(
+      `MCP server "${d.name}" is dormant — set ${d.missingVars.join(', ')} to activate it`,
+    );
+  }
+
+  const servers: { entry: McpServerEntry; server: MountedServer }[] = [];
+  const mounted: { name: string; toolCount: number }[] = [];
+  const skipped: { name: string; reason: string }[] = [];
+
+  for (const entry of config.entries) {
+    let ok: boolean;
+    try {
+      ok = await ensureConsent(entry, consent);
+    } catch (cause) {
+      warn(
+        `MCP server "${entry.name}" has a malformed config: ${(cause as Error).message}`,
+      );
+      skipped.push({ name: entry.name, reason: (cause as Error).message });
+      continue;
+    }
+    if (!ok) {
+      skipped.push({ name: entry.name, reason: 'consent not granted' });
+      continue;
+    }
+    let server: MountedServer;
+    try {
+      server = await mount(toSpec(entry));
+    } catch (cause) {
+      warn(
+        `MCP server "${entry.name}" failed to mount: ${(cause as Error).message}`,
+      );
+      skipped.push({ name: entry.name, reason: (cause as Error).message });
+      continue;
+    }
+    const hash = toolsHash(server.tools);
+    if (checkDrift(store, entry.name, hash)) {
+      warn(
+        `MCP server "${entry.name}" changed its tool definitions since approval (possible rug-pull)`,
+      );
+      const reOk = consent.autoYes
+        ? true
+        : consent.isTTY
+          ? await consent.ask(
+              `Tool definitions for "${entry.name}" CHANGED. Re-approve?`,
+            )
+          : false;
+      if (!reOk) {
+        await server.close().catch(() => {});
+        skipped.push({
+          name: entry.name,
+          reason: 'tool-definition drift not re-approved',
+        });
+        continue;
+      }
+    }
+    pinTools(store, entry.name, hash);
+    servers.push({ entry, server });
+    mounted.push({
+      name: entry.name,
+      toolCount: Object.keys(server.tools).length,
+    });
+  }
+
+  try {
+    writeApprovals(store, approvalsFile);
+  } catch (cause) {
+    warn(`could not persist MCP approvals: ${(cause as Error).message}`);
+  }
+
+  const merged: ToolSet = {};
+  for (const { entry, server } of servers) {
+    for (const [name, t] of Object.entries(server.tools)) {
+      if (merged[name]) {
+        warn(
+          `tool "${name}" from MCP server "${entry.name}" overrides an earlier server's tool of the same name`,
+        );
+      }
+      merged[name] = t;
+    }
+  }
+
+  return {
+    merged,
+    forAgent(agentName: string): ToolSet {
+      const slice: ToolSet = {};
+      for (const { entry, server } of servers) {
+        if (entry.agents && !entry.agents.includes(agentName)) continue;
+        Object.assign(slice, server.tools);
+      }
+      return slice;
+    },
+    mounted,
+    skipped,
+    async close(): Promise<void> {
+      for (const { entry, server } of servers) {
+        try {
+          await server.close();
+        } catch (cause) {
+          warn(
+            `closing MCP server "${entry.name}" failed: ${(cause as Error).message}`,
+          );
+        }
+      }
+    },
+  };
+}
+
+/** Typo guard: warn when an entry's agents list names an agent that doesn't exist. */
+export function warnUnknownAgents(
+  config: McpConfig,
+  knownAgents: string[],
+  warn: (msg: string) => void,
+): void {
+  const known = new Set(knownAgents);
+  for (const entry of config.entries) {
+    for (const a of entry.agents ?? []) {
+      if (!known.has(a)) {
+        warn(
+          `mcp.json entry "${entry.name}" targets unknown agent "${a}" (known: ${knownAgents.join(', ')})`,
+        );
+      }
+    }
+  }
+}
