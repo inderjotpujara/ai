@@ -80,17 +80,26 @@ export function loadMcpConfig(
   }
   for (const [name, raw] of Object.entries(servers)) {
     const schema = isHttpLike(raw) ? httpEntrySchema : stdioEntrySchema;
-    const parsed = schema.safeParse(raw);
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      const where = issue?.path?.length ? ` at "${issue.path.join('.')}"` : '';
-      cfg.warnings.push(
-        `mcp.json entry "${name}" is invalid and was skipped:${where} ${issue?.message ?? 'schema mismatch'}`,
-      );
-      continue;
+    const fallback =
+      schema === httpEntrySchema ? stdioEntrySchema : httpEntrySchema;
+    let parseResult = schema.safeParse(raw);
+    if (!parseResult.success) {
+      const secondResult = fallback.safeParse(raw);
+      if (secondResult.success) {
+        parseResult = secondResult;
+      } else {
+        const issue = parseResult.error.issues[0];
+        const where = issue?.path?.length
+          ? ` at "${issue.path.join('.')}"`
+          : '';
+        cfg.warnings.push(
+          `mcp.json entry "${name}" is invalid and was skipped:${where} ${issue?.message ?? 'schema mismatch'}`,
+        );
+        continue;
+      }
     }
     const missing: string[] = [];
-    const entry = toEntry(name, parsed.data, raw, env, missing);
+    const entry = toEntry(name, parseResult.data, raw, env, missing);
     if (missing.length > 0) {
       cfg.dormant.push({ name, missingVars: [...new Set(missing)] });
       continue;

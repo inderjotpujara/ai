@@ -113,4 +113,22 @@ describe('loadMcpConfig', () => {
       'mcp.json entry "bad" is invalid and was skipped: Invalid input',
     );
   });
+  it('accepts an explicit type:"stdio" entry (VS Code convention) as stdio', () => {
+    const path = writeConfig({
+      mcpServers: {
+        s: { type: 'stdio', command: 'bun', args: ['run', 'x.ts'] },
+      },
+    });
+    const cfg = loadMcpConfig(path, {});
+    expect(cfg.entries).toHaveLength(1);
+    expect(cfg.entries[0]?.kind).toBe(McpTransportKind.Stdio);
+    expect(cfg.warnings).toEqual([]);
+  });
+  it('accepts a stdio entry carrying a stray url key (union tolerance)', () => {
+    const path = writeConfig({
+      mcpServers: { s: { command: 'bun', url: 'https://stray.example' } },
+    });
+    const cfg = loadMcpConfig(path, {});
+    expect(cfg.entries[0]?.kind).toBe(McpTransportKind.Stdio);
+  });
 });
