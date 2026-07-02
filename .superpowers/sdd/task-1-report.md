@@ -133,3 +133,60 @@ bun run lint:file    — ✓ pass (no errors)
 ```
 Message: fix(mcp): branch-targeted config validation errors + raw-unexpanded regression test (Slice 15 Task 1 review)
 ```
+
+---
+
+# Task 1 Re-Review Fix — Union Tolerance with Fallback Parse
+
+## Summary of Regression
+
+The previous fix (branch-targeted validation) introduced a regression: the `isHttpLike()` detector routes entries by the presence of `'url'` or `'type'` keys, but this breaks VS Code–convention entries like `{ "type": "stdio", "command": "bun", "args": [...] }` because the presence of the `'type'` key alone triggers httpEntrySchema, which rejects 'stdio' as an invalid type value.
+
+Symmetrically, a stdio entry with a stray `url` key would fail if it doesn't match the http schema structure.
+
+## Solution: Fallback Parse with Union Tolerance
+
+**File:** `src/mcp/config.ts`
+
+Added a schema fallback: if the primary schema (routed by `isHttpLike()`) fails, attempt parsing with the alternate schema before reporting an error. This restores the union tolerance of the original `z.union` approach while keeping branch-targeted error messages.
+
+**Changes:**
+- Compute both schemas: primary and fallback
+- Try primary schema first
+- On failure, try fallback schema
+- Only report error if both fail (preserving detailed error from primary)
+
+**Test Coverage:**
+Added two regression tests to `tests/mcp/config.test.ts`:
+1. **"accepts an explicit type:'stdio' entry (VS Code convention) as stdio"** — validates that `{ type: 'stdio', command: '...', args: [...] }` is accepted
+2. **"accepts a stdio entry carrying a stray url key (union tolerance)"** — validates that union tolerance works (stray keys don't cause parse failure)
+
+## Test Results
+
+```
+bun test tests/mcp/config.test.ts
+ 12 pass
+ 0 fail
+ 26 expect() calls
+Ran 12 tests across 1 file. [38.00ms]
+```
+
+All 12 tests pass: 10 original + 2 new regression tests. The existing test "malformed-entry warning names the actual problem" still passes, confirming error messages remain accurate.
+
+## Lint & Type Check
+
+```
+bun run typecheck    — ✓ pass
+bun run lint:file    — ✓ pass
+```
+
+## Files Modified
+
+- `src/mcp/config.ts` — fallback parse logic + formatting
+- `tests/mcp/config.test.ts` — 2 regression tests + formatting
+
+## Re-Review Commit
+
+```
+Message: fix(mcp): restore union tolerance with schema fallback in config validation (Slice 15 Task 1 re-review)
+```
