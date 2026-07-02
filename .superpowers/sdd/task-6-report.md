@@ -80,6 +80,20 @@ All runs with `AGENT_MCP_AUTO_APPROVE=1` (non-TTY shell — interactive consent 
 - **Testing-strategy §16 bullet** — every named test file exists in `tests/mcp/` and does what's claimed (verified `mount-http.test.ts` really runs a `node:http` + `StreamableHTTPServerTransport` server; `sqlite-server.test.ts` really uses a tmpdir DB file). ✔
 - **Live-verify paragraph in §14** — matches this report's evidence table 1:1, including the failures. ✔
 
+## Docs-accuracy fix (post-review, Task 6 cleanup)
+
+Fixed stale prose in `docs/architecture.md` §9 and §10 that described CLI mount patterns using pre-Slice-15 language ("mounts file+fetch MCP tools ... closing the fetch server, then the file server"). Updated to reflect the real Slice-15 registry-driven pattern:
+
+- **§9 flow.ts entry (line 473):** Changed "mounts file+fetch MCP tools ... closing ... the fetch server, then the file server" → "loads `mcp.json` via `loadMcpConfig()` and mounts the registry with `mountAll()` (consent-gated per §14) ... closing the selection runtime, then the mounted registry in `finally`"
+- **§9 shared live-selection runtime entry (line 475):** Changed "nested inside the mounted file/fetch MCP servers" → "nested inside the mounted MCP registry"
+- **§10 crew.ts entry (line 554):** Changed "mounts file+fetch MCP tools" → "loads `mcp.json` and mounts the registry via `loadMcpConfig()` + `mountAll()` (consent-gated per §14)"
+
+Also appended two missing deferred items to `docs/ROADMAP.md` "Slice 15 follow-ons" section (exactly as recorded in Task 6 live-verify findings):
+- **GitHub remote-HTTP live-verify** — `github` pack entry contract-tested; live-verify deferred until `GITHUB_PAT` available
+- **Interactive consent-prompt UX live-verify** — headless path live-verified; TTY interactive path unit-tested, awaits first real terminal run
+
+Both fixes maintain the accuracy hard-line: docs now match the real Slice-15 registry-driven code, not stale pre-Slice-15 hardcoded-mount language.
+
 ## Deferred / owed items (explicit)
 
 - **Interactive TTY consent-prompt UX** — not exercisable from this non-TTY session; deferred to the user's first interactive run. Recorded in ledger + arch.md §14.
