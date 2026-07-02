@@ -17,6 +17,14 @@ export function pascalCase(snake: string): string {
     .join('');
 }
 
+/** Snake_case names only — defense-in-depth: write.ts must not trust that
+ *  every caller already ran validate.ts. Enforced at the top of writeAgent. */
+const NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
+
+function factoryName(p: AgentProposal): string {
+  return `create${pascalCase(p.name)}Agent`;
+}
+
 function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, content);
@@ -24,8 +32,9 @@ function atomicWrite(path: string, content: string): void {
 }
 
 function renderAgentFile(p: AgentProposal): string {
-  const Factory = `create${pascalCase(p.name)}Agent`;
-  // JSON.stringify safely escapes the generated strings into TS string literals.
+  const Factory = factoryName(p);
+  // JSON.stringify safely escapes every generated value into a TS string
+  // literal — including `name`, which must never be interpolated raw.
   return `import type { ToolSet } from 'ai';
 import qwenFast from '../models/qwen-fast.ts';
 import type { Agent } from '../src/core/agent-def.ts';
@@ -37,7 +46,7 @@ const SYSTEM_PROMPT = ${JSON.stringify(p.systemPrompt)};
 
 export function ${Factory}(tools: ToolSet): Agent {
   return {
-    name: '${p.name}', // validated snake_case ([a-z][a-z0-9_]*) — safe unescaped
+    name: ${JSON.stringify(p.name)},
     description: ${JSON.stringify(p.description)},
     model: createOllamaModel(qwenFast),
     systemPrompt: SYSTEM_PROMPT,
@@ -54,7 +63,7 @@ export function ${Factory}(tools: ToolSet): Agent {
 }
 
 function registerInIndex(indexPath: string, p: AgentProposal): void {
-  const Factory = `create${pascalCase(p.name)}Agent`;
+  const Factory = factoryName(p);
   let idx = readFileSync(indexPath, 'utf8');
   const importLine = `import { ${Factory} } from './${p.name}.ts';\n`;
   const entryLine = `  ${p.name}: ${Factory},\n`;
@@ -81,8 +90,23 @@ function scopeMcp(mcpConfigPath: string, p: AgentProposal): void {
   for (const s of p.suggestedServers) {
     const entry = getPackEntry(s.packName);
     if (!entry) continue; // validate.ts already guarantees palette membership
-    if (!servers[s.packName]) servers[s.packName] = { ...entry.server };
-    const current = servers[s.packName] as Record<string, unknown>;
+    if (!servers[s.packName]) {
+      // Deep-clone the nested `agents` array: a shallow `{ ...entry.server }`
+      // copy would share the pack entry's array reference, so the push()
+      // below would mutate the shared STARTER_PACK constant in
+      // src/mcp/pack.ts for entries that ship a preset `agents` list
+      // (e.g. file-tools -> ['file_qa'], fetch -> ['web_fetch']).
+      servers[s.packName] = {
+        ...entry.server,
+        agents: [
+          ...(Array.isArray(entry.server.agents)
+            ? (entry.server.agents as string[])
+            : []),
+        ],
+      };
+    }
+    const current = servers[s.packName];
+    if (!current) continue; // noUncheckedIndexedAccess: unreachable, just assigned above
     const agents = Array.isArray(current.agents)
       ? (current.agents as string[])
       : [];
@@ -95,6 +119,15 @@ function scopeMcp(mcpConfigPath: string, p: AgentProposal): void {
 /** Write the generated agent file, register it in agents/index.ts, and add/scope
  *  its suggested pack servers in mcp.json. Atomic per file. Returns files written. */
 export function writeAgent(p: AgentProposal, paths: WritePaths): string[] {
+  // Defense-in-depth: write.ts must not assume validate.ts already ran on
+  // every call path. A bad name here would otherwise produce a syntactically
+  // broken generated file, a broken import specifier/registry key, and (via
+  // `${p.name}.ts` in the on-disk path) a path-traversal write.
+  if (!NAME_PATTERN.test(p.name)) {
+    throw new Error(
+      `writeAgent: invalid agent name ${JSON.stringify(p.name)} — must match ${NAME_PATTERN}`,
+    );
+  }
   const written: string[] = [];
   const agentPath = join(paths.agentsDir, `${p.name}.ts`);
   atomicWrite(agentPath, renderAgentFile(p));
