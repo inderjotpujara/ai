@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { STARTER_PACK, getPackEntry, packByCapability } from '../../src/mcp/pack.ts';
+import {
+  getPackEntry,
+  packByCapability,
+  STARTER_PACK,
+} from '../../src/mcp/pack.ts';
 
 describe('starter pack', () => {
   it('has the 12 curated entries with unique names', () => {
@@ -13,7 +17,10 @@ describe('starter pack', () => {
     }
   });
   it('is queryable by capability (the agent-builder palette)', () => {
-    expect(packByCapability('web-search').map((e) => e.name)).toEqual(['brave-search', 'exa-search']);
+    expect(packByCapability('web-search').map((e) => e.name)).toEqual([
+      'brave-search',
+      'exa-search',
+    ]);
     expect(packByCapability('sql')[0]?.name).toBe('sqlite');
   });
   it('keyed entries declare requiresEnv and reference ${VAR} in the server value', () => {
@@ -23,7 +30,13 @@ describe('starter pack', () => {
   });
   it('never emits archived @modelcontextprotocol invocations (2025 prune)', () => {
     const all = JSON.stringify(STARTER_PACK);
-    for (const dead of ['server-postgres', 'server-sqlite', 'server-brave-search', 'server-puppeteer', 'server-github']) {
+    for (const dead of [
+      'server-postgres',
+      'server-sqlite',
+      'server-brave-search',
+      'server-puppeteer',
+      'server-github',
+    ]) {
       expect(all).not.toContain(dead);
     }
   });
