@@ -21,5 +21,5 @@ model-images/*
 *.log
 .DS_Store
 
-# MCP mount trust store (machine-local approvals; never committed). See docs/architecture.md §14
+# MCP mount trust store (machine-local approvals; never committed). See docs/architecture.md
 .mcp-approvals.json

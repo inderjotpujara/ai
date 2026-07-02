@@ -20,9 +20,11 @@ function sha256(s: string): string {
 export function specHash(entry: McpServerEntry): string {
   if (entry.kind === McpTransportKind.Http) {
     const raw = entry.raw as { url?: string; headers?: Record<string, string> };
+    if (!raw.url)
+      throw new Error(`malformed raw config for MCP server "${entry.name}"`);
     return sha256(
       JSON.stringify({
-        url: raw.url ?? entry.url,
+        url: raw.url,
         headerNames: Object.keys(raw.headers ?? {}).sort(),
       }),
     );
@@ -32,10 +34,12 @@ export function specHash(entry: McpServerEntry): string {
     args?: string[];
     env?: Record<string, string>;
   };
+  if (!raw.command)
+    throw new Error(`malformed raw config for MCP server "${entry.name}"`);
   return sha256(
     JSON.stringify({
-      command: raw.command ?? entry.command,
-      args: raw.args ?? entry.args,
+      command: raw.command,
+      args: raw.args,
       envKeys: Object.keys(raw.env ?? {}).sort(),
     }),
   );
@@ -52,7 +56,12 @@ export function toolsHash(tools: ToolSet): string {
       } catch {
         schema = 'unserializable';
       }
-      return `${name}|${(t as { description?: string }).description ?? ''}|${schema}`;
+      // JSON-serialize field array: delimiter injection impossible, schema already JSON.
+      return JSON.stringify([
+        name,
+        (t as { description?: string }).description ?? '',
+        schema,
+      ]);
     })
     .sort();
   return sha256(parts.join('\n'));
@@ -91,11 +100,15 @@ export function writeApprovals(
 export function describeEntry(entry: McpServerEntry): string {
   if (entry.kind === McpTransportKind.Http) {
     const raw = entry.raw as { url?: string; headers?: Record<string, string> };
+    if (!raw.url)
+      throw new Error(`malformed raw config for MCP server "${entry.name}"`);
     const names = Object.keys(raw.headers ?? {});
-    return `${raw.url ?? entry.url}${names.length > 0 ? `  (headers: ${names.join(', ')})` : ''}`;
+    return `${raw.url}${names.length > 0 ? `  (headers: ${names.join(', ')})` : ''}`;
   }
   const raw = entry.raw as { command?: string; args?: string[] };
-  return [raw.command ?? entry.command, ...(raw.args ?? entry.args)].join(' ');
+  if (!raw.command)
+    throw new Error(`malformed raw config for MCP server "${entry.name}"`);
+  return [raw.command, ...(raw.args ?? [])].join(' ');
 }
 
 const DANGER_PATTERNS: [RegExp, string][] = [

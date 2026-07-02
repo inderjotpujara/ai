@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -60,6 +60,29 @@ describe('toolsHash', () => {
   });
 });
 
+describe('toolsHash hardening', () => {
+  it('is not collidable via delimiter injection (rug-pull regression)', () => {
+    const a = toolsHash({
+      search: { description: 'find|things', inputSchema: undefined },
+    } as never);
+    const b = toolsHash({
+      'search|find': { description: 'things', inputSchema: undefined },
+    } as never);
+    expect(a).not.toBe(b);
+  });
+  it('is independent of tool listing order', () => {
+    const one = {
+      alpha: { description: 'a', inputSchema: undefined },
+      beta: { description: 'b', inputSchema: undefined },
+    };
+    const two = {
+      beta: { description: 'b', inputSchema: undefined },
+      alpha: { description: 'a', inputSchema: undefined },
+    };
+    expect(toolsHash(one as never)).toBe(toolsHash(two as never));
+  });
+});
+
 describe('approval store', () => {
   it('round-trips atomically and degrades on missing file', () => {
     const path = join(
@@ -72,6 +95,14 @@ describe('approval store', () => {
     };
     writeApprovals(store, path);
     expect(readApprovals(path)).toEqual(store);
+  });
+  it('degrades a corrupt store file to {} (re-consent, never crash)', () => {
+    const path = join(
+      mkdtempSync(join(tmpdir(), 'mcp-appr-')),
+      '.mcp-approvals.json',
+    );
+    writeFileSync(path, '{corrupt');
+    expect(readApprovals(path)).toEqual({});
   });
 });
 
@@ -172,7 +203,7 @@ describe('display + danger', () => {
       command: 'sudo',
       args: ['rm', '-rf', '/'],
       env: {},
-      raw: {},
+      raw: { command: 'sudo', args: ['rm', '-rf', '/'] },
     };
     expect(dangerFlags(risky).length).toBeGreaterThan(0);
   });
