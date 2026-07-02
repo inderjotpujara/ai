@@ -8,7 +8,9 @@ import { runChat } from '../../src/cli/run-chat.ts';
 import { renderRun } from '../../src/cli/runs.ts';
 import { createFileTools } from '../../src/mcp/client.ts';
 import { unloadModel } from '../../src/resource/ollama-control.ts';
+import { createRun } from '../../src/run/run-store.ts';
 import { readSpans } from '../../src/run/run-trace.ts';
+import { initRunTelemetry } from '../../src/telemetry/provider.ts';
 import { ollamaReady } from './ollama-available.ts';
 
 const ready = await ollamaReady(qwenRouter.model);
@@ -27,12 +29,17 @@ describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
       const { tools, close } = await createFileTools();
       try {
         const orchestrator = createSuperAgent(tools, {});
-        await runChat({
-          orchestrator,
-          task: `What is written in ${filePath}?`,
-          runsRoot,
-          runId: 'live-1',
-        });
+        const run = await createRun(runsRoot, 'live-1');
+        const tel = initRunTelemetry(run.dir);
+        try {
+          await runChat({
+            orchestrator,
+            task: `What is written in ${filePath}?`,
+            run,
+          });
+        } finally {
+          await tel.shutdown();
+        }
       } finally {
         await close();
       }

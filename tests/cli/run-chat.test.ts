@@ -6,7 +6,9 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { runChat } from '../../src/cli/run-chat.ts';
 import type { Agent } from '../../src/core/agent-def.ts';
 import { createOrchestrator } from '../../src/core/orchestrator.ts';
+import { createRun } from '../../src/run/run-store.ts';
 import { readSpans } from '../../src/run/run-trace.ts';
+import { initRunTelemetry } from '../../src/telemetry/provider.ts';
 
 let root: string;
 beforeEach(async () => {
@@ -65,12 +67,18 @@ function gapOrchestrator(): Agent {
 }
 
 test('runChat records a gap run and writes the gap artifact', async () => {
-  const result = await runChat({
-    orchestrator: gapOrchestrator(),
-    task: 'email my boss',
-    runsRoot: root,
-    runId: 'run-1',
-  });
+  const run = await createRun(root, 'run-1');
+  const tel = initRunTelemetry(run.dir);
+  let result: Awaited<ReturnType<typeof runChat>>;
+  try {
+    result = await runChat({
+      orchestrator: gapOrchestrator(),
+      task: 'email my boss',
+      run,
+    });
+  } finally {
+    await tel.shutdown();
+  }
   expect(result.kind).toBe('gap');
   expect(await readFile(join(root, 'run-1', 'gap.txt'), 'utf8')).toContain(
     'send email',
@@ -99,12 +107,18 @@ function answerOrchestrator(): Agent {
 }
 
 test('runChat records an answer run and writes the answer artifact', async () => {
-  const result = await runChat({
-    orchestrator: answerOrchestrator(),
-    task: 'what is 2+2?',
-    runsRoot: root,
-    runId: 'run-2',
-  });
+  const run = await createRun(root, 'run-2');
+  const tel = initRunTelemetry(run.dir);
+  let result: Awaited<ReturnType<typeof runChat>>;
+  try {
+    result = await runChat({
+      orchestrator: answerOrchestrator(),
+      task: 'what is 2+2?',
+      run,
+    });
+  } finally {
+    await tel.shutdown();
+  }
   expect(result.kind).toBe('answer');
   if (result.kind === 'answer') {
     expect(result.text).toBe('Here is your answer.');
@@ -115,12 +129,18 @@ test('runChat records an answer run and writes the answer artifact', async () =>
 });
 
 test('runChat writes spans.jsonl with a root run span carrying the outcome', async () => {
-  const result = await runChat({
-    orchestrator: gapOrchestrator(),
-    task: 'email my boss',
-    runsRoot: root,
-    runId: 'run-span',
-  });
+  const run = await createRun(root, 'run-span');
+  const tel = initRunTelemetry(run.dir);
+  let result: Awaited<ReturnType<typeof runChat>>;
+  try {
+    result = await runChat({
+      orchestrator: gapOrchestrator(),
+      task: 'email my boss',
+      run,
+    });
+  } finally {
+    await tel.shutdown();
+  }
   expect(result.kind).toBe('gap');
   const { spans } = await readSpans(join(root, 'run-span'));
   const runSpan = spans.find((s) => s.name === 'agent.run');
@@ -129,12 +149,17 @@ test('runChat writes spans.jsonl with a root run span carrying the outcome', asy
 });
 
 test('runChat no longer writes journal.jsonl', async () => {
-  await runChat({
-    orchestrator: gapOrchestrator(),
-    task: 'x',
-    runsRoot: root,
-    runId: 'run-nojournal',
-  });
+  const run = await createRun(root, 'run-nojournal');
+  const tel = initRunTelemetry(run.dir);
+  try {
+    await runChat({
+      orchestrator: gapOrchestrator(),
+      task: 'x',
+      run,
+    });
+  } finally {
+    await tel.shutdown();
+  }
   await expect(
     stat(join(root, 'run-nojournal', 'journal.jsonl')),
   ).rejects.toThrow();
