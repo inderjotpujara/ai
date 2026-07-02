@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "file-tools": {
+      "command": "bun",
+      "args": ["run", "src/mcp/server.ts"],
+      "agents": ["file_qa"]
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "agents": ["web_fetch"]
+    }
+  }
+}
