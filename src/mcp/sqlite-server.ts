@@ -19,10 +19,17 @@ server.registerTool(
   'query',
   {
     title: 'SQL Query',
-    description: `Run a read-only SQL SELECT against the ${dbPath} SQLite database and return rows as JSON.`,
+    description: `Run a SQL SELECT against the ${dbPath} SQLite database and return rows as JSON. Only SELECT statements are accepted; use execute for writes.`,
     inputSchema: { sql: z.string() },
   },
   async ({ sql }) => {
+    const trimmed = sql.trim();
+    if (!/^select\b/i.test(trimmed)) {
+      return textResult(
+        'query only accepts SELECT statements; use the execute tool for writes',
+        true,
+      );
+    }
     try {
       const rows = db.query(sql).all();
       return textResult(JSON.stringify(rows, null, 2));
@@ -66,7 +73,9 @@ server.registerTool(
         .all() as { name: string }[];
       const out = tables.map((t) => ({
         table: t.name,
-        columns: db.query(`PRAGMA table_info(${JSON.stringify(t.name)})`).all(),
+        columns: db
+          .query(`PRAGMA table_info("${t.name.replace(/"/g, '""')}")`)
+          .all(),
       }));
       return textResult(JSON.stringify(out, null, 2));
     } catch (cause) {
