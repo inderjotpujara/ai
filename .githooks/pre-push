@@ -2,8 +2,9 @@
 # Documentation currency gate — slice-merge granularity.
 # (1) Blocks a push whose commits change src/** but do NOT update docs/architecture.md.
 # (2) On a push to main that changes docs/architecture.md (= a slice landed), also
-#     requires README.md + docs/ROADMAP.md be updated in the same push, and reminds
-#     to regenerate the interactive architecture Artifact (docs snapshot).
+#     requires README.md + docs/ROADMAP.md + .superpowers/sdd/progress.md (the SDD
+#     ledger) be updated in the same push, and reminds to regenerate the interactive
+#     architecture Artifact (docs snapshot).
 # Deliberate bypass (genuine no-doc-needed push): DOCS_OK=1 git push
 # Activate once per clone with: bun run setup
 [ "$DOCS_OK" = "1" ] && exit 0
@@ -42,15 +43,17 @@ while read -r local_ref local_oid remote_ref remote_oid; do
   # Artifact must be regenerated (not a repo file — reminded, not auto-checked).
   if [ "$remote_ref" = "refs/heads/main" ] && echo "$changed" | grep -qx 'docs/architecture.md'; then
     missing=""
-    echo "$changed" | grep -qx 'README.md'       || missing="$missing README.md"
-    echo "$changed" | grep -qx 'docs/ROADMAP.md'  || missing="$missing docs/ROADMAP.md"
+    echo "$changed" | grep -qx 'README.md'                    || missing="$missing README.md"
+    echo "$changed" | grep -qx 'docs/ROADMAP.md'              || missing="$missing docs/ROADMAP.md"
+    echo "$changed" | grep -qx '.superpowers/sdd/progress.md' || missing="$missing .superpowers/sdd/progress.md"
     if [ -n "$missing" ]; then
       echo "✖ pre-push: docs/architecture.md changed on a push to main (a slice landed),"
       echo "  but these living status docs were not updated in the same push:$missing"
       echo "  The hard line: a slice updates architecture.md AND README (status + slice table)"
-      echo "  AND docs/ROADMAP.md (status) — and you regenerate the interactive architecture"
-      echo "  Artifact (docs snapshot) from architecture.md. Update them, or, if genuinely"
-      echo "  not a slice (e.g. a typo fix), bypass once with:  DOCS_OK=1 git push"
+      echo "  AND docs/ROADMAP.md (status) AND .superpowers/sdd/progress.md (the SDD ledger) —"
+      echo "  and you regenerate the interactive architecture Artifact (docs snapshot) from"
+      echo "  architecture.md. Update them, or, if genuinely not a slice (e.g. a typo fix),"
+      echo "  bypass once with:  DOCS_OK=1 git push"
       status=1
     else
       echo "ℹ pre-push: architecture.md + README + ROADMAP updated — also regenerate the"
