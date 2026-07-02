@@ -36,10 +36,13 @@ a grounded-verification layer (claim decomposition, a MiniCheck faithfulness
 judge, bounded Corrective RAG, abstention) that opts a crew/workflow run into
 citation-checked, hallucination-resistant answers via `--verify`. The
 **product surface** is still thin beyond that: 3 agents (`super`, `file-qa`,
-`web-fetch`), 1 native tool (`read_file`) + 1 mounted MCP server
-(`mcp-server-fetch`) — first-boot model provisioning ships in Slice 14
-(Ollama live-verified; LM Studio/llama.cpp/MLX contract-tested, live-verify
-deferred).
+`web-fetch`); first-boot model provisioning shipped in Slice 14 (Ollama
+live-verified; LM Studio/llama.cpp/MLX contract-tested, live-verify
+deferred); and a declarative `mcp.json` mount registry + 12-entry curated
+starter pack shipped in Slice 15 (consent-gated mounting, spec-hash/
+tools-hash pinning against tool-definition drift, `bun run mcp
+list|status|add`) replacing the 2 hardcoded mounts (`read_file`,
+`mcp-server-fetch`) Slices 1–3 shipped.
 
 | n8n / CrewAI concept | Our analog | Status |
 |---|---|---|
@@ -47,7 +50,7 @@ deferred).
 | Hierarchical process / supervisor | orchestrator (agents-as-tools) | ✅ built |
 | Self-hosted, your infrastructure | local-first, Ollama, Mac Mini | ✅ core premise |
 | Hardware-aware scheduling | Model Manager (live RAM budget, KV quant) | ✅ built (Slices 4–7) |
-| Integration library (n8n's 400+ nodes) | mounted MCP servers | 🟡 1 server — needs a **mount registry + pack** |
+| Integration library (n8n's 400+ nodes) | mounted MCP servers | ✅ `mcp.json` registry + 12-entry pack (Slice 15) |
 | **Workflow / DAG (deterministic steps)** | **workflow engine** | ✅ **built (Slice 10)** |
 | **Crew (role + goal + task + process)** | crews / roles / tasks | ✅ built (Slice 11) |
 | Structured data between steps | response-format / typed I/O | ✅ built (Slice 10 — Zod-validated step I/O) |
@@ -132,8 +135,8 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 
 | Item | Why | Depends on |
 |---|---|---|
-| **Declarative `mcp.json` mount registry** | Generalizes Slice 3's in-code mounts: list servers + which agents get them, loaded at startup. The cheapest path to **real usefulness** and the **palette agent-builder suggests from**. | Slice 3 |
-| **Starter integration pack** | A curated set of keyless/local MCP servers — filesystem, **web-search**, git/**GitHub**, SQLite/Postgres, shell — so the platform can actually *do* things across domains. *"Power comes from tools, not the agent shell."* | mount registry |
+| **Declarative `mcp.json` mount registry** — ✅ **shipped (Slice 15)** | Generalizes Slice 3's in-code mounts: list servers + which agents get them, loaded at startup. The cheapest path to **real usefulness** and the **palette agent-builder suggests from**. | Slice 3 |
+| **Starter integration pack** — ✅ **shipped (Slice 15)** | A curated set of keyless/local MCP servers — filesystem, SQLite, **web-search** (Brave/Exa), git/**GitHub**, time, browser (Playwright) — so the platform can actually *do* things across domains. *"Power comes from tools, not the agent shell."* (Postgres/shell not in the pack — no maintained official server; shell needs a sandboxing design, see Slice 15 follow-ons.) | mount registry |
 | **Codex heavy-lifting backup** | Opt-in `@openai/codex-sdk` delegate agent (personal plan) as the single cloud escape hatch for jobs local models can't handle — never default. | Slice 2 |
 
 ## Phase D — Grow it  *(self-extension — the ⭐ differentiator)*
@@ -209,7 +212,7 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 5. ✅ **Memory / RAG** (Phase B) — shipped, Slice 12. Persistent semantic memory (LanceDB + `bun:sqlite`, weights-only embedder via the Model Manager, dense retrieval + optional default-on cross-encoder rerank) that crews/workflows can opt into via a `recall` tool + auto-persist.
 6. ✅ **Grounded verification** (Phase B) — shipped, Slice 13. Closes the retrieve-then-hallucinate loop Slice 12 opened: claim decomposition, cited-evidence lookup, a MiniCheck faithfulness judge (consent-pull + fallback), bounded Corrective RAG, and an explicit abstain outcome, opt-in via `--verify`.
 7. ✅ **shipped, Slice 14** — **First-boot model provisioning + runtime-agnostic downloader**. A fresh clone/machine used to need manual `ollama pull`s for the router, specialists, embedder, and the verification judge (`bespoke-minicheck`); `bun run provision` (plus a non-invasive `chat.ts` auto-detect hook) now runs a guided flow (detect hardware → discover fitting models → per-model consent → download with a **live progress UI** [bytes/%/speed/ETA] → hand off to `ensureReady` on the next normal run), removing that friction. Built **runtime-agnostic** behind a `DownloadProvider` abstraction + unified progress protocol covering **all four runtimes** (Ollama + LM Studio delegating; llama.cpp + MLX via one shared HuggingFace fetcher) — LM Studio's delegating adapter is implemented + contract-tested but not yet routed via `providerFor` — it shares the `MlxServer` kind today; wiring it is a logged follow-on. Discovery is **dynamic per-runtime query with a committed-snapshot fallback** (Ollama registry-manifest sizes; HF tree sizes; LM Studio SDK). Also removes the root cause of the Slice-13 selector crash (declaring models without guaranteeing install). **Live-verified on Ollama** (only runtime installed on the dev machine); **LM Studio / llama.cpp / MLX adapters ship contract-tested with live-verify explicitly deferred + logged** (see Deferred items below) — never a silent skip; the HF-fetch adapter is additionally shape-complete but not yet disk-persisting (no `.part`+rename, placeholder SHA256), a gap folded into the same deferred live-verify pass. Spec: `docs/superpowers/specs/2026-07-01-slice-14-provisioning-design.md`.
-8. **`mcp.json` mount registry + starter pack** (Phase C) — make it genuinely useful; gives workflows things to *do* and agent-builder servers to *suggest*.
+8. ✅ **shipped, Slice 15** — **`mcp.json` mount registry + starter pack** (Phase C). Replaces Slice 3's two hardcoded mounts with a declarative registry (`src/mcp/config.ts`, per-server `agents` scoping, per-entry degrade) + consent-gated mounting with spec-hash/tools-hash pinning against tool-definition drift (`consent.ts`, `mount.ts`) + a 12-entry curated starter pack (`pack.ts`, `bun run mcp list\|status\|add`) — files, SQL, memory, reasoning, web-fetch, git, time, browser, GitHub, web-search; key-gated entries stay dormant until their env var is set. Makes workflows/crews genuinely useful *now* and gives the future agent-builder a queryable palette (`packByCapability`) to suggest from. Spec: `docs/superpowers/specs/2026-07-02-slice-15-mcp-mounts-design.md`.
 9. **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library).
 10. **Triggers / daemon** (Phase E) — turn workflows into automations (n8n's identity).
 
@@ -236,3 +239,16 @@ Recorded so nothing is silently lost (see the Slice-14 spec §13 + `provisioning
 - **Snapshot-catalog refresh automation** — periodic job regenerating the committed snapshot from live APIs (manual/scripted refresh until then).
 - **Parallel multi-model downloads** (multi-bar) — Slice 14 ships sequential-with-one-bar.
 - **Live Metal `recommendedMaxWorkingSetSize` read** instead of the tier-fraction heuristic; and bumping bootstrap `bytesPerWeight` 0.56 → ~0.6 for Q4_K_M realism (fold in with fit-tuning).
+
+### Slice 15 follow-ons (deferred deliberately — MUST be included in future, not dropped)
+
+Recorded so nothing is silently lost (see the Slice-15 spec §12 + `docs/architecture.md` §14):
+- **Codex heavy-lifting backup** (Phase C) — own slice; cloud-delegation consent + cost design deserves its own spec.
+- **OAuth for remote servers** (`authProvider`) — the AI SDK MCP client supports it (PKCE, refresh); the browser-flow UX + token storage design is its own unit of work. Today's `github`/`brave-search`/`exa-search` pack entries are static-key only.
+- **Live official-registry query** (`registry.modelcontextprotocol.io`) — API frozen at v0.1, GA pending; the curated pack is the value today. Revisit when GA.
+- **Shell server** — arbitrary command execution needs a sandboxing design; no maintained official server exists yet, so it's deliberately excluded from the pack.
+- **`list_changed` / notifications** — unsupported by the AI SDK client and itself a rug-pull vector; **pinning + re-prompt-on-drift is the deliberate posture**, not a live-notification subscription.
+- **Roots / sampling** — entering 12-month deprecation in spec 2026-07-28; do not build.
+- **Spec-2026-07-28 / TS-SDK-v2 migration** — the stateless core lands ~4 weeks after this slice; a small follow-on once the SDK v2 is stable.
+- **`mcp.mount` span/run-telemetry ordering gap** (found live-verifying Task 6, see `docs/architecture.md` §14 Telemetry) — in all three CLIs, mounting (and its `mcp.mount` span) happens in `main()` before that run's `initRunTelemetry()` registers the per-run tracer provider, so the span is currently a no-op and never lands in `runs/<id>/spans.jsonl`. Fix by hoisting run/telemetry creation earlier in each CLI or moving the mount call inside `runFlow`/`runChat`/`runCrewCli`.
+- **`sqlite` pack entry needs `data/` to pre-exist** — `bun:sqlite` doesn't create parent directories for its default `data/agent.db` path; a bare clone's first `bun run mcp add sqlite` mount fails until `mkdir -p data` (or the entry is edited to `:memory:`/an existing path). Small UX polish, not a correctness bug (mounting degrades per-entry as designed).
