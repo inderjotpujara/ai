@@ -117,6 +117,13 @@ graph TD
         verifyexpand["expand.ts · expandVerification/StepKind.Verify"]
         verifydeps["deps.ts · makeVerifyDeps"]
     end
+    subgraph PROV["Provisioning · src/provisioning"]
+        provtypes["types.ts · DownloadPhase/DownloadProgress/DownloadProvider"]
+        provtracker["progress-tracker.ts · ProgressTracker (monotonic % + EWMA speed)"]
+        provformat["ui/format.ts · formatBytes/formatSpeed/formatEta/renderProgressLine"]
+        provbar["ui/progress-bar.ts · ProgressBar (TTY vs non-TTY render)"]
+        provprompt["ui/prompt.ts · askYesNo/selectModels (testable stdin)"]
+    end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
         images[("model-images/ + catalog.json")]
@@ -237,6 +244,7 @@ graph TD
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — `createRun` → `initRunTelemetry` → `runCrew` → `writeArtifact('result.txt'\|'failed.txt')` → `shutdown()`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
 | **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
+| **Provisioning** | `src/provisioning/` | First-boot provisioning (Slice 14 — in progress, Task 1 of N): a runtime-agnostic download-progress protocol and dependency-free UI, built before any adapter exists — `DownloadPhase`/`DownloadProgress`/`DownloadProvider` (`types.ts`), `ProgressTracker` (monotonic percent clamp + EWMA speed smoothing, `progress-tracker.ts`), human-readable formatters (`ui/format.ts`), a TTY/non-TTY `ProgressBar` (`ui/progress-bar.ts`), and testable stdin prompts `askYesNo`/`selectModels` (`ui/prompt.ts`). Later tasks add the Ollama/HF/LM-Studio `DownloadProvider` adapters that emit these events | `core/types.ts` (`ProviderKind`) only — no other subsystem depends on it yet |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
