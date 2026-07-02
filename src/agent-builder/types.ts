@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import type { ModelRequirement } from '../core/types.ts';
+import type { WritePaths } from './write.ts';
 
 /** A curated-pack MCP server the generated agent needs, scoped to that agent. */
 export type SuggestedServer = { packName: string; scopeToAgent: string };
@@ -26,4 +27,13 @@ export type BuildResult =
  *  The real impl (deps.ts) wraps `generateObject` with a live model. */
 export type BuilderModel = {
   object: <T>(args: { schema: z.ZodType<T>; prompt: string }) => Promise<T>;
+};
+
+export type BuilderDeps = {
+  model: BuilderModel;
+  existingNames: () => string[];
+  packNames: () => string[];
+  confirm: (proposalText: string) => Promise<boolean>;
+  paths: WritePaths;
+  log?: (m: string) => void;
 };
