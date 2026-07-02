@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import { runFlow } from '../../src/cli/flow.ts';
+import { createRun } from '../../src/run/run-store.ts';
+import { initRunTelemetry } from '../../src/telemetry/provider.ts';
 import type { VerifyDeps } from '../../src/verification/types.ts';
 import { defineWorkflow } from '../../src/workflow/define.ts';
-import { StepKind } from '../../src/workflow/types.ts';
+import { StepKind, type WorkflowOutcome } from '../../src/workflow/types.ts';
 
 const cannedAgent = (name: string) => ({
   name,
@@ -47,14 +49,20 @@ describe('runFlow', () => {
         },
       ],
     });
-    const outcome = await runFlow({
-      def,
-      input: 'hello',
-      runsRoot,
-      runId: 'r1',
-      agents: { web_fetch: cannedAgent('web_fetch') },
-      tools: {},
-    });
+    const run = await createRun(runsRoot, 'r1');
+    const tel = initRunTelemetry(run.dir);
+    let outcome: WorkflowOutcome;
+    try {
+      outcome = await runFlow({
+        def,
+        input: 'hello',
+        run,
+        agents: { web_fetch: cannedAgent('web_fetch') },
+        tools: {},
+      });
+    } finally {
+      await tel.shutdown();
+    }
     expect(outcome.kind).toBe('done');
     const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
     expect(spans).toContain('workflow.run');
@@ -77,14 +85,20 @@ describe('runFlow', () => {
         },
       ],
     });
-    const outcome = await runFlow({
-      def,
-      input: null,
-      runsRoot,
-      runId: 'r2',
-      agents: { web_fetch: cannedAgent('web_fetch') },
-      tools: {},
-    });
+    const run = await createRun(runsRoot, 'r2');
+    const tel = initRunTelemetry(run.dir);
+    let outcome: WorkflowOutcome;
+    try {
+      outcome = await runFlow({
+        def,
+        input: null,
+        run,
+        agents: { web_fetch: cannedAgent('web_fetch') },
+        tools: {},
+      });
+    } finally {
+      await tel.shutdown();
+    }
     expect(outcome.kind).toBe('failed');
     const failed = await readFile(join(runsRoot, 'r2', 'failed.txt'), 'utf8');
     expect(failed).toContain('sum');
@@ -128,15 +142,21 @@ describe('runFlow', () => {
         },
       ],
     });
-    const outcome = await runFlow({
-      def, // no step.verify set in the fixture
-      input: 'hello',
-      runsRoot,
-      runId: 'r3',
-      agents: { web_fetch: cannedAgent('web_fetch') },
-      tools: {},
-      verifyDeps: fakeVerifyDeps(false),
-    });
+    const run = await createRun(runsRoot, 'r3');
+    const tel = initRunTelemetry(run.dir);
+    let outcome: WorkflowOutcome;
+    try {
+      outcome = await runFlow({
+        def, // no step.verify set in the fixture
+        input: 'hello',
+        run,
+        agents: { web_fetch: cannedAgent('web_fetch') },
+        tools: {},
+        verifyDeps: fakeVerifyDeps(false),
+      });
+    } finally {
+      await tel.shutdown();
+    }
     expect(outcome.kind).toBe('unverified');
     const unverified = await readFile(
       join(runsRoot, 'r3', 'unverified.txt'),
@@ -159,15 +179,21 @@ describe('runFlow', () => {
         },
       ],
     });
-    const outcome = await runFlow({
-      def,
-      input: 'hello',
-      runsRoot,
-      runId: 'r4',
-      agents: { web_fetch: cannedAgent('web_fetch') },
-      tools: {},
-      verifyDeps: fakeVerifyDeps(true),
-    });
+    const run = await createRun(runsRoot, 'r4');
+    const tel = initRunTelemetry(run.dir);
+    let outcome: WorkflowOutcome;
+    try {
+      outcome = await runFlow({
+        def,
+        input: 'hello',
+        run,
+        agents: { web_fetch: cannedAgent('web_fetch') },
+        tools: {},
+        verifyDeps: fakeVerifyDeps(true),
+      });
+    } finally {
+      await tel.shutdown();
+    }
     expect(outcome.kind).toBe('done');
     const result = await readFile(join(runsRoot, 'r4', 'result.txt'), 'utf8');
     expect(result).toContain('summary text');

@@ -1,5 +1,9 @@
 import type { ToolSet } from 'ai';
-import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
+import {
+  askYesNo,
+  interactiveTTY,
+  stdinInput,
+} from '../provisioning/ui/prompt.ts';
 import {
   type McpMountSpec,
   type MountedServer,
@@ -60,7 +64,7 @@ export async function mountAll(
   const consent: ConsentDeps = {
     store,
     ask: (q) => askYesNo(q, { input, autoYes: false }),
-    isTTY: process.stderr.isTTY ?? false,
+    isTTY: interactiveTTY(),
     autoYes: process.env.AGENT_MCP_AUTO_APPROVE === '1',
     warn,
     ...deps.consent,

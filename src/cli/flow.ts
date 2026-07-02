@@ -5,16 +5,9 @@ import { getWorkflow } from '../../workflows/index.ts';
 import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
-import { loadMcpConfig } from '../mcp/config.ts';
-import { mountAll, warnUnknownAgents } from '../mcp/mount.ts';
-import { createRun, writeArtifact } from '../run/run-store.ts';
-import { initRunTelemetry } from '../telemetry/provider.ts';
-import {
-  ATTR,
-  annotateStep,
-  withMcpMountSpan,
-  withWorkflowSpan,
-} from '../telemetry/spans.ts';
+import { warnUnknownAgents } from '../mcp/mount.ts';
+import { type RunHandle, writeArtifact } from '../run/run-store.ts';
+import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
 import type { VerifyDeps } from '../verification/types.ts';
 import { defineWorkflow } from '../workflow/define.ts';
 import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
@@ -26,12 +19,12 @@ import {
 } from '../workflow/types.ts';
 import { createSelectionRuntime } from './select-runtime.ts';
 import { makeRealVerifyDeps } from './verify-runtime.ts';
+import { withMcpRun } from './with-mcp-run.ts';
 
 export type FlowDeps = {
   def: WorkflowDef;
   input: unknown;
-  runsRoot: string;
-  runId: string;
+  run: RunHandle;
   agents: Record<string, Agent>;
   tools: ToolSet;
   onBeforeDelegate?: BeforeDelegate; // live model selection
@@ -69,46 +62,40 @@ function lastStepOutputText(
   return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 }
 
-/** Run a workflow with telemetry + artifact persistence (mirrors runChat). */
+/** Run a workflow with telemetry + artifact persistence (mirrors runChat).
+ *  Telemetry + the run dir are established by the caller (withMcpRun). */
 export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
-  const run = await createRun(deps.runsRoot, deps.runId);
-  const tel = initRunTelemetry(run.dir);
-  try {
-    const def = deps.verifyDeps
-      ? defineWorkflow(withVerifyFlags(deps.def), {
-          verifyDeps: deps.verifyDeps,
-        })
-      : deps.def;
-    return await withWorkflowSpan(def.id, async () => {
-      const outcome = await runWorkflow(def, deps.input, {
-        runAgentStep: defaultRunAgentStep(deps.agents, deps.onBeforeDelegate),
-        tools: deps.tools,
-      });
-      annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
-      if (outcome.kind === 'done') {
-        await writeArtifact(
-          run,
-          'result.txt',
-          lastStepOutputText(deps.def, outcome.output),
-        );
-      } else if (outcome.kind === 'unverified') {
-        await writeArtifact(
-          run,
-          'unverified.txt',
-          `step ${outcome.failedStepId ?? '?'} abstained (faithfulness ${outcome.faithfulness}); unsupported claims:\n${outcome.unsupportedClaims.join('\n')}\n\ndraft:\n${outcome.draft}`,
-        );
-      } else {
-        await writeArtifact(
-          run,
-          'failed.txt',
-          `step ${outcome.failedStep}: ${outcome.message}`,
-        );
-      }
-      return outcome;
+  const { run } = deps;
+  const def = deps.verifyDeps
+    ? defineWorkflow(withVerifyFlags(deps.def), { verifyDeps: deps.verifyDeps })
+    : deps.def;
+  return await withWorkflowSpan(def.id, async () => {
+    const outcome = await runWorkflow(def, deps.input, {
+      runAgentStep: defaultRunAgentStep(deps.agents, deps.onBeforeDelegate),
+      tools: deps.tools,
     });
-  } finally {
-    await tel.shutdown();
-  }
+    annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
+    if (outcome.kind === 'done') {
+      await writeArtifact(
+        run,
+        'result.txt',
+        lastStepOutputText(deps.def, outcome.output),
+      );
+    } else if (outcome.kind === 'unverified') {
+      await writeArtifact(
+        run,
+        'unverified.txt',
+        `step ${outcome.failedStepId ?? '?'} abstained (faithfulness ${outcome.faithfulness}); unsupported claims:\n${outcome.unsupportedClaims.join('\n')}\n\ndraft:\n${outcome.draft}`,
+      );
+    } else {
+      await writeArtifact(
+        run,
+        'failed.txt',
+        `step ${outcome.failedStep}: ${outcome.message}`,
+      );
+    }
+    return outcome;
+  });
 }
 
 /** Split `--verify` out of the positional args (mirrors src/cli/crew.ts). */
@@ -135,62 +122,54 @@ async function main(): Promise<void> {
   }
   const { positional, verify } = parseArgs(rest);
 
-  const config = loadMcpConfig();
-  const reg = await withMcpMountSpan(async (record) => {
-    const r = await mountAll(config);
-    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
-    for (const s of r.skipped) record(s.name, s.reason);
-    for (const d of config.dormant) record(d.name, 'dormant');
-    return r;
-  });
-  try {
-    const selection = await createSelectionRuntime();
-    try {
-      const tools: ToolSet = reg.merged;
-      const agents: Record<string, Agent> = {};
-      const fileQa = createFileQaAgent(reg.forAgent('file_qa'));
-      const webFetch = createWebFetchAgent(reg.forAgent('web_fetch'));
-      agents[fileQa.name] = fileQa;
-      agents[webFetch.name] = webFetch;
-      warnUnknownAgents(config, Object.keys(agents), (m) => console.error(m));
-
-      const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
+  await withMcpRun(
+    { runsRoot: 'runs', runId: `flow-${process.pid}` },
+    async ({ run, reg, config }) => {
+      const selection = await createSelectionRuntime();
       try {
-        const outcome = await runFlow({
-          def,
-          input: positional.join(' ').trim(),
-          runsRoot: 'runs',
-          runId: `flow-${process.pid}`,
-          agents,
-          tools,
-          onBeforeDelegate: selection.onBeforeDelegate,
-          verifyDeps: verifyRuntime?.verifyDeps,
-        });
-        if (outcome.kind === 'done') {
-          console.log(lastStepOutputText(def, outcome.output));
-        } else if (outcome.kind === 'unverified') {
-          console.error(
-            `Workflow abstained at ${outcome.failedStepId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
-          );
-          process.exitCode = 1;
-        } else {
-          console.error(
-            `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
-          );
-          process.exitCode = 1;
+        const tools: ToolSet = reg.merged;
+        const agents: Record<string, Agent> = {};
+        const fileQa = createFileQaAgent(reg.forAgent('file_qa'));
+        const webFetch = createWebFetchAgent(reg.forAgent('web_fetch'));
+        agents[fileQa.name] = fileQa;
+        agents[webFetch.name] = webFetch;
+        warnUnknownAgents(config, Object.keys(agents), (m) => console.error(m));
+
+        const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
+        try {
+          const outcome = await runFlow({
+            def,
+            input: positional.join(' ').trim(),
+            run,
+            agents,
+            tools,
+            onBeforeDelegate: selection.onBeforeDelegate,
+            verifyDeps: verifyRuntime?.verifyDeps,
+          });
+          if (outcome.kind === 'done') {
+            console.log(lastStepOutputText(def, outcome.output));
+          } else if (outcome.kind === 'unverified') {
+            console.error(
+              `Workflow abstained at ${outcome.failedStepId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
+            );
+            process.exitCode = 1;
+          } else {
+            console.error(
+              `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
+            );
+            process.exitCode = 1;
+          }
+        } finally {
+          if (verifyRuntime) {
+            verifyRuntime.store.close();
+            await verifyRuntime.manager.unloadAll();
+          }
         }
       } finally {
-        if (verifyRuntime) {
-          verifyRuntime.store.close();
-          await verifyRuntime.manager.unloadAll();
-        }
+        await selection.close();
       }
-    } finally {
-      await selection.close();
-    }
-  } finally {
-    await reg.close();
-  }
+    },
+  );
 }
 
 if (import.meta.main) {

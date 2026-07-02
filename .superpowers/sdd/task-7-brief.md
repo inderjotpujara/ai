@@ -1,74 +1,34 @@
-## Task 7: `verify()` primitive
+## Task 7: Docs (4 surfaces) + SDD ledger
 
-**Files:** Create `src/verification/verify.ts`; Test `tests/verification/verify.test.ts`
+**Files:**
+- Modify: `docs/architecture.md` (§14 Telemetry + CLI module map), `README.md` (slice table + status), `docs/ROADMAP.md` (flip Slice 15 follow-on markers), `.superpowers/sdd/progress.md` (append Slice 16 entries)
 
-**Interfaces:**
-- Consumes: everything from Tasks 1/4/5; `withVerificationSpan` (Task 2); `VerificationError`.
-- Produces: `verify(answer: string, opts: { query: string; space: string; threshold?: number }, deps: VerifyDeps): Promise<Verdict>`.
+**Interfaces:** none (documentation).
 
-- [ ] **Step 1: Failing test** (mock deps end-to-end)
-```ts
-// tests/verification/verify.test.ts
-import { describe, expect, test } from 'bun:test';
-import { verify } from '../../src/verification/verify.ts';
+- [ ] **Step 1: Update `docs/architecture.md`**
 
-function deps(over: Partial<any> = {}): any {
-  return {
-    generalModel: 'g',
-    ensureJudge: async (m: string) => ({ model: m, fallback: false }),
-    generate: async (_m: string, p: string) => {
-      if (p.includes('atomic factual claims')) return '[{"text":"Raft elects a leader","citedIds":["r#0"]}]';
-      return p.includes('Raft') ? 'Yes' : 'No'; // checkClaim
-    },
-    getByIds: async (_s: string, ids: string[]) => ids.map((id) => ({ id, text: 'Raft elects a leader via timeouts', source: 'kb', score: 0, namespace: '' })),
-    ...over,
-  };
-}
+In §14 (Telemetry): remove any claim that the `mcp.mount` span is currently a no-op / never lands. State that `src/cli/with-mcp-run.ts` establishes run-dir → telemetry → mount (in that order) so `mcp.mount` (with `mcp.server.count` = mounted servers and `mcp.tool.count` = summed tools, plus per-server `mcp.server.mount` events) reaches `runs/<id>/spans.jsonl`. Add `with-mcp-run.ts` to the CLI module list/map with a one-line responsibility. Note that `runFlow`/`runCrewCli`/`runChat` now receive a `run: RunHandle` and execute within the caller-established scope. Mention the consent predicate now requires both stdin+stderr TTY.
 
-describe('verify', () => {
-  test('grounded answer → supported', async () => {
-    const v = await verify('Raft elects a leader [mem:r#0]', { query: 'raft leader', space: 'default' }, deps());
-    expect(v.supported).toBe(true);
-    expect(v.faithfulness).toBe(1);
-  });
-  test('no citations → abstain-worthy (faithfulness 0)', async () => {
-    const d = deps({ generate: async (_m: string, p: string) => (p.includes('atomic') ? '[{"text":"Uncited claim","citedIds":[]}]' : 'No') });
-    const v = await verify('Uncited claim', { query: 'q', space: 'default' }, d);
-    expect(v.supported).toBe(false);
-    expect(v.faithfulness).toBe(0);
-  });
-});
+- [ ] **Step 2: Update `README.md`**
+
+Add the Slice 16 row to the slice status table (✅ Done): "MCP telemetry-ordering fix + consent robustness". Update the Status line to reference Slice 16. If any feature paragraph claims mount observability, ensure it now reads as true (it is, post-fix).
+
+- [ ] **Step 3: Update `docs/ROADMAP.md`**
+
+In "Slice 15 follow-ons": mark the `mcp.mount` span/run-telemetry ordering gap and the `mcp.tool.count` rename as ✅ shipped (Slice 16); mark the consent stdin/TTY edge case shipped. Leave GitHub remote-HTTP live-verify and interactive-consent TTY spot-check as outstanding (verification-only) unless done in Task 8. Add a one-line Slice 16 note to the phase table / recommended sequence as appropriate.
+
+- [ ] **Step 4: Append to `.superpowers/sdd/progress.md`**
+
+Append Slice 16 per-task entries (Tasks 1-7), matching the existing ledger format used for Slice 15 (task, what shipped, gate results). Record that the binding condition from the Slice 15 final review is discharged.
+
+- [ ] **Step 5: Commit docs**
+
+```bash
+git add docs/architecture.md README.md docs/ROADMAP.md .superpowers/sdd/progress.md
+git commit -m "docs: Slice 16 — mount-span ordering fix + consent robustness across all 4 surfaces + ledger"
 ```
 
-- [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Implement `src/verification/verify.ts`**
-```ts
-import { withVerificationSpan } from '../telemetry/spans.ts';
-import { verifyThreshold } from './config.ts';
-import { decomposeClaims } from './claims.ts';
-import { verifyFaithfulness } from './judge.ts';
-import type { Verdict, VerifyDeps } from './types.ts';
-
-export async function verify(
-  answer: string, opts: { query: string; space: string; threshold?: number }, deps: VerifyDeps,
-): Promise<Verdict> {
-  const threshold = opts.threshold ?? verifyThreshold();
-  const claims = await decomposeClaims(answer, deps);
-  const allIds = [...new Set(claims.flatMap((c) => c.citedIds))];
-  const judge = await deps.ensureJudge(deps.generalModel); // model id resolved by caller; see wiring
-  const evidence = allIds.length ? await deps.getByIds(opts.space, allIds) : [];
-  const evidenceById = new Map(evidence.map((e) => [e.id, e.text]));
-  return withVerificationSpan({}, async () => {
-    const verdict: Verdict = await verifyFaithfulness(claims, evidenceById, judge.model, judge.fallback, threshold, deps);
-    // annotate the span from the computed verdict
-    return verdict;
-  });
-}
-```
-> Note: `ensureJudge` here is passed the desired judge model by the CLI wiring (Task 10) — the primitive stays agnostic; tests inject a fake returning `{model, fallback}`. If you prefer, thread the judge model via `opts` — keep it consistent with the wiring task and the test.
-
-- [ ] **Step 4: Run tests + typecheck** → PASS.
-- [ ] **Step 5: Commit** — `git commit -m "feat(verification): verify() primitive (decompose→evidence→judge)"`
+> After merge, regenerate the snapshot Artifact by hand: add the `with-mcp-run.ts` CLI-helper node, refresh the footer to "16 slices · <final test count>", and hold it to the accuracy bar. (Tooling only reminds; regenerating is manual.)
 
 ---
 

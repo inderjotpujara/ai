@@ -1,31 +1,140 @@
-# Task 5 Report — Tool telemetry + CLI wiring (chat/flow/crew) + default `mcp.json` (Slice 15)
+# Task 5 report: Migrate `crew` CLI to `withMcpRun`
 
-**Status:** DONE
-**Branch:** `slice-15-mcp-mounts`
-**Commit:** `ba51662` — `feat(mcp): registry-driven CLI mounts + workflow.tool/mcp.mount telemetry + default mcp.json (Slice 15 Task 5)`
+## Summary
 
-## What was done (brief steps, in order)
+Migrated `src/cli/crew.ts` so `runCrewCli` no longer creates the run dir or
+inits/tears down telemetry — it now receives an already-created
+`run: RunHandle` via `CrewCliDeps`. `main()` is rewired to call `withMcpRun`
+(Task 3), which owns the run-dir + telemetry-init + MCP-mount ordering so
+`mcp.mount` spans land in `runs/<id>/spans.jsonl`. This is the identical
+migration Task 4 applied to `flow`.
 
-1. **Failing span test** — created `tests/mcp/tool-span.test.ts` exactly per the brief (3 tests: result pass-through, error propagation, mount-recorder handoff). Verified FAIL first (`Export named 'withMcpMountSpan' not found`).
-2. **`src/telemetry/spans.ts`** — added 5 `ATTR` keys after `PROVISION_SNAPSHOT_FALLBACK` (`TOOL_NAME` = `gen_ai.tool.name`, `MCP_SERVER`, `MCP_TRANSPORT`, `MCP_TOOL_COUNT`, `MCP_MOUNT_OUTCOME`) plus `withToolSpan` (span `workflow.tool`) and `withMcpMountSpan` (span `mcp.mount`, per-server `mcp.server.mount` events, recorded-server count set on the span at the end). Test now PASSES (3/3).
-3. **`src/workflow/run-step.ts`** — wrapped both `callTool` call sites (`runLeaf` and `runStepByKind` `case StepKind.Tool`) in `withToolSpan` with unchanged dispatch semantics: same args, same callIds (`callId` / `step.id`), same unknown-tool `WorkflowError` paths (throw in runLeaf, `Promise.reject` in runStepByKind — both *before* the span opens, unchanged). `bun test tests/workflow/` → 21 pass, 0 fail, suite unmodified.
-4. **`mcp.json` (repo root, committed)** — exactly today's two mounts: `file-tools` (`bun run src/mcp/server.ts`, agents `["file_qa"]`) and `fetch` (`uvx mcp-server-fetch`, agents `["web_fetch"]`). Behavior-preserving default. `.mcp-approvals.json` remains gitignored (verified).
-5. **`src/cli/flow.ts`** — swapped `createFetchTools, createFileTools` import for `loadMcpConfig` + `mountAll`/`warnUnknownAgents` + `withMcpMountSpan`. Mount region replaced per the brief: `reg = await withMcpMountSpan(mountAll + record mounted/skipped/dormant)`; `tools = reg.merged`; agents built from `reg.forAgent('file_qa')` / `reg.forAgent('web_fetch')`; `warnUnknownAgents(config, Object.keys(agents), console.error)` added. Inner body (selection runtime, verifyRuntime + `store.close()`/`manager.unloadAll()` finally, outcome handling, exit codes) identical apart from one indent level; outer finally is now `await reg.close()`.
-6. **`src/cli/crew.ts`** — same envelope swap; `tools = reg.merged` (crew members without per-member tools fall back to the merged set via `buildCrewAgent` — unchanged behavior). Selection/verify/`runCrewCli`/outcome body preserved; outer finally `await reg.close()`. (`warnUnknownAgents` not wired here — crew has no fixed agent map; the brief only wires it in flow.ts.)
-7. **`src/cli/chat.ts`** — same envelope swap; `createSuperAgent(reg.forAgent('file_qa'), reg.forAgent('web_fetch'), onBeforeDelegate)` — signature unchanged. `maybeAutoProvision()`, model-manager warmup, notice/notify block, registry/select-hook all untouched. Outer finally preserves order: `await reg.close(); await manager.unloadAll();`.
-8. **Formatting** — `biome check --write` on the touched files fixed 3 formatting nits the brief's inline code introduced (long param/expect lines).
+## Changes
+
+### `src/cli/crew.ts`
+- `CrewCliDeps`: replaced `runsRoot: string; runId: string;` with
+  `run: RunHandle`.
+- Import line (`../run/run-store.ts`) now brings in `RunHandle` (type) +
+  `writeArtifact` only.
+- `runCrewCli`: destructures `deps.run` directly; no longer calls
+  `createRun`/`initRunTelemetry`/`tel.shutdown()`. Body (verify-flag
+  splicing, `runCrew` call, artifact writes on done/unverified/failed) is
+  otherwise byte-identical.
+- `main()`: replaced the manual `loadMcpConfig` → `withMcpMountSpan(mountAll)`
+  → try/finally `reg.close()` scaffolding with a single
+  `await withMcpRun({ runsRoot: 'runs', runId: \`crew-${process.pid}\` }, async ({ run, reg }) => { ... })`
+  call. Inner body (selection runtime, `tools = reg.merged`, verify runtime,
+  `runCrewCli` call, console output, exit codes, nested finally blocks) is
+  unchanged in behavior — only the closing braces/finally nesting changed to
+  match the new callback shape.
+
+### `tests/cli/crew.test.ts`
+- Added imports: `createRun` (`../../src/run/run-store.ts`),
+  `initRunTelemetry` (`../../src/telemetry/provider.ts`), `type CrewOutcome`
+  (`../../src/crew/types.ts`, needed to type `let outcome` — biome's
+  `noImplicitAnyLet` rejected an untyped `let outcome;`, same issue Task 4
+  hit).
+- All 3 cases (r1, r2, r3 — the brief's full enumeration, no extras found in
+  this file) now do:
+  ```ts
+  const run = await createRun(runsRoot, 'r1');
+  const tel = initRunTelemetry(run.dir);
+  let outcome: CrewOutcome;
+  try {
+    outcome = await runCrewCli({ def, input, run, tools /*, ...*/ });
+  } finally {
+    await tel.shutdown();
+  }
+  ```
+  All existing `spans.jsonl` / `result.txt` / `unverified.txt` path
+  assertions are unchanged.
+
+### `tests/integration/crew.live.test.ts`
+- Added the same `createRun`/`initRunTelemetry` imports and applied the
+  identical transform to the single `runId: 'live'` call.
+
+## Extra test cases found
+
+None. `tests/cli/crew.test.ts` has exactly r1/r2/r3 as the brief describes;
+`tests/integration/crew.live.test.ts` has exactly one `runCrewCli` call
+(`runId: 'live'`). No stragglers to migrate beyond what the brief specified.
+
+## TDD: RED → GREEN
+
+**RED** (test files migrated first, `src/cli/crew.ts` still old — `CrewCliDeps`
+still required `runsRoot`/`runId`, so the migrated tests' `run: RunHandle`
+field was ignored and old `runCrewCli` tried `createRun(deps.runsRoot, ...)`
+with `deps.runsRoot === undefined`):
+
+```
+$ bun test tests/cli/crew.test.ts
+TypeError: The "paths[0]" property must be of type string, got undefined
+ code: "ERR_INVALID_ARG_TYPE"
+      at createRun (/Users/inderjotsingh/ai/src/run/run-store.ts:11:15)
+      at runCrewCli (/Users/inderjotsingh/ai/src/cli/crew.ts:29:21)
+      ...
+ 0 pass
+ 3 fail
+Ran 3 tests across 1 file. [220.00ms]
+```
+
+**GREEN** (after the `CrewCliDeps`/`runCrewCli`/`main` changes):
+
+```
+$ bun test tests/cli/crew.test.ts
+bun test v1.3.11 (af24e281)
+
+ 3 pass
+ 0 fail
+ 7 expect() calls
+Ran 3 tests across 1 file. [191.00ms]
+```
 
 ## Gate results
 
-- `bun run docs:check` → ✔ (no new src subsystem; living docs intact)
-- `bun run typecheck` → clean
-- `bun run lint` → my files clean; **3 pre-existing errors + 8 warnings remain in files untouched by this task** (`tests/mcp/pack.test.ts` import-sort/format from an earlier task; `noTemplateCurlyInString`/`noExplicitAny`/unused-var warnings in pack/provisioning/snapshot-source/ollama-control tests). Verified via `git status`: none of those files are in my diff.
-- `bun test` (full, 200.8s) → **416 pass, 2 skip, 0 fail, 418 tests / 125 files** — includes the 3 new tool-span tests; no pre-existing count dropped.
+- `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
+- `bun run lint:file -- "src/cli/crew.ts" "tests/cli/crew.test.ts" "tests/integration/crew.live.test.ts"`
+  → initially flagged one formatter diff in `tests/cli/crew.test.ts` (the
+  consolidated `import { type CrewDef, type CrewOutcome, CrewProcess } from ...`
+  line exceeded print width and needed multi-line wrapping); fixed with
+  `bunx biome check --write tests/cli/crew.test.ts`. Final run: clean
+  (`Checked 3 files in 4ms. No fixes applied.`).
+- Full suite: `bun test` → `428 pass, 2 skip, 0 fail, 923 expect() calls,
+  Ran 430 tests across 129 files. [241.18s]`. The 2 skips are the
+  `describe.skipIf(!ready)` Ollama-gated live tests (expected — no local
+  Ollama server reachable in this environment).
+- `bun run docs:check` (pre-commit hook, also run standalone) → passed:
+  `✔ docs-check: living docs present + linked; every src subsystem documented.`
+  No `docs/architecture.md` change was needed — this is an internal
+  CLI-wiring refactor onto Task 3's already-documented `withMcpRun` helper,
+  not a new subsystem or a change to `mcp.mount` ordering semantics (same
+  reasoning as Task 4).
 
-## Self-review notes
+## Imports removed from `src/cli/crew.ts`
 
-- All three CLI finally-structures re-read post-edit and verified against the brief: try-nesting depth reduced by one (two servers → one registry), every inner finally (verifyRuntime store/manager, selection.close, chat's manager.unloadAll) preserved verbatim and in order.
-- `ATTR.MCP_TRANSPORT` is added but not yet emitted anywhere — the brief specifies the key now while mount events carry server/outcome/toolCount; flagging so the final review doesn't count it as drift.
-- `withMcpMountSpan` sets `ATTR.MCP_TOOL_COUNT` on the root span to the number of *recorded servers* (mounted+skipped+dormant), while the same key on per-server events means tool count — slightly overloaded semantics, but exactly per the brief's spec'd code.
-- `createFileTools`/`createFetchTools` in `src/mcp/client.ts` now have no src/ callers (tests still exercise the client module). Left in place — removal wasn't in scope.
-- Consent note (brief Step 10): the committed defaults are NOT pre-approved; first interactive run prompts once per server (persisted to `.mcp-approvals.json`); non-TTY runs skip with a warning (`AGENT_MCP_AUTO_APPROVE=1` bypasses). Test suite unaffected (tests construct deps directly).
+- `loadMcpConfig` (from `../mcp/config.ts`) — entire import line removed.
+- `mountAll` (from `../mcp/mount.ts`) — entire import line removed (crew.ts
+  had no other symbol from that module, unlike flow.ts's `warnUnknownAgents`).
+- `withMcpMountSpan` (from `../telemetry/spans.ts`) — entire import line
+  removed (crew.ts imported nothing else from that module).
+- `initRunTelemetry` (from `../telemetry/provider.ts`) — entire import line
+  removed.
+- `createRun` (from `../run/run-store.ts`) — kept `writeArtifact`, added
+  `RunHandle` as a type import on the same line.
+
+Kept as instructed: `writeArtifact`.
+
+## Commit
+
+`2972253` — `refactor(cli): crew uses withMcpRun; runCrewCli takes run:RunHandle (Slice 16 Task 5)`
+(3 files changed, 139 insertions, 124 deletions — only `src/cli/crew.ts`,
+`tests/cli/crew.test.ts`, `tests/integration/crew.live.test.ts` staged/
+committed; other concurrently-modified repo files, e.g. `.superpowers/sdd/*`,
+`.remember/*`, were left untouched/unstaged for this task).
+
+## Concerns / notes
+
+None functional. No deviations from the brief were required beyond the
+formatter auto-wrap noted above. Note: this same filename previously held a
+stale Slice-15 report (for a different task numbering) — it has been
+overwritten with this Task 5 / Slice 16 report.

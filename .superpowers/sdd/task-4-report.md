@@ -1,150 +1,136 @@
-# Task 4 Report: `bun:sqlite` server + starter pack + `bun run mcp` CLI (Slice 15)
+# Task 4 report: Migrate `flow` CLI to `withMcpRun`
 
 ## Summary
 
-Implemented all components in TDD order per brief (Steps 1–10). Followed constraints: no new npm deps, string `${VAR}` literals (dormancy handles unset keys), no archived @modelcontextprotocol packages.
+Migrated `src/cli/flow.ts` so `runFlow` no longer creates the run dir or
+inits/tears down telemetry — it now receives an already-created
+`run: RunHandle` via `FlowDeps`. `main()` is rewired to call `withMcpRun`
+(from Task 3), which owns the run-dir + telemetry-init + MCP-mount ordering
+so `mcp.mount` spans land in `runs/<id>/spans.jsonl`.
 
-## What was built
+## Changes
 
-1. **`src/mcp/sqlite-server.ts`** (70 lines) — stdio MCP server on bun:sqlite
-   - DB path from `process.argv[2]` (defaults `:memory:`)
-   - Tools: `query` (SELECT → rows JSON), `execute` (statement → {changes}), `schema` (tables + columns)
-   - Error handling via textResult(err.message, isError=true)
-   - No console.log (not CLI, kept silent per brief)
+### `src/cli/flow.ts`
+- `FlowDeps`: replaced `runsRoot: string; runId: string;` with `run: RunHandle`.
+- Added `RunHandle` to the `run-store` import; removed `createRun` (no longer
+  used here — `withMcpRun` owns it).
+- Removed now-unused imports: `loadMcpConfig`, `mountAll` (from `../mcp/mount.ts`,
+  kept `warnUnknownAgents`), `withMcpMountSpan` (from `../telemetry/spans.ts`),
+  `initRunTelemetry` (from `../telemetry/provider.ts`).
+- Added import: `withMcpRun` from `./with-mcp-run.ts`.
+- `runFlow`: destructures `deps.run` directly; no longer calls `createRun`/
+  `initRunTelemetry`/`tel.shutdown()`. Body (workflow-span wrapping,
+  artifact writes on done/unverified/failed) is otherwise unchanged.
+- `main()`: replaced the manual `loadMcpConfig` → `withMcpMountSpan(mountAll)`
+  → try/finally `reg.close()` scaffolding with a single
+  `await withMcpRun({ runsRoot: 'runs', runId: \`flow-${process.pid}\` }, async ({ run, reg, config }) => { ... })`
+  call. Inner body (selection runtime, agent wiring, `warnUnknownAgents`,
+  verify runtime, `runFlow` call, console output, exit codes) is byte-identical
+  in behavior — only the closing braces/finally nesting changed to match the
+  new callback shape.
 
-2. **`src/mcp/pack.ts`** (100 lines) — curated starter-pack catalog (12 entries)
-   - Exported: `STARTER_PACK[]`, `getPackEntry(name)`, `packByCapability(cap)`
-   - Entries: file-tools, sqlite, filesystem, memory, sequential-thinking, fetch, git, time, playwright, github, brave-search, exa-search
-   - Keyed entries (github, brave-search, exa-search) use literal `${VAR}` strings (dormancy handles unset keys at load time)
-   - Added `// biome-ignore lint/suspicious/noTemplateCurlyInString` comments for intentional placeholders
-   - Never emits archived packages (server-postgres/server-sqlite/server-brave-search/server-puppeteer/server-github)
+### `tests/cli/flow.test.ts`
+- Added imports: `createRun` (`../../src/run/run-store.ts`), `initRunTelemetry`
+  (`../../src/telemetry/provider.ts`), `type WorkflowOutcome`
+  (`../../src/workflow/types.ts`, needed to type `let outcome` — biome's
+  `noImplicitAnyLet` rejected an untyped `let outcome;`).
+- All 4 cases (r1, r2, r3, r4 — the brief only called out r1-r3, but the file
+  actually has a 4th case for the grounded/verify-pass scenario, migrated for
+  consistency) now do:
+  ```ts
+  const run = await createRun(runsRoot, 'r1');
+  const tel = initRunTelemetry(run.dir);
+  let outcome: WorkflowOutcome;
+  try {
+    outcome = await runFlow({ def, input, run, agents, tools /*, ...*/ });
+  } finally {
+    await tel.shutdown();
+  }
+  ```
+  All existing `spans.jsonl` / `result.txt` / `failed.txt` / `unverified.txt`
+  path assertions are unchanged.
 
-3. **`src/cli/mcp.ts`** (70 lines) — CLI with three commands
-   - `bun run mcp list` — shows all 12 starter-pack entries, their capabilities, and status (✓ if configured)
-   - `bun run mcp status` — shows active/dormant configured servers from mcp.json
-   - `bun run mcp add <name>` — adds pack entry to mcp.json (atomic temp+rename write)
-   - Exported: `addPackEntry(name, configPath?)` for tests
-   - Refuses to overwrite existing same-name entries
-   - Console.log allowed per brief for CLI output
+### `tests/integration/workflow.live.test.ts`
+- Added the same `createRun`/`initRunTelemetry`/`WorkflowOutcome` imports and
+  applied the identical transform to the single `runId: 'live'` call.
 
-4. **`package.json`** — added `"mcp": "bun run src/cli/mcp.ts"` script after `provision`
+## TDD: RED → GREEN
 
-5. **Tests** (all passing):
-   - `sqlite-server.test.ts` (1 test) — real subprocess round-trip via mountMcpServer: schema/execute/query
-   - `pack.test.ts` (5 tests) — 12 unique entries, descriptions, ≥1 capability each, queryable by capability, keyed env refs, no archived packages
-   - `cli-add.test.ts` (4 tests) — creates mcp.json when absent, appends without disturbing existing entries, refuses overwrite, rejects unknown names
-
-## Lint & Type Audit
-
-**Issues encountered:**
-- Template string placeholders (`${GITHUB_PAT}`, etc.) flagged as suspicious → added biome-ignore comments (dormancy contract, per brief's note on string ${VAR} handling)
-- Import sorting in mcp.ts (`STARTER_PACK, getPackEntry` → sorted to `getPackEntry, STARTER_PACK`)
-- Void return statements (`return func()` where func returns void) → changed to separate call + `return;`
-- Formatting (line breaks, indentation) → applied `biome --fix` to all 3 src files
-
-**Results:**
-- Typecheck: ✅ clean (0 errors)
-- Lint: ✅ clean (0 errors/warnings after fixes; `biome check src/mcp/sqlite-server.ts src/mcp/pack.ts src/cli/mcp.ts`)
-- Format: ✅ clean (biome --fix applied and verified)
-
-## Test Results
+**RED** (test files migrated first, `src/cli/flow.ts` still old):
 
 ```
-Ran 10 tests across 3 files
-10 pass, 0 fail, 46 expect() calls
+$ bun test tests/cli/flow.test.ts
+TypeError: The "paths[0]" property must be of type string, got undefined
+ code: "ERR_INVALID_ARG_TYPE"
+      at createRun (/Users/inderjotsingh/ai/src/run/run-store.ts:11:15)
+      at runFlow (/Users/inderjotsingh/ai/src/cli/flow.ts:74:21)
+      ...
+ 0 pass
+ 4 fail
+Ran 4 tests across 1 file. [230.00ms]
+```
+(Old `runFlow` still destructured `deps.runsRoot`/`deps.runId`, which the
+migrated tests no longer pass — confirms the test exercised the pre-change
+signature and failed for the expected reason.)
 
-sqlite-server.test.ts:   1 pass
-pack.test.ts:            5 pass
-cli-add.test.ts:         4 pass
+**GREEN** (after the `FlowDeps`/`runFlow`/`main` changes):
+
+```
+$ bun test tests/cli/flow.test.ts
+bun test v1.3.11 (af24e281)
+
+ 4 pass
+ 0 fail
+ 10 expect() calls
+Ran 4 tests across 1 file. [203.00ms]
 ```
 
-**Smoke test:** `bun run mcp list` outputs all 12 starter-pack entries with names, capabilities, descriptions, and env-key markers (🔑) for keyed entries.
+## Gate results
+
+- `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
+- `bun run lint:file -- "src/cli/flow.ts" "tests/cli/flow.test.ts" "tests/integration/workflow.live.test.ts"`
+  → initially flagged: (a) formatter diffs in `flow.ts` (fixed with
+  `bunx biome check --write src/cli/flow.ts`), (b) `noImplicitAnyLet` on the
+  5 `let outcome;` declarations across both test files (fixed by typing them
+  `let outcome: WorkflowOutcome;` and importing the type). Final run:
+  `Checked 3 files in 5ms. No fixes applied.` — clean.
+- Full suite: `bun test` → `428 pass, 2 skip, 0 fail, 923 expect() calls,
+  Ran 430 tests across 129 files. [259.75s]`. The 2 skips are the
+  `describe.skipIf(!ready)` Ollama-gated live tests (expected — no local
+  Ollama server reachable in this environment).
+- `bun run docs:check` (pre-commit hook) → passed:
+  `✔ docs-check: living docs present + linked; every src subsystem documented.`
+  No `docs/architecture.md` change was needed for this task — it's an internal
+  CLI-wiring refactor onto Task 3's already-documented `withMcpRun` helper,
+  not a new subsystem or a change to `mcp.mount` ordering semantics.
+
+## Imports removed from `src/cli/flow.ts`
+
+- `loadMcpConfig` (from `../mcp/config.ts`) — entire import line removed.
+- `mountAll` (from `../mcp/mount.ts`) — kept `warnUnknownAgents` from the
+  same module.
+- `withMcpMountSpan` (from `../telemetry/spans.ts`) — kept `ATTR`,
+  `annotateStep`, `withWorkflowSpan`.
+- `initRunTelemetry` (from `../telemetry/provider.ts`) — entire import line
+  removed.
+- `createRun` (from `../run/run-store.ts`) — kept `writeArtifact`, added
+  `RunHandle` as a type import.
+
+Kept as instructed: `warnUnknownAgents`, `writeArtifact`.
 
 ## Commit
 
-```
-[slice-15-mcp-mounts 62898f8] feat(mcp): bun:sqlite server + capability-tagged starter pack + bun run mcp CLI (Slice 15 Task 4)
-7 files changed, 400 insertions(+)
-- src/mcp/sqlite-server.ts
-- src/mcp/pack.ts
-- src/cli/mcp.ts
-- package.json
-- tests/mcp/sqlite-server.test.ts
-- tests/mcp/pack.test.ts
-- tests/mcp/cli-add.test.ts
-```
+`851ac66` — `refactor(cli): flow uses withMcpRun; runFlow takes run:RunHandle (Slice 16 Task 4)`
+(3 files changed, 159 insertions, 145 deletions — only
+`src/cli/flow.ts`, `tests/cli/flow.test.ts`,
+`tests/integration/workflow.live.test.ts` staged/committed; other
+concurrently-modified repo files, e.g. `.superpowers/sdd/*`, `.remember/*`,
+were left untouched/unstaged for this task).
 
-Pre-commit docs-check hook passed ✅
+## Concerns / notes
 
-## Code Quality
-
-- **No console.log in src/mcp/** (silent servers per brief)
-- **Console.log in src/cli/mcp.ts** (CLI output, allowed)
-- **Type over interface** throughout (PackEntry used from Task 1)
-- **Early returns** used consistently
-- **addPackEntry:** atomic write (temp → rename, no overwrites)
-- **String ${VAR} handling:** literal strings, dormancy layer resolves at load time
-- **No new npm deps:** uses bun:sqlite natively
-- **Exports for tests:** `addPackEntry` exported from cli/mcp.ts for test suite
-
-## Self-review
-
-- All brief code (Steps 1–10) implemented in order: test-first → code → pass → lint → commit
-- Brief constraints honored: `${VAR}` literals, no archived packages, no new deps, dormancy-ready
-- sqlite-server test: real subprocess mount (mountMcpServer) with three tools tested end-to-end
-- pack test: 12-entry validation, capability queries, keyed-entry env refs, archived-package rejection
-- cli-add test: file creation, appending, refusal to overwrite, unknown-name handling
-- Lint issues fixed with biome-ignore comments (intended behavior for dormancy) + formatting
-- No concerns or workarounds needed
-
-## Review Fixes
-
-### Defect 1 — `query` tool write enforcement (Task 4 review)
-
-**Issue:** The `query` tool claimed to be read-only but enforced nothing—a DELETE would execute via `db.query(sql).all()`.
-
-**Fix:** Added gate before executing query:
-```ts
-const trimmed = sql.trim();
-if (!/^select\b/i.test(trimmed)) {
-  return textResult('query only accepts SELECT statements; use the execute tool for writes', true);
-}
-```
-
-Updated description to be precise: "Run a SQL SELECT against the ${dbPath} SQLite database and return rows as JSON. Only SELECT statements are accepted; use execute for writes."
-
-### Defect 2 — `schema` tool identifier quoting (Task 4 review)
-
-**Issue:** Table introspection used `JSON.stringify(t.name)` to quote identifiers. JSON backslash-escaping is not SQLite identifier quoting; breaks on legal names containing a double quote.
-
-**Fix:** Replaced with proper SQLite identifier quoting:
-```ts
-columns: db
-  .query(`PRAGMA table_info("${t.name.replace(/"/g, '""')}")`)
-  .all(),
-```
-
-This correctly escapes embedded quotes as `""` per SQLite identifier syntax.
-
-### Regression Tests Added
-
-Extended `sqlite-server.test.ts` with four new assertions (after baseline SELECT, before close):
-
-1. **Write rejection:** `query` rejects DELETE; returns `isError: true`
-2. **Survival test:** Deleted row still exists (DELETE didn't execute)
-3. **Quoted identifiers:** `schema` handles table names with embedded double quotes; introspection succeeds and includes both the weird-named table and the notes table in output
-4. **Invalid SQL:** Malformed SQL in `execute` surfaces as `isError: true`, not a throw
-
-**Test results:**
-```
-bun test v1.3.11
-1 pass, 0 fail, 10 expect() calls
-```
-
-All new assertions passed.
-
-### Quality Audit
-
-- **Typecheck:** ✅ clean (0 errors)
-- **Lint:** ✅ clean (0 errors/warnings; biome check passed)
-- **Format:** ✅ clean (formatter applied and verified)
+- None functional. One deviation from the brief worth flagging: the brief's
+  Step 1 text only mentions migrating r1/r2/r3 in `tests/cli/flow.test.ts`,
+  but the file has a 4th case (`r4`, the grounded verify-pass scenario). I
+  applied the identical transform to it too, since leaving it on the old
+  `runsRoot`/`runId` signature would have broken the build.

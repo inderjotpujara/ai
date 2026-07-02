@@ -60,6 +60,7 @@ export const ATTR = {
   MCP_TRANSPORT: 'mcp.transport',
   MCP_TOOL_COUNT: 'mcp.tool.count',
   MCP_MOUNT_OUTCOME: 'mcp.mount.outcome',
+  MCP_SERVER_COUNT: 'mcp.server.count',
 } as const;
 
 export type ModelSelectInfo = {
@@ -411,13 +412,17 @@ export function withMcpMountSpan<T>(
   ) => Promise<T>,
 ): Promise<T> {
   return inSpan('mcp.mount', async (span) => {
-    let servers = 0;
+    let mountedServers = 0;
+    let mountedTools = 0;
     const record = (
       name: string,
       outcome: string,
       toolCount?: number,
     ): void => {
-      servers += 1;
+      if (outcome === 'mounted') {
+        mountedServers += 1;
+        mountedTools += toolCount ?? 0;
+      }
       span.addEvent('mcp.server.mount', {
         [ATTR.MCP_SERVER]: name,
         [ATTR.MCP_MOUNT_OUTCOME]: outcome,
@@ -427,7 +432,8 @@ export function withMcpMountSpan<T>(
       });
     };
     const out = await fn(record);
-    span.setAttribute(ATTR.MCP_TOOL_COUNT, servers);
+    span.setAttribute(ATTR.MCP_SERVER_COUNT, mountedServers);
+    span.setAttribute(ATTR.MCP_TOOL_COUNT, mountedTools);
     return out;
   });
 }

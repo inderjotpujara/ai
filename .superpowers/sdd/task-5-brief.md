@@ -1,301 +1,149 @@
-### Task 5: Tool telemetry + CLI wiring (chat/flow/crew) + default `mcp.json`
+## Task 5: Migrate `crew` CLI to `withMcpRun`
 
 **Files:**
-- Modify: `src/telemetry/spans.ts` (ATTR keys + `withToolSpan` + `recordMountOutcome`)
-- Modify: `src/workflow/run-step.ts` (wrap `callTool` in `withToolSpan`)
-- Modify: `src/cli/flow.ts`, `src/cli/crew.ts`, `src/cli/chat.ts` (registry mounts)
-- Create: `mcp.json` (committed default — today's two mounts)
-- Test: `tests/mcp/tool-span.test.ts`
+- Modify: `src/cli/crew.ts` (`CrewCliDeps` 14-25, `runCrewCli` 28-62, `main` 76-141)
+- Test: `tests/cli/crew.test.ts`, `tests/integration/crew.live.test.ts`
 
 **Interfaces:**
-- Consumes: `loadMcpConfig` (Task 1), `mountAll`/`warnUnknownAgents`/`MountedRegistry` (Task 3).
-- Produces:
-  - `ATTR.TOOL_NAME = 'gen_ai.tool.name'`, `ATTR.MCP_SERVER = 'mcp.server'`, `ATTR.MCP_TRANSPORT = 'mcp.transport'`, `ATTR.MCP_TOOL_COUNT = 'mcp.tool.count'`, `ATTR.MCP_MOUNT_OUTCOME = 'mcp.mount.outcome'`
-  - `withToolSpan<T>(toolName: string, fn: () => Promise<T>): Promise<T>` — span `workflow.tool`.
-  - `withMcpMountSpan<T>(fn: (record: (name: string, outcome: string, toolCount?: number) => void) => Promise<T>): Promise<T>` — span `mcp.mount` with per-server `mcp.server.mount` events.
+- Consumes: `withMcpRun` (Task 3).
+- Produces: `CrewCliDeps` has `run: RunHandle` in place of `runsRoot`/`runId`; `runCrewCli` no longer creates the run or manages telemetry.
 
-- [ ] **Step 1: Write the failing span test**
+- [ ] **Step 1: Migrate `tests/cli/crew.test.ts` (RED)**
 
-```ts
-// tests/mcp/tool-span.test.ts
-import { describe, expect, it } from 'bun:test';
-import { withMcpMountSpan, withToolSpan } from '../../src/telemetry/spans.ts';
+Add imports:
 
-// No provider initialized → no-op tracer; helpers must pass results through
-// and propagate errors (the provider-attached path is exercised by run-viewer live tests).
-describe('withToolSpan', () => {
-  it('passes the function result through', async () => {
-    expect(await withToolSpan('echo', async () => 42)).toBe(42);
-  });
-  it('propagates errors', async () => {
-    await expect(withToolSpan('boom', async () => { throw new Error('x'); })).rejects.toThrow('x');
-  });
-});
-
-describe('withMcpMountSpan', () => {
-  it('hands the recorder to the body and returns its result', async () => {
-    const out = await withMcpMountSpan(async (record) => {
-      record('file-tools', 'mounted', 1);
-      record('gh', 'dormant');
-      return 'ok';
-    });
-    expect(out).toBe('ok');
-  });
-});
+```typescript
+import { createRun } from '../../src/run/run-store.ts';
+import { initRunTelemetry } from '../../src/telemetry/provider.ts';
 ```
 
-- [ ] **Step 2: Run to verify fail**
+For each `runCrewCli({ ..., runsRoot, runId: 'rN', ... })` (cases `r1`, `r2`, `r3`), wrap exactly as in Task 4 Step 1:
 
-Run: `bun test tests/mcp/tool-span.test.ts`
-Expected: FAIL (exports missing).
-
-- [ ] **Step 3: Extend `src/telemetry/spans.ts`**
-
-Add to the `ATTR` const (after `PROVISION_SNAPSHOT_FALLBACK`):
-
-```ts
-  TOOL_NAME: 'gen_ai.tool.name',
-  MCP_SERVER: 'mcp.server',
-  MCP_TRANSPORT: 'mcp.transport',
-  MCP_TOOL_COUNT: 'mcp.tool.count',
-  MCP_MOUNT_OUTCOME: 'mcp.mount.outcome',
-```
-
-Add at the end of the file:
-
-```ts
-/** Span for one engine-level tool call (StepKind.Tool) — closes the gap where
- *  direct tool dispatch ran uninstrumented (agent-internal tool calls are
- *  already covered by AI-SDK experimental_telemetry). */
-export function withToolSpan<T>(
-  toolName: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  return inSpan('workflow.tool', async (span) => {
-    span.setAttribute(ATTR.TOOL_NAME, toolName);
-    return fn();
-  });
-}
-
-/** Root span for an MCP mount pass; the body records one event per server. */
-export function withMcpMountSpan<T>(
-  fn: (record: (name: string, outcome: string, toolCount?: number) => void) => Promise<T>,
-): Promise<T> {
-  return inSpan('mcp.mount', async (span) => {
-    let servers = 0;
-    const record = (name: string, outcome: string, toolCount?: number): void => {
-      servers += 1;
-      span.addEvent('mcp.server.mount', {
-        [ATTR.MCP_SERVER]: name,
-        [ATTR.MCP_MOUNT_OUTCOME]: outcome,
-        ...(toolCount !== undefined ? { [ATTR.MCP_TOOL_COUNT]: toolCount } : {}),
-      });
-    };
-    const out = await fn(record);
-    span.setAttribute(ATTR.MCP_TOOL_COUNT, servers);
-    return out;
-  });
+```typescript
+const run = await createRun(runsRoot, 'r1');
+const tel = initRunTelemetry(run.dir);
+let outcome;
+try {
+  outcome = await runCrewCli({ def, input, run, tools /*, ...*/ });
+} finally {
+  await tel.shutdown();
 }
 ```
 
-- [ ] **Step 4: Run to verify pass**
+Leave the `join(runsRoot, 'r1', 'spans.jsonl')` / `result.txt` / `unverified.txt` assertions unchanged.
 
-Run: `bun test tests/mcp/tool-span.test.ts`
-Expected: PASS (3 tests).
+- [ ] **Step 2: Run test to verify it fails**
 
-- [ ] **Step 5: Wrap engine tool dispatch in `src/workflow/run-step.ts`**
+Run: `bun test tests/cli/crew.test.ts`
+Expected: FAIL — `CrewCliDeps` has no `run`; `runCrewCli` still calls `createRun` on `deps.runsRoot`.
 
-Add `withToolSpan` to the existing spans import, then change the two `callTool` call sites (semantics unchanged — same args, same errors):
+- [ ] **Step 3: Update `CrewCliDeps` + `runCrewCli` in `src/cli/crew.ts`**
 
-In `runLeaf`:
+Replace `runsRoot: string; runId: string;` (lines 17-18) with `run: RunHandle;`. Extend the import on line 7:
 
-```ts
-  const tool = deps.tools[sub.tool];
-  if (!tool?.execute) throw new WorkflowError(`unknown tool: ${sub.tool}`);
-  return withToolSpan(sub.tool, () => callTool(tool, sub.input(ctx), callId));
+```typescript
+import { type RunHandle, writeArtifact } from '../run/run-store.ts';
 ```
 
-In `runStepByKind` (`case StepKind.Tool`):
+Rewrite `runCrewCli` (lines 28-62) to use `deps.run` and drop telemetry ownership:
 
-```ts
-    case StepKind.Tool: {
-      const tool = deps.tools[step.tool];
-      if (!tool?.execute) {
-        return Promise.reject(new WorkflowError(`unknown tool: ${step.tool}`));
-      }
-      return withToolSpan(step.tool, () => callTool(tool, step.input(ctx), step.id));
-    }
-```
-
-Run: `bun test tests/workflow/` — Expected: PASS (no behavior change).
-
-- [ ] **Step 6: Create the committed default `mcp.json` (repo root)**
-
-```json
-{
-  "mcpServers": {
-    "file-tools": {
-      "command": "bun",
-      "args": ["run", "src/mcp/server.ts"],
-      "agents": ["file_qa"]
-    },
-    "fetch": {
-      "command": "uvx",
-      "args": ["mcp-server-fetch"],
-      "agents": ["web_fetch"]
-    }
+```typescript
+/** Run a crew with telemetry + artifact persistence (mirrors runFlow).
+ *  Telemetry + the run dir are established by the caller (withMcpRun). */
+export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
+  const { run } = deps;
+  const def = deps.verifyDeps ? { ...deps.def, verify: true } : deps.def;
+  const outcome = await runCrew(def, deps.input, {
+    tools: deps.tools,
+    onBeforeDelegate: deps.onBeforeDelegate,
+    runAgentStep: deps.runAgentStep,
+    verifyDeps: deps.verifyDeps,
+  });
+  if (outcome.kind === 'done') {
+    const text =
+      typeof outcome.output === 'string'
+        ? outcome.output
+        : JSON.stringify(outcome.output, null, 2);
+    await writeArtifact(run, 'result.txt', text);
+  } else if (outcome.kind === 'unverified') {
+    await writeArtifact(
+      run,
+      'unverified.txt',
+      `task ${outcome.failedTaskId ?? '?'} abstained (faithfulness ${outcome.faithfulness}); unsupported claims:\n${outcome.unsupportedClaims.join('\n')}\n\ndraft:\n${outcome.draft}`,
+    );
+  } else {
+    await writeArtifact(run, 'failed.txt', `task ${outcome.failedTask ?? '?'}: ${outcome.message}`);
   }
+  return outcome;
 }
 ```
 
-- [ ] **Step 7: Rewire `src/cli/flow.ts`**
+Remove the now-unused imports `createRun` and `initRunTelemetry` (lines 7-8). Remove `loadMcpConfig` (line 5), `mountAll` (line 6), `withMcpMountSpan` (line 9) once `main` is rewired in Step 4.
 
-Replace the `createFetchTools, createFileTools` import with:
+- [ ] **Step 4: Rewire `main()` to use `withMcpRun`**
 
-```ts
-import { loadMcpConfig } from '../mcp/config.ts';
-import { mountAll, warnUnknownAgents } from '../mcp/mount.ts';
-import { withMcpMountSpan } from '../telemetry/spans.ts';
-```
+Add `import { withMcpRun } from './with-mcp-run.ts';`. Replace the mount block through the outer `finally` (lines 89-140) with:
 
-Replace the mount region of `main()` — from `const fileServer = await createFileTools();` through its matching final `finally { await fileServer.close(); }` — with (inner body unchanged except the marked lines):
-
-```ts
-  const config = loadMcpConfig();
-  const reg = await withMcpMountSpan(async (record) => {
-    const r = await mountAll(config);
-    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
-    for (const s of r.skipped) record(s.name, s.reason);
-    for (const d of config.dormant) record(d.name, 'dormant');
-    return r;
-  });
-  try {
-    const selection = await createSelectionRuntime();
-    try {
-      const tools: ToolSet = reg.merged;
-      const agents: Record<string, Agent> = {};
-      const fileQa = createFileQaAgent(reg.forAgent('file_qa'));
-      const webFetch = createWebFetchAgent(reg.forAgent('web_fetch'));
-      agents[fileQa.name] = fileQa;
-      agents[webFetch.name] = webFetch;
-      warnUnknownAgents(config, Object.keys(agents), (m) => console.error(m));
-
-      const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
+```typescript
+  await withMcpRun(
+    { runsRoot: 'runs', runId: `crew-${process.pid}` },
+    async ({ run, reg }) => {
+      const selection = await createSelectionRuntime();
       try {
-        const outcome = await runFlow({
-          def,
-          input: positional.join(' ').trim(),
-          runsRoot: 'runs',
-          runId: `flow-${process.pid}`,
-          agents,
-          tools,
-          onBeforeDelegate: selection.onBeforeDelegate,
-          verifyDeps: verifyRuntime?.verifyDeps,
-        });
-        if (outcome.kind === 'done') {
-          console.log(lastStepOutputText(def, outcome.output));
-        } else if (outcome.kind === 'unverified') {
-          console.error(
-            `Workflow abstained at ${outcome.failedStepId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
-          );
-          process.exitCode = 1;
-        } else {
-          console.error(
-            `Workflow failed at ${outcome.failedStep}: ${outcome.message}`,
-          );
-          process.exitCode = 1;
+        const tools: ToolSet = reg.merged;
+        const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;
+        try {
+          const outcome = await runCrewCli({
+            def,
+            input: positional.join(' ').trim(),
+            run,
+            tools,
+            onBeforeDelegate: selection.onBeforeDelegate,
+            verifyDeps: verifyRuntime?.verifyDeps,
+          });
+          if (outcome.kind === 'done') {
+            console.log(
+              typeof outcome.output === 'string'
+                ? outcome.output
+                : JSON.stringify(outcome.output, null, 2),
+            );
+          } else if (outcome.kind === 'unverified') {
+            console.error(
+              `Crew abstained at ${outcome.failedTaskId ?? '?'} (unverified, faithfulness ${outcome.faithfulness}): ${outcome.unsupportedClaims.join('; ')}`,
+            );
+            process.exitCode = 1;
+          } else {
+            console.error(`Crew failed at ${outcome.failedTask ?? '?'}: ${outcome.message}`);
+            process.exitCode = 1;
+          }
+        } finally {
+          if (verifyRuntime) {
+            verifyRuntime.store.close();
+            await verifyRuntime.manager.unloadAll();
+          }
         }
       } finally {
-        if (verifyRuntime) {
-          verifyRuntime.store.close();
-          await verifyRuntime.manager.unloadAll();
-        }
+        await selection.close();
       }
-    } finally {
-      await selection.close();
-    }
-  } finally {
-    await reg.close();
-  }
+    },
+  );
 ```
 
-- [ ] **Step 8: Rewire `src/cli/crew.ts` (same pattern)**
+- [ ] **Step 5: Migrate `tests/integration/crew.live.test.ts`**
 
-Same import swap as Step 7. Replace its mount region — `const fileServer = await createFileTools();` through the final `finally { await fileServer.close(); }` — keeping the inner body identical except `const tools: ToolSet = { ...fileServer.tools, ...fetchServer.tools };` becomes `const tools: ToolSet = reg.merged;`, wrapped in:
+Apply the Step 1 transform to its `runCrewCli({ runsRoot, runId: 'live', ... })` call.
 
-```ts
-  const config = loadMcpConfig();
-  const reg = await withMcpMountSpan(async (record) => {
-    const r = await mountAll(config);
-    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
-    for (const s of r.skipped) record(s.name, s.reason);
-    for (const d of config.dormant) record(d.name, 'dormant');
-    return r;
-  });
-  try {
-    // ... existing selection/verify/runCrewCli body, tools = reg.merged ...
-  } finally {
-    await reg.close();
-  }
-```
+- [ ] **Step 6: Run tests + typecheck**
 
-(Crew members without per-member `tools` fall back to the merged set via `buildCrewAgent(member, tools)` — unchanged behavior.)
+Run: `bun test tests/cli/crew.test.ts` (PASS), `bun run typecheck` (clean).
 
-- [ ] **Step 9: Rewire `src/cli/chat.ts`**
+- [ ] **Step 7: Lint + commit**
 
-Same import swap. Replace the mount region — `const fileServer = await createFileTools();` through `await fileServer.close();` (keep `await manager.unloadAll();` in the outer finally) — with:
-
-```ts
-  const config = loadMcpConfig();
-  const reg = await withMcpMountSpan(async (record) => {
-    const r = await mountAll(config);
-    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
-    for (const s of r.skipped) record(s.name, s.reason);
-    for (const d of config.dormant) record(d.name, 'dormant');
-    return r;
-  });
-  try {
-    const orchestrator = createSuperAgent(
-      reg.forAgent('file_qa'),
-      reg.forAgent('web_fetch'),
-      onBeforeDelegate,
-    );
-    const result = await runChat({
-      orchestrator,
-      task,
-      runsRoot: 'runs',
-      runId: `run-${process.pid}`,
-      routerNumCtx,
-      capture,
-    });
-    if (result.kind === 'answer') {
-      console.log(result.text);
-    } else if (result.kind === 'gap') {
-      console.log(result.message);
-    } else {
-      console.error(result.message);
-      process.exitCode = 1;
-    }
-  } finally {
-    await reg.close();
-    await manager.unloadAll();
-  }
-```
-
-`maybeAutoProvision()` and everything above the mount region stay untouched.
-
-- [ ] **Step 10: First-run consent seeding note + full gate**
-
-The committed default `mcp.json` entries are NOT pre-approved: the first interactive `bun run flow|crew|chat` prompts once per server (y → recorded in `.mcp-approvals.json`). Non-TTY runs skip unapproved servers with a warning (tests construct deps directly, so the suite is unaffected).
-
-Run: `bun run docs:check && bun run typecheck && bun run lint` then `bun test`
-Expected: all clean/green (pre-existing pass counts + the new mcp tests).
-
-- [ ] **Step 11: Commit**
+Run: `bun run lint:file -- "src/cli/crew.ts" "tests/cli/crew.test.ts" "tests/integration/crew.live.test.ts"`.
 
 ```bash
-git add src/telemetry/spans.ts src/workflow/run-step.ts src/cli/flow.ts src/cli/crew.ts src/cli/chat.ts mcp.json tests/mcp/tool-span.test.ts
-git commit -m "feat(mcp): registry-driven CLI mounts + workflow.tool/mcp.mount telemetry + default mcp.json (Slice 15 Task 5)"
+git add src/cli/crew.ts tests/cli/crew.test.ts tests/integration/crew.live.test.ts
+git commit -m "refactor(cli): crew uses withMcpRun; runCrewCli takes run:RunHandle (Slice 16 Task 5)"
 ```
 
 ---

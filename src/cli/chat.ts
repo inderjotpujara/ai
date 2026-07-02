@@ -4,8 +4,6 @@ import { BOOTSTRAP } from '../../models/registry.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
-import { loadMcpConfig } from '../mcp/config.ts';
-import { mountAll } from '../mcp/mount.ts';
 import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
 import { detectMissing } from '../provisioning/detect-missing.ts';
 import { runProvision } from '../provisioning/provisioner.ts';
@@ -22,10 +20,10 @@ import {
   isModelInstalled,
   listLoadedModels,
 } from '../resource/ollama-control.ts';
-import { withMcpMountSpan } from '../telemetry/spans.ts';
 import { runChat } from './run-chat.ts';
 import { createSelectHook } from './select-hook.ts';
 import { formatSelectionNotice } from './selection-notice.ts';
+import { withMcpRun } from './with-mcp-run.ts';
 
 /** Non-invasive first-boot offer: only fires interactively, and only on explicit consent. */
 async function maybeAutoProvision(): Promise<void> {
@@ -105,38 +103,33 @@ async function main(): Promise<void> {
     notify,
   });
 
-  const config = loadMcpConfig();
-  const reg = await withMcpMountSpan(async (record) => {
-    const r = await mountAll(config);
-    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
-    for (const s of r.skipped) record(s.name, s.reason);
-    for (const d of config.dormant) record(d.name, 'dormant');
-    return r;
-  });
   try {
-    const orchestrator = createSuperAgent(
-      reg.forAgent('file_qa'),
-      reg.forAgent('web_fetch'),
-      onBeforeDelegate,
+    await withMcpRun(
+      { runsRoot: 'runs', runId: `run-${process.pid}` },
+      async ({ run, reg }) => {
+        const orchestrator = createSuperAgent(
+          reg.forAgent('file_qa'),
+          reg.forAgent('web_fetch'),
+          onBeforeDelegate,
+        );
+        const result = await runChat({
+          orchestrator,
+          task,
+          run,
+          routerNumCtx,
+          capture,
+        });
+        if (result.kind === 'answer') {
+          console.log(result.text);
+        } else if (result.kind === 'gap') {
+          console.log(result.message);
+        } else {
+          console.error(result.message);
+          process.exitCode = 1;
+        }
+      },
     );
-    const result = await runChat({
-      orchestrator,
-      task,
-      runsRoot: 'runs',
-      runId: `run-${process.pid}`,
-      routerNumCtx,
-      capture,
-    });
-    if (result.kind === 'answer') {
-      console.log(result.text);
-    } else if (result.kind === 'gap') {
-      console.log(result.message);
-    } else {
-      console.error(result.message);
-      process.exitCode = 1;
-    }
   } finally {
-    await reg.close();
     await manager.unloadAll();
   }
 }
