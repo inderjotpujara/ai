@@ -6,7 +6,13 @@ import { z } from 'zod';
 import { runCrewCli } from '../../src/cli/crew.ts';
 import { Capability, PreferPolicy } from '../../src/core/types.ts';
 import { defineCrew } from '../../src/crew/define.ts';
-import { type CrewDef, CrewProcess } from '../../src/crew/types.ts';
+import {
+  type CrewDef,
+  type CrewOutcome,
+  CrewProcess,
+} from '../../src/crew/types.ts';
+import { createRun } from '../../src/run/run-store.ts';
+import { initRunTelemetry } from '../../src/telemetry/provider.ts';
 import type { VerifyDeps } from '../../src/verification/types.ts';
 
 const crew: CrewDef = defineCrew({
@@ -60,15 +66,21 @@ function fakeVerifyDeps(
 describe('runCrewCli', () => {
   it('writes spans.jsonl with crew.run + result.txt on success', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'crew-'));
-    const outcome = await runCrewCli({
-      def: crew,
-      input: 'hello',
-      runsRoot,
-      runId: 'r1',
-      tools: {},
-      // deps hook: override the agent runner so no real model is needed
-      runAgentStep: async () => 'result text',
-    } as never);
+    const run = await createRun(runsRoot, 'r1');
+    const tel = initRunTelemetry(run.dir);
+    let outcome: CrewOutcome;
+    try {
+      outcome = await runCrewCli({
+        def: crew,
+        input: 'hello',
+        run,
+        tools: {},
+        // deps hook: override the agent runner so no real model is needed
+        runAgentStep: async () => 'result text',
+      } as never);
+    } finally {
+      await tel.shutdown();
+    }
     expect(outcome.kind).toBe('done');
     const spans = await readFile(join(runsRoot, 'r1', 'spans.jsonl'), 'utf8');
     expect(spans).toContain('crew.run');
@@ -78,15 +90,21 @@ describe('runCrewCli', () => {
 
   it('verifyDeps present + a plain crew (no verify flags set) still verifies, and unverified.txt is written on abstain', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'crew-verify-'));
-    const outcome = await runCrewCli({
-      def: crew, // no task.verify / crew.verify set in the fixture
-      input: 'hello',
-      runsRoot,
-      runId: 'r2',
-      tools: {},
-      runAgentStep: async () => 'a draft answer [mem:c#0]',
-      verifyDeps: fakeVerifyDeps(false),
-    });
+    const run = await createRun(runsRoot, 'r2');
+    const tel = initRunTelemetry(run.dir);
+    let outcome: CrewOutcome;
+    try {
+      outcome = await runCrewCli({
+        def: crew, // no task.verify / crew.verify set in the fixture
+        input: 'hello',
+        run,
+        tools: {},
+        runAgentStep: async () => 'a draft answer [mem:c#0]',
+        verifyDeps: fakeVerifyDeps(false),
+      });
+    } finally {
+      await tel.shutdown();
+    }
     expect(outcome.kind).toBe('unverified');
     const unverified = await readFile(
       join(runsRoot, 'r2', 'unverified.txt'),
@@ -97,15 +115,21 @@ describe('runCrewCli', () => {
 
   it('verifyDeps present + a grounded answer -> done, result.txt written', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'crew-verify-ok-'));
-    const outcome = await runCrewCli({
-      def: crew,
-      input: 'hello',
-      runsRoot,
-      runId: 'r3',
-      tools: {},
-      runAgentStep: async () => 'a grounded answer [mem:c#0]',
-      verifyDeps: fakeVerifyDeps(true),
-    });
+    const run = await createRun(runsRoot, 'r3');
+    const tel = initRunTelemetry(run.dir);
+    let outcome: CrewOutcome;
+    try {
+      outcome = await runCrewCli({
+        def: crew,
+        input: 'hello',
+        run,
+        tools: {},
+        runAgentStep: async () => 'a grounded answer [mem:c#0]',
+        verifyDeps: fakeVerifyDeps(true),
+      });
+    } finally {
+      await tel.shutdown();
+    }
     expect(outcome.kind).toBe('done');
     const result = await readFile(join(runsRoot, 'r3', 'result.txt'), 'utf8');
     expect(result).toContain('grounded answer');
