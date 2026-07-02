@@ -13,19 +13,17 @@ import {
   createSnapshotSource,
   withSnapshotFallback,
 } from './catalog/snapshot-source.ts';
+import { createHfFetchProvider } from './providers/hf-fetch.ts';
 import { createOllamaProvider } from './providers/ollama.ts';
-// Task 5: re-enable — HF-fetch and LM Studio download providers don't exist yet.
-// import { createHfFetchProvider } from './providers/hf-fetch.ts';
-// import { createLmStudioProvider } from './providers/lmstudio.ts';
 import type { DownloadProvider } from './types.ts';
 
 export function providerFor(kind: ProviderKind): DownloadProvider {
   switch (kind) {
     case ProviderKind.Ollama:
       return createOllamaProvider();
-    // Task 5: re-enable — MLX snapshot download via HF.
-    // case ProviderKind.MlxServer:
-    //   return createHfFetchProvider(ProviderKind.MlxServer);
+    // MLX snapshot download via HF (llama.cpp GGUF / MLX whole-snapshot).
+    case ProviderKind.MlxServer:
+      return createHfFetchProvider(ProviderKind.MlxServer);
     default:
       return createOllamaProvider();
   }
