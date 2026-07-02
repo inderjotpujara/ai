@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import { ProviderKind } from '../../src/core/types.ts';
 import { runProvision } from '../../src/provisioning/provisioner.ts';
-import { DownloadPhase } from '../../src/provisioning/types.ts';
+import {
+  DownloadPhase,
+  type DownloadProgress,
+} from '../../src/provisioning/types.ts';
 
 const host = {
   totalRamBytes: 24e9,
@@ -22,8 +25,13 @@ const cand = (model: string, size: number) => ({
 
 function deps(overrides = {}) {
   const downloaded: string[] = [];
+  const barEvents: { render: DownloadProgress[]; done: DownloadProgress[] } = {
+    render: [],
+    done: [],
+  };
   return {
     downloaded,
+    barEvents,
     detectHost: async () => host,
     catalogSources: [
       {
@@ -35,6 +43,14 @@ function deps(overrides = {}) {
     providerFor: () => ({
       kind: ProviderKind.Ollama,
       download: async (m: string, o: any) => {
+        o.onProgress({
+          modelRef: m,
+          phase: DownloadPhase.Downloading,
+          bytesCompleted: 1e9,
+          bytesTotal: 3e9,
+          percent: 33,
+          speedBytesPerSec: 1,
+        });
         o.onProgress({
           modelRef: m,
           phase: DownloadPhase.Done,
@@ -51,7 +67,14 @@ function deps(overrides = {}) {
     ui: {
       askYesNo: async () => true,
       selectModels: async (items: any[]) => items.filter((i) => i.recommended),
-      bar: { render() {}, done() {} },
+      bar: {
+        render(p: DownloadProgress) {
+          barEvents.render.push(p);
+        },
+        done(p: DownloadProgress) {
+          barEvents.done.push(p);
+        },
+      },
     },
     ...overrides,
   };
@@ -63,6 +86,15 @@ describe('runProvision', () => {
     const res = await runProvision({ deps: d, autoYes: false });
     expect(res.downloaded).toEqual(['qwen3.5:4b']);
     expect(d.downloaded).toEqual(['qwen3.5:4b']);
+  });
+
+  it('calls bar.done() on the terminal Done event, bar.render() for intermediate events', async () => {
+    const d = deps();
+    await runProvision({ deps: d, autoYes: false });
+    expect(d.barEvents.render).toHaveLength(1);
+    expect(d.barEvents.render[0]?.phase).toBe(DownloadPhase.Downloading);
+    expect(d.barEvents.done).toHaveLength(1);
+    expect(d.barEvents.done[0]?.phase).toBe(DownloadPhase.Done);
   });
 
   it('records nothing downloaded when consent is declined', async () => {

@@ -7,7 +7,11 @@ import type {
 import { ATTR, withProvisionSpan } from '../telemetry/spans.ts';
 import { type FitCandidate, fitAndRank } from './fit.ts';
 import { checkDiskSpace } from './supervisor.ts';
-import type { DownloadProgress, DownloadProvider } from './types.ts';
+import {
+  DownloadPhase,
+  type DownloadProgress,
+  type DownloadProvider,
+} from './types.ts';
 
 export type ProvisionResult = {
   downloaded: string[];
@@ -111,7 +115,10 @@ export async function runProvision(opts: {
         try {
           const provider = deps.providerFor(c.provider);
           await provider.download(c.model, {
-            onProgress: (p) => deps.ui.bar.render(p),
+            onProgress: (p) =>
+              p.phase === DownloadPhase.Done || p.phase === DownloadPhase.Failed
+                ? deps.ui.bar.done(p)
+                : deps.ui.bar.render(p),
             signal: ctrl.signal,
           });
           result.downloaded.push(c.model);
