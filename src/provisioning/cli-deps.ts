@@ -3,7 +3,7 @@ import { detectHost } from '../discovery/host.ts';
 import type { ProvisionDeps } from './provisioner.ts';
 import { catalogSourcesFor, enrichSize, providerFor } from './registry.ts';
 import { formatBytes } from './ui/format.ts';
-import { ProgressBar } from './ui/progress-bar.ts';
+import { MultiProgressBar, ProgressBar } from './ui/progress-bar.ts';
 import { askYesNo, selectModels, stdinInput } from './ui/prompt.ts';
 
 /** Free disk space on the models volume; conservative fallback keeps preflight non-fatal. */
@@ -23,13 +23,20 @@ export function buildProvisionDeps(
   opts: { autoYes: boolean },
 ): ProvisionDeps {
   const input = stdinInput();
-  const bar = new ProgressBar(process.stderr, process.stderr.isTTY ?? false);
+  // Same TTY signal picks both the download concurrency strategy (see
+  // runProvision's `deps.isTTY` gate) and the matching bar renderer: a
+  // multi-row bar only makes sense when downloads actually run in parallel.
+  const isTTY = process.stdout.isTTY ?? false;
+  const bar = isTTY
+    ? new MultiProgressBar(process.stderr)
+    : new ProgressBar(process.stderr, process.stderr.isTTY ?? false);
   return {
     detectHost: async () => host,
     catalogSources: catalogSourcesFor(host),
     providerFor,
     enrichSize,
     freeDiskBytes,
+    isTTY,
     ui: {
       askYesNo: (q) => askYesNo(q, { input, autoYes: opts.autoYes }),
       selectModels: (items) =>

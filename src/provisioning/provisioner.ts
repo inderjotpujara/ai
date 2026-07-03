@@ -37,7 +37,18 @@ export type ProvisionDeps = {
   enrichSize: (c: Candidate) => Promise<number>;
   freeDiskBytes: () => Promise<number>;
   ui: ProvisionUi;
+  /** Whether the current process is attached to an interactive terminal.
+   *  Gates bounded-parallel downloads (a multi-bar only renders sanely on a
+   *  TTY); non-interactive runs (CI, piped output) always download
+   *  sequentially with a single bar. Defaults to `false` (sequential) when
+   *  omitted so existing callers/tests keep their prior behavior. */
+  isTTY?: boolean;
 };
+
+/** How many models download at once when running on a TTY. Small enough that
+ *  a multi-bar still fits on screen and we don't saturate bandwidth/disk I/O;
+ *  large enough to meaningfully overlap network-bound downloads. */
+const DOWNLOAD_CONCURRENCY = 2;
 
 /** Orchestrates the first-boot flow. All deps injectable; degrade-never-crash. */
 export async function runProvision(opts: {
@@ -111,7 +122,8 @@ export async function runProvision(opts: {
     }
   }
 
-  // 6) Sequential download with a live bar; degrade-never-crash per model.
+  // 6) Download with a live bar; degrade-never-crash per model. Bounded-
+  // parallel on a TTY (multi-bar), sequential otherwise (single bar).
   const runtimes = [...new Set(selected.map((c) => c.runtime))];
   return withProvisionSpan(
     {
@@ -125,7 +137,8 @@ export async function runProvision(opts: {
       const ctrl = new AbortController();
       const destDir = resolveDestDir();
       let deferredVerify = false;
-      for (const c of selected) {
+
+      const downloadOne = async (c: FitCandidate): Promise<void> => {
         try {
           const provider = deps.providerFor(c.provider);
           const outcome = await provider.download(c.model, {
@@ -144,7 +157,26 @@ export async function runProvision(opts: {
             error: (err as Error).message,
           });
         }
+      };
+
+      if (deps.isTTY) {
+        // Bounded-parallel: a small pool of workers drains the shared queue
+        // so at most DOWNLOAD_CONCURRENCY downloads are in flight; a
+        // rejection inside downloadOne is already caught there, so one
+        // worker's failure never stops the others from draining the queue.
+        let next = 0;
+        const poolSize = Math.min(DOWNLOAD_CONCURRENCY, selected.length);
+        const workers = Array.from({ length: poolSize }, async () => {
+          while (next < selected.length) {
+            const c = selected[next++] as FitCandidate;
+            await downloadOne(c);
+          }
+        });
+        await Promise.all(workers);
+      } else {
+        for (const c of selected) await downloadOne(c);
       }
+
       span.setAttribute(
         ATTR.PROVISION_DOWNLOADED_COUNT,
         result.downloaded.length,

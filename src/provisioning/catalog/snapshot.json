@@ -6,7 +6,7 @@
     "quant": "Q4_K_M",
     "params_billions": 4,
     "bytes_per_weight": 0.6,
-    "file_size_bytes": 3000000000,
+    "file_size_bytes": 3389983735,
     "downloads": 100000,
     "role": "routing / orchestration",
     "capabilities": ["tools"]
@@ -18,7 +18,7 @@
     "quant": "Q4_K_M",
     "params_billions": 9,
     "bytes_per_weight": 0.6,
-    "file_size_bytes": 6600000000,
+    "file_size_bytes": 6594474711,
     "downloads": 100000,
     "role": "general reasoning + tool use",
     "capabilities": ["tools"]
@@ -30,7 +30,7 @@
     "quant": "Q4_K_M",
     "params_billions": 0.6,
     "bytes_per_weight": 0.6,
-    "file_size_bytes": 640000000,
+    "file_size_bytes": 639150858,
     "downloads": 50000,
     "role": "embeddings",
     "capabilities": []
@@ -42,7 +42,7 @@
     "quant": "Q4_K_M",
     "params_billions": 7,
     "bytes_per_weight": 0.6,
-    "file_size_bytes": 4700000000,
+    "file_size_bytes": 4712804207,
     "downloads": 20000,
     "role": "faithfulness judge",
     "capabilities": []
