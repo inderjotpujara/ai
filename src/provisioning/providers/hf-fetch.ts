@@ -193,24 +193,45 @@ export function createHfFetchProvider(
         });
         return;
       }
-      // HfSnapshot (multi-file): actual on-disk write lands in a later task;
-      // for now this counts bytes and reports progress only.
-      const url = `${HF_RESOLVE}/${repo}/resolve/main/`;
-      const res = await fetchImpl(url, { signal });
-      if (!res.ok || !res.body)
-        throw new ProviderError(`HF resolve returned ${res.status}`);
-      const total = Number(res.headers.get('content-length')) || null;
-      const reader = res.body.getReader();
-      let done = 0;
-      for (;;) {
-        const { done: finished, value } = await reader.read();
-        if (finished) break;
-        done += value?.byteLength ?? 0;
-        onProgress(tracker.update(DownloadPhase.Downloading, done, total));
+      // HfSnapshot (multi-file): an MLX model is the whole repo. Enumerate
+      // the tree ONCE (not per file — see Task 8's note) and download every
+      // entry atomically to <destDir>/<repo>/<path>. Unlike the single-file
+      // branch above, a tree-fetch failure here leaves nothing to enumerate,
+      // so degrade the whole download by throwing (the provisioner catches
+      // this into result.failed) rather than silently downloading nothing.
+      let files: { path: string; size: number; oid?: string }[];
+      try {
+        files = await treeFiles(repo ?? '');
+      } catch (err) {
+        throw new ProviderError(
+          `HF tree listing failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
-      onProgress(tracker.update(DownloadPhase.Verifying, done, total));
-      if (deps.sha256) await deps.sha256(repo ?? modelRef);
-      onProgress(tracker.update(DownloadPhase.Done, done, total ?? done));
+      const bytesTotal = files.reduce((sum, f) => sum + f.size, 0) || null;
+      let completedBytes = 0;
+      for (const f of files) {
+        const destPath = safeJoin(destDir, `${repo}/${f.path}`);
+        const fileUrl = `${HF_RESOLVE}/${repo}/resolve/main/${f.path}`;
+        const bytesBeforeThisFile = completedBytes;
+        await downloadFile(fileUrl, destPath, {
+          // Re-scale this file's own (isolated) tracker output onto the
+          // whole-snapshot byte range so percent climbs monotonically across
+          // files instead of resetting/jumping backwards per file.
+          onProgress: (p) =>
+            onProgress(
+              tracker.update(
+                p.phase,
+                bytesBeforeThisFile + p.bytesCompleted,
+                bytesTotal,
+              ),
+            ),
+          signal,
+          tracker: new ProgressTracker(modelRef),
+          expectedOid: f.oid,
+        });
+        completedBytes += f.size;
+      }
+      onProgress(tracker.update(DownloadPhase.Done, completedBytes, bytesTotal));
     },
   };
 }
