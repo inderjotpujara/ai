@@ -37,10 +37,7 @@ export function catalogSourcesFor(_host: HostCapabilities): CatalogSource[] {
   const snap = createSnapshotSource();
   return [
     withSnapshotFallback(createOllamaCatalogSource(), snap),
-    withSnapshotFallback(
-      createHfCatalogSource(ProviderKind.HfSnapshot),
-      snap,
-    ),
+    withSnapshotFallback(createHfCatalogSource(ProviderKind.HfSnapshot), snap),
   ];
 }
 

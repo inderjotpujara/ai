@@ -1,9 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import {
-  Capability,
-  ProviderKind,
-  RuntimeKind,
-} from '../../src/core/types.ts';
+import { Capability, ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import {
   detectTools,
   hfGgufSource,

@@ -1,10 +1,10 @@
+import { downloadKindFor } from '../core/kind-map.ts';
 import {
   Capability,
   ContentPolicy,
   type ModelDeclaration,
   RuntimeKind,
 } from '../core/types.ts';
-import { downloadKindFor } from '../core/kind-map.ts';
 import type {
   Candidate,
   CatalogSource,

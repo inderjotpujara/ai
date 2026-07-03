@@ -117,14 +117,14 @@ describe('runProvision', () => {
     const d = deps({
       providerFor: () => ({
         kind: ProviderKind.Ollama,
-        download: async (m: string, o: any) => {
+        download: async (_m: string, o: any) => {
           seenDestDir = o.destDir;
         },
       }),
     });
     await runProvision({ deps: d, autoYes: false });
     expect(typeof seenDestDir).toBe('string');
-    expect(seenDestDir!.length).toBeGreaterThan(0);
+    expect((seenDestDir ?? '').length).toBeGreaterThan(0);
   });
 
   it('degrades: a failing download is recorded in failed, others still proceed', async () => {
@@ -167,7 +167,7 @@ describe('runProvision', () => {
       ],
       providerFor: () => ({
         kind: ProviderKind.Ollama,
-        download: async (m: string) => {
+        download: async (_m: string) => {
           inFlight++;
           maxInFlight = Math.max(maxInFlight, inFlight);
           await new Promise((r) => setTimeout(r, 20));

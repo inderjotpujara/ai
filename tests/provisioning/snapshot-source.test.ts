@@ -15,11 +15,6 @@ describe('snapshot', () => {
 });
 
 describe('withSnapshotFallback', () => {
-  const host = {
-    totalRamBytes: 24e9,
-    liveBudgetBytes: 8e9,
-    runtimes: [RuntimeKind.Ollama],
-  };
   const query = { budgetBytes: 8e9, hostTotalRamBytes: 24e9 };
   it('falls back to the snapshot slice when the live source throws', async () => {
     const failing: CatalogSource = {

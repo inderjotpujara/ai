@@ -10,9 +10,7 @@ describe('providerFor', () => {
     );
   });
   it('routes LmStudio to the LM Studio provider', () => {
-    expect(providerFor(ProviderKind.LmStudio).kind).toBe(
-      ProviderKind.LmStudio,
-    );
+    expect(providerFor(ProviderKind.LmStudio).kind).toBe(ProviderKind.LmStudio);
   });
   it('routes Ollama to the Ollama provider', () => {
     expect(providerFor(ProviderKind.Ollama).kind).toBe(ProviderKind.Ollama);
