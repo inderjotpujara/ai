@@ -1,5 +1,5 @@
-import { generateText } from 'ai';
 import { describe, expect, test } from 'bun:test';
+import { generateText } from 'ai';
 import { RuntimeKind } from '../../src/core/types.ts';
 import { mlxServerRuntime } from '../../src/runtime/mlx-server.ts';
 import { mlxReady } from './mlx-available.ts';

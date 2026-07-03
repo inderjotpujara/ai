@@ -1,15 +1,11 @@
-import type { LanguageModel } from 'ai';
 import { expect, mock, test } from 'bun:test';
+import type { LanguageModel } from 'ai';
 import { BOOTSTRAP } from '../../models/registry.ts';
 import { createSelectHook } from '../../src/cli/select-hook.ts';
 import type { Agent } from '../../src/core/agent-def.ts';
 import { ResourceError } from '../../src/core/errors.ts';
 import type { ModelDeclaration } from '../../src/core/types.ts';
-import {
-  Capability,
-  PreferPolicy,
-  RuntimeKind,
-} from '../../src/core/types.ts';
+import { Capability, PreferPolicy, RuntimeKind } from '../../src/core/types.ts';
 import type { Runtime } from '../../src/runtime/runtime.ts';
 
 /** A minimal stub runtime for injecting via `SelectHookDeps.runtimeFor` in tests,
@@ -133,8 +129,7 @@ test('hook degrades to Ollama when the declared MLX runtime is unreachable: no t
     ensureReady,
     pinned: [],
     capture,
-    runtimeFor: (kind) =>
-      fakeRuntime(kind, kind === RuntimeKind.Ollama), // only Ollama is reachable
+    runtimeFor: (kind) => fakeRuntime(kind, kind === RuntimeKind.Ollama), // only Ollama is reachable
     log,
   });
   const pre = await hook(specialist());
@@ -155,7 +150,10 @@ test('hook degrades using fallbackModel: Ollama receives the fallback tag, not t
   const capture = {};
   const log = mock((_msg: string) => {});
   let seenModelId: string | undefined;
-  const capturingFakeRuntime = (kind: RuntimeKind, available: boolean): Runtime => ({
+  const capturingFakeRuntime = (
+    kind: RuntimeKind,
+    available: boolean,
+  ): Runtime => ({
     kind,
     isAvailable: async () => available,
     createModel: (decl: ModelDeclaration) => {
