@@ -59,12 +59,21 @@ export async function runProvision(opts: {
     budgetBytes: host.liveBudgetBytes,
     hostTotalRamBytes: host.totalRamBytes,
   };
+  const applicableSources = deps.catalogSources.filter((s) =>
+    s.appliesTo(host),
+  );
   const lists = await Promise.all(
-    deps.catalogSources
-      .filter((s) => s.appliesTo(host))
-      .map((s) => s.listCandidates(query).catch(() => [] as Candidate[])),
+    applicableSources.map((s) =>
+      s.listCandidates(query).catch(() => [] as Candidate[]),
+    ),
   );
   const candidates = lists.flat();
+  // Truthful signal (not hardcoded): true when ANY applicable source's most
+  // recent listCandidates() call above served from the committed snapshot
+  // catalog rather than a live source (see withSnapshotFallback).
+  const snapshotFallback = applicableSources.some(
+    (s) => s.usedSnapshotFallback?.() ?? false,
+  );
 
   // 2) Fit-filter + rank; recommended pre-marked.
   const ranked = fitAndRank(candidates, host.liveBudgetBytes);
@@ -103,20 +112,23 @@ export async function runProvision(opts: {
   }
 
   // 6) Sequential download with a live bar; degrade-never-crash per model.
+  const runtimes = [...new Set(selected.map((c) => c.runtime as string))];
   return withProvisionSpan(
     {
       candidateCount: ranked.length,
       selectedCount: selected.length,
       bytesTotal: required,
-      snapshotFallback: false,
+      snapshotFallback,
+      runtimes,
     },
     async (span) => {
       const ctrl = new AbortController();
       const destDir = resolveDestDir();
+      let deferredVerify = false;
       for (const c of selected) {
         try {
           const provider = deps.providerFor(c.provider);
-          await provider.download(c.model, {
+          const outcome = await provider.download(c.model, {
             onProgress: (p) =>
               p.phase === DownloadPhase.Done || p.phase === DownloadPhase.Failed
                 ? deps.ui.bar.done(p)
@@ -124,6 +136,7 @@ export async function runProvision(opts: {
             signal: ctrl.signal,
             destDir,
           });
+          if (outcome?.deferredVerify) deferredVerify = true;
           result.downloaded.push(c.model);
         } catch (err) {
           result.failed.push({
@@ -137,6 +150,7 @@ export async function runProvision(opts: {
         result.downloaded.length,
       );
       span.setAttribute(ATTR.PROVISION_FAILED_COUNT, result.failed.length);
+      span.setAttribute(ATTR.PROVISION_DEFERRED_VERIFY, deferredVerify);
       return result;
     },
   );

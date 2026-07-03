@@ -121,6 +121,124 @@ describe('provisioning eval — telemetry span emission', () => {
     expect(s?.attributes[ATTR.PROVISION_DOWNLOADED_COUNT]).toBe(1);
     expect(s?.attributes[ATTR.PROVISION_FAILED_COUNT]).toBe(0);
     expect(s?.attributes[ATTR.PROVISION_SNAPSHOT_FALLBACK]).toBe(false);
+    expect(s?.attributes[ATTR.PROVISION_RUNTIME]).toEqual([RuntimeKind.Ollama]);
+    // Ollama's provider returns no DownloadOutcome (no hash-gate signal of
+    // its own) -> the aggregate must degrade to false, not be left unset.
+    expect(s?.attributes[ATTR.PROVISION_DEFERRED_VERIFY]).toBe(false);
+  });
+
+  it('reports snapshotFallback=true when a catalog source actually served from the committed snapshot', async () => {
+    const { exporter } = registerTestProvider();
+
+    const selected = [
+      {
+        ...cand('4b', 4, 3e9),
+        estimatedBytes: 3.95e9,
+        fits: true,
+        recommended: true,
+      },
+    ];
+
+    const deps: ProvisionDeps = {
+      detectHost: async () => ({
+        totalRamBytes: 24e9,
+        liveBudgetBytes: 8e9,
+        runtimes: [RuntimeKind.Ollama],
+      }),
+      catalogSources: [
+        {
+          name: 'test-source-with-fallback',
+          appliesTo: () => true,
+          listCandidates: async () => [cand('4b', 4, 3e9)],
+          // Simulates withSnapshotFallback having served the committed
+          // snapshot for its most recent listCandidates() call.
+          usedSnapshotFallback: () => true,
+        },
+      ],
+      providerFor: () => ({
+        kind: ProviderKind.Ollama,
+        download: async (_modelRef, { onProgress }) => {
+          onProgress({
+            modelRef: '4b',
+            phase: DownloadPhase.Done,
+            bytesCompleted: 3e9,
+            bytesTotal: 3e9,
+            percent: 100,
+            speedBytesPerSec: null,
+          });
+        },
+      }),
+      enrichSize: async (c) => c.fileSizeBytes,
+      freeDiskBytes: async () => 100e9,
+      ui: {
+        askYesNo: async () => true,
+        selectModels: async () => selected,
+        bar: { render: () => {}, done: () => {} },
+      },
+    };
+
+    await runProvision({ deps });
+
+    const spans = exporter.getFinishedSpans();
+    const s = spans.find((sp) => sp.name === 'agent.model.provision');
+    expect(s?.attributes[ATTR.PROVISION_SNAPSHOT_FALLBACK]).toBe(true);
+  });
+
+  it('reports deferredVerify=true when a download recorded a hash without verifying it', async () => {
+    const { exporter } = registerTestProvider();
+
+    const selected = [
+      {
+        ...cand('4b', 4, 3e9),
+        estimatedBytes: 3.95e9,
+        fits: true,
+        recommended: true,
+      },
+    ];
+
+    const deps: ProvisionDeps = {
+      detectHost: async () => ({
+        totalRamBytes: 24e9,
+        liveBudgetBytes: 8e9,
+        runtimes: [RuntimeKind.Ollama],
+      }),
+      catalogSources: [
+        {
+          name: 'test-source',
+          appliesTo: () => true,
+          listCandidates: async () => [cand('4b', 4, 3e9)],
+        },
+      ],
+      providerFor: () => ({
+        kind: ProviderKind.Ollama,
+        // Simulates an HF provider that recorded a hash without a tree oid
+        // to verify against (compute-and-record, no gate).
+        download: async (_modelRef, { onProgress }) => {
+          onProgress({
+            modelRef: '4b',
+            phase: DownloadPhase.Done,
+            bytesCompleted: 3e9,
+            bytesTotal: 3e9,
+            percent: 100,
+            speedBytesPerSec: null,
+          });
+          return { deferredVerify: true };
+        },
+      }),
+      enrichSize: async (c) => c.fileSizeBytes,
+      freeDiskBytes: async () => 100e9,
+      ui: {
+        askYesNo: async () => true,
+        selectModels: async () => selected,
+        bar: { render: () => {}, done: () => {} },
+      },
+    };
+
+    await runProvision({ deps });
+
+    const spans = exporter.getFinishedSpans();
+    const s = spans.find((sp) => sp.name === 'agent.model.provision');
+    expect(s?.attributes[ATTR.PROVISION_DEFERRED_VERIFY]).toBe(true);
   });
 
   it('does NOT emit a provision span for a no-op run (nothing fits)', async () => {

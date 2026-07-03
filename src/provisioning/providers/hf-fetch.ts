@@ -269,7 +269,7 @@ export function createHfFetchProvider(
           tracker,
           expectedOid,
         });
-        return;
+        return { deferredVerify: expectedOid === undefined };
       }
       // HfSnapshot (multi-file): an MLX model is the whole repo. Enumerate
       // the tree ONCE (not per file — see Task 8's note) and download every
@@ -314,7 +314,12 @@ export function createHfFetchProvider(
         });
         completedBytes += f.size;
       }
-      onProgress(tracker.update(DownloadPhase.Done, completedBytes, bytesTotal));
+      onProgress(
+        tracker.update(DownloadPhase.Done, completedBytes, bytesTotal),
+      );
+      // Deferred (compute-and-record, no gate) if ANY file in the snapshot
+      // landed without a tree oid to verify against.
+      return { deferredVerify: files.some((f) => f.oid === undefined) };
     },
   };
 }

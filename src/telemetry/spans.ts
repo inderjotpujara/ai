@@ -49,6 +49,9 @@ export const ATTR = {
   VERIFICATION_CRAG_GRADE: 'verification.crag_grade',
   VERIFICATION_RETRIES: 'verification.retries',
   VERIFICATION_FALLBACK: 'verification.fallback',
+  /** Distinct RuntimeKind values across the models selected for this
+   *  provisioning run — the inference runtime the download will serve,
+   *  not the download `ProviderKind` (see `Candidate.provider` for that). */
   PROVISION_RUNTIME: 'provision.runtime',
   PROVISION_CANDIDATE_COUNT: 'provision.candidate_count',
   PROVISION_SELECTED_COUNT: 'provision.selected_count',
@@ -392,6 +395,8 @@ export type ProvisionSpanInfo = {
   selectedCount: number;
   bytesTotal: number;
   snapshotFallback: boolean;
+  /** Distinct RuntimeKind values (as strings) backing the selected models. */
+  runtimes: string[];
 };
 
 /** Root span for a first-boot provisioning run (Slice 14). */
@@ -404,6 +409,7 @@ export function withProvisionSpan<T>(
     span.setAttribute(ATTR.PROVISION_SELECTED_COUNT, info.selectedCount);
     span.setAttribute(ATTR.PROVISION_BYTES_TOTAL, info.bytesTotal);
     span.setAttribute(ATTR.PROVISION_SNAPSHOT_FALLBACK, info.snapshotFallback);
+    span.setAttribute(ATTR.PROVISION_RUNTIME, info.runtimes);
     return fn(span);
   });
 }

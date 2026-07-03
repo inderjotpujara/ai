@@ -70,7 +70,7 @@ describe('createHfFetchProvider', () => {
         )) as unknown as typeof fetch,
     });
     const phases: DownloadPhase[] = [];
-    await provider.download('mlx-community/x', {
+    const outcome = await provider.download('mlx-community/x', {
       onProgress: (p) => phases.push(p.phase),
       signal: new AbortController().signal,
       destDir: dest,
@@ -84,6 +84,8 @@ describe('createHfFetchProvider', () => {
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
     // Exactly one Done for the whole snapshot, not one per file.
     expect(phases.filter((p) => p === DownloadPhase.Done)).toHaveLength(1);
+    // Neither tree entry carried an oid -> the whole snapshot is deferred.
+    expect(outcome).toEqual({ deferredVerify: true });
   });
 
   it('HfSnapshot: a rejecting tree fetch degrades to a ProviderError, not a crash', async () => {
@@ -113,23 +115,22 @@ describe('createHfFetchProvider', () => {
       },
     });
     const phases: DownloadPhase[] = [];
-    await provider.download('org/repo::model.gguf', {
+    const outcome = await provider.download('org/repo::model.gguf', {
       onProgress: (p) => phases.push(p.phase),
       signal: new AbortController().signal,
       destDir: dest,
     });
     expect(existsSync(join(dest, 'model.gguf'))).toBe(true);
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
+    // No oid to verify against (the tree lookup failed) -> recorded-not-verified.
+    expect(outcome).toEqual({ deferredVerify: true });
   });
 
   it('HfSnapshot: rejects on sha256 mismatch and leaves no final file or .part behind', async () => {
     const dest = mkdtempSync(join(tmpdir(), 'hf-'));
     const provider = createHfFetchProvider(ProviderKind.HfSnapshot, {
       fetchImpl: (async () =>
-        streamingResponse(
-          [new Uint8Array(3)],
-          3,
-        )) as unknown as typeof fetch,
+        streamingResponse([new Uint8Array(3)], 3)) as unknown as typeof fetch,
       sha256: async () => 'actual-hash',
       treeFiles: async () => [
         { path: 'config.json', size: 3, oid: 'expected-hash' },
@@ -291,13 +292,15 @@ describe('createHfFetchProvider', () => {
       ],
     });
     const phases: DownloadPhase[] = [];
-    await provider.download('org/repo::model.gguf', {
+    const outcome = await provider.download('org/repo::model.gguf', {
       onProgress: (p) => phases.push(p.phase),
       signal: new AbortController().signal,
       destDir: dest,
     });
     expect(existsSync(join(dest, 'model.gguf'))).toBe(true);
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
+    // A matching oid was verified against -> not deferred.
+    expect(outcome).toEqual({ deferredVerify: false });
   });
 
   it('retries a transient fetchImpl failure and completes the download on the second attempt', async () => {

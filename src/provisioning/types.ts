@@ -21,6 +21,21 @@ export type DownloadProgress = {
   error?: string;
 };
 
+/** Result of a single download, surfacing signals telemetry can report truthfully. */
+export type DownloadOutcome = {
+  /** True when the download recorded a hash without verifying it against a
+   *  known source oid first (compute-and-record, no gate) rather than
+   *  gating acceptance on a match against a trusted digest. Currently only
+   *  meaningful for the HF providers (an HF tree-listing failure or a
+   *  missing per-file oid means we record sha256 but never had anything to
+   *  check it against). Ollama/LM Studio verify integrity inside their own
+   *  daemons — we have no signal either way, so providers that don't return
+   *  an outcome are treated as `false` (approximation, not a positive claim
+   *  that they verified).
+   */
+  deferredVerify: boolean;
+};
+
 /** Runtime-agnostic model downloader. One adapter per runtime. */
 export type DownloadProvider = {
   readonly kind: ProviderKind;
@@ -31,5 +46,9 @@ export type DownloadProvider = {
       signal: AbortSignal;
       destDir: string;
     },
-  ): Promise<void>;
+  ): // Ollama/LM Studio return no outcome; `void` (not `undefined`) is what
+  // makes an implicit `return;`/no-return async body assignable here
+  // without every provider needing an explicit `return undefined`.
+  // biome-ignore lint/suspicious/noConfusingVoidType: see comment above
+  Promise<DownloadOutcome | void>;
 };

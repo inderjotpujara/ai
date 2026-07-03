@@ -30,4 +30,10 @@ export type CatalogSource = {
   name: string;
   appliesTo(host: HostCapabilities): boolean;
   listCandidates(q: DiscoveryQuery): Promise<Candidate[]>;
+  /** True when the most recent `listCandidates()` call served from the
+   *  committed snapshot fallback rather than a live source. Only sources
+   *  wrapped by `withSnapshotFallback` implement this; absent means "never
+   *  falls back" (e.g. a plain live source, the snapshot source itself, or
+   *  a test double). */
+  usedSnapshotFallback?(): boolean;
 };
