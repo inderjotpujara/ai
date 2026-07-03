@@ -2,8 +2,9 @@ import {
   Capability,
   ContentPolicy,
   type ModelDeclaration,
-  ProviderKind,
+  RuntimeKind,
 } from '../core/types.ts';
+import { downloadKindFor } from '../core/kind-map.ts';
 import type {
   Candidate,
   CatalogSource,
@@ -60,7 +61,7 @@ async function candidateFor(
   const params = (cfg.num_parameters ?? 0) / 1e9;
   const bpw = params > 0 ? total / 1e9 / params : 0.55;
   const decl: ModelDeclaration = {
-    provider: ProviderKind.MlxServer,
+    runtime: RuntimeKind.MlxServer,
     model: repo,
     params: {},
     role: 'discovered MLX general reasoning + tool use',
@@ -75,6 +76,7 @@ async function candidateFor(
   };
   return {
     ...decl,
+    provider: downloadKindFor(RuntimeKind.MlxServer, 'snapshot'),
     repo,
     quant: '4bit',
     fileSizeBytes: total,
@@ -86,7 +88,7 @@ async function candidateFor(
 export const hfMlxSource: CatalogSource = {
   name: 'hf-mlx',
   appliesTo: (host: HostCapabilities) =>
-    host.runtimes.includes(ProviderKind.MlxServer),
+    host.runtimes.includes(RuntimeKind.MlxServer),
   async listCandidates(q: DiscoveryQuery): Promise<Candidate[]> {
     const items: ListItem[] = [];
     for (const author of TRUSTED) {

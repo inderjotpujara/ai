@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import { runProvision } from '../../src/provisioning/provisioner.ts';
 import {
   DownloadPhase,
@@ -9,9 +9,10 @@ import {
 const host = {
   totalRamBytes: 24e9,
   liveBudgetBytes: 8e9,
-  runtimes: [ProviderKind.Ollama],
+  runtimes: [RuntimeKind.Ollama],
 };
 const cand = (model: string, size: number) => ({
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model,
   params: {},

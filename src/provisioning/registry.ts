@@ -50,5 +50,5 @@ export async function enrichSize(c: Candidate): Promise<number> {
     const [model, tag = 'latest'] = c.model.split(':');
     return ollamaManifestSize(model ?? c.model, tag);
   }
-  return hfTreeSize(c.repo, {}); // MLX snapshot sum
+  return hfTreeSize(c.repo, {}); // HF snapshot sum
 }

@@ -2,6 +2,7 @@ import type {
   Capability,
   ModelDeclaration,
   ProviderKind,
+  RuntimeKind,
 } from '../core/types.ts';
 
 export class DiscoveryError extends Error {}
@@ -9,7 +10,7 @@ export class DiscoveryError extends Error {}
 export type HostCapabilities = {
   totalRamBytes: number;
   liveBudgetBytes: number;
-  runtimes: ProviderKind[];
+  runtimes: RuntimeKind[];
 };
 export type DiscoveryQuery = {
   budgetBytes: number;
@@ -17,6 +18,8 @@ export type DiscoveryQuery = {
   hostTotalRamBytes: number;
 };
 export type Candidate = ModelDeclaration & {
+  /** Which downloader fetches this model's weights (distinct from the inference `runtime`). */
+  provider: ProviderKind;
   repo: string;
   quant?: string;
   fileSizeBytes: number;

@@ -22,7 +22,7 @@ async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
     try {
       for (const m of await rt.control.listLoaded()) {
         out.push({
-          provider: rt.kind,
+          runtime: rt.kind,
           model: m.name,
           params: {},
           role: 'installed',
@@ -37,7 +37,7 @@ async function installedFromRuntimes(): Promise<ModelDeclaration[]> {
 }
 
 function defaultIsInstalled(decl: ModelDeclaration): Promise<boolean> {
-  return runtimeFor(decl.provider).control.isInstalled(decl.model);
+  return runtimeFor(decl.runtime).control.isInstalled(decl.model);
 }
 
 async function filterInstalledCatalog(
@@ -55,7 +55,7 @@ async function filterInstalledCatalog(
   return results;
 }
 
-/** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ catalog (installed-only), deduped by (provider,model). */
+/** OFFLINE-SAFE merge: bootstrap ∪ installed ∪ catalog (installed-only), deduped by (runtime,model). */
 export async function buildRegistry(
   deps: BuildRegistryDeps = {},
 ): Promise<ModelDeclaration[]> {
@@ -72,7 +72,7 @@ export async function buildRegistry(
 
   const byKey = new Map<string, ModelDeclaration>();
   for (const d of [...bootstrap, ...installed, ...catalog]) {
-    const key = `${d.provider}::${d.model}`;
+    const key = `${d.runtime}::${d.model}`;
     if (!byKey.has(key)) byKey.set(key, d); // first wins: bootstrap > installed > catalog
   }
   return [...byKey.values()];

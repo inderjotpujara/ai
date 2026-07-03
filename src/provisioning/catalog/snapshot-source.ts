@@ -1,3 +1,4 @@
+import { runtimeKindFor } from '../../core/kind-map.ts';
 import type { Capability, ProviderKind } from '../../core/types.ts';
 import type {
   Candidate,
@@ -22,6 +23,7 @@ type SnapshotEntry = {
 /** Read the committed snapshot catalog into Candidates. The robustness floor. */
 export function loadSnapshot(): Candidate[] {
   return (snapshot as SnapshotEntry[]).map((e) => ({
+    runtime: runtimeKindFor(e.provider as ProviderKind),
     provider: e.provider as ProviderKind,
     model: e.model,
     params: {},

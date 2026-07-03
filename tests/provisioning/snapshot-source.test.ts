@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import type { CatalogSource } from '../../src/discovery/catalog-source.ts';
 import {
   loadSnapshot,
@@ -18,7 +18,7 @@ describe('withSnapshotFallback', () => {
   const host = {
     totalRamBytes: 24e9,
     liveBudgetBytes: 8e9,
-    runtimes: [ProviderKind.Ollama],
+    runtimes: [RuntimeKind.Ollama],
   };
   const query = { budgetBytes: 8e9, hostTotalRamBytes: 24e9 };
   it('falls back to the snapshot slice when the live source throws', async () => {
@@ -34,6 +34,7 @@ describe('withSnapshotFallback', () => {
       appliesTo: () => true,
       listCandidates: async () => [
         {
+          runtime: RuntimeKind.Ollama,
           provider: ProviderKind.Ollama,
           model: 'qwen3.5:4b',
           params: {},

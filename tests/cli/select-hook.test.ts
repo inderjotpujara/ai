@@ -7,7 +7,7 @@ import type { ModelDeclaration } from '../../src/core/types.ts';
 import {
   Capability,
   PreferPolicy,
-  ProviderKind,
+  RuntimeKind,
 } from '../../src/core/types.ts';
 
 function specialist(): Agent {
@@ -26,7 +26,7 @@ function specialist(): Agent {
 }
 
 const mlxDecl: ModelDeclaration = {
-  provider: ProviderKind.MlxServer,
+  runtime: RuntimeKind.MlxServer,
   model: 'mlx-community/Qwen2.5-7B-Instruct-4bit',
   params: {},
   role: 'general reasoning + tool use',

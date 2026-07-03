@@ -1,5 +1,6 @@
 import type { Capability } from '../core/types.ts';
-import { Capability as Cap } from '../core/types.ts';
+import { Capability as Cap, ProviderKind, RuntimeKind } from '../core/types.ts';
+import { providerFor } from '../provisioning/registry.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import {
   catalogPath,
@@ -71,8 +72,18 @@ export async function runDiscovery(
   const n = deps.prePullCount ?? 1;
   const pull =
     deps.pullTop ??
-    (async (model, provider) => {
-      await runtimeFor(provider).control.pull(model);
+    (async (model: string, provider: Candidate['provider']) => {
+      // Ollama pre-pulls via its local daemon; every other download kind
+      // fetches through its DownloadProvider (e.g. MLX → HF snapshot to disk).
+      if (provider === ProviderKind.Ollama) {
+        await runtimeFor(RuntimeKind.Ollama).control.pull(model);
+        return;
+      }
+      const ctrl = new AbortController();
+      await providerFor(provider).download(model, {
+        onProgress: () => {},
+        signal: ctrl.signal,
+      });
     });
   for (const c of ranked.slice(0, n)) {
     try {

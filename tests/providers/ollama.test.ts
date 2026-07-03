@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test';
 import qwenFast from '../../models/qwen-fast.ts';
-import { ProviderKind } from '../../src/core/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import { createOllamaModel } from '../../src/providers/ollama.ts';
 
 test('qwen-fast declaration targets qwen3.5:9b on ollama', () => {
-  expect(qwenFast.provider).toBe(ProviderKind.Ollama);
+  expect(qwenFast.runtime).toBe(RuntimeKind.Ollama);
   expect(qwenFast.model).toBe('qwen3.5:9b');
 });
 

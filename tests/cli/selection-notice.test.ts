@@ -3,11 +3,11 @@ import { formatSelectionNotice } from '../../src/cli/selection-notice.ts';
 import {
   Capability,
   type ModelDeclaration,
-  ProviderKind,
+  RuntimeKind,
 } from '../../src/core/types.ts';
 
 const decl: ModelDeclaration = {
-  provider: ProviderKind.Ollama,
+  runtime: RuntimeKind.Ollama,
   model: 'qwen3.5:9b',
   params: { numCtx: 16384 },
   role: 'general',

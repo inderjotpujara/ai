@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import { buildRegistry } from '../../src/discovery/build-registry.ts';
 
 const bootstrap = [
   {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model: 'qwen3.5:4b',
     params: {},
     role: 'r',
@@ -13,6 +13,7 @@ const bootstrap = [
 ];
 
 const catalogEntry = {
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model: 'qwen3.5:4b',
   params: {},
@@ -25,6 +26,7 @@ const catalogEntry = {
 };
 
 const catalogEntryNew = {
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model: 'qwen3.5:14b',
   params: {},
@@ -36,12 +38,12 @@ const catalogEntryNew = {
   installed: false,
 };
 
-test('merges bootstrap + installed + catalog, deduped by (provider,model)', async () => {
+test('merges bootstrap + installed + catalog, deduped by (runtime,model)', async () => {
   const reg = await buildRegistry({
     bootstrap,
     installed: async () => [
       {
-        provider: ProviderKind.Ollama,
+        runtime: RuntimeKind.Ollama,
         model: 'qwen3.5:9b',
         params: {},
         role: 'i',

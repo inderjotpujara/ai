@@ -4,7 +4,7 @@ import {
   ContentPolicy,
   type ModelDeclaration,
   PreferPolicy,
-  ProviderKind,
+  RuntimeKind,
 } from '../../src/core/types.ts';
 import { selectCandidates } from '../../src/resource/selector.ts';
 
@@ -14,7 +14,7 @@ function m(
   policy?: ContentPolicy,
 ): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: {},
     role: 'r',

@@ -2,7 +2,7 @@ import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { ResourceError } from '../core/errors.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
-import { type ModelDeclaration, ProviderKind } from '../core/types.ts';
+import { type ModelDeclaration, RuntimeKind } from '../core/types.ts';
 import type { EnsureOpts } from '../resource/model-manager.ts';
 import type { LoadedModel } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
@@ -39,15 +39,15 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
       );
       recordModelSelect({
         modelId: decl.model,
-        provider: decl.provider,
+        provider: decl.runtime,
         numCtx,
         paramsBillions: decl.footprint.approxParamsBillions,
       });
       await deps.notify?.(decl, numCtx);
-      const model = runtimeFor(decl.provider).createModel(decl);
+      const model = runtimeFor(decl.runtime).createModel(decl);
       return {
         model,
-        numCtx: decl.provider === ProviderKind.Ollama ? numCtx : undefined,
+        numCtx: decl.runtime === RuntimeKind.Ollama ? numCtx : undefined,
       };
     } catch (err) {
       if (err instanceof ResourceError) {

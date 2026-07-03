@@ -10,13 +10,13 @@ afterAll(() => {
   else process.env.AGENT_KV_CACHE_TYPE = __prevKv;
 });
 
-import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
+import { type ModelDeclaration, RuntimeKind } from '../../src/core/types.ts';
 import { createModelManager } from '../../src/resource/model-manager.ts';
 import type { RuntimeControl } from '../../src/runtime/runtime.ts';
 
 function decl(model: string, role: string): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: { numCtx: 0 },
     role,

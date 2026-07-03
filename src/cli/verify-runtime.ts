@@ -1,5 +1,5 @@
 import qwenRouter from '../../models/qwen-router.ts';
-import { ProviderKind } from '../core/types.ts';
+import { RuntimeKind } from '../core/types.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
 import { createMemoryStore, type MemoryStore } from '../memory/store.ts';
@@ -19,7 +19,7 @@ export function makeRealVerifyDeps(): {
   manager: ReturnType<typeof createModelManager>;
 } {
   const manager = createModelManager();
-  const control = runtimeFor(ProviderKind.Ollama).control;
+  const control = runtimeFor(RuntimeKind.Ollama).control;
   const embedModel =
     process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
   const embedder = makeEmbedder({

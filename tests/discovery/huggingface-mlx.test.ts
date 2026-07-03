@@ -1,16 +1,16 @@
 import { afterEach, expect, test } from 'bun:test';
-import { Capability, ProviderKind } from '../../src/core/types.ts';
+import { Capability, RuntimeKind } from '../../src/core/types.ts';
 import { hfMlxSource } from '../../src/discovery/huggingface-mlx.ts';
 
 test('applies only when an MLX runtime is present on the host', () => {
   const base = { totalRamBytes: 24e9, liveBudgetBytes: 12e9 };
   expect(
-    hfMlxSource.appliesTo({ ...base, runtimes: [ProviderKind.Ollama] }),
+    hfMlxSource.appliesTo({ ...base, runtimes: [RuntimeKind.Ollama] }),
   ).toBe(false);
   expect(
     hfMlxSource.appliesTo({
       ...base,
-      runtimes: [ProviderKind.Ollama, ProviderKind.MlxServer],
+      runtimes: [RuntimeKind.Ollama, RuntimeKind.MlxServer],
     }),
   ).toBe(true);
 });
@@ -46,7 +46,7 @@ test('builds an MLX candidate from config.json + chat_template + tree', async ()
   expect(cands.length).toBe(1);
   const cand = cands[0];
   if (!cand) throw new Error('expected a candidate');
-  expect(cand.provider).toBe(ProviderKind.MlxServer);
+  expect(cand.runtime).toBe(RuntimeKind.MlxServer);
   expect(cand.model).toBe('mlx-community/Qwen2.5-7B-Instruct-4bit');
   expect(cand.capabilities).toContain(Capability.Tools);
 });

@@ -4,13 +4,13 @@ import {
   Capability,
   type ModelDeclaration,
   PreferPolicy,
-  ProviderKind,
+  RuntimeKind,
 } from '../../src/core/types.ts';
 import { resolveModel } from '../../src/resource/selector.ts';
 
 function m(model: string, b: number): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: { numCtx: 8192 },
     role: 'test',

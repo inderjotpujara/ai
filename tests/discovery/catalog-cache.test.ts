@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ProviderKind } from '../../src/core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import {
   isStale,
   readCatalog,
@@ -19,6 +19,7 @@ test('write then read round-trips candidates', () => {
   const p = join(dir, 'catalog.json');
   const cands = [
     {
+      runtime: RuntimeKind.Ollama,
       provider: ProviderKind.Ollama,
       model: 'hf.co/x:Q4_K_M',
       params: {},

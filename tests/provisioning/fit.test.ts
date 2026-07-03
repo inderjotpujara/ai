@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import { fitAndRank } from '../../src/provisioning/fit.ts';
 
 const cand = (model: string, params: number, size: number) => ({
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model,
   params: {},

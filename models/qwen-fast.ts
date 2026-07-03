@@ -1,12 +1,12 @@
 import {
   Capability,
   type ModelDeclaration,
-  ProviderKind,
+  RuntimeKind,
 } from '../src/core/types.ts';
 
 /** Fast general-purpose local model with reliable tool-calling. */
 const qwenFast: ModelDeclaration = {
-  provider: ProviderKind.Ollama,
+  runtime: RuntimeKind.Ollama,
   model: 'qwen3.5:9b',
   params: { temperature: 0.2, numCtx: 16384 },
   role: 'general reasoning + tool use',

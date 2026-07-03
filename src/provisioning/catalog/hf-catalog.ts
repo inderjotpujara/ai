@@ -1,4 +1,5 @@
 import { ProviderError } from '../../core/errors.ts';
+import { runtimeKindFor } from '../../core/kind-map.ts';
 import { ProviderKind } from '../../core/types.ts';
 import type {
   Candidate,
@@ -46,7 +47,9 @@ export function createHfCatalogSource(
 ): CatalogSource {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const filter =
-    deps.filter ?? (kind === ProviderKind.MlxServer ? 'mlx' : 'gguf');
+    deps.filter ?? (kind === ProviderKind.HfSnapshot ? 'mlx' : 'gguf');
+  // Which inference runtime consumes this download kind.
+  const runtime = runtimeKindFor(kind);
   return {
     name: `hf-catalog-${filter}`,
     appliesTo: (_host: HostCapabilities) => true, // HF reachable regardless of local runtime
@@ -56,6 +59,7 @@ export function createHfCatalogSource(
       if (!res.ok) throw new ProviderError(`HF search returned ${res.status}`);
       const entries = (await res.json()) as SearchEntry[];
       return entries.map((e) => ({
+        runtime,
         provider: kind,
         model: e.id,
         params: {},

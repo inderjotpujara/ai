@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { rmSync } from 'node:fs';
 import qwenRouter from '../../models/qwen-router.ts';
-import { ProviderKind } from '../../src/core/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import { makeEmbedder, probeEmbedder } from '../../src/memory/embed.ts';
 import { createMemoryStore } from '../../src/memory/store.ts';
 import { createModelManager } from '../../src/resource/model-manager.ts';
@@ -25,7 +25,7 @@ async function judgeReady(): Promise<boolean> {
   if (!embedOk) return false;
   try {
     if (await isModelInstalled(JUDGE_MODEL)) return true;
-    const control = runtimeFor(ProviderKind.Ollama).control;
+    const control = runtimeFor(RuntimeKind.Ollama).control;
     await control.pull(JUDGE_MODEL);
     return await isModelInstalled(JUDGE_MODEL);
   } catch {
@@ -42,7 +42,7 @@ describe.skipIf(!ready)('verification.live', () => {
     } catch {}
 
     const manager = createModelManager();
-    const control = runtimeFor(ProviderKind.Ollama).control;
+    const control = runtimeFor(RuntimeKind.Ollama).control;
     const embedder = makeEmbedder({
       ensureReady: (decl) => manager.ensureReady(decl),
       control,

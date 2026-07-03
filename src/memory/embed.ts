@@ -1,5 +1,5 @@
 import type { ModelDeclaration } from '../core/types.ts';
-import { ProviderKind } from '../core/types.ts';
+import { RuntimeKind } from '../core/types.ts';
 import { withMemoryEmbedSpan } from '../telemetry/spans.ts';
 
 const DEFAULT_BASE = 'http://localhost:11434';
@@ -7,7 +7,7 @@ const DEFAULT_BASE = 'http://localhost:11434';
 /** Weights-only model declaration for an embedder (no KV cache to budget). */
 export function embedderDecl(model: string): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: {},
     role: 'embedder',

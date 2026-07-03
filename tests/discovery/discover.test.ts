@@ -1,8 +1,13 @@
 import { expect, test } from 'bun:test';
-import { Capability, ProviderKind } from '../../src/core/types.ts';
+import {
+  Capability,
+  ProviderKind,
+  RuntimeKind,
+} from '../../src/core/types.ts';
 import { runDiscovery } from '../../src/discovery/discover.ts';
 
 const makeCandidate = (model: string, dl: number, params: number) => ({
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model,
   params: {},
@@ -22,7 +27,7 @@ test('fetches from applicable sources, filters/ranks, writes, pre-pulls top-1', 
     host: {
       totalRamBytes: 24e9,
       liveBudgetBytes: 12e9,
-      runtimes: [ProviderKind.Ollama],
+      runtimes: [RuntimeKind.Ollama],
     },
     sources: [
       {
@@ -49,7 +54,7 @@ test('failing pullTop populates pullFailed', async () => {
     host: {
       totalRamBytes: 24e9,
       liveBudgetBytes: 12e9,
-      runtimes: [ProviderKind.Ollama],
+      runtimes: [RuntimeKind.Ollama],
     },
     sources: [
       {

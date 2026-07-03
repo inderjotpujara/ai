@@ -11,7 +11,7 @@ afterAll(() => {
 });
 
 import { ProviderError, ResourceError } from '../../src/core/errors.ts';
-import { type ModelDeclaration, ProviderKind } from '../../src/core/types.ts';
+import { type ModelDeclaration, RuntimeKind } from '../../src/core/types.ts';
 import {
   createModelManager,
   MIN_CTX,
@@ -20,7 +20,7 @@ import type { RuntimeControl } from '../../src/runtime/runtime.ts';
 
 function decl(model: string, b: number): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: { numCtx: 0 }, // numCtx 0 → KV term 0, so bytes == params*1e9*bpw*1.2
     role: 'test',
@@ -63,7 +63,7 @@ function fakes(
 
 function declCtx(model: string, b: number, numCtx: number): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: { numCtx },
     role: 'test',
@@ -324,7 +324,7 @@ test('routes lifecycle through controlFor(decl.provider)', async () => {
   const f = fakes();
   const mgr = createModelManager(f.deps);
   await mgr.ensureReady({
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model: 'm7',
     params: { numCtx: 0 },
     role: 't',
@@ -337,7 +337,7 @@ test('embedder role: skips /api/generate warm but still installs it', async () =
   const f = fakes();
   const mgr = createModelManager(f.deps);
   await mgr.ensureReady({
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model: 'qwen3-embedding:0.6b',
     params: {},
     role: 'embedder',
@@ -355,7 +355,7 @@ test('embedder role: is tracked as resident (loaded, evictable, skips a second l
   const f = fakes();
   const mgr = createModelManager(f.deps);
   const embedDecl: ModelDeclaration = {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model: 'qwen3-embedding:0.6b',
     params: {},
     role: 'embedder',

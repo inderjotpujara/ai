@@ -1,6 +1,6 @@
 import { afterEach, expect, mock, test } from 'bun:test';
 import type { ModelDeclaration } from '../../src/core/types.ts';
-import { ProviderKind } from '../../src/core/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import type { KvArch } from '../../src/resource/kv-cache.ts';
 import {
   createModelManager,
@@ -34,7 +34,7 @@ function control(over: Partial<RuntimeControl> = {}): RuntimeControl {
 }
 function decl(numCtx: number): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model: 'm',
     params: { numCtx },
     role: 't',

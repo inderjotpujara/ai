@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import { detectMissing } from '../../src/provisioning/detect-missing.ts';
 
 const decl = (model: string) => ({
-  provider: ProviderKind.Ollama,
+  runtime: RuntimeKind.Ollama,
   model,
   params: {},
   role: 'x',

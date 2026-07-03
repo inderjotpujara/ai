@@ -10,3 +10,11 @@ export function downloadKindFor(runtime: RuntimeKind, shape: RepoShape): Provide
   if (shape === 'gguf-file') return ProviderKind.HfGguf;
   return ProviderKind.Ollama;
 }
+
+/** Which inference runtime consumes a given download provider's weights. */
+export function runtimeKindFor(provider: ProviderKind): RuntimeKind {
+  if (provider === ProviderKind.HfSnapshot) return RuntimeKind.MlxServer;
+  if (provider === ProviderKind.LmStudio) return RuntimeKind.LmStudio;
+  // ProviderKind.Ollama and ProviderKind.HfGguf both run under Ollama:
+  return RuntimeKind.Ollama;
+}

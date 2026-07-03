@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import { mlxServerRuntime } from '../../src/runtime/mlx-server.ts';
 
 test('mlx runtime has the right kind and builds a model', () => {
-  expect(mlxServerRuntime.kind).toBe(ProviderKind.MlxServer);
+  expect(mlxServerRuntime.kind).toBe(RuntimeKind.MlxServer);
   const model = mlxServerRuntime.createModel({
-    provider: ProviderKind.MlxServer,
+    runtime: RuntimeKind.MlxServer,
     model: 'mlx-community/Qwen2.5-7B-Instruct-4bit',
     params: {},
     role: 'r',

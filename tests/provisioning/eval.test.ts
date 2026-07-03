@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import { fitAndRank } from '../../src/provisioning/fit.ts';
 import type { ProvisionDeps } from '../../src/provisioning/provisioner.ts';
 import { runProvision } from '../../src/provisioning/provisioner.ts';
@@ -8,6 +8,7 @@ import { ATTR } from '../../src/telemetry/spans.ts';
 import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 const cand = (model: string, params: number, size: number) => ({
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model,
   params: {},
@@ -78,7 +79,7 @@ describe('provisioning eval — telemetry span emission', () => {
       detectHost: async () => ({
         totalRamBytes: 24e9,
         liveBudgetBytes: 8e9,
-        runtimes: [ProviderKind.Ollama],
+        runtimes: [RuntimeKind.Ollama],
       }),
       catalogSources: [
         {
@@ -129,7 +130,7 @@ describe('provisioning eval — telemetry span emission', () => {
       detectHost: async () => ({
         totalRamBytes: 8e9,
         liveBudgetBytes: 1e9,
-        runtimes: [ProviderKind.Ollama],
+        runtimes: [RuntimeKind.Ollama],
       }),
       catalogSources: [
         {

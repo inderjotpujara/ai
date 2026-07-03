@@ -19,7 +19,7 @@ function streamingResponse(chunks: Uint8Array[], total: number): Response {
 describe('createHfFetchProvider', () => {
   it('emits Downloading progress that reaches Done', async () => {
     const chunk = new Uint8Array(1000);
-    const provider = createHfFetchProvider(ProviderKind.MlxServer, {
+    const provider = createHfFetchProvider(ProviderKind.HfSnapshot, {
       fetchImpl: (async () =>
         streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
       sha256: async () => 'deadbeef',
