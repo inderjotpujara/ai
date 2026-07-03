@@ -111,6 +111,10 @@ export async function runProvision(opts: {
     },
     async (span) => {
       const ctrl = new AbortController();
+      const destDir =
+        process.env.HF_HOME ??
+        process.env.OLLAMA_MODELS ??
+        `${process.cwd()}/model-images`;
       for (const c of selected) {
         try {
           const provider = deps.providerFor(c.provider);
@@ -120,6 +124,7 @@ export async function runProvision(opts: {
                 ? deps.ui.bar.done(p)
                 : deps.ui.bar.render(p),
             signal: ctrl.signal,
+            destDir,
           });
           result.downloaded.push(c.model);
         } catch (err) {

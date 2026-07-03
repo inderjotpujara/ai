@@ -112,6 +112,21 @@ describe('runProvision', () => {
     expect(res.downloaded).toEqual([]);
   });
 
+  it('passes a non-empty destDir to the download provider', async () => {
+    let seenDestDir: string | undefined;
+    const d = deps({
+      providerFor: () => ({
+        kind: ProviderKind.Ollama,
+        download: async (m: string, o: any) => {
+          seenDestDir = o.destDir;
+        },
+      }),
+    });
+    await runProvision({ deps: d, autoYes: false });
+    expect(typeof seenDestDir).toBe('string');
+    expect(seenDestDir!.length).toBeGreaterThan(0);
+  });
+
   it('degrades: a failing download is recorded in failed, others still proceed', async () => {
     const d = deps({
       catalogSources: [

@@ -29,6 +29,7 @@ export function createHfFetchProvider(
   return {
     kind,
     async download(modelRef, { onProgress, signal }) {
+      // destDir: accepted but not yet written to (Task 6 wires the actual write).
       const tracker = new ProgressTracker(modelRef);
       onProgress(tracker.update(DownloadPhase.Resolving, 0, null));
       // modelRef = "repo/id" or "repo/id::file.gguf"; snapshot fetch omits the file.

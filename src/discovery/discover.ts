@@ -84,9 +84,14 @@ export async function runDiscovery(
         return;
       }
       const ctrl = new AbortController();
+      const destDir =
+        process.env.HF_HOME ??
+        process.env.OLLAMA_MODELS ??
+        `${process.cwd()}/model-images`;
       await providerFor(candidate.provider).download(model, {
         onProgress: () => {},
         signal: ctrl.signal,
+        destDir,
       });
     });
   for (const c of ranked.slice(0, n)) {

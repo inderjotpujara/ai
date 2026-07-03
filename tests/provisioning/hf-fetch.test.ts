@@ -28,6 +28,7 @@ describe('createHfFetchProvider', () => {
     await provider.download('mlx-community/x', {
       onProgress: (p) => phases.push(p.phase),
       signal: new AbortController().signal,
+      destDir: '/tmp/dest',
     });
     expect(phases).toContain(DownloadPhase.Downloading);
     expect(phases.at(-1)).toBe(DownloadPhase.Done);

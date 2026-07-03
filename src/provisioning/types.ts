@@ -26,6 +26,10 @@ export type DownloadProvider = {
   readonly kind: ProviderKind;
   download(
     modelRef: string,
-    opts: { onProgress: (p: DownloadProgress) => void; signal: AbortSignal },
+    opts: {
+      onProgress: (p: DownloadProgress) => void;
+      signal: AbortSignal;
+      destDir: string;
+    },
   ): Promise<void>;
 };

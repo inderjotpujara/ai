@@ -26,6 +26,7 @@ export function createLmStudioProvider(
   return {
     kind: ProviderKind.LmStudio,
     async download(modelRef, { onProgress, signal }) {
+      // destDir is ignored: the LM Studio daemon owns its own model store on disk.
       const tracker = new ProgressTracker(modelRef);
       onProgress(tracker.update(DownloadPhase.Resolving, 0, null));
       const start = await fetchImpl(`${baseUrl}/api/v1/models/download`, {

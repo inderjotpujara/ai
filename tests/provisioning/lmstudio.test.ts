@@ -37,6 +37,7 @@ describe('createLmStudioProvider', () => {
     await provider.download('lmstudio-community/x', {
       onProgress: (p) => phases.push(p.phase),
       signal: new AbortController().signal,
+      destDir: '/tmp/dest',
     });
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
   });
