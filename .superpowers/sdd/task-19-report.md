@@ -65,3 +65,98 @@ calls, 0 fail.
 
 **Commit:** to be created after this report —
 `fix(mcp): allow read-only WITH…SELECT CTEs in sqlite gate (still reject data-modifying CTEs)`
+
+## Critical fix (engine-enforced read-only)
+
+**Finding (CRITICAL, live-verified):** the `isReadOnlyQuery`/`stripParenGroups`
+textual classifier added above is bypassable. `stripParenGroups` counts
+`(`/`)` with no string-literal awareness, so a string literal that itself
+contains `)`/`(` characters fools the paren-depth walk into believing a
+data-modifying statement is nested inside a CTE body. Confirmed payload:
+
+```sql
+WITH x AS (SELECT ')select(' AS s) DELETE FROM t
+```
+
+classified as read-only by the old gate, and the `query` tool actually
+executed the `DELETE` (rows 2 → 0). The same shape bypasses `INSERT`/
+`UPDATE`/`DROP`. This defeats the `query` tool's advertised "read-only-only"
+contract.
+
+**Root cause:** parsing SQL with a hand-rolled scanner instead of asking the
+engine. Any textual classifier that doesn't fully implement SQLite's string/
+identifier-quoting grammar (single-quoted string literals, escaped `''`
+inside them, bracketed/quoted identifiers, comments, etc.) can be fooled by
+adversarial input embedded in a literal.
+
+**Fix:** stop classifying SQL text entirely. Make SQLite's own `PRAGMA
+query_only` the security boundary:
+
+- Added `runReadOnly<T>(fn)` in `src/mcp/sqlite-server.ts`, which sets
+  `PRAGMA query_only = ON`, runs the query, and resets it to `OFF` in a
+  `finally` (so a thrown error can never leave the pragma stuck on).
+- The `query` tool now calls `db.query(sql).all()` inside `runReadOnly`. Under
+  `query_only = ON`, SQLite itself rejects any write (`INSERT`/`UPDATE`/
+  `DELETE`/`DROP`/`CREATE`/data-modifying CTEs, …) with a genuine engine
+  error (`attempt to write a readonly database`) while `SELECT` and
+  `WITH…SELECT` continue to execute normally — this is enforced by SQLite's
+  parser/planner, so no string-literal or paren-nesting trick can confuse it.
+- The `query` tool's catch block now distinguishes that specific engine error
+  (`/readonly database/i`) and returns the existing "query only accepts
+  read-only … use the execute tool for writes" `isError` message; any other
+  thrown error still falls back to the original "query failed: …" message.
+- The `execute` (write) tool now explicitly runs `PRAGMA query_only = OFF`
+  before every write, as defense in depth against the pragma ever leaking
+  from the `query` tool into a write path (belt-and-suspenders on top of the
+  `finally` reset).
+- Deleted `stripParenGroups` and `isReadOnlyQuery` entirely — there is no
+  textual classifier left in the file; the engine is the only gate.
+
+**Tests (`tests/mcp/sqlite-server.test.ts`), TDD:** added a new test,
+`sqlite MCP server: query tool cannot be bypassed via a string-literal
+trick`, covering:
+- The exact bypass payload → `isError: true`, and the table's row count is
+  asserted unchanged both immediately after and at the end of the test
+  (proves the `DELETE` never executed).
+- `WITH x AS (SELECT 1) SELECT * FROM x` → allowed, rows returned.
+- Plain `SELECT` → allowed.
+- `INSERT`/`UPDATE`/`DELETE`/`DROP`, and a plain (non-bypass) `WITH…DELETE` →
+  all rejected, row count unchanged after every attempt.
+- The `execute` tool still successfully writes a row *after* the `query`
+  tool has run (regression guard proving `query_only` didn't leak into the
+  write path).
+
+**RED → GREEN, confirmed live:**
+- Stashed `src/mcp/sqlite-server.ts` (reverting only the fix, keeping the new
+  test) and ran `bun run test:file -- "tests/mcp/sqlite-server.test.ts"`
+  against the pre-fix (7bceded) classifier: the bypass-payload assertion
+  failed — `expect(bypassResult.isError).toBe(true)` received `false` — i.e.
+  the DELETE was classified as read-only and actually ran. 1 fail / 2 pass.
+  Popped the stash to restore the fix.
+- After the fix: `bun run test:file -- "tests/mcp/sqlite-server.test.ts"` →
+  3 pass, 0 fail, 31 `expect()` calls.
+
+**Verification (inline only, full suite intentionally not run):**
+- `bun run typecheck` → 0 errors (`tsc --noEmit` clean).
+- `bun run lint:file -- "src/mcp/sqlite-server.ts" "tests/mcp/sqlite-server.test.ts"`
+  → clean (one formatting fix auto-applied via `--write`, then re-checked
+  clean).
+- `bun run test:file -- "tests/mcp/sqlite-server.test.ts"` → 3 pass, 0 fail,
+  31 `expect()` calls.
+
+**Concerns / notes:**
+- `bun:sqlite`'s prepared-statement object exposes no `.readonly` flag (only
+  `native`, `safeIntegers`, `as`, `columnNames`, `columnTypes`,
+  `declaredTypes`, `paramsCount`, `finalize`), so option 3 from the brief
+  (reject on `!stmt.readonly`) isn't available in this driver — used option 1
+  (`PRAGMA query_only`), which is the most robust option this driver
+  supports and requires no new dependency.
+- `PRAGMA query_only = ON` is a connection-level (not statement-level)
+  setting; the single shared `db: Database` instance is used by both tools,
+  so correctness depends on the pragma being reset before any write can run.
+  This is covered by both the `finally` in `runReadOnly` and the explicit
+  reset at the top of the `execute` tool, and by the new regression test
+  that writes *after* the query tool has executed.
+- No new dependencies; `bun:sqlite` is built in.
+
+**Commit:** `fix(mcp): enforce sqlite read-only via engine (PRAGMA query_only), fixing string-literal gate bypass`

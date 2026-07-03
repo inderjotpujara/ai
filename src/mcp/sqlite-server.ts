@@ -23,64 +23,24 @@ function textResult(text: string, isError = false) {
   };
 }
 
-// Collapse every balanced `(...)` group to a single space, dropping its
-// contents. Used to see past CTE bodies / column lists so the read-only gate
-// can find a WITH-prefixed query's real leading statement keyword without
-// parsing full SQL grammar.
-function stripParenGroups(sql: string): string {
-  let depth = 0;
-  let out = '';
-  for (const ch of sql) {
-    if (ch === '(') {
-      depth++;
-      if (depth === 1) out += ' ';
-      continue;
-    }
-    if (ch === ')') {
-      if (depth > 0) depth--;
-      continue;
-    }
-    if (depth === 0) out += ch;
+// The `query` tool's read-only guarantee is enforced by the SQLite engine
+// itself (`PRAGMA query_only = ON`), not by textually classifying the SQL
+// string. A home-rolled classifier that counts `(`/`)` or scans keywords has
+// no string-literal awareness and is bypassable — e.g.
+// `WITH x AS (SELECT ')select(' AS s) DELETE FROM t` fools a paren-counting
+// scanner into treating the DELETE as buried inside a CTE body. With
+// `query_only = ON`, SQLite rejects every write (INSERT/UPDATE/DELETE/DROP/
+// data-modifying CTEs, …) with a real engine error while `SELECT` and
+// `WITH…SELECT` continue to run — the engine is the parser, so no
+// string-literal or nesting trick can confuse it. The pragma is toggled OFF
+// again in a `finally` so it can never leak into the `execute` (write) tool.
+function runReadOnly<T>(fn: () => T): T {
+  db.exec('PRAGMA query_only = ON');
+  try {
+    return fn();
+  } finally {
+    db.exec('PRAGMA query_only = OFF');
   }
-  return out;
-}
-
-// A query is read-only if it is a bare SELECT, or a WITH-prefixed query whose
-// main statement (after the CTE definitions) is a SELECT. A CTE can legally
-// wrap a data-modifying main statement (`WITH x AS (...) DELETE ...`), so the
-// WITH case must resolve past every `name [(cols)] AS (body)` CTE definition
-// to find the real leading keyword — degrade to "reject" on anything that
-// doesn't match the expected shape.
-function isReadOnlyQuery(sql: string): boolean {
-  if (/^select\b/i.test(sql)) return true;
-  if (!/^with\b/i.test(sql)) return false;
-
-  const tokens = stripParenGroups(sql)
-    .replace(/,/g, ' , ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((t) => t.toLowerCase());
-
-  let i = 0;
-  if (tokens[i] !== 'with') return false;
-  i++;
-  if (tokens[i] === 'recursive') i++;
-
-  for (;;) {
-    const name = tokens[i];
-    if (!name || name === ',') return false; // malformed CTE header
-    i++;
-    if (tokens[i] !== 'as') return false; // CTEs require AS in SQLite
-    i++;
-    if (tokens[i] === ',') {
-      i++;
-      continue;
-    }
-    break;
-  }
-
-  return tokens[i] === 'select';
 }
 
 server.registerTool(
@@ -91,18 +51,21 @@ server.registerTool(
     inputSchema: { sql: z.string() },
   },
   async ({ sql }) => {
-    const trimmed = sql.trim();
-    if (!isReadOnlyQuery(trimmed)) {
-      return textResult(
-        'query only accepts read-only SELECT (or WITH...SELECT) statements; use the execute tool for writes',
-        true,
-      );
-    }
     try {
-      const rows = db.query(sql).all();
+      const rows = runReadOnly(() => db.query(sql).all());
       return textResult(JSON.stringify(rows, null, 2));
     } catch (cause) {
-      return textResult(`query failed: ${(cause as Error).message}`, true);
+      const message = (cause as Error).message;
+      // SQLite's own error for a write attempted under `query_only = ON`;
+      // surface it as the read-only-gate rejection rather than a generic
+      // query failure.
+      if (/readonly database/i.test(message)) {
+        return textResult(
+          `query only accepts read-only SELECT (or WITH...SELECT) statements; use the execute tool for writes (${message})`,
+          true,
+        );
+      }
+      return textResult(`query failed: ${message}`, true);
     }
   },
 );
@@ -117,6 +80,9 @@ server.registerTool(
   },
   async ({ sql }) => {
     try {
+      // Defense in depth: the `query` tool always resets `query_only` in its
+      // own `finally`, but guarantee writes never run under it regardless.
+      db.exec('PRAGMA query_only = OFF');
       const r = db.run(sql);
       return textResult(JSON.stringify({ changes: r.changes }));
     } catch (cause) {
