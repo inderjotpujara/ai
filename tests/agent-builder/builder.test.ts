@@ -186,6 +186,25 @@ describe('buildTool (Task 24 — consent-gated brand-new tool-code generation)',
     return { object: async () => draft as never };
   }
 
+  /** Counts tool-draft generation calls, returning each successive draft in
+   *  order (clamped to the last once exhausted) — mirrors `countingDraftModel`
+   *  above, sized for `buildTool`'s simpler single-call-per-attempt shape
+   *  (no interleaved server-pick call). */
+  function countingToolModel(drafts: Array<typeof validToolDraft>): {
+    model: BuilderModel;
+    calls: () => number;
+  } {
+    let calls = 0;
+    const model: BuilderModel = {
+      object: async () => {
+        const d = drafts[Math.min(calls, drafts.length - 1)];
+        calls += 1;
+        return d as never;
+      },
+    };
+    return { model, calls: () => calls };
+  }
+
   async function toolDeps(
     confirm: boolean,
     model: BuilderModel,
@@ -263,5 +282,40 @@ describe('buildTool (Task 24 — consent-gated brand-new tool-code generation)',
     );
     const r = await buildTool('count words', d);
     expect(r.kind).toBe('invalid');
+  });
+
+  describe('same-run auto-retry (Task 24)', () => {
+    const invalidToolDraft = {
+      ...validToolDraft,
+      name: 'read_file', // collides with existingModuleNames -> always invalid
+    };
+
+    it('regenerates exactly once and succeeds when the retry is valid', async () => {
+      const { model, calls } = countingToolModel([
+        invalidToolDraft,
+        validToolDraft,
+      ]);
+      const d = await toolDeps(true, model);
+      const r = await buildTool('count words', d);
+      expect(r.kind).toBe('written');
+      if (r.kind === 'written') expect(r.proposal.name).toBe('word_count');
+      expect(calls()).toBe(2); // first attempt + exactly one regeneration
+    });
+
+    it('returns invalid after exactly one retry when the regeneration is still invalid', async () => {
+      let asked = false;
+      const { model, calls } = countingToolModel([invalidToolDraft]);
+      const d = await toolDeps(true, model);
+      d.confirm = async () => {
+        asked = true;
+        return true;
+      };
+      const r = await buildTool('count words', d);
+      expect(r.kind).toBe('invalid');
+      expect(asked).toBe(false); // never reaches consent
+      expect(calls()).toBe(2); // bounded to exactly 1 retry, not 3+
+      const files = await readdir(d.proposalsDir);
+      expect(files).toEqual([]); // nothing written pre-consent
+    });
   });
 });
