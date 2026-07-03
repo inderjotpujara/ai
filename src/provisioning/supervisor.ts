@@ -39,7 +39,7 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 /** Full-jitter exponential backoff retry. Idempotent re-invocation is the retry primitive. */
 export async function withRetry<T>(
-  fn: (signal: AbortSignal) => Promise<T>,
+  fn: () => Promise<T>,
   opts: {
     attempts: number;
     baseMs: number;
@@ -52,9 +52,8 @@ export async function withRetry<T>(
   let lastErr: unknown;
   for (let attempt = 0; attempt < opts.attempts; attempt++) {
     if (attempt > 0 && opts.signal?.aborted) break;
-    const ctrl = new AbortController();
     try {
-      return await fn(ctrl.signal);
+      return await fn();
     } catch (err) {
       lastErr = err;
       const next = attempt + 1;

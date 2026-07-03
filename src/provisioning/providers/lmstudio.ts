@@ -39,7 +39,7 @@ export function createLmStudioProvider(
         throw new ProviderError(`LM Studio download returned ${start.status}`);
       const job = (await start.json()) as DownloadJob;
       if (job.status === 'already_downloaded') {
-        onProgress(tracker.update(DownloadPhase.Done, 0, 0));
+        onProgress(tracker.update(DownloadPhase.Done, 0, null));
         return;
       }
       const total = job.total_size_bytes ?? null;
