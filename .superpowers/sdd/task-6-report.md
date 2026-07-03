@@ -67,3 +67,66 @@ untrusted `modelRef` (`repo::file`). A ref like `org/repo::../../evil.gguf` or
 ### Verification
 - `bun run typecheck` → clean (`tsc --noEmit`, 0 errors).
 - `bun test` (full suite) → **481 pass / 2 skip / 0 fail**, 1021 expect() calls, 483 tests across 139 files. Green (+2 tests vs the 479 baseline).
+
+## Critical fix (write-stream error handling)
+
+Review flagged a CRITICAL finding against `downloadFile`: `createWriteStream(partPath)`
+had no `'error'` listener. A write-side failure (EACCES/ENOSPC — realistic for
+large GGUF/MLX writes) emits an EventEmitter `'error'` with no listener →
+**uncaught exception → process crash**, bypassing `try/finally` entirely and
+never reaching the provisioner's per-model `catch → result.failed`. This
+violated the task's degrade-never-crash constraint (the read side, `sha256File`,
+already handled this correctly via `s.on('error', reject)`). A MINOR
+companion finding: the `finally` unlinked `.part` without first destroying the
+WriteStream, leaking an open fd on the unlinked inode.
+
+### Fix
+- `src/provisioning/providers/hf-fetch.ts`:
+  - Added `streamErrorGuard(stream): Promise<never>` — attaches `stream.on('error', reject)`
+    and returns a promise that only ever rejects (never resolves). A stray
+    `.catch(() => {})` on the standalone reference silences the "unhandled
+    rejection" warning; the promise is still raced by every real consumer via
+    `Promise.race`, so a genuine error always propagates.
+  - `downloadFile` now races every stream-facing await — `writeChunk` (each
+    chunk) and `endStream` (final flush/close) — against `streamErrorGuard`,
+    so a stream `'error'` rejects the same promise chain the caller already
+    awaits, instead of escaping as an unhandled EventEmitter event.
+  - `writeChunk`/`endStream` retyped from `WriteStream` to `Writable` (the
+    injectable seam below hands back a plain `Writable`, not necessarily an
+    `fs.WriteStream`).
+  - Added an injectable test seam: `deps.openWriteStream?: (path: string) => Writable`,
+    defaulting to `createWriteStream`. Minimal, typed, additive — no behavior
+    change for real callers (still `createWriteStream` by default).
+  - `finally` now does `if (stream && !stream.destroyed) stream.destroy();`
+    **before** `unlink(partPath)`, fixing the leaked-fd-on-cleanup MINOR
+    finding — the WriteStream is torn down before the underlying inode is
+    unlinked.
+
+### TDD evidence
+- **RED:** added `rejects (not crashes) when the write stream errors, and
+  leaves no .part file` to `tests/provisioning/hf-fetch.test.ts`. It injects
+  an `ErroringWriteStream extends Writable` whose `_write` emits `'error'`
+  synchronously instead of invoking the write callback (deterministic, no
+  chmod, no real fd) via the new `openWriteStream` seam, then asserts
+  `provider.download(...)` **rejects** with the injected error and leaves no
+  `.part`/final file behind.
+  - Verified RED against the **pre-fix** source by `git stash push -- src/provisioning/providers/hf-fetch.ts`
+    (test file kept) and running `bun run test:file -- "tests/provisioning/hf-fetch.test.ts"`
+    → **4 pass / 1 fail**: `Expected promise that rejects / Received promise
+    that resolved`. Reason: the unfixed `createHfFetchProvider` has no
+    `openWriteStream` seam, so the injected `ErroringWriteStream` is silently
+    ignored and the real `createWriteStream` succeeds — confirming the seam
+    (and therefore the error path) did not exist before the fix. Restored the
+    fix via `git stash pop`.
+  - **GREEN:** after the fix, `bun run test:file -- "tests/provisioning/hf-fetch.test.ts"`
+    → **5 pass / 0 fail / 15 expect() calls**. No uncaught exception, no
+    process crash — `download()` cleanly rejects and the caller's
+    `.rejects.toThrow(...)` catches it.
+
+### Verification
+- `bun run typecheck` → clean (`tsc --noEmit`, 0 errors).
+- `bun run test:file -- "tests/provisioning/hf-fetch.test.ts"` → **5 pass / 0 fail / 15 expect() calls**.
+- `bun run lint:file` (both touched files) → clean (fixed import ordering in
+  `hf-fetch.ts` and a formatter nit in the test file).
+- Full suite (`bun test`) intentionally **not** run here per instruction — the
+  controller runs it after this commit.

@@ -2,9 +2,26 @@ import { describe, expect, it } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { Writable } from 'node:stream';
 import { ProviderKind } from '../../src/core/types.ts';
 import { createHfFetchProvider } from '../../src/provisioning/providers/hf-fetch.ts';
 import { DownloadPhase } from '../../src/provisioning/types.ts';
+
+/**
+ * Deterministically simulates a write-side failure (EACCES/ENOSPC-class)
+ * without touching the filesystem or chmod'ing anything: the very first
+ * `_write` call emits 'error' on itself instead of invoking the write
+ * callback, exactly like a real fd failure would.
+ */
+class ErroringWriteStream extends Writable {
+  override _write(
+    _chunk: Uint8Array,
+    _encoding: BufferEncoding,
+    _callback: (error?: Error | null) => void,
+  ): void {
+    this.emit('error', new Error('ENOSPC: simulated disk-full write failure'));
+  }
+}
 
 function streamingResponse(chunks: Uint8Array[], total: number): Response {
   const body = new ReadableStream({
@@ -75,6 +92,25 @@ describe('createHfFetchProvider', () => {
     ).rejects.toThrow();
     expect(existsSync(join(parent, 'evil.gguf'))).toBe(false);
     expect(existsSync(join(dirname(parent), 'evil.gguf'))).toBe(false);
+  });
+
+  it('rejects (not crashes) when the write stream errors, and leaves no .part file', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const chunk = new Uint8Array(1000);
+    const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      openWriteStream: () => new ErroringWriteStream(),
+    });
+    await expect(
+      provider.download('org/repo::model.gguf', {
+        onProgress: () => {},
+        signal: new AbortController().signal,
+        destDir: dest,
+      }),
+    ).rejects.toThrow(/simulated disk-full/);
+    expect(existsSync(join(dest, 'model.gguf.part'))).toBe(false);
+    expect(existsSync(join(dest, 'model.gguf'))).toBe(false);
   });
 
   it('rejects a modelRef with an absolute-path file component', async () => {

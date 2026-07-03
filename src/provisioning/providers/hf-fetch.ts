@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { WriteStream } from 'node:fs';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { mkdir, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import type { Writable } from 'node:stream';
 import { ProviderError } from '../../core/errors.ts';
 import type { ProviderKind } from '../../core/types.ts';
 import { ProgressTracker } from '../progress-tracker.ts';
@@ -46,16 +46,37 @@ export async function sha256File(path: string): Promise<string> {
   });
 }
 
-function writeChunk(stream: WriteStream, chunk: Uint8Array): Promise<void> {
+function writeChunk(stream: Writable, chunk: Uint8Array): Promise<void> {
   return new Promise((resolve, reject) => {
     stream.write(chunk, (err) => (err ? reject(err) : resolve()));
   });
 }
 
-function endStream(stream: WriteStream): Promise<void> {
+function endStream(stream: Writable): Promise<void> {
   return new Promise((resolve, reject) => {
     stream.end((err?: Error | null) => (err ? reject(err) : resolve()));
   });
+}
+
+/**
+ * Resolves only on 'error'; never resolves otherwise. Without a listener, a
+ * write-side failure (EACCES/ENOSPC — real for large GGUF/MLX writes) would
+ * emit 'error' on the WriteStream with no handler and crash the process
+ * (Node's default behavior for unhandled EventEmitter errors), bypassing the
+ * try/finally entirely and violating degrade-never-crash. Every write/end
+ * await in `downloadFile` races against this promise so a stream error always
+ * rejects the download instead of crashing. The `.catch(() => {})` only
+ * silences the "unhandled rejection" warning on this standalone reference —
+ * every real consumer still observes the rejection via `Promise.race`.
+ */
+function streamErrorGuard(stream: Writable): Promise<never> {
+  const guard = new Promise<never>((_resolve, reject) => {
+    stream.on('error', (err) =>
+      reject(err instanceof Error ? err : new Error(String(err))),
+    );
+  });
+  guard.catch(() => {});
+  return guard;
 }
 
 /** Runtime-agnostic HuggingFace downloader (llama.cpp GGUF + MLX snapshot). We own the fetch. */
@@ -64,10 +85,13 @@ export function createHfFetchProvider(
   deps: {
     fetchImpl?: typeof fetch;
     sha256?: (path: string) => Promise<string>;
+    /** Test seam: inject a Writable in place of `createWriteStream` to deterministically exercise stream-error handling. */
+    openWriteStream?: (path: string) => Writable;
   } = {},
 ): DownloadProvider {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const sha256 = deps.sha256 ?? sha256File;
+  const openWriteStream = deps.openWriteStream ?? createWriteStream;
 
   /**
    * Streams a single HF file to `<destPath>.part`, verifies its sha256, then
@@ -91,19 +115,21 @@ export function createHfFetchProvider(
       throw new ProviderError(`HF resolve returned ${res.status}`);
     const total = Number(res.headers.get('content-length')) || null;
     await mkdir(dirname(destPath), { recursive: true });
+    let stream: Writable | undefined;
     try {
-      const stream = createWriteStream(partPath);
+      stream = openWriteStream(partPath);
+      const streamError = streamErrorGuard(stream);
       const reader = res.body.getReader();
       let done = 0;
       for (;;) {
         const { done: finished, value } = await reader.read();
         if (finished) break;
         if (!value) continue;
-        await writeChunk(stream, value);
+        await Promise.race([writeChunk(stream, value), streamError]);
         done += value.byteLength;
         onProgress(tracker.update(DownloadPhase.Downloading, done, total));
       }
-      await endStream(stream);
+      await Promise.race([endStream(stream), streamError]);
 
       // Verify (SHA256 of the written file) — llama.cpp/GGUF has no content hash of its own.
       onProgress(tracker.update(DownloadPhase.Verifying, done, total));
@@ -118,6 +144,8 @@ export function createHfFetchProvider(
       await rename(partPath, destPath);
       onProgress(tracker.update(DownloadPhase.Done, done, total ?? done));
     } finally {
+      // Destroy before unlink so we don't leak an open fd on the unlinked inode.
+      if (stream && !stream.destroyed) stream.destroy();
       if (existsSync(partPath)) await unlink(partPath);
     }
   }
