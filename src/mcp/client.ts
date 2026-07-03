@@ -1,4 +1,4 @@
-import { createMCPClient } from '@ai-sdk/mcp';
+import { createMCPClient, type OAuthClientProvider } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport as StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
 
@@ -9,17 +9,35 @@ export type McpServerSpec = {
   env?: Record<string, string>;
 };
 
-/** A remote Streamable-HTTP MCP server (static headers; OAuth is a follow-on). */
+/** A remote Streamable-HTTP MCP server. Static-key auth (default): fixed
+ *  `headers` (PAT/API key from env), unchanged. OAuth: an `authProvider` —
+ *  the installed `@ai-sdk/mcp`'s HTTP transport accepts one natively
+ *  (`OAuthClientProvider`); we pass it straight through. Contract-tested
+ *  only — live token exchange is deferred (no server to auth against; see
+ *  docs/architecture.md §14). */
 export type McpHttpSpec = {
   type: 'http';
   url: string;
   headers?: Record<string, string>;
+  authProvider?: OAuthClientProvider;
 };
 
 export type McpMountSpec = McpServerSpec | McpHttpSpec;
 
 /** A mounted server's tools plus a handle to stop its subprocess/connection. */
 export type MountedServer = { tools: ToolSet; close: () => Promise<void> };
+
+/** Pure builder for the HTTP transport config, split out so the
+ *  static-header-vs-authProvider wiring is unit-testable without a network
+ *  round-trip or mocking `createMCPClient`. */
+export function buildHttpTransportConfig(spec: McpHttpSpec) {
+  return {
+    type: 'http' as const,
+    url: spec.url,
+    headers: spec.headers,
+    authProvider: spec.authProvider,
+  };
+}
 
 /** Connect to ANY stdio or Streamable-HTTP MCP server and expose its tools.
  *  The integration primitive. */
@@ -28,7 +46,7 @@ export async function mountMcpServer(
 ): Promise<MountedServer> {
   const transport =
     'url' in spec
-      ? ({ type: 'http', url: spec.url, headers: spec.headers } as const)
+      ? buildHttpTransportConfig(spec)
       : new StdioMCPTransport(spec);
   const client = await createMCPClient({ transport });
   const tools = await client.tools();

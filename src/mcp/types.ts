@@ -5,6 +5,18 @@ export enum McpTransportKind {
   Http = 'http',
 }
 
+/** How a remote HTTP server authenticates. `Static` (the default, implicit
+ *  when `auth` is absent) sends fixed `headers` (PAT/API key from env, as
+ *  today). `OAuth` marks the entry as wanting an `authProvider` — the actual
+ *  provider instance is supplied by the caller (deps.authProviders in
+ *  mount.ts), never by JSON config, since it's a stateful runtime object.
+ *  Live OAuth token exchange is deferred (contract-tested only — see
+ *  docs/architecture.md §14). */
+export enum McpAuthKind {
+  Static = 'static',
+  OAuth = 'oauth',
+}
+
 /** Raw per-entry schemas — the standard mcpServers shape + our `agents` extension. */
 export const stdioEntrySchema = z.object({
   command: z.string().min(1),
@@ -13,10 +25,13 @@ export const stdioEntrySchema = z.object({
   agents: z.array(z.string()).optional(),
 });
 
+export const httpAuthSchema = z.object({ kind: z.literal(McpAuthKind.OAuth) });
+
 export const httpEntrySchema = z.object({
   type: z.enum(['http', 'streamable-http', 'sse']), // aliases tolerated; all mount as HTTP
   url: z.url(),
   headers: z.record(z.string(), z.string()).optional(),
+  auth: httpAuthSchema.optional(),
   agents: z.array(z.string()).optional(),
 });
 
@@ -39,6 +54,9 @@ export type HttpServerEntry = {
   name: string;
   url: string;
   headers: Record<string, string>;
+  /** Absent = static-header auth (default, unchanged). Present = the entry
+   *  wants an OAuth authProvider (see McpAuthKind doc above). */
+  auth?: { kind: McpAuthKind.OAuth };
   agents?: string[];
   raw: unknown;
 };

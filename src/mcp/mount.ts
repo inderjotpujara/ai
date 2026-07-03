@@ -1,3 +1,4 @@
+import type { OAuthClientProvider } from '@ai-sdk/mcp';
 import type { ToolSet } from 'ai';
 import {
   askYesNo,
@@ -21,6 +22,7 @@ import {
   writeApprovals,
 } from './consent.ts';
 import {
+  McpAuthKind,
   type McpConfig,
   type McpServerEntry,
   McpTransportKind,
@@ -41,13 +43,46 @@ export type MountAllDeps = {
   consent?: Partial<ConsentDeps>;
   approvalsFile?: string;
   warn?: (msg: string) => void;
+  /** OAuth providers, keyed by entry name, for entries whose `auth.kind` is
+   *  `oauth`. Never sourced from JSON config (a provider is a stateful
+   *  runtime object, not data) — the caller constructs and registers one.
+   *  An `oauth` entry with no registered provider degrades to mounting
+   *  without auth (warns; never crashes) — live OAuth wiring is deferred. */
+  authProviders?: Record<string, OAuthClientProvider>;
 };
 
-function toSpec(entry: McpServerEntry): McpMountSpec {
+function toSpec(
+  entry: McpServerEntry,
+  authProvider?: OAuthClientProvider,
+): McpMountSpec {
   if (entry.kind === McpTransportKind.Http) {
-    return { type: 'http', url: entry.url, headers: entry.headers };
+    return {
+      type: 'http',
+      url: entry.url,
+      headers: entry.headers,
+      authProvider,
+    };
   }
   return { command: entry.command, args: entry.args, env: entry.env };
+}
+
+/** Resolve the authProvider for an entry declaring OAuth. Degrades to
+ *  `undefined` (mount without auth) + a warning when none is registered —
+ *  never crashes, never attempts a live handshake. */
+function resolveAuthProvider(
+  entry: McpServerEntry,
+  authProviders: Record<string, OAuthClientProvider> | undefined,
+  warn: (msg: string) => void,
+): OAuthClientProvider | undefined {
+  if (entry.kind !== McpTransportKind.Http) return undefined;
+  if (entry.auth?.kind !== McpAuthKind.OAuth) return undefined;
+  const provider = authProviders?.[entry.name];
+  if (!provider) {
+    warn(
+      `MCP server "${entry.name}" declares OAuth but no authProvider is registered — live OAuth is deferred; mounting without auth`,
+    );
+  }
+  return provider;
 }
 
 /** Mount every approved config entry; consent-gate first, pin tool definitions
@@ -99,7 +134,8 @@ export async function mountAll(
     }
     let server: MountedServer;
     try {
-      server = await mount(toSpec(entry));
+      const authProvider = resolveAuthProvider(entry, deps.authProviders, warn);
+      server = await mount(toSpec(entry, authProvider));
     } catch (cause) {
       warn(
         `MCP server "${entry.name}" failed to mount: ${(cause as Error).message}`,
