@@ -24,7 +24,7 @@ export function createLmStudioProvider(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const pollMs = deps.pollMs ?? 1000;
   return {
-    kind: ProviderKind.MlxServer, // LM Studio serves GGUF+MLX; shares the MlxServer kind today
+    kind: ProviderKind.LmStudio,
     async download(modelRef, { onProgress, signal }) {
       const tracker = new ProgressTracker(modelRef);
       onProgress(tracker.update(DownloadPhase.Resolving, 0, null));
