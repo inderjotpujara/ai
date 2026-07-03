@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { STARTER_PACK } from '../mcp/pack.ts';
 import type { PackEntry } from '../mcp/types.ts';
+import { delimitNeed } from './prompt.ts';
 import type { AgentProposal, BuilderModel, SuggestedServer } from './types.ts';
 
 const PickSchema = z.object({
@@ -31,7 +32,7 @@ export async function suggestServers(
     'Palette:',
     palette,
     '',
-    `<need>${need}</need>`,
+    delimitNeed(need),
   ].join('\n');
 
   const { servers } = await model.object({ schema: PickSchema, prompt });

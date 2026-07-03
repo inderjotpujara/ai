@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Capability, PreferPolicy } from '../core/types.ts';
+import { delimitNeed } from './prompt.ts';
 import type { AgentProposal, BuilderModel } from './types.ts';
 
 const DraftSchema = z.object({
@@ -27,7 +28,7 @@ export async function generateProposal(
     'Return: a snake_case name, a one-sentence description the router will route on,',
     'a focused system prompt, a short role label, and a one-sentence rationale.',
     '',
-    `<need>${need}</need>`,
+    delimitNeed(need),
   ].join('\n');
 
   const d = await model.object({ schema: DraftSchema, prompt });

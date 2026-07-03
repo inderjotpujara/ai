@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,6 +91,13 @@ describe('writeAgent', () => {
     expect(() => writeAgent(proposal, paths)).toThrow(/AGENT-BUILDER markers/);
     const idx = await readFile(paths.indexPath, 'utf8');
     expect(idx).toBe(unmarked); // untouched, not silently corrupted
+  });
+  it('does not write an orphan agent file when markers are missing (checks index BEFORE writing)', async () => {
+    const paths = await setup();
+    const unmarked = 'export const AGENTS = {};\n';
+    await Bun.write(paths.indexPath, unmarked);
+    expect(() => writeAgent(proposal, paths)).toThrow(/AGENT-BUILDER markers/);
+    expect(existsSync(join(paths.agentsDir, 'pdf_qa.ts'))).toBe(false);
   });
   it('inserts import + entry into index.ts at the markers', async () => {
     const paths = await setup();

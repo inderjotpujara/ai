@@ -62,19 +62,32 @@ export function ${Factory}(tools: ToolSet): Agent {
 `;
 }
 
-function registerInIndex(indexPath: string, p: AgentProposal): void {
-  const Factory = factoryName(p);
-  let idx = readFileSync(indexPath, 'utf8');
-  const importLine = `import { ${Factory} } from './${p.name}.ts';\n`;
-  const entryLine = `  ${p.name}: ${Factory},\n`;
-  const IMPORTS = '// AGENT-BUILDER:IMPORTS';
-  const ENTRIES = '// AGENT-BUILDER:ENTRIES';
-  if (!idx.includes(IMPORTS) || !idx.includes(ENTRIES)) {
+const IMPORTS_MARKER = '// AGENT-BUILDER:IMPORTS';
+const ENTRIES_MARKER = '// AGENT-BUILDER:ENTRIES';
+
+/** Read agents/index.ts and assert both registration markers are present.
+ *  Called BEFORE any file is written, so a missing marker never leaves an
+ *  orphan agent file that was written but couldn't be registered. */
+function assertIndexMarkers(indexPath: string): string {
+  const idx = readFileSync(indexPath, 'utf8');
+  if (!idx.includes(IMPORTS_MARKER) || !idx.includes(ENTRIES_MARKER)) {
     throw new Error(`agents/index.ts is missing the AGENT-BUILDER markers`);
   }
+  return idx;
+}
+
+function registerInIndex(
+  indexPath: string,
+  idx: string,
+  p: AgentProposal,
+): void {
+  const Factory = factoryName(p);
+  const importLine = `import { ${Factory} } from './${p.name}.ts';\n`;
+  const entryLine = `  ${p.name}: ${Factory},\n`;
   if (!idx.includes(importLine))
-    idx = idx.replace(IMPORTS, importLine + IMPORTS);
-  if (!idx.includes(entryLine)) idx = idx.replace(ENTRIES, entryLine + ENTRIES);
+    idx = idx.replace(IMPORTS_MARKER, importLine + IMPORTS_MARKER);
+  if (!idx.includes(entryLine))
+    idx = idx.replace(ENTRIES_MARKER, entryLine + ENTRIES_MARKER);
   atomicWrite(indexPath, idx);
 }
 
@@ -128,11 +141,14 @@ export function writeAgent(p: AgentProposal, paths: WritePaths): string[] {
       `writeAgent: invalid agent name ${JSON.stringify(p.name)} — must match ${NAME_PATTERN}`,
     );
   }
+  // Check the index markers BEFORE writing the agent file: if registration
+  // would fail, we must not leave an orphan agents/<name>.ts on disk.
+  const idx = assertIndexMarkers(paths.indexPath);
   const written: string[] = [];
   const agentPath = join(paths.agentsDir, `${p.name}.ts`);
   atomicWrite(agentPath, renderAgentFile(p));
   written.push(agentPath);
-  registerInIndex(paths.indexPath, p);
+  registerInIndex(paths.indexPath, idx, p);
   written.push(paths.indexPath);
   if (p.suggestedServers.length > 0) {
     scopeMcp(paths.mcpConfigPath, p);
