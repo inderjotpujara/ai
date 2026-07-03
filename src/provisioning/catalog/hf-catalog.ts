@@ -40,7 +40,7 @@ export async function hfTreeSize(
 
 type SearchEntry = { id: string; downloads?: number };
 
-/** kind = which runtime consumes these (Ollama-independent): MlxServer for MLX; filter differs. */
+/** kind = which download ProviderKind fetches these weights (e.g. HfSnapshot for MLX); filter differs. */
 export function createHfCatalogSource(
   kind: ProviderKind,
   deps: { filter?: string; fetchImpl?: typeof fetch } = {},

@@ -1,5 +1,5 @@
 import type { Capability } from '../core/types.ts';
-import { Capability as Cap, ProviderKind, RuntimeKind } from '../core/types.ts';
+import { Capability as Cap, RuntimeKind } from '../core/types.ts';
 import { providerFor } from '../provisioning/registry.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import {
@@ -18,7 +18,7 @@ export type DiscoverDeps = {
   host?: HostCapabilities;
   sources?: CatalogSource[];
   writeCatalog?: (c: Candidate[]) => void;
-  pullTop?: (model: string, provider: Candidate['provider']) => Promise<void>;
+  pullTop?: (model: string, candidate: Candidate) => Promise<void>;
   catalogPathStr?: string;
   prePullCount?: number;
 };
@@ -72,22 +72,26 @@ export async function runDiscovery(
   const n = deps.prePullCount ?? 1;
   const pull =
     deps.pullTop ??
-    (async (model: string, provider: Candidate['provider']) => {
-      // Ollama pre-pulls via its local daemon; every other download kind
-      // fetches through its DownloadProvider (e.g. MLX → HF snapshot to disk).
-      if (provider === ProviderKind.Ollama) {
+    (async (model: string, candidate: Candidate) => {
+      // Route by inference RUNTIME, not download provider: an Ollama-runtime
+      // candidate pre-pulls via its local daemon, which natively resolves
+      // hf.co/<repo>:<quant> refs (common when the default hfGguf/hfMlx
+      // sources surface an Ollama-native model string). Every other runtime
+      // downloads weights through its DownloadProvider, keyed on the
+      // download `provider` kind (e.g. MLX → HF snapshot to disk).
+      if (candidate.runtime === RuntimeKind.Ollama) {
         await runtimeFor(RuntimeKind.Ollama).control.pull(model);
         return;
       }
       const ctrl = new AbortController();
-      await providerFor(provider).download(model, {
+      await providerFor(candidate.provider).download(model, {
         onProgress: () => {},
         signal: ctrl.signal,
       });
     });
   for (const c of ranked.slice(0, n)) {
     try {
-      await pull(c.model, c.provider);
+      await pull(c.model, c);
       pulled.push(c.model);
     } catch (err) {
       pullFailed.push({

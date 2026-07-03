@@ -39,7 +39,7 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
       );
       recordModelSelect({
         modelId: decl.model,
-        provider: decl.runtime,
+        provider: decl.runtime, // telemetry field name is legacy; value is the inference runtime (gen_ai.system). WS3 revisits this hook.
         numCtx,
         paramsBillions: decl.footprint.approxParamsBillions,
       });
