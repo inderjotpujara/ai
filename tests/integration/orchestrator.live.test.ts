@@ -23,7 +23,9 @@ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
     await writeFile(path, 'The fox and the dog are friends.');
     const { tools, close } = await createFileTools();
     try {
-      const orch = createSuperAgent(tools, {});
+      const orch = createSuperAgent((name) =>
+        name === 'file_qa' ? tools : {},
+      );
       const result = await runOrchestrator(
         orch,
         `What animals are in ${path}?`,
@@ -42,7 +44,9 @@ describe.skipIf(!ready)('live orchestrator (real Ollama)', () => {
     await warmModel(qwenFast.model);
     const { tools, close } = await createFileTools();
     try {
-      const orch = createSuperAgent(tools, {});
+      const orch = createSuperAgent((name) =>
+        name === 'file_qa' ? tools : {},
+      );
       const result = await runOrchestrator(
         orch,
         'Book me a flight to Tokyo for next Tuesday.',

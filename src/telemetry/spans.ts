@@ -61,6 +61,10 @@ export const ATTR = {
   MCP_TOOL_COUNT: 'mcp.tool.count',
   MCP_MOUNT_OUTCOME: 'mcp.mount.outcome',
   MCP_SERVER_COUNT: 'mcp.server.count',
+  BUILD_NEED: 'agent.build.need',
+  BUILD_AGENT: 'agent.build.agent_name',
+  BUILD_OUTCOME: 'agent.build.outcome',
+  BUILD_SERVERS: 'agent.build.server_count',
 } as const;
 
 export type ModelSelectInfo = {
@@ -435,5 +439,32 @@ export function withMcpMountSpan<T>(
     span.setAttribute(ATTR.MCP_SERVER_COUNT, mountedServers);
     span.setAttribute(ATTR.MCP_TOOL_COUNT, mountedTools);
     return out;
+  });
+}
+
+/** Root span for one agent-builder run (Slice 17). The body records stage
+ *  events (generated / validated / suggested / consent / written) and sets
+ *  the outcome + counts at the end via the returned recorder. */
+export function withAgentBuildSpan<T>(
+  need: string,
+  fn: (rec: {
+    event: (
+      name: string,
+      attrs?: Record<string, string | number | boolean>,
+    ) => void;
+    outcome: (kind: string, agentName?: string, serverCount?: number) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('agent.build', async (span) => {
+    span.setAttribute(ATTR.BUILD_NEED, need);
+    return fn({
+      event: (name, attrs) => span.addEvent(name, attrs),
+      outcome: (kind, agentName, serverCount) => {
+        span.setAttribute(ATTR.BUILD_OUTCOME, kind);
+        if (agentName) span.setAttribute(ATTR.BUILD_AGENT, agentName);
+        if (serverCount !== undefined)
+          span.setAttribute(ATTR.BUILD_SERVERS, serverCount);
+      },
+    });
   });
 }

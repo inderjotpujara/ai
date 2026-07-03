@@ -13,28 +13,34 @@ Mini.
 > composition guardrails (Slice 9), workflow/DAG engine (Slice 10), crews &
 > roles (Slice 11), memory/RAG (Slice 12), grounded verification (Slice 13),
 > first-boot model provisioning (Slice 14), a declarative MCP mount
-> registry + starter pack (Slice 15), and an MCP telemetry-ordering fix +
-> consent robustness hardening (Slice 16) have landed. Agent-builder →
-> triggers is next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> registry + starter pack (Slice 15), an MCP telemetry-ordering fix +
+> consent robustness hardening (Slice 16), and Phase D's **agent-builder**
+> (Slice 17) — describe a capability gap, review a proposal, and the system
+> writes a new specialist — have landed. A crew/workflow builder + triggers
+> are next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 16 complete — **MCP telemetry-ordering fix + consent
-> robustness**. A new `src/cli/with-mcp-run.ts` owns the per-run CLI scope
-> for `chat`/`flow`/`crew` in one place — `createRun` → `initRunTelemetry` →
-> mount — so the `mcp.mount` span (with a corrected `mcp.tool.count` and a
-> new `mcp.server.count` attribute) now actually lands in `runs/<id>/
-> spans.jsonl`, fixing a Slice 15 gap where it was silently dropped. Consent
-> prompting is now judged on **both** stdin and stderr being TTYs
-> (`interactiveTTY()`), and a piped-closed stdin resolves instead of hanging
-> (`flow < /dev/null` no longer hangs). Also shipped: Slice 15 (`mcp.json`
-> mount registry + starter pack, `src/mcp/`, 12-entry curated pack,
-> consent-gated + tool-definition-pinned mounting), Slice 14 (first-boot
-> provisioning + runtime-agnostic downloader, Ollama live-verified; LM
-> Studio/llama.cpp/MLX contract-tested, live-verify deferred), Slice 8 (OTel
-> run-viewer, `bun run runs`), Slice 9 (composition guardrails — delegation
-> depth limit + return-size cap), Slice 10 (workflow/DAG engine, `bun run
-> flow <name>`), Slice 11 (crews & roles, `bun run crew <name>`), Slice 12
-> (memory/RAG, `bun run memory ingest|recall|stats|reindex`), and Slice 13
-> (grounded verification, `--verify`). See [Roadmap](#roadmap).
+> **Status:** Slice 17 complete — **Agent-builder (Phase D)**. `src/agent-builder/`
+> turns a plain-language capability need into a reviewed, working specialist:
+> draft a proposal → suggest a minimal palette-only MCP-server subset from the
+> Slice 15 starter pack → validate it structurally → ask for explicit consent
+> → write the agent file + register it in a new `agents/index.ts` registry +
+> scope its tools in `mcp.json`, all atomically. Trigger it directly with
+> `bun run agent-builder "<need>"`, or accept a TTY-gated offer when a chat run
+> hits a capability gap. Safety model: review-before-activate (nothing writes
+> without a yes), palette-only tools (no invented servers), and no
+> same-run activation — a new agent is live on the *next* run, never the one
+> that discovered the gap. Also shipped: Slice 16 (MCP telemetry-ordering fix
+> + consent robustness — `mcp.mount` now lands in `runs/<id>/spans.jsonl`,
+> consent judged on stdin **and** stderr TTY), Slice 15 (`mcp.json` mount
+> registry + starter pack, `src/mcp/`, 12-entry curated pack, consent-gated +
+> tool-definition-pinned mounting), Slice 14 (first-boot provisioning +
+> runtime-agnostic downloader, Ollama live-verified; LM Studio/llama.cpp/MLX
+> contract-tested, live-verify deferred), Slice 8 (OTel run-viewer, `bun run
+> runs`), Slice 9 (composition guardrails — delegation depth limit +
+> return-size cap), Slice 10 (workflow/DAG engine, `bun run flow <name>`),
+> Slice 11 (crews & roles, `bun run crew <name>`), Slice 12 (memory/RAG,
+> `bun run memory ingest|recall|stats|reindex`), and Slice 13 (grounded
+> verification, `--verify`). See [Roadmap](#roadmap).
 
 ---
 
@@ -84,6 +90,8 @@ No manual steps. No API keys. Everything runs locally.
 **MCP mount registry & starter pack (Slice 15).** Slice 3's two hardcoded mounts (`createFileTools`/`createFetchTools`) are replaced by a **declarative registry**, `src/mcp/`: a committed `mcp.json` (the standard `mcpServers` shape, plus a per-server `agents` field for scoping) is read by `loadMcpConfig()` (per-entry degrade — a bad entry warns and is skipped, one needing an unset env var goes `dormant`) and mounted by `mountAll()`. Every mount is **consent-gated** — a TTY prompt shows the exact command/URL before it runs (or `AGENT_MCP_AUTO_APPROVE=1` for headless/CI), and its tool definitions are **hashed and pinned** so a server that changes its tools after approval (a "rug-pull") gets caught and re-prompted rather than silently trusted. A **12-entry curated starter pack** — `bun run mcp list|status|add <name>` — covers files (`file-tools`, `filesystem`), SQL (`sqlite`, SELECT-gated `query` + `execute`), memory, sequential-thinking, web-fetch, git, time, browser (Playwright), GitHub, and web-search (Brave/Exa); key-gated entries stay dormant until their env var is set. A live eval (`tests/mcp/eval-scoping.test.ts`) checks that a `file_qa`-scoped agent reliably picks `read_file` over a merged toolset's distractors. See [`docs/architecture.md`](docs/architecture.md) §14.
 
 **MCP telemetry-ordering fix + consent robustness (Slice 16).** Slice 15 wired an `mcp.mount` span around every mount pass, but each CLI's `main()` mounted **before** creating the run dir/telemetry provider, so the span was recorded against the OTel no-op default and never reached `runs/<id>/spans.jsonl`. A new `src/cli/with-mcp-run.ts` fixes this by owning the whole per-run CLI scope in one place — `createRun` → `initRunTelemetry(run.dir)` → `withMcpMountSpan(mountAll(...))` → the run body → `finally { registry.close(); telemetry.shutdown() }` — so `mcp.mount` now lands alongside every other span. The mount span also gains a `mcp.server.count` attribute and a corrected `mcp.tool.count` (now the sum of mounted servers' tool counts, not a raw record count). Separately, interactive consent prompting now requires **both** stdin and stderr to be TTYs (`interactiveTTY()`) — judging on stderr alone let a piped-in run (`bun run flow ... < /dev/null`) hang on an already-ended stdin — and `stdinInput()` resolves `''` on stream `end` instead of leaving the read promise pending. See [`docs/architecture.md`](docs/architecture.md) §14.
+
+**Agent-builder (Slice 17, Phase D).** The first self-extension slice: `src/agent-builder/` turns *"describe a need"* into a working specialist. `generateProposal` drafts a snake_case name/description/system-prompt/rationale from the need (inserted as `<need>…</need>` **delimited data**, never instructions, to blunt prompt injection); `suggestServers` picks the minimal MCP-server subset from the Slice 15 `STARTER_PACK` — **palette-only**, anything the model invents is dropped; `validateProposal` is a pure structural gate (unique snake_case name, non-empty fields, palette-only + correctly-scoped servers) that runs **before** consent is ever asked; `writeAgent` then atomically renders `agents/<name>.ts`, inserts one import + registry line into a new `agents/index.ts` **registry** (`AGENTS: Record<name, AgentFactory>` + `agentNames()` — `super.ts`/`chat.ts`/`flow.ts` now build their agent set from it instead of hardcoding factories) at marker comments, and scopes any suggested servers into `mcp.json` (deep-cloning pack entries so it never mutates the shared `STARTER_PACK`). `buildAgent` sequences generate→suggest→validate→consent→write under a new `agent.build` telemetry span (`agent.build.need`/`.outcome`/`.agent_name`/`.server_count`). Two triggers: `bun run agent-builder "<need>" [--yes]`, and a TTY-gated offer when `chat.ts` hits a `{kind:'gap'}` outcome (that outcome and its `agent.gap.missing_capability` attribute are unchanged — the offer is a purely additive branch). Safety model: **review-before-activate** (consent is mandatory, no bypass in the chat path), **palette-only tools**, **no same-run activation** (a written agent is live on the *next* run), no tool-code generation, no OAuth. See [`docs/architecture.md`](docs/architecture.md) §18.
 
 ---
 
@@ -174,9 +182,10 @@ they're reusable across other agent tools (Claude Code, Cursor, …).
 | `src/run/` | `run-store.ts` (run dirs + artifacts), `journal.ts` (resumable JSONL log) |
 | `src/tools/` | `read-file.ts` — the `read_file` tool |
 | `src/mcp/` | `types.ts`/`config.ts` (`mcp.json` registry, per-entry degrade), `consent.ts` (spec/tools-hash pinning, `.mcp-approvals.json`), `mount.ts` (`mountAll`, per-agent slices), `pack.ts` (12-entry starter pack), `client.ts` (`mountMcpServer` primitive), `server.ts`/`sqlite-server.ts` (in-repo servers) |
-| `src/cli/` | `chat.ts` (entrypoint), `run-chat.ts` (testable orchestration), `flow.ts` (`bun run flow`), `crew.ts` (`bun run crew`), `with-mcp-run.ts` (per-run scope + telemetry + mount helper, Slice 16), `select-hook.ts` (selector-driven `onBeforeDelegate`), `selection-notice.ts` (per-delegation notice), `mcp.ts` (`bun run mcp list\|status\|add`) |
+| `src/cli/` | `chat.ts` (entrypoint), `run-chat.ts` (testable orchestration), `flow.ts` (`bun run flow`), `crew.ts` (`bun run crew`), `with-mcp-run.ts` (per-run scope + telemetry + mount helper, Slice 16), `select-hook.ts` (selector-driven `onBeforeDelegate`), `selection-notice.ts` (per-delegation notice), `mcp.ts` (`bun run mcp list\|status\|add`), `agent-builder.ts` (`bun run agent-builder "<need>" [--yes]`, Slice 17) |
+| `src/agent-builder/` | Specialist agent generation (Slice 17): `types.ts`, `generate.ts` (prompt-injection-guarded draft), `suggest-tools.ts` (palette-only server pick), `validate.ts` (structural gate), `write.ts` (atomic file + registry + `mcp.json` scoping), `builder.ts` (`buildAgent`: generate→suggest→validate→consent→write), `deps.ts` (live tools-capable largest-that-fits model) |
 | `models/` | model **declarations** (data, not weights) — `qwen-fast.ts`, `qwen-router.ts`, `registry.ts` (bootstrap capability ladder) |
-| `agents/` | agent definitions — **all agents live here** ([readme](agents/README.md)) |
+| `agents/` | agent definitions — **all agents live here** ([readme](agents/README.md)); `index.ts` is the `AGENTS` registry (`agentNames()`) generated agents register into (Slice 17) |
 | `model-images/` | local model blob files (git-ignored, [readme](model-images/README.md)) |
 | `docs/` | architecture + the design specs/plans under `docs/superpowers/` |
 
@@ -235,7 +244,8 @@ interface — no agent code changes. See
 | **14** | **First-boot provisioning + downloader** (Phase A/ops) — `src/provisioning/`: runtime-agnostic `DownloadProvider` abstraction (Ollama live-verified; LM Studio/llama.cpp/MLX contract-tested, live-verify deferred) + unified progress protocol; two-phase catalog discovery (dynamic per-runtime query + committed-snapshot fallback); hardware-fit ranking + per-model consent; disk preflight + stall/retry supervisor guards; `bun run provision` + a non-invasive `chat.ts` auto-detect hook | ✅ Done |
 | **15** | **`mcp.json` mount registry + starter pack** (Phase C) — `src/mcp/`: declarative registry (`config.ts`, per-server `agents` scoping) replaces Slice 3's hardcoded mounts; consent-gated mounting with spec-hash/tools-hash pinning against tool-definition drift (`consent.ts`, `mount.ts`); 12-entry curated starter pack (`pack.ts`, `bun run mcp list\|status\|add`); registry wired into all three CLIs (`chat`/`flow`/`crew`); live scoping eval (`tests/mcp/eval-scoping.test.ts`) | ✅ Done |
 | **16** | **MCP telemetry-ordering fix + consent robustness** (Phase C follow-on) — `src/cli/with-mcp-run.ts` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` for `chat`/`flow`/`crew` so `mcp.mount` now lands in `runs/<id>/spans.jsonl` (previously silently dropped); mount span gains `mcp.server.count` + a corrected (summed) `mcp.tool.count`; `runFlow`/`runCrewCli`/`runChat` now take `run: RunHandle` from the caller; consent interactivity now requires stdin **and** stderr TTY (`interactiveTTY()`), and `stdinInput()` resolves on stream `end` (no more hang on `< /dev/null`) | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **D** grow (**agent-builder ⭐**, or a Codex-delegate follow-on) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **17** | **Agent-builder** (Phase D) — generate a specialist on a capability gap: `src/agent-builder/` drafts a proposal (prompt-injection-guarded), suggests a minimal palette-only server subset from the Slice 15 pack, validates it structurally, requires explicit consent, then atomically writes the agent file + a new `agents/index.ts` registry entry + scoped `mcp.json`; triggers via `bun run agent-builder "<need>"` and a TTY-gated `chat.ts` gap-offer (the `{kind:'gap'}` outcome itself is unchanged); `agent.build` telemetry span; safety model = review-before-activate, palette-only, no same-run activation, no tool-code generation, no OAuth | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **D** grow further (a crew/workflow builder composing existing + generated agents, or a Codex-delegate follow-on) → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

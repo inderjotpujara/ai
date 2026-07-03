@@ -1,140 +1,206 @@
-# Task 5 report: Migrate `crew` CLI to `withMcpRun`
+# Task 5 report: `writeAgent` — render file + register in index + scope mcp.json (Slice 17)
 
-## Summary
+## What `src/agent-builder/write.ts` does
 
-Migrated `src/cli/crew.ts` so `runCrewCli` no longer creates the run dir or
-inits/tears down telemetry — it now receives an already-created
-`run: RunHandle` via `CrewCliDeps`. `main()` is rewired to call `withMcpRun`
-(Task 3), which owns the run-dir + telemetry-init + MCP-mount ordering so
-`mcp.mount` spans land in `runs/<id>/spans.jsonl`. This is the identical
-migration Task 4 applied to `flow`.
+`writeAgent(proposal, paths)` is the terminal step of the agent-builder
+pipeline (Slice 17, Phase D): given a validated `AgentProposal`, it
 
-## Changes
+1. **`renderAgentFile`** — renders a standalone `agents/<name>.ts` source file
+   (factory function `create<Name>Agent`, system prompt, model requirement)
+   and writes it atomically (`atomicWrite`: write to `<path>.tmp`, then
+   `renameSync`).
+2. **`registerInIndex`** — inserts an `import { create<Name>Agent } from
+   './<name>.ts'` line and a `<name>: create<Name>Agent,` registry entry into
+   `agents/index.ts` at the `// AGENT-BUILDER:IMPORTS` / `// AGENT-BUILDER:
+   ENTRIES` markers, idempotently (skips insertion if the exact line is
+   already present) and atomically.
+3. **`scopeMcp`** — for each of the proposal's `suggestedServers`, looks up
+   the pack entry (`getPackEntry`, `src/mcp/pack.ts`), ensures an entry
+   exists under `mcpServers.<packName>` in `mcp.json`, and appends the new
+   agent's name to that server's `agents` allow-list — writing the whole
+   config back atomically.
 
-### `src/cli/crew.ts`
-- `CrewCliDeps`: replaced `runsRoot: string; runId: string;` with
-  `run: RunHandle`.
-- Import line (`../run/run-store.ts`) now brings in `RunHandle` (type) +
-  `writeArtifact` only.
-- `runCrewCli`: destructures `deps.run` directly; no longer calls
-  `createRun`/`initRunTelemetry`/`tel.shutdown()`. Body (verify-flag
-  splicing, `runCrew` call, artifact writes on done/unverified/failed) is
-  otherwise byte-identical.
-- `main()`: replaced the manual `loadMcpConfig` → `withMcpMountSpan(mountAll)`
-  → try/finally `reg.close()` scaffolding with a single
-  `await withMcpRun({ runsRoot: 'runs', runId: \`crew-${process.pid}\` }, async ({ run, reg }) => { ... })`
-  call. Inner body (selection runtime, `tools = reg.merged`, verify runtime,
-  `runCrewCli` call, console output, exit codes, nested finally blocks) is
-  unchanged in behavior — only the closing braces/finally nesting changed to
-  match the new callback shape.
+This report documents the fixes applied for the Task 5 review findings
+(regression + hardening + missing test coverage), not a new task.
 
-### `tests/cli/crew.test.ts`
-- Added imports: `createRun` (`../../src/run/run-store.ts`),
-  `initRunTelemetry` (`../../src/telemetry/provider.ts`), `type CrewOutcome`
-  (`../../src/crew/types.ts`, needed to type `let outcome` — biome's
-  `noImplicitAnyLet` rejected an untyped `let outcome;`, same issue Task 4
-  hit).
-- All 3 cases (r1, r2, r3 — the brief's full enumeration, no extras found in
-  this file) now do:
-  ```ts
-  const run = await createRun(runsRoot, 'r1');
-  const tel = initRunTelemetry(run.dir);
-  let outcome: CrewOutcome;
-  try {
-    outcome = await runCrewCli({ def, input, run, tools /*, ...*/ });
-  } finally {
-    await tel.shutdown();
+## Fixes applied
+
+### Finding 1 — CRITICAL: `scopeMcp` mutated the shared `STARTER_PACK` constant
+
+The old code copied a pack entry into `mcp.json` with `{ ...entry.server }`
+— a **shallow** copy. For pack entries that ship a preset `agents` array
+(`file-tools` → `['file_qa']`, `fetch` → `['web_fetch']`), the copy's
+`agents` property was the *same array reference* as the one inside
+`src/mcp/pack.ts`'s exported `STARTER_PACK`. The subsequent
+`agents.push(p.name)` therefore mutated the shared module-level constant in
+place — every later caller in the process (any agent, any test) would see
+the extra name leak into `file-tools`'s or `fetch`'s preset agent list.
+
+Fixed by deep-cloning the nested `agents` array when the server entry is
+first created in `mcp.json`:
+
+```ts
+if (!servers[s.packName]) {
+  servers[s.packName] = {
+    ...entry.server,
+    agents: [
+      ...(Array.isArray(entry.server.agents)
+        ? (entry.server.agents as string[])
+        : []),
+    ],
+  };
+}
+```
+
+`current.agents` reads/writes still work exactly as before — only the
+initial copy is now array-independent from the pack entry.
+
+### Finding 2 — IMPORTANT: unescaped `p.name` interpolation + no defense-in-depth
+
+(a) `renderAgentFile` used `name: '${p.name}'` (raw interpolation) instead of
+the plan's `JSON.stringify(p.name)`. Changed to
+`name: ${JSON.stringify(p.name)}` — consistent with how `description`,
+`systemPrompt`, and `modelReq.role` are already emitted.
+
+(b) Added a defense-in-depth guard at the top of `writeAgent` (before any
+file is touched) that re-checks `p.name` locally, independent of
+`validate.ts`:
+
+```ts
+const NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
+...
+export function writeAgent(p: AgentProposal, paths: WritePaths): string[] {
+  if (!NAME_PATTERN.test(p.name)) {
+    throw new Error(
+      `writeAgent: invalid agent name ${JSON.stringify(p.name)} — must match ${NAME_PATTERN}`,
+    );
   }
-  ```
-  All existing `spans.jsonl` / `result.txt` / `unverified.txt` path
-  assertions are unchanged.
-
-### `tests/integration/crew.live.test.ts`
-- Added the same `createRun`/`initRunTelemetry` imports and applied the
-  identical transform to the single `runId: 'live'` call.
-
-## Extra test cases found
-
-None. `tests/cli/crew.test.ts` has exactly r1/r2/r3 as the brief describes;
-`tests/integration/crew.live.test.ts` has exactly one `runCrewCli` call
-(`runId: 'live'`). No stragglers to migrate beyond what the brief specified.
-
-## TDD: RED → GREEN
-
-**RED** (test files migrated first, `src/cli/crew.ts` still old — `CrewCliDeps`
-still required `runsRoot`/`runId`, so the migrated tests' `run: RunHandle`
-field was ignored and old `runCrewCli` tried `createRun(deps.runsRoot, ...)`
-with `deps.runsRoot === undefined`):
-
-```
-$ bun test tests/cli/crew.test.ts
-TypeError: The "paths[0]" property must be of type string, got undefined
- code: "ERR_INVALID_ARG_TYPE"
-      at createRun (/Users/inderjotsingh/ai/src/run/run-store.ts:11:15)
-      at runCrewCli (/Users/inderjotsingh/ai/src/cli/crew.ts:29:21)
-      ...
- 0 pass
- 3 fail
-Ran 3 tests across 1 file. [220.00ms]
+  ...
 ```
 
-**GREEN** (after the `CrewCliDeps`/`runCrewCli`/`main` changes):
+This decouples `write.ts` from upstream validation — `p.name` also drives
+the import specifier, the registry key, and (via `${p.name}.ts`) the
+on-disk file path, so an unvalidated name reaching this function is a
+path-traversal / syntax-corruption risk regardless of what called it.
+`write.ts` does **not** import `validate.ts` (kept as a local regex, per
+the finding).
+
+### Finding 3 — IMPORTANT: untested risk behaviors
+
+Added three tests to `tests/agent-builder/write.test.ts`:
+- idempotent re-insertion (`writeAgent` called twice → import line and
+  entry line each appear exactly once in `agents/index.ts`).
+- missing markers throw (seeded `index.ts` without the
+  `AGENT-BUILDER:IMPORTS`/`:ENTRIES` markers → `writeAgent` throws, and the
+  file is left byte-identical, i.e. it never silently corrupts `index.ts`).
+- **regression test for Finding 1** — imports `getPackEntry` from
+  `../../src/mcp/pack.ts`, snapshots `getPackEntry('file-tools')?.server
+  .agents` via `structuredClone`, runs `writeAgent` with a proposal whose
+  `suggestedServers` includes `{ packName: 'file-tools', scopeToAgent:
+  'pack_regression_agent' }` into a temp workspace, then asserts the
+  snapshot is unchanged afterward.
+
+Also added a small test for the Finding-2 guard (rejects a
+`../evil`-style name with a thrown error), and updated the existing
+"writes a parseable agent file" test's assertion from `"name: 'pdf_qa'"`
+(single-quoted, matching the old raw interpolation) to `'name: "pdf_qa"'`
+(double-quoted, matching the new `JSON.stringify` output) — this is the
+direct, expected consequence of the Finding-2(a) fix, not an unrelated
+behavior change.
+
+### Finding 4 — MINOR: dedupe factory-name expression
+
+Extracted `factoryName(p: AgentProposal): string` (`` `create${pascalCase(p
+.name)}Agent` ``) and pointed both `renderAgentFile` and `registerInIndex`
+at it, removing the duplicated inline expression.
+
+## TDD: RED → GREEN (Finding 1 regression test)
+
+**RED** — regression test added first, run against the pre-fix
+shallow-copy `scopeMcp` (before any of the fixes above were applied):
 
 ```
-$ bun test tests/cli/crew.test.ts
+$ bun test tests/agent-builder/write.test.ts
+...
+tests/agent-builder/write.test.ts:
+103 |       suggestedServers: [
+104 |         { packName: 'file-tools', scopeToAgent: 'pack_regression_agent' },
+105 |       ],
+106 |     };
+107 |     writeAgent(packRegressionProposal, paths);
+108 |     expect(getPackEntry('file-tools')?.server.agents).toEqual(before);
+                                                            ^
+error: expect(received).toEqual(expected)
+
+@@ -2,3 +2,3 @@
+    "file_qa",
++   "pack_regression_agent",
+  ]
+
+- Expected  - 0
++ Received  + 1
+
+      at <anonymous> (/Users/inderjotsingh/ai/tests/agent-builder/write.test.ts:108:55)
+(fail) writeAgent > does not mutate the shared STARTER_PACK entry when scoping a preset-agents pack (regression) [1.30ms]
+
+ 5 pass
+ 1 fail
+ 14 expect() calls
+Ran 6 tests across 1 file. [25.00ms]
+```
+
+This reproduces the finding exactly: `writeAgent` on an unrelated
+`file-tools`-scoped proposal permanently added `pack_regression_agent` to
+the live `STARTER_PACK` entry's `agents` array.
+
+**GREEN** — after applying the `scopeMcp` deep-clone fix (Finding 1) plus
+the remaining fixes (Findings 2 and 4) and the rest of the new tests
+(Finding 3):
+
+```
+$ bun test tests/agent-builder/write.test.ts
 bun test v1.3.11 (af24e281)
 
- 3 pass
+ 9 pass
  0 fail
- 7 expect() calls
-Ran 3 tests across 1 file. [191.00ms]
+ 19 expect() calls
+Ran 9 tests across 1 file. [22.00ms]
 ```
+
+All 9 cases pass: the 4 pre-existing tests (`pascalCase`, parseable file,
+index insertion, mcp.json scoping, re-scoping without clobbering — now 6
+counting the name-rejection and duplication additions folded in) plus the
+5 new/changed tests from this review (name rejection, idempotent
+re-insertion, missing-markers throw, and the Finding-1 regression test),
+with the quote-style assertion updated to match `JSON.stringify` output.
 
 ## Gate results
 
-- `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
-- `bun run lint:file -- "src/cli/crew.ts" "tests/cli/crew.test.ts" "tests/integration/crew.live.test.ts"`
-  → initially flagged one formatter diff in `tests/cli/crew.test.ts` (the
-  consolidated `import { type CrewDef, type CrewOutcome, CrewProcess } from ...`
-  line exceeded print width and needed multi-line wrapping); fixed with
-  `bunx biome check --write tests/cli/crew.test.ts`. Final run: clean
-  (`Checked 3 files in 4ms. No fixes applied.`).
-- Full suite: `bun test` → `428 pass, 2 skip, 0 fail, 923 expect() calls,
-  Ran 430 tests across 129 files. [241.18s]`. The 2 skips are the
+- `bun test tests/agent-builder/write.test.ts` → `9 pass, 0 fail, 19
+  expect() calls`.
+- `bun run typecheck` (`tsc --noEmit`) → clean, no output.
+- `bun run lint:file -- "src/agent-builder/write.ts"
+  "tests/agent-builder/write.test.ts"` → clean:
+  `Checked 2 files in 4ms. No fixes applied.`
+- Full suite: `bun test` → `453 pass, 2 skip, 0 fail, 972 expect() calls,
+  Ran 455 tests across 134 files. [194.28s]`. The 2 skips are the
   `describe.skipIf(!ready)` Ollama-gated live tests (expected — no local
-  Ollama server reachable in this environment).
-- `bun run docs:check` (pre-commit hook, also run standalone) → passed:
-  `✔ docs-check: living docs present + linked; every src subsystem documented.`
-  No `docs/architecture.md` change was needed — this is an internal
-  CLI-wiring refactor onto Task 3's already-documented `withMcpRun` helper,
-  not a new subsystem or a change to `mcp.mount` ordering semantics (same
-  reasoning as Task 4).
+  Ollama server reachable in this environment); no other file was affected
+  by this change.
+- `bun run docs:check` → passed: `✔ docs-check: living docs present +
+  linked; every src subsystem documented.` No `docs/architecture.md`
+  change was required — this fixes a bug and hardens/tests an already
+  documented mechanism (`writeAgent`'s file/index/mcp.json writes); it does
+  not add a new subsystem or change the documented shape of the write
+  pipeline.
 
-## Imports removed from `src/cli/crew.ts`
+## Scope notes
 
-- `loadMcpConfig` (from `../mcp/config.ts`) — entire import line removed.
-- `mountAll` (from `../mcp/mount.ts`) — entire import line removed (crew.ts
-  had no other symbol from that module, unlike flow.ts's `warnUnknownAgents`).
-- `withMcpMountSpan` (from `../telemetry/spans.ts`) — entire import line
-  removed (crew.ts imported nothing else from that module).
-- `initRunTelemetry` (from `../telemetry/provider.ts`) — entire import line
-  removed.
-- `createRun` (from `../run/run-store.ts`) — kept `writeArtifact`, added
-  `RunHandle` as a type import on the same line.
-
-Kept as instructed: `writeArtifact`.
-
-## Commit
-
-`2972253` — `refactor(cli): crew uses withMcpRun; runCrewCli takes run:RunHandle (Slice 16 Task 5)`
-(3 files changed, 139 insertions, 124 deletions — only `src/cli/crew.ts`,
-`tests/cli/crew.test.ts`, `tests/integration/crew.live.test.ts` staged/
-committed; other concurrently-modified repo files, e.g. `.superpowers/sdd/*`,
-`.remember/*`, were left untouched/unstaged for this task).
-
-## Concerns / notes
-
-None functional. No deviations from the brief were required beyond the
-formatter auto-wrap noted above. Note: this same filename previously held a
-stale Slice-15 report (for a different task numbering) — it has been
-overwritten with this Task 5 / Slice 16 report.
+- The fixed `.tmp`-suffix atomicity in `atomicWrite` was left as-is per the
+  review's explicit instruction (acceptable for the single sequential
+  caller in this pipeline; not in scope for this fix).
+- No new dependencies were added; both fixes are local (regex guard,
+  array spread) with zero new imports.
+- Note: this same filename previously held a stale Slice-16 report (crew
+  CLI migration to `withMcpRun`) — it has been overwritten with this Task 5
+  / Slice 17 report.
