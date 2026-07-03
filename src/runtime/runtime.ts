@@ -1,5 +1,5 @@
 import type { LanguageModel } from 'ai';
-import type { ModelDeclaration, ProviderKind } from '../core/types.ts';
+import type { ModelDeclaration, RuntimeKind } from '../core/types.ts';
 import type { KvArch } from '../resource/kv-cache.ts';
 import type { LoadedModel } from '../resource/ollama-control.ts';
 
@@ -19,7 +19,7 @@ export type RuntimeControl = {
 
 /** A model runtime: builds AI-SDK models and owns their lifecycle + availability. */
 export type Runtime = {
-  kind: ProviderKind;
+  kind: RuntimeKind;
   isAvailable(): Promise<boolean>;
   createModel(decl: ModelDeclaration): LanguageModel;
   control: RuntimeControl;

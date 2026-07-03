@@ -1,7 +1,7 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { MemoryError } from '../core/errors.ts';
 import type { ModelDeclaration } from '../core/types.ts';
-import { ProviderKind } from '../core/types.ts';
+import { RuntimeKind } from '../core/types.ts';
 import type { LoadedModel, Runtime } from './runtime.ts';
 
 const BASE = process.env.MLX_BASE_URL ?? 'http://localhost:1234/v1';
@@ -27,7 +27,7 @@ async function listIds(): Promise<string[]> {
  * a model must be loaded in the server; we surface a clear message if it is not.
  */
 export const mlxServerRuntime: Runtime = {
-  kind: ProviderKind.MlxServer,
+  kind: RuntimeKind.MlxServer,
   async isAvailable() {
     try {
       const res = await fetch(`${BASE}/models`, {
