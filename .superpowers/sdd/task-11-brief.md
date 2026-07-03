@@ -1,11 +1,21 @@
-## Task 11: In-repo eval gate (golden set)
+### Task 11: MLX control surface — real `isInstalled`/`listLoaded`/`getModelMax`
 
-**Files:** Create `tests/verification/golden/cases.json`, `tests/verification/faithfulness.eval.test.ts`
+**Files:** Modify: `src/runtime/mlx-server.ts`; Test: `tests/runtime/mlx-server.test.ts` (extend, injecting a fake fetch).
 
-- [ ] **Step 1:** Author `cases.json` — ~15–20 `{ id, answer, evidence:[{id,text}], expectedSupported }`, incl. planted hallucinations, uncited-claim, and no-evidence cases.
-- [ ] **Step 2:** Write `faithfulness.eval.test.ts` that runs the project's `verify()` with a deps built from a fixed fake `generate` implementing a simple lexical-entailment stand-in (deterministic, offline) OR the general-model fallback path, over each case; assert detection precision/recall ≥ target (e.g. all planted hallucinations flagged; ≤1 false-abstention). Gate it in `bun run check` (it's a normal `bun test`).
-> The offline eval uses a deterministic stand-in judge so `bun run check` is hermetic. A `.live` variant (Task 12) runs the SAME golden set through real MiniCheck.
-- [ ] **Step 3:** Run + commit `test(verification): in-repo faithfulness golden-set eval gate`.
+**Interfaces:**
+- Produces: `getModelMax(model)` returns a number when the server exposes it (else `undefined`); `listLoaded` returns real sizes when available; `pull` attempts a server-side load and degrades with a clear error.
+
+- [ ] **Step 1: Write the failing test** — inject a fake `${BASE}/models` response exposing a context length / size; assert `getModelMax` returns it and `listLoaded` maps the id.
+  (Refactor `mlx-server.ts` to accept an injectable `fetchImpl`/`baseUrl` via a `createMlxServerRuntime(deps)` factory so it's testable without a live server; export a default `mlxServerRuntime = createMlxServerRuntime()`.)
+- [ ] **Step 2: Run to verify it fails.**
+- [ ] **Step 3: Implement** the factory + fill `getModelMax`/`getModelKvArch` (return `undefined` when the server gives nothing — planner tolerates it), real `listLoaded` sizes when present, and a `pull` that checks `listIds()` then attempts the server's load endpoint if one exists, else throws the existing clear "load it in the server" error (degrade). Keep `embed` throwing `MemoryError` (honestly unsupported).
+- [ ] **Step 4: Run to verify it passes.**
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/runtime/mlx-server.ts tests/runtime/mlx-server.test.ts
+git commit -m "feat(runtime): fill MLX control surface (getModelMax, listLoaded, pull best-effort) via injectable factory"
+```
 
 ---
 

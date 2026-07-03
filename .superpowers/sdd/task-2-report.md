@@ -1,94 +1,69 @@
-# Task 2 Report: agent-builder types + structural validation (Slice 17)
+# Task 2 Report: Reroute the download registry + wire LM Studio (Slice 18)
 
-> Note: this file previously held Slice 16 Task 2 report. That work is
-> preserved in git history. This file now holds the Slice 17 Task 2 report.
+> Note: this file previously held the Slice 17 Task 2 report. That work is
+> preserved in git history. This file now holds the Slice 18 Task 2 report.
 
 ## Status
 
-**✅ COMPLETED**
+**COMPLETED**
 
-**Commit:** `36766bf` on branch `slice-17-agent-builder`
+## Summary
+Rewrote `providerFor` in `src/provisioning/registry.ts` to route all four
+`ProviderKind` download kinds (`Ollama`, `HfGguf`, `HfSnapshot`, `LmStudio`),
+wiring in the previously dead `createLmStudioProvider`. Updated
+`catalogSourcesFor` to source the HF catalog with `ProviderKind.HfSnapshot`
+instead of the now-removed `ProviderKind.MlxServer`. Fixed
+`src/provisioning/providers/lmstudio.ts:27` to report `kind: ProviderKind.LmStudio`
+(was `ProviderKind.MlxServer`, dropped the now-inaccurate shared-kind comment).
+`enrichSize` was left untouched per the brief — its non-Ollama branch already
+sums the HF tree generically and works for both HF kinds.
+`src/provisioning/providers/hf-fetch.ts` required no change — it already
+accepted a generic `kind: ProviderKind` parameter and passes it through.
 
-## What was built
+## TDD sequence
+1. Wrote `tests/provisioning/registry.test.ts` (3 tests, per brief, exact text).
+2. Ran `bun run test:file -- "tests/provisioning/registry.test.ts"` — confirmed
+   RED: 2 of 3 tests failed. `providerFor(ProviderKind.HfGguf)` and
+   `providerFor(ProviderKind.LmStudio)` both returned the Ollama provider
+   (kind `"Ollama"`) instead of the expected kind, because the old switch only
+   matched `ProviderKind.Ollama` and the removed `ProviderKind.MlxServer`
+   (now `undefined` at runtime, since Task 1 deleted it from the enum) —
+   so both new kinds fell through to the `default` branch.
+3. Implemented the changes described above.
+4. Re-ran the same test command — GREEN: 3 pass / 0 fail / 4 expect() calls.
+5. Committed.
 
-Pure-logic types + validation for specialist agent generation (Slice 17):
+## Files changed
+- `src/provisioning/registry.ts` — `providerFor` switch now handles
+  `HfGguf`/`HfSnapshot` (→ `createHfFetchProvider`), `LmStudio` (→
+  `createLmStudioProvider`, newly imported), `Ollama` (unchanged), default
+  falls back to Ollama (unchanged behavior). `catalogSourcesFor` now calls
+  `createHfCatalogSource(ProviderKind.HfSnapshot)`.
+- `src/provisioning/providers/lmstudio.ts` — `kind` field corrected to
+  `ProviderKind.LmStudio`.
+- `tests/provisioning/registry.test.ts` — new, 3 tests per brief.
 
-1. **`src/agent-builder/types.ts`**:
-   - `SuggestedServer` — packName + scopeToAgent for curated MCP server references
-   - `AgentProposal` — drafted agent definition (name, description, systemPrompt, modelReq, suggestedServers, rationale)
-   - `ValidationIssue` — field + problem string for structural gate reporting
-   - `BuildResult` — discriminated union: written | declined | invalid | abandoned
-
-2. **`src/agent-builder/validate.ts`**:
-   - `validateProposal(p: AgentProposal, existingNames: string[], packNames: string[]): ValidationIssue[]`
-   - Returns empty array if valid; collects issues for:
-     * Name: must be snake_case, not reserved (`super`, `orchestrator`), not in existingNames
-     * Description & systemPrompt: must be non-empty (after trim)
-     * suggestedServers: each packName must be in packNames (palette-only), and scopeToAgent must equal p.name
-
-3. **`tests/agent-builder/validate.test.ts`**:
-   - 7 test cases: clean proposal, duplicate-name rejection, reserved-name rejection, non-snake_case rejection, empty-fields rejection, off-palette-server rejection, mis-scoped-server rejection
-
-4. **`docs/architecture.md`**:
-   - Added agent-builder subgraph to mermaid diagram (§AB: abtypes + abvalidate)
-   - Added row to the subsystem table documenting agent-builder (Slice 17) with dependencies on core/types (ModelRequirement) and mcp/ (pack registry)
-
-## TDD evidence (RED → GREEN)
-
-**RED** — before creating `types.ts` and `validate.ts`:
-
+## Verification
 ```
-$ bun test tests/agent-builder/validate.test.ts
-bun test v1.3.11 (af24e281)
-
-tests/agent-builder/validate.test.ts:
-
-# Unhandled error between tests
--------------------------------
-error: Cannot find module '../../src/agent-builder/validate.ts' 
-  from '/Users/inderjotsingh/ai/tests/agent-builder/validate.test.ts'
--------------------------------
-
- 0 pass
- 1 fail
- 1 error
-Ran 1 test across 1 file. [10.00ms]
-```
-
-**GREEN** — after implementing `types.ts` and `validate.ts`:
-
-```
-$ bun test tests/agent-builder/validate.test.ts
-bun test v1.3.11 (af24e281)
-
- 7 pass
+$ bun run test:file -- "tests/provisioning/registry.test.ts"
+ 3 pass
  0 fail
- 8 expect() calls
-Ran 7 tests across 1 file. [10.00ms]
+ 4 expect() calls
+Ran 3 tests across 1 file.
 ```
+Only this scoped test was run, per instructions. Full `bun run typecheck` /
+`bun test` were intentionally NOT run — `src/runtime/*`, `src/discovery/*`,
+and `src/provisioning/catalog/hf-catalog.ts` still reference the removed
+`ProviderKind.MlxServer` and remain red pending Tasks 3-4. This is expected
+residual breakage, not something introduced by this task.
 
-All 7 test cases pass: clean proposal, duplicate-name, reserved-name, non-snake_case, empty-fields, off-palette-server, mis-scoped-server.
-
-## Gate results
-
-- **`bun run typecheck`** → clean (`tsc --noEmit`, no output/errors).
-- **`bun run lint:file -- "src/agent-builder/types.ts" "src/agent-builder/validate.ts" "tests/agent-builder/validate.test.ts"`**
-  → initially flagged 2 issues: test import sort order and line-wrapping in validate.ts.
-  Fixed both via import reordering (bun:test imports first, then types, then other imports)
-  and wrapping long push() calls across lines. Re-run → `Checked 3 files in 3ms. No fixes applied.` (clean).
-- **`bun test tests/agent-builder/validate.test.ts`** → 7 pass, 0 fail, 8 expect() calls.
-- **`bun run docs:check`** (pre-commit hook) → passed. Added agent-builder subgraph to mermaid
-  diagram and table entry to `docs/architecture.md` documenting the new subsystem.
-
-## Files changed (created/modified)
-
-- `src/agent-builder/types.ts` (created) — type definitions for agent generation
-- `src/agent-builder/validate.ts` (created) — structural validation gate
-- `tests/agent-builder/validate.test.ts` (created) — 7 test cases, all passing
-- `docs/architecture.md` (modified) — added agent-builder (§AB) to mermaid + table
-
-**Commit:** `36766bf` — "feat(agent-builder): AgentProposal types + structural validateProposal (Slice 17 Task 2)" on branch `slice-17-agent-builder`.
+## Commit
+`f4954b2` — `feat(provisioning): route HfGguf/HfSnapshot/LmStudio download kinds + wire dead LM Studio provider`
+(3 files changed, 32 insertions, 5 deletions) on branch `slice-18-debt-wrapup-mlx`.
+The pre-commit `docs:check` hook ran and passed (no `docs/architecture.md`
+changes needed for this task — no new subsystem).
 
 ## Concerns
-
-None. Task 2 is pure-logic (no I/O, no LLM); all 7 validation rules are exercised by the test suite. Ready for Task 3 (generator).
+None. Implementation matches the brief's exact code verbatim (registry.ts
+switch, lmstudio.ts kind fix). No ambiguity encountered; no scope creep into
+Task 3/4 files (`src/runtime/*`, `src/discovery/*`, `hf-catalog.ts` untouched).

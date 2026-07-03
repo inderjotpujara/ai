@@ -1,240 +1,58 @@
-## Task 6: `builder.ts` orchestration + `agent.build` telemetry
+### Task 6: hf-fetch — single-file atomic write + sha256 (HfGguf)
 
 **Files:**
-- Create: `src/agent-builder/builder.ts`
-- Modify: `src/telemetry/spans.ts` (add `ATTR` keys + `withAgentBuildSpan`)
-- Test: `tests/agent-builder/builder.test.ts`
+- Modify: `src/provisioning/providers/hf-fetch.ts`
+- Test: `tests/provisioning/hf-fetch.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: everything from Tasks 2-5.
-- Produces:
-  ```ts
-  // types.ts (add BuilderDeps)
-  export type BuilderDeps = {
-    model: BuilderModel;
-    existingNames: () => string[];
-    packNames: () => string[];
-    confirm: (proposalText: string) => Promise<boolean>;
-    paths: WritePaths;               // from write.ts
-    log?: (m: string) => void;
-  };
-  // builder.ts
-  export function renderProposal(p: AgentProposal): string;   // human-readable consent text
-  export function buildAgent(need: string, deps: BuilderDeps): Promise<BuildResult>;
-  ```
+- Consumes: `destDir` opt (Task 5), existing `sha256File(path)` helper, `ProgressTracker`, `DownloadPhase`.
+- Produces: on `HfGguf` download, a file at `<destDir>/<file>` (atomic via `.part`→rename); phases include `Verifying` + `Finalizing`; no `.part` left on success or failure.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test** — download writes bytes to disk, no `.part` remains.
 
-Create `tests/agent-builder/builder.test.ts`:
-
-```typescript
-import { mkdtemp, readFile } from 'node:fs/promises';
+```ts
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'bun:test';
-import type { BuilderDeps, BuilderModel } from '../../src/agent-builder/types.ts';
-import { buildAgent } from '../../src/agent-builder/builder.ts';
-
-const INDEX_SEED = `import type { ToolSet } from 'ai';
-import type { Agent } from '../src/core/agent-def.ts';
-// AGENT-BUILDER:IMPORTS (generated agent imports are inserted above this line — do not remove)
-export type AgentFactory = (tools: ToolSet) => Agent;
-export const AGENTS: Record<string, AgentFactory> = {
-  // AGENT-BUILDER:ENTRIES (generated agent entries are inserted above this line — do not remove)
-};
-`;
-
-// A model that returns a draft for the first call and a server pick for the second.
-function twoStepModel(serverPick: string[]): BuilderModel {
-  let call = 0;
-  return {
-    object: async () => {
-      call += 1;
-      if (call === 1) return { name: 'pdf_qa', description: 'PDF Q&A.', systemPrompt: 'Answer about a PDF.', role: 'pdf', rationale: 'no pdf agent' } as never;
-      return { servers: serverPick } as never;
-    },
-  };
-}
-
-async function deps(confirm: boolean, model: BuilderModel): Promise<BuilderDeps> {
-  const dir = await mkdtemp(join(tmpdir(), 'ab-build-'));
-  const agentsDir = join(dir, 'agents');
-  await Bun.write(join(agentsDir, 'index.ts'), INDEX_SEED);
-  return {
-    model,
-    existingNames: () => ['file_qa'],
-    packNames: () => ['filesystem', 'fetch'],
-    confirm: async () => confirm,
-    paths: { agentsDir, indexPath: join(agentsDir, 'index.ts'), mcpConfigPath: join(dir, 'mcp.json') },
-  };
-}
-
-describe('buildAgent', () => {
-  it('writes the agent on consent', async () => {
-    const d = await deps(true, twoStepModel(['filesystem']));
-    const r = await buildAgent('read pdfs', d);
-    expect(r.kind).toBe('written');
-    if (r.kind === 'written') {
-      expect(r.proposal.name).toBe('pdf_qa');
-      const idx = await readFile(d.paths.indexPath, 'utf8');
-      expect(idx).toContain('pdf_qa: createPdfQaAgent,');
-    }
+// reuse streamingResponse() from the existing test file
+it('HfGguf: writes the file to destDir atomically and reaches Done', async () => {
+  const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+  const chunk = new Uint8Array(1000);
+  const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+    fetchImpl: (async () => streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
   });
-  it('writes nothing when consent is declined', async () => {
-    const d = await deps(false, twoStepModel(['filesystem']));
-    const r = await buildAgent('read pdfs', d);
-    expect(r.kind).toBe('declined');
-    const idx = await readFile(d.paths.indexPath, 'utf8');
-    expect(idx).not.toContain('pdf_qa');
+  const phases: DownloadPhase[] = [];
+  await provider.download('org/repo::model.gguf', {
+    onProgress: (p) => phases.push(p.phase), signal: new AbortController().signal, destDir: dest,
   });
-  it('returns invalid (no consent asked) when the draft fails validation', async () => {
-    let asked = false;
-    const model = twoStepModel(['filesystem']);
-    const d = await deps(true, model);
-    d.existingNames = () => ['file_qa', 'pdf_qa']; // force duplicate-name rejection
-    d.confirm = async () => { asked = true; return true; };
-    const r = await buildAgent('read pdfs', d);
-    expect(r.kind).toBe('invalid');
-    expect(asked).toBe(false);
-  });
+  const out = join(dest, 'model.gguf');
+  expect(existsSync(out)).toBe(true);
+  expect(readFileSync(out).byteLength).toBe(2000);
+  expect(existsSync(out + '.part')).toBe(false);
+  expect(phases).toContain(DownloadPhase.Finalizing);
+  expect(phases.at(-1)).toBe(DownloadPhase.Done);
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to verify it fails** — `bun run test:file -- "tests/provisioning/hf-fetch.test.ts"` → FAIL (no file written; no `Finalizing`).
 
-Run: `bun test tests/agent-builder/builder.test.ts`
-Expected: FAIL — `builder.ts` / `BuilderDeps` not found.
+- [ ] **Step 3: Implement in `hf-fetch.ts`** — add a private `downloadFile(url, destPath, {onProgress, signal, tracker, expectedOid})` that:
+  1. opens a write stream to `destPath + '.part'`;
+  2. in the read loop writes each `value` chunk (`await write(value)`), accumulates `done`, emits `Downloading`;
+  3. on loop end: emit `Verifying`; `const hash = await (deps.sha256 ?? sha256File)(destPath + '.part')`; if `expectedOid` present and `hash !== expectedOid` → throw `ProviderError` (finally unlinks `.part`);
+  4. emit `Finalizing`; `await rename(destPath + '.part', destPath)`;
+  5. wrap steps 1-4 in `try { ... } finally { if still exists, unlink .part }` so aborts/errors clean up.
 
-- [ ] **Step 3: Add `ATTR` keys + `withAgentBuildSpan` to `src/telemetry/spans.ts`**
+  For `HfGguf` (`file` present), `destPath = join(destDir, file)`.
 
-In the `ATTR` object (after the `agent.gap.*`/existing keys), add:
+- [ ] **Step 4: Run to verify it passes** — PASS.
 
-```typescript
-  BUILD_NEED: 'agent.build.need',
-  BUILD_AGENT: 'agent.build.agent_name',
-  BUILD_OUTCOME: 'agent.build.outcome',
-  BUILD_SERVERS: 'agent.build.server_count',
-```
-
-Add the span helper near the other `with*Span` helpers:
-
-```typescript
-/** Root span for one agent-builder run (Slice 17). The body records stage
- *  events (generated / validated / suggested / consent / written) and sets
- *  the outcome + counts at the end via the returned recorder. */
-export function withAgentBuildSpan<T>(
-  need: string,
-  fn: (rec: {
-    event: (name: string, attrs?: Record<string, string | number | boolean>) => void;
-    outcome: (kind: string, agentName?: string, serverCount?: number) => void;
-  }) => Promise<T>,
-): Promise<T> {
-  return inSpan('agent.build', async (span) => {
-    span.setAttribute(ATTR.BUILD_NEED, need);
-    return fn({
-      event: (name, attrs) => span.addEvent(name, attrs),
-      outcome: (kind, agentName, serverCount) => {
-        span.setAttribute(ATTR.BUILD_OUTCOME, kind);
-        if (agentName) span.setAttribute(ATTR.BUILD_AGENT, agentName);
-        if (serverCount !== undefined) span.setAttribute(ATTR.BUILD_SERVERS, serverCount);
-      },
-    });
-  });
-}
-```
-
-(`inSpan` and `ATTR` already exist in this file; match the existing style.)
-
-- [ ] **Step 4: Add `BuilderDeps` to `src/agent-builder/types.ts` and create `builder.ts`**
-
-Append to `types.ts`:
-
-```typescript
-import type { WritePaths } from './write.ts';
-
-export type BuilderDeps = {
-  model: BuilderModel;
-  existingNames: () => string[];
-  packNames: () => string[];
-  confirm: (proposalText: string) => Promise<boolean>;
-  paths: WritePaths;
-  log?: (m: string) => void;
-};
-```
-
-Create `src/agent-builder/builder.ts`:
-
-```typescript
-import { withAgentBuildSpan } from '../telemetry/spans.ts';
-import { generateProposal } from './generate.ts';
-import { suggestServers } from './suggest-tools.ts';
-import type { AgentProposal, BuildResult, BuilderDeps } from './types.ts';
-import { validateProposal } from './validate.ts';
-import { writeAgent } from './write.ts';
-
-/** Human-readable consent card for a proposal. */
-export function renderProposal(p: AgentProposal): string {
-  const servers = p.suggestedServers.length
-    ? p.suggestedServers.map((s) => `  • ${s.packName} (scoped to ${s.scopeToAgent})`).join('\n')
-    : '  • (none)';
-  return [
-    `Proposed agent: ${p.name}`,
-    `  ${p.description}`,
-    `Why: ${p.rationale}`,
-    `Tools (MCP servers to mount):`,
-    servers,
-    `Files that will be written: agents/${p.name}.ts, agents/index.ts` +
-      (p.suggestedServers.length ? `, mcp.json` : ''),
-  ].join('\n');
-}
-
-/** generate → suggest → validate → consent → write. Consent is mandatory; on
- *  decline or invalid, nothing is written. */
-export function buildAgent(need: string, deps: BuilderDeps): Promise<BuildResult> {
-  return withAgentBuildSpan(need, async (rec) => {
-    const draft = await generateProposal(need, deps.model);
-    rec.event('generated', { name: draft.name });
-    const proposal: AgentProposal = {
-      ...draft,
-      suggestedServers: await suggestServers(need, draft, deps.model),
-    };
-    rec.event('suggested', { count: proposal.suggestedServers.length });
-
-    const issues = validateProposal(proposal, deps.existingNames(), deps.packNames());
-    rec.event('validated', { ok: issues.length === 0, issues: issues.length });
-    if (issues.length > 0) {
-      rec.outcome('invalid');
-      return { kind: 'invalid', issues };
-    }
-
-    const granted = await deps.confirm(renderProposal(proposal));
-    rec.event('consent', { granted });
-    if (!granted) {
-      rec.outcome('declined', proposal.name);
-      return { kind: 'declined' };
-    }
-
-    const files = writeAgent(proposal, deps.paths);
-    rec.event('written', { files: files.length });
-    rec.outcome('written', proposal.name, proposal.suggestedServers.length);
-    deps.log?.(`Created agent "${proposal.name}" (${files.length} file(s)). It is live on the next run.`);
-    return { kind: 'written', proposal, files };
-  });
-}
-```
-
-- [ ] **Step 5: Run tests to verify they pass**
-
-Run: `bun test tests/agent-builder/builder.test.ts`
-Expected: PASS (all 3 — written / declined / invalid-without-consent).
-
-- [ ] **Step 6: Typecheck, lint, commit**
-
-Run: `bun run typecheck`; `bun run lint:file -- "src/telemetry/spans.ts" "src/agent-builder/types.ts" "src/agent-builder/builder.ts" "tests/agent-builder/builder.test.ts"`.
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/telemetry/spans.ts src/agent-builder/types.ts src/agent-builder/builder.ts tests/agent-builder/builder.test.ts
-git commit -m "feat(agent-builder): buildAgent orchestration (generate→suggest→validate→consent→write) + agent.build span (Slice 17 Task 6)"
+git add src/provisioning/providers/hf-fetch.ts tests/provisioning/hf-fetch.test.ts
+git commit -m "feat(provisioning): hf-fetch writes single GGUF files atomically with sha256"
 ```
 
 ---
