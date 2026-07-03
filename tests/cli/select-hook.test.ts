@@ -145,3 +145,45 @@ test('hook degrades to Ollama when the declared MLX runtime is unreachable: no t
   expect(log.mock.calls[0]?.[0]).toContain('MlxServer');
   expect(log.mock.calls[0]?.[0]).toContain('Ollama');
 });
+
+test('hook degrades using fallbackModel: Ollama receives the fallback tag, not the unresolvable MLX id', async () => {
+  const declWithFallback: ModelDeclaration = {
+    ...mlxDecl,
+    fallbackModel: 'qwen2.5:7b-instruct',
+  };
+  const ensureReady = mock(async () => 8192);
+  const capture = {};
+  const log = mock((_msg: string) => {});
+  let seenModelId: string | undefined;
+  const capturingFakeRuntime = (kind: RuntimeKind, available: boolean): Runtime => ({
+    kind,
+    isAvailable: async () => available,
+    createModel: (decl: ModelDeclaration) => {
+      if (kind === RuntimeKind.Ollama) seenModelId = decl.model;
+      return { modelId: kind } as unknown as LanguageModel;
+    },
+    control: {
+      isInstalled: async () => true,
+      pull: async () => {},
+      warm: async () => {},
+      unload: async () => {},
+      listLoaded: async () => [],
+      getModelMax: async () => undefined,
+      getModelKvArch: async () => undefined,
+      embed: async () => [],
+    },
+  });
+  const hook = createSelectHook({
+    registry: [declWithFallback],
+    ensureReady,
+    pinned: [],
+    capture,
+    runtimeFor: (kind) =>
+      capturingFakeRuntime(kind, kind === RuntimeKind.Ollama),
+    log,
+  });
+  const pre = await hook(specialist());
+  expect(pre && 'model' in pre && pre.model).toBeTruthy();
+  expect(seenModelId).toBe('qwen2.5:7b-instruct');
+  expect(seenModelId).not.toBe(declWithFallback.model);
+});

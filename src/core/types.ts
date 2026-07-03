@@ -76,4 +76,11 @@ export type ModelDeclaration = {
    * Ollama; set this only to deliberately cap below it or as a probe fallback.
    */
   maxContext?: number;
+  /**
+   * A valid Ollama model tag to use when this declaration's runtime is
+   * unreachable and selection degrades to Ollama. Non-Ollama runtimes (e.g.
+   * MLX/HF repo ids) are not resolvable by Ollama, so without this the
+   * degrade path honestly reuses `model` (and logs it) rather than guessing.
+   */
+  fallbackModel?: string;
 };

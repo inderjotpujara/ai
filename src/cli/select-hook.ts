@@ -43,14 +43,10 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
         },
         { pinned: deps.pinned },
       );
-      recordModelSelect({
-        modelId: decl.model,
-        provider: decl.runtime, // telemetry field name is legacy; value is the inference runtime (gen_ai.system). WS3 revisits this hook.
-        numCtx,
-        paramsBillions: decl.footprint.approxParamsBillions,
-      });
       await deps.notify?.(decl, numCtx);
       let rt = resolveRuntime(decl.runtime);
+      let effectiveDecl = decl;
+      let degraded = false;
       // Opt-in + degrade: a non-Ollama runtime (e.g. MLX) is only used when
       // actually reachable. Ollama is the always-on default, so it never
       // needs the probe on its own happy path.
@@ -59,8 +55,22 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
           `Runtime "${decl.runtime}" is unreachable for model "${decl.model}"; falling back to Ollama.`,
         );
         rt = resolveRuntime(RuntimeKind.Ollama);
+        degraded = true;
+        // The declared model id belongs to the original runtime (e.g. an MLX/HF
+        // repo id) and is not resolvable by Ollama. Use the declared Ollama
+        // fallback tag when the decl names one; otherwise the honest fallback
+        // is to reuse `decl.model` as-is (already logged above).
+        effectiveDecl = { ...decl, model: decl.fallbackModel ?? decl.model };
       }
-      const model = rt.createModel(decl);
+      recordModelSelect({
+        modelId: effectiveDecl.model,
+        provider: decl.runtime, // telemetry field name is legacy; value is the *declared* inference runtime (gen_ai.system).
+        numCtx,
+        paramsBillions: decl.footprint.approxParamsBillions,
+        runtime: rt.kind,
+        degraded,
+      });
+      const model = rt.createModel(effectiveDecl);
       return {
         model,
         numCtx: rt.kind === RuntimeKind.Ollama ? numCtx : undefined,

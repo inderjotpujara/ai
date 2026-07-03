@@ -20,6 +20,8 @@ export const ATTR = {
   MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
   MODEL_BUDGET_BYTES: 'model.budget_bytes',
   MODEL_SIZE_BYTES: 'model.size_bytes',
+  MODEL_RUNTIME_SELECTED: 'model.runtime.selected',
+  MODEL_RUNTIME_DEGRADED: 'model.runtime.degraded',
   EVICT_REASON: 'model.evict.reason',
   USAGE_INPUT_TOKENS: 'gen_ai.usage.input_tokens',
   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
@@ -72,6 +74,10 @@ export type ModelSelectInfo = {
   provider: string;
   numCtx: number;
   paramsBillions?: number;
+  /** The runtime that actually served the request (post-degrade, if any). */
+  runtime?: string;
+  /** True when the declared runtime was unreachable and selection fell back to another. */
+  degraded?: boolean;
 };
 
 export type ModelLoadInfo = {
@@ -163,6 +169,12 @@ export function recordModelSelect(info: ModelSelectInfo): void {
     [ATTR.MODEL_NUM_CTX]: info.numCtx,
     ...(info.paramsBillions !== undefined
       ? { [ATTR.MODEL_PARAMS_B]: info.paramsBillions }
+      : {}),
+    ...(info.runtime !== undefined
+      ? { [ATTR.MODEL_RUNTIME_SELECTED]: info.runtime }
+      : {}),
+    ...(info.degraded !== undefined
+      ? { [ATTR.MODEL_RUNTIME_DEGRADED]: info.degraded }
       : {}),
   });
 }
