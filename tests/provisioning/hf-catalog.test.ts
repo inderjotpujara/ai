@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'bun:test';
-import { hfTreeSize } from '../../src/provisioning/catalog/hf-catalog.ts';
+import {
+  hfTreeFiles,
+  hfTreeSize,
+} from '../../src/provisioning/catalog/hf-catalog.ts';
+
+describe('hfTreeFiles', () => {
+  it('surfaces lfs.oid for LFS-backed entries and undefined for others', async () => {
+    const fakeFetch = async () =>
+      new Response(
+        JSON.stringify([
+          { path: 'model-Q4_K_M.gguf', lfs: { size: 5, oid: 'abc123' } },
+          { path: 'README.md', size: 1_000 },
+        ]),
+        { status: 200 },
+      );
+    const files = await hfTreeFiles(
+      'bartowski/x-GGUF',
+      fakeFetch as unknown as typeof fetch,
+    );
+    expect(files).toEqual([
+      { path: 'model-Q4_K_M.gguf', size: 5, oid: 'abc123' },
+      { path: 'README.md', size: 1_000, oid: undefined },
+    ]);
+  });
+});
 
 describe('hfTreeSize', () => {
   it('returns the size of a single matching GGUF file', async () => {

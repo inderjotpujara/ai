@@ -60,6 +60,7 @@ describe('createHfFetchProvider', () => {
     const provider = createHfFetchProvider(ProviderKind.HfGguf, {
       fetchImpl: (async () =>
         streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      treeFiles: async () => [],
     });
     const phases: DownloadPhase[] = [];
     await provider.download('org/repo::model.gguf', {
@@ -82,6 +83,7 @@ describe('createHfFetchProvider', () => {
     const provider = createHfFetchProvider(ProviderKind.HfGguf, {
       fetchImpl: (async () =>
         streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      treeFiles: async () => [],
     });
     await expect(
       provider.download('org/repo::../../evil.gguf', {
@@ -101,6 +103,7 @@ describe('createHfFetchProvider', () => {
       fetchImpl: (async () =>
         streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
       openWriteStream: () => new ErroringWriteStream(),
+      treeFiles: async () => [],
     });
     await expect(
       provider.download('org/repo::model.gguf', {
@@ -119,6 +122,7 @@ describe('createHfFetchProvider', () => {
     const provider = createHfFetchProvider(ProviderKind.HfGguf, {
       fetchImpl: (async () =>
         streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      treeFiles: async () => [],
     });
     await expect(
       provider.download('org/repo::/etc/evil', {
@@ -128,5 +132,49 @@ describe('createHfFetchProvider', () => {
       }),
     ).rejects.toThrow();
     expect(existsSync('/etc/evil')).toBe(false);
+  });
+
+  it('HfGguf: threads the tree oid as expectedOid and rejects on sha256 mismatch', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const chunk = new Uint8Array(1000);
+    const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      sha256: async () => 'actual-hash',
+      treeFiles: async (repo) => {
+        expect(repo).toBe('org/repo');
+        return [{ path: 'model.gguf', size: 2000, oid: 'expected-hash' }];
+      },
+    });
+    await expect(
+      provider.download('org/repo::model.gguf', {
+        onProgress: () => {},
+        signal: new AbortController().signal,
+        destDir: dest,
+      }),
+    ).rejects.toThrow(/sha256 mismatch/);
+    expect(existsSync(join(dest, 'model.gguf'))).toBe(false);
+    expect(existsSync(join(dest, 'model.gguf.part'))).toBe(false);
+  });
+
+  it('HfGguf: succeeds when the tree oid matches the downloaded sha256', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const chunk = new Uint8Array(1000);
+    const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      sha256: async () => 'matching-hash',
+      treeFiles: async () => [
+        { path: 'model.gguf', size: 2000, oid: 'matching-hash' },
+      ],
+    });
+    const phases: DownloadPhase[] = [];
+    await provider.download('org/repo::model.gguf', {
+      onProgress: (p) => phases.push(p.phase),
+      signal: new AbortController().signal,
+      destDir: dest,
+    });
+    expect(existsSync(join(dest, 'model.gguf'))).toBe(true);
+    expect(phases.at(-1)).toBe(DownloadPhase.Done);
   });
 });

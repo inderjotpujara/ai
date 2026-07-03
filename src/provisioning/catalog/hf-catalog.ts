@@ -10,11 +10,44 @@ import type {
 
 const HF_API = 'https://huggingface.co/api';
 
-type TreeEntry = { path: string; size?: number };
+type TreeEntry = {
+  path: string;
+  size?: number;
+  lfs?: { size?: number; oid?: string };
+};
 
 function hfHeaders(): Record<string, string> {
   const token = process.env.HF_TOKEN; // env-fallback only; degrade to anonymous
   return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+async function fetchTree(
+  repoId: string,
+  fetchImpl: typeof fetch,
+): Promise<TreeEntry[]> {
+  const res = await fetchImpl(
+    `${HF_API}/models/${repoId}/tree/main?recursive=true`,
+    { headers: hfHeaders() },
+  );
+  if (!res.ok) throw new ProviderError(`HF tree returned ${res.status}`);
+  return (await res.json()) as TreeEntry[];
+}
+
+/**
+ * Per-file listing of a repo's tree, surfacing each LFS file's sha256
+ * (`lfs.oid`) so downloaders can verify-when-available instead of only
+ * compute-and-record.
+ */
+export async function hfTreeFiles(
+  repoId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ path: string; size: number; oid?: string }[]> {
+  const tree = await fetchTree(repoId, fetchImpl);
+  return tree.map((e) => ({
+    path: e.path,
+    size: e.lfs?.size ?? e.size ?? 0,
+    oid: e.lfs?.oid,
+  }));
 }
 
 /** Pre-download size: one GGUF file's size, or the summed tree for a snapshot. */
@@ -23,19 +56,14 @@ export async function hfTreeSize(
   opts: { file?: string },
   fetchImpl: typeof fetch = fetch,
 ): Promise<number> {
-  const res = await fetchImpl(
-    `${HF_API}/models/${repoId}/tree/main?recursive=true`,
-    { headers: hfHeaders() },
-  );
-  if (!res.ok) throw new ProviderError(`HF tree returned ${res.status}`);
-  const tree = (await res.json()) as TreeEntry[];
+  const files = await hfTreeFiles(repoId, fetchImpl);
   if (opts.file) {
-    const hit = tree.find((e) => e.path === opts.file);
+    const hit = files.find((e) => e.path === opts.file);
     if (!hit)
       throw new ProviderError(`HF file ${opts.file} not found in ${repoId}`);
-    return hit.size ?? 0;
+    return hit.size;
   }
-  return tree.reduce((sum, e) => sum + (e.size ?? 0), 0);
+  return files.reduce((sum, e) => sum + e.size, 0);
 }
 
 type SearchEntry = { id: string; downloads?: number };

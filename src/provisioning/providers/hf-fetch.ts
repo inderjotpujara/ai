@@ -5,6 +5,7 @@ import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import type { Writable } from 'node:stream';
 import { ProviderError } from '../../core/errors.ts';
 import type { ProviderKind } from '../../core/types.ts';
+import { hfTreeFiles } from '../catalog/hf-catalog.ts';
 import { ProgressTracker } from '../progress-tracker.ts';
 import {
   DownloadPhase,
@@ -87,11 +88,16 @@ export function createHfFetchProvider(
     sha256?: (path: string) => Promise<string>;
     /** Test seam: inject a Writable in place of `createWriteStream` to deterministically exercise stream-error handling. */
     openWriteStream?: (path: string) => Writable;
+    /** Test/reuse seam: repo tree listing with per-file oid, reused by Task 9 for snapshots. */
+    treeFiles?: (
+      repo: string,
+    ) => Promise<{ path: string; size: number; oid?: string }[]>;
   } = {},
 ): DownloadProvider {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const sha256 = deps.sha256 ?? sha256File;
   const openWriteStream = deps.openWriteStream ?? createWriteStream;
+  const treeFiles = deps.treeFiles ?? hfTreeFiles;
 
   /**
    * Streams a single HF file to `<destPath>.part`, verifies its sha256, then
@@ -150,6 +156,25 @@ export function createHfFetchProvider(
     }
   }
 
+  /**
+   * Looks up the LFS sha256 for `file` in `repo`'s tree so the download can
+   * verify-when-available. A metadata-fetch failure is not a download
+   * failure: degrade to `undefined` (compute-and-record, no gate) rather
+   * than crash the whole download over a tree-listing hiccup.
+   */
+  async function resolveExpectedOid(
+    repo: string,
+    file: string,
+  ): Promise<string | undefined> {
+    try {
+      const files = await treeFiles(repo);
+      return files.find((e) => e.path === file)?.oid;
+    } catch (err) {
+      console.error(`HF tree lookup failed for ${repo}::${file}:`, err);
+      return undefined;
+    }
+  }
+
   return {
     kind,
     async download(modelRef, { onProgress, signal, destDir }) {
@@ -159,10 +184,12 @@ export function createHfFetchProvider(
       const [repo, file] = modelRef.split('::');
       if (file) {
         const url = `${HF_RESOLVE}/${repo}/resolve/main/${file}`;
+        const expectedOid = await resolveExpectedOid(repo ?? '', file);
         await downloadFile(url, safeJoin(destDir, file), {
           onProgress,
           signal,
           tracker,
+          expectedOid,
         });
         return;
       }
