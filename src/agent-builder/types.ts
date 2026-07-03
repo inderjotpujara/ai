@@ -37,3 +37,35 @@ export type BuilderDeps = {
   paths: WritePaths;
   log?: (m: string) => void;
 };
+
+/** A drafted brand-new tool module (Task 24, discharges the Slice-17
+ *  "no tool-code generation" deferral). `code` is model-authored — the FULL
+ *  proposed TS module text — so unlike `AgentProposal.systemPrompt` (plain
+ *  text embedded as data) this really is generated code. The safety trade is
+ *  structural: it is written to disk as a review artifact only (write-tool.ts),
+ *  gated behind the same mandatory consent as agents, and NEVER imported,
+ *  eval'd, or wired into any agent's toolset in the same run — a human reviews
+ *  the file and activates it deliberately, in a later, separate step. */
+export type ToolProposal = {
+  name: string; // snake_case unique tool module id, e.g. word_count
+  description: string; // one sentence: what the tool does
+  code: string; // full generated TS module source — PROPOSAL, never executed here
+  rationale: string; // why this tool is needed
+};
+
+export type ToolBuildResult =
+  | { kind: 'written'; proposal: ToolProposal; file: string }
+  | { kind: 'declined' }
+  | { kind: 'invalid'; issues: ValidationIssue[] };
+
+export type ToolBuilderDeps = {
+  model: BuilderModel;
+  existingModuleNames: () => string[];
+  confirm: (proposalText: string) => Promise<boolean>;
+  /** Directory the reviewable `<name>.proposal.ts` file is written into.
+   *  Deliberately NOT `agents/` or any registry/index location — nothing in
+   *  this process reads this directory back, so writing here can never
+   *  amount to same-run activation. */
+  proposalsDir: string;
+  log?: (m: string) => void;
+};
