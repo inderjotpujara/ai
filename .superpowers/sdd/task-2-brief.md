@@ -1,161 +1,163 @@
-## Task 2: Minor ③ — consent interactivity predicate + stdin `end` handling
+## Task 2: agent-builder types + structural validation
 
 **Files:**
-- Modify: `src/provisioning/ui/prompt.ts:1-17` (`stdinInput`) and add `interactiveTTY`
-- Modify: `src/mcp/mount.ts:63` (use `interactiveTTY()`)
-- Test: `tests/provisioning/prompt.test.ts` (extend; create if absent) and `tests/mcp/mount.test.ts` (extend — see Step 5)
+- Create: `src/agent-builder/types.ts`, `src/agent-builder/validate.ts`
+- Test: `tests/agent-builder/validate.test.ts`
 
 **Interfaces:**
-- Consumes: nothing new.
-- Produces: `stdinInput(stream?: NodeJS.ReadStream): LineInput` — now accepts an optional stream (defaults to `process.stdin`) and its `read()` resolves `''` on stream `end`. New `interactiveTTY(stdin?: { isTTY?: boolean }, stderr?: { isTTY?: boolean }): boolean` — true only when BOTH are TTYs.
+- Produces:
+  ```ts
+  // types.ts
+  export type SuggestedServer = { packName: string; scopeToAgent: string };
+  export type AgentProposal = {
+    name: string; description: string; systemPrompt: string;
+    modelReq: ModelRequirement; suggestedServers: SuggestedServer[]; rationale: string;
+  };
+  export type ValidationIssue = { field: string; problem: string };
+  export type BuildResult =
+    | { kind: 'written'; proposal: AgentProposal; files: string[] }
+    | { kind: 'declined' }
+    | { kind: 'invalid'; issues: ValidationIssue[] }
+    | { kind: 'abandoned'; reason: string };
+  // validate.ts
+  export function validateProposal(
+    p: AgentProposal, existingNames: string[], packNames: string[],
+  ): ValidationIssue[];
+  ```
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
-Create/extend `tests/provisioning/prompt.test.ts`:
+Create `tests/agent-builder/validate.test.ts`:
 
 ```typescript
 import { describe, expect, it } from 'bun:test';
-import { PassThrough } from 'node:stream';
-import { interactiveTTY, stdinInput } from '../../src/provisioning/ui/prompt.ts';
+import { Capability, PreferPolicy } from '../../src/core/types.ts';
+import type { AgentProposal } from '../../src/agent-builder/types.ts';
+import { validateProposal } from '../../src/agent-builder/validate.ts';
 
-describe('interactiveTTY', () => {
-  it('is true only when both stdin and stderr are TTYs', () => {
-    expect(interactiveTTY({ isTTY: true }, { isTTY: true })).toBe(true);
-    expect(interactiveTTY({ isTTY: false }, { isTTY: true })).toBe(false); // stdin redirected (< /dev/null)
-    expect(interactiveTTY({ isTTY: true }, { isTTY: false })).toBe(false);
-    expect(interactiveTTY({}, {})).toBe(false); // isTTY undefined → false
-  });
-});
+const base: AgentProposal = {
+  name: 'pdf_qa',
+  description: 'Answers questions about PDF files.',
+  systemPrompt: 'You answer questions about a PDF.',
+  modelReq: { role: 'pdf reasoning', requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits },
+  suggestedServers: [{ packName: 'filesystem', scopeToAgent: 'pdf_qa' }],
+  rationale: 'No agent reads PDFs.',
+};
+const existing = ['file_qa', 'web_fetch'];
+const pack = ['file-tools', 'filesystem', 'fetch'];
 
-describe('stdinInput', () => {
-  it('resolves the trimmed line on data', async () => {
-    const s = new PassThrough();
-    const input = stdinInput(s as unknown as NodeJS.ReadStream);
-    const p = input.read();
-    s.write('  yes \n');
-    expect(await p).toBe('yes');
+describe('validateProposal', () => {
+  it('accepts a clean proposal', () => {
+    expect(validateProposal(base, existing, pack)).toEqual([]);
   });
-  it('resolves empty string when the stream ends (never hangs)', async () => {
-    const s = new PassThrough();
-    const input = stdinInput(s as unknown as NodeJS.ReadStream);
-    const p = input.read();
-    s.end(); // e.g. stdin was `< /dev/null`
-    expect(await p).toBe('');
+  it('rejects a duplicate name', () => {
+    const issues = validateProposal({ ...base, name: 'file_qa' }, existing, pack);
+    expect(issues.some((i) => i.field === 'name')).toBe(true);
+  });
+  it('rejects reserved names', () => {
+    expect(validateProposal({ ...base, name: 'super' }, existing, pack).some((i) => i.field === 'name')).toBe(true);
+  });
+  it('rejects non-snake_case names', () => {
+    expect(validateProposal({ ...base, name: 'PdfQA' }, existing, pack).some((i) => i.field === 'name')).toBe(true);
+  });
+  it('rejects empty description and systemPrompt', () => {
+    expect(validateProposal({ ...base, description: '  ' }, existing, pack).some((i) => i.field === 'description')).toBe(true);
+    expect(validateProposal({ ...base, systemPrompt: '' }, existing, pack).some((i) => i.field === 'systemPrompt')).toBe(true);
+  });
+  it('rejects an off-palette server (least-privilege)', () => {
+    const issues = validateProposal({ ...base, suggestedServers: [{ packName: 'evil-server', scopeToAgent: 'pdf_qa' }] }, existing, pack);
+    expect(issues.some((i) => i.field === 'suggestedServers')).toBe(true);
+  });
+  it('rejects a mis-scoped server', () => {
+    const issues = validateProposal({ ...base, suggestedServers: [{ packName: 'filesystem', scopeToAgent: 'other' }] }, existing, pack);
+    expect(issues.some((i) => i.field === 'suggestedServers')).toBe(true);
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/provisioning/prompt.test.ts`
-Expected: FAIL — `interactiveTTY` is not exported; the `end` test hangs/times out because `stdinInput` has no `end` handler.
+Run: `bun test tests/agent-builder/validate.test.ts`
+Expected: FAIL — modules not found.
 
-- [ ] **Step 3: Implement in `src/provisioning/ui/prompt.ts`**
-
-Replace `stdinInput` (lines 4-17) and add `interactiveTTY`:
+- [ ] **Step 3: Create `src/agent-builder/types.ts`**
 
 ```typescript
-export function stdinInput(
-  stream: NodeJS.ReadStream = process.stdin,
-): LineInput {
-  return {
-    read: () =>
-      new Promise((resolve) => {
-        const cleanup = (): void => {
-          stream.off('data', onData);
-          stream.off('end', onEnd);
-        };
-        const onData = (d: Buffer): void => {
-          cleanup();
-          stream.pause();
-          resolve(d.toString().trim());
-        };
-        const onEnd = (): void => {
-          cleanup();
-          resolve('');
-        };
-        stream.resume();
-        stream.on('data', onData);
-        stream.on('end', onEnd);
-      }),
-  };
+import type { ModelRequirement } from '../core/types.ts';
+
+/** A curated-pack MCP server the generated agent needs, scoped to that agent. */
+export type SuggestedServer = { packName: string; scopeToAgent: string };
+
+/** A drafted specialist agent: definition + the minimal scoped tools it needs. */
+export type AgentProposal = {
+  name: string; // snake_case, unique vs the registry
+  description: string; // the orchestrator routes on this
+  systemPrompt: string;
+  modelReq: ModelRequirement;
+  suggestedServers: SuggestedServer[]; // pack-only, each scoped to `name`
+  rationale: string; // why this agent + these tools (shown to the user)
+};
+
+export type ValidationIssue = { field: string; problem: string };
+
+export type BuildResult =
+  | { kind: 'written'; proposal: AgentProposal; files: string[] }
+  | { kind: 'declined' }
+  | { kind: 'invalid'; issues: ValidationIssue[] }
+  | { kind: 'abandoned'; reason: string };
+```
+
+- [ ] **Step 4: Create `src/agent-builder/validate.ts`**
+
+```typescript
+import type { AgentProposal, ValidationIssue } from './types.ts';
+
+const SNAKE = /^[a-z][a-z0-9_]*$/;
+const RESERVED = new Set(['super', 'orchestrator']);
+
+/** Structural gate. Palette-only tools + unique snake_case name + non-empty
+ *  fields + each server scoped to this agent. No LLM, no I/O. */
+export function validateProposal(
+  p: AgentProposal,
+  existingNames: string[],
+  packNames: string[],
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!SNAKE.test(p.name)) {
+    issues.push({ field: 'name', problem: `"${p.name}" is not snake_case ([a-z][a-z0-9_]*)` });
+  } else if (RESERVED.has(p.name) || existingNames.includes(p.name)) {
+    issues.push({ field: 'name', problem: `"${p.name}" is reserved or already exists` });
+  }
+  if (p.description.trim().length === 0) {
+    issues.push({ field: 'description', problem: 'description is empty' });
+  }
+  if (p.systemPrompt.trim().length === 0) {
+    issues.push({ field: 'systemPrompt', problem: 'systemPrompt is empty' });
+  }
+  for (const s of p.suggestedServers) {
+    if (!packNames.includes(s.packName)) {
+      issues.push({ field: 'suggestedServers', problem: `"${s.packName}" is not in the curated pack (palette-only)` });
+    }
+    if (s.scopeToAgent !== p.name) {
+      issues.push({ field: 'suggestedServers', problem: `"${s.packName}" must be scoped to "${p.name}", not "${s.scopeToAgent}"` });
+    }
+  }
+  return issues;
 }
-
-/** Interactive prompting is safe only when the stream we WRITE the question to
- *  (stderr) and the stream we READ the answer from (stdin) are both TTYs.
- *  Judging on stderr alone lets `cmd < /dev/null` hang on an ended stdin. */
-export function interactiveTTY(
-  stdin: { isTTY?: boolean } = process.stdin,
-  stderr: { isTTY?: boolean } = process.stderr,
-): boolean {
-  return (stdin.isTTY ?? false) && (stderr.isTTY ?? false);
-}
 ```
 
-- [ ] **Step 4: Wire the predicate into `src/mcp/mount.ts`**
+- [ ] **Step 5: Run tests to verify they pass**
 
-Add `interactiveTTY` to the existing import (line 2):
+Run: `bun test tests/agent-builder/validate.test.ts`
+Expected: PASS (all 7).
 
-```typescript
-import { askYesNo, interactiveTTY, stdinInput } from '../provisioning/ui/prompt.ts';
-```
+- [ ] **Step 6: Typecheck, lint, commit**
 
-Change `mount.ts:63` from `isTTY: process.stderr.isTTY ?? false,` to:
-
-```typescript
-    isTTY: interactiveTTY(),
-```
-
-- [ ] **Step 5: Add a mountAll no-hang regression test**
-
-Add to `tests/mcp/mount.test.ts` (a describe block; adapt imports to the file's existing style — it already imports `mountAll` and builds `McpConfig` fixtures):
-
-```typescript
-it('skips consent-gated servers non-interactively without calling ask (no hang)', async () => {
-  let asked = 0;
-  const config = {
-    entries: [
-      {
-        name: 'needs-consent',
-        kind: McpTransportKind.Stdio,
-        command: 'echo',
-        args: [],
-      },
-    ],
-    dormant: [],
-    warnings: [],
-  } as unknown as McpConfig;
-  const reg = await mountAll(config, {
-    approvalsFile: join(await mkdtemp(join(tmpdir(), 'appr-')), 'a.json'),
-    consent: {
-      isTTY: false,
-      autoYes: false,
-      ask: async () => {
-        asked += 1;
-        return true;
-      },
-    },
-    mount: async () => ({ tools: {}, close: async () => {} }),
-  });
-  expect(asked).toBe(0);
-  expect(reg.skipped.some((s) => s.name === 'needs-consent')).toBe(true);
-});
-```
-
-> If `tests/mcp/mount.test.ts` doesn't exist, create it with the standard header (`import { describe, expect, it } from 'bun:test'`, `mkdtemp`/`tmpdir`/`join`, `mountAll` from `../../src/mcp/mount.ts`, `McpConfig`/`McpTransportKind` from `../../src/mcp/types.ts`) wrapped in `describe('mountAll consent', () => { ... })`. First read `src/mcp/consent.ts`'s `ensureConsent` to confirm the `isTTY:false && !autoYes && !approved` branch returns `false` (skip) rather than prompting — it does; this test guards that path stays wired.
-
-- [ ] **Step 6: Run tests to verify they pass**
-
-Run: `bun test tests/provisioning/prompt.test.ts tests/mcp/mount.test.ts`
-Expected: PASS (no hang on the `end` test; `asked` is 0).
-
-- [ ] **Step 7: Typecheck, lint, commit**
-
-Run: `bun run typecheck`; `bun run lint:file -- "src/provisioning/ui/prompt.ts" "src/mcp/mount.ts"`.
+Run: `bun run typecheck`; `bun run lint:file -- "src/agent-builder/types.ts" "src/agent-builder/validate.ts" "tests/agent-builder/validate.test.ts"`.
 
 ```bash
-git add src/provisioning/ui/prompt.ts src/mcp/mount.ts tests/provisioning/prompt.test.ts tests/mcp/mount.test.ts
-git commit -m "fix(mcp): consent judges TTY on the stream it reads (stdin) + stdin end resolves empty (Slice 16 Task 2)"
+git add src/agent-builder/types.ts src/agent-builder/validate.ts tests/agent-builder/validate.test.ts
+git commit -m "feat(agent-builder): AgentProposal types + structural validateProposal (Slice 17 Task 2)"
 ```
 
 ---

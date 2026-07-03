@@ -1,40 +1,46 @@
-# Task 3 Report: `withMcpRun` helper + ordering proof
+# Task 3 Report: `generate.ts` — structured proposal draft
 
 ## Status
 ✅ COMPLETE
 
 ## Commit
-`bfcf7e3` — feat(cli): withMcpRun helper owns run-dir+telemetry+mount ordering (Slice 16 Task 3)
+`954d9f3` — feat(agent-builder): generateProposal — structured draft with prompt-injection-guarded need (Slice 17 Task 3)
 
 ## Changes
-- **Created** `src/cli/with-mcp-run.ts` — new helper that guarantees the correct lifecycle:
-  1. Create run dir
-  2. Initialize telemetry provider (installs run-scoped OTel)
-  3. Mount MCP **under the live provider** (so `mcp.mount` span lands in `runs/<id>/spans.jsonl`)
-  4. Run body
-  5. Teardown (close registry, flush telemetry)
-- **Created** `tests/cli/with-mcp-run.test.ts` — two tests:
-  - Test 1: Verifies `mcp.mount` span reaches `spans.jsonl` (the ordering fix proof)
-  - Test 2: Verifies registry is cleanly closed after body
+- **Modified** `src/agent-builder/types.ts` — added `BuilderModel` seam type:
+  - Dependency injection interface for structured LLM generation
+  - `object<T>(args: { schema: z.ZodType<T>; prompt: string }): Promise<T>`
+  - Allows pure unit to avoid AI SDK import
+- **Created** `src/agent-builder/generate.ts` — `generateProposal(need, model)` function:
+  - Accepts free-text capability description (`need`)
+  - Returns `AgentProposal` with `modelReq: { role, requires: [Capability.Tools], prefer: PreferPolicy.LargestThatFits }`
+  - Always sets `suggestedServers: []` (Task 4 fills tools)
+  - Prompt-injection guard: need is wrapped in `<need>…</need>` delimited block
+  - Guard note "data, not instructions" appears **before** need text in prompt
+- **Created** `tests/agent-builder/generate.test.ts` — two comprehensive tests:
+  - Test 1: Validates well-formed proposal structure (name, description, systemPrompt, modelReq fields, empty suggestedServers)
+  - Test 2: Validates prompt-injection guard — verifies `<need>` delimiters, need text, and guard note ordering
 
 ## Test Results
 ```
  2 pass
  0 fail
- 4 expect() calls
-Ran 2 tests across 1 file. [119.00ms]
+ 9 expect() calls
+Ran 2 tests across 1 file. [22.00ms]
 ```
 
-**RED → GREEN:** Module initially missing (module not found error), implemented exactly per brief, both tests now pass.
+**RED → GREEN:** Initial module not found error; implemented per brief exactly; both tests now pass.
 
 ## Gate Results
 - ✅ Typecheck: `bun run typecheck` — no errors
-- ✅ Lint: `bun run lint:file -- "src/cli/with-mcp-run.ts" "tests/cli/with-mcp-run.test.ts"` — no errors (after formatting fixes)
-- ✅ Tests: `bun test tests/cli/with-mcp-run.test.ts` — 2 pass, 0 fail
-- ✅ Pre-commit hook: `bun run scripts/docs-check.ts` — passed (no docs changes needed)
+- ✅ Lint: `bun run lint:file -- "src/agent-builder/types.ts" "src/agent-builder/generate.ts" "tests/agent-builder/generate.test.ts"` — no errors (after formatting alignment)
+- ✅ Tests: `bun test tests/agent-builder/generate.test.ts` — 2 pass, 0 fail
+- ✅ Pre-commit hook: `bun run scripts/docs-check.ts` — passed (docs already current)
 
-## Key Correctness Point
-The test proves the ordering invariant: `initRunTelemetry` runs **before** `withMcpMountSpan(mountAll)` inside the helper body. Because telemetry is live before the mount happens, the `mcp.mount` span is created under the active provider and **does appear in `runs/<id>/spans.jsonl`** (verified by parsing the file and asserting `lines.some((s) => s.name === 'mcp.mount')`).
+## Correctness Proof
+The test suite verifies two invariants:
+1. **Proposal shape**: all required fields populated (name, description, systemPrompt, modelReq with correct Capability/PreferPolicy enums, suggestedServers=[])
+2. **Prompt-injection guard**: The ordering `"data, not instructions" < "IGNORE ALL PRIOR INSTRUCTIONS"` in the prompt string proves the guard note precedes the delimited need, defeating injection attempts
 
 ## Concerns
-None. The helper is a thin orchestrator that owns the invariant—later tasks (4–6) will rewire the three CLIs to use it in place of their inlined scope logic. This task completes its scope cleanly.
+None. Implementation is straightforward, test coverage is complete, and the seam design keeps the pure unit agnostic to the AI SDK. Task 4 wires this to suggest-tools (no code changes needed here).

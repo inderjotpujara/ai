@@ -1,34 +1,34 @@
-## Task 8: Crew auto-insertion (`verify` flag → verify/branch/corrective/abstain)
+## Task 8: docs (4 surfaces) + SDD ledger
 
-**Files:** Modify `src/crew/types.ts` (`Task.verify?`, `CrewDef.verify?`, `CrewOutcome` +`unverified`), `src/crew/compile.ts` (insert steps), `src/crew/engine.ts` (map outcome); Test `tests/crew/verify-wiring.test.ts`
+**Files:**
+- Modify: `docs/architecture.md` (new §18), `README.md`, `docs/ROADMAP.md`, `.superpowers/sdd/progress.md`
 
-**Interfaces:** Consumes verify primitive + workflow Branch step. Produces the compiled sub-graph + `{kind:'unverified'}` outcome.
+**Interfaces:** none (documentation).
 
-> Read `src/crew/compile.ts` + `src/workflow/types.ts` (BranchStep: `predicate`/`whenTrue`/`whenFalse`) first. Keep additive: a task without `verify` compiles exactly as today.
+- [ ] **Step 1: `docs/architecture.md` — add §18 "Agent-builder (Slice 17)"**
 
-- [ ] **Step 1: Failing test** (mock models via injected deps; assert an unsupported answer yields `unverified`)
-```ts
-// tests/crew/verify-wiring.test.ts  (sketch — align to runCrew's real deps shape)
-import { describe, expect, test } from 'bun:test';
-import { runCrew } from '../../src/crew/engine.ts';
-// Build a 1-task crew with verify:true, inject a verifyDeps whose judge always says "No"
-// → expect outcome.kind === 'unverified' with unsupportedClaims non-empty.
+Document: the `agents/index.ts` registry (factories keyed by name; `super`/`chat`/`flow` build from it); the `src/agent-builder/` units (types, generate [prompt-injection-guarded], suggest-tools [palette-only], validate [structural], write [atomic file + index markers + scoped mcp.json], builder [generate→suggest→validate→consent→write], deps [live largest-that-fits tools model]); the two triggers (`bun run agent-builder` + TTY gap-offer); the safety model (review-before-activate, palette-only, no same-run activation); and the `agent.build` span + `agent.build.*` attributes. Add `src/agent-builder/` and `agents/index.ts` to the module map. Note the gap seam is now an additive TTY branch (the `{kind:'gap'}` outcome + its `agent.gap.missing_capability` attribute are unchanged).
+
+- [ ] **Step 2: `README.md`**
+
+Add the Slice 17 row to the slice table (✅ Done): "Agent-builder (Phase D) — generate a specialist on a capability gap". Update the Status line to Slice 17. Add a feature paragraph. Add `agents/index.ts` + `src/agent-builder/` to the project-structure table. Update the test count (run `bun test` for the number).
+
+- [ ] **Step 3: `docs/ROADMAP.md`**
+
+Flip Agent-builder ❌/🟡 → ✅ shipped (Slice 17) in the gap table (line ~59), the Phase D table (line ~146), and the recommended-sequence (line ~217, item 9). Add a "Slice 17 follow-on" note: crew/workflow builder (composes existing + generated agents) as the next Phase-D slice; execution dry-run + golden-eval + reuse/archive as the path to a *verified* "works out of the box". State the north-star (chat → any agent/crew out of the box).
+
+- [ ] **Step 4: Append the Slice 17 summary to `.superpowers/sdd/progress.md`**
+
+Per-task entries + a slice summary (what shipped, suite result). Note this is the first Phase-D slice.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/architecture.md README.md docs/ROADMAP.md .superpowers/sdd/progress.md
+git commit -m "docs: Slice 17 — Agent-builder across all 4 surfaces + ledger"
 ```
-> Flesh out against `runCrew`'s real signature; the assertion is: `verify:true` + failing judge → `{kind:'unverified'}`; `verify:true` + passing judge → `{kind:'done'}`; no `verify` → unchanged.
 
-- [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Add flags + outcome** to `src/crew/types.ts`:
-```ts
-// Task<O>: add `verify?: boolean;`
-// CrewDef: add `verify?: boolean;` (applies to the final/answer task)
-// CrewOutcome union: add:
-| { kind: 'unverified'; failedTaskId?: string; unsupportedClaims: string[]; faithfulness: number; draft: string }
-```
-- [ ] **Step 4: Insert the sub-graph** in `src/crew/compile.ts`: for a task with `verify`, after its AgentStep append a verify step (calls the primitive with the task output + query), a Branch on `supported`, a corrective+re-answer+verify₂ path (bounded by `verifyMaxRetries()`), and an abstain terminal. Map the abstain terminal's result to the `unverified` outcome in `src/crew/engine.ts`.
-> This is the largest task; keep the inserted steps small + named (`<taskId>__verify`, `__branch`, `__corrective`, `__verify2`, `__abstain`). Reuse `effectiveTaskDeps`/context threading. If the branch/corrective wiring gets unwieldy, STOP and report DONE_WITH_CONCERNS with the sub-graph shape for review.
-
-- [ ] **Step 5: Run tests + full suite** (existing crew tests unchanged) → PASS.
-- [ ] **Step 6: Commit** — `git commit -m "feat(crew): opt-in verify → branch + bounded CRAG + unverified abstention"`
+> After merge, regenerate the snapshot Artifact by hand: add an **Agent-builder** node (`src/agent-builder`) + edges cli→builder, builder→pack (palette), builder→agents-registry, builder→telemetry; a "Grown deliberately" concept card; footer → "17 slices · <final test count>".
 
 ---
 

@@ -1,133 +1,240 @@
-## Task 6: Migrate `chat` CLI + `runChat` to `withMcpRun`
+## Task 6: `builder.ts` orchestration + `agent.build` telemetry
 
 **Files:**
-- Modify: `src/cli/run-chat.ts` (`ChatDeps` 9-16, `runChat` 18-42), `src/cli/chat.ts` (`main` 108-141)
-- Test: `tests/cli/run-chat.test.ts`, `tests/integration/run-viewer.live.test.ts`
+- Create: `src/agent-builder/builder.ts`
+- Modify: `src/telemetry/spans.ts` (add `ATTR` keys + `withAgentBuildSpan`)
+- Test: `tests/agent-builder/builder.test.ts`
 
 **Interfaces:**
-- Consumes: `withMcpRun` (Task 3).
-- Produces: `ChatDeps` has `run: RunHandle` in place of `runsRoot`/`runId`; `runChat` uses `run.id` for its span name and no longer manages telemetry.
+- Consumes: everything from Tasks 2-5.
+- Produces:
+  ```ts
+  // types.ts (add BuilderDeps)
+  export type BuilderDeps = {
+    model: BuilderModel;
+    existingNames: () => string[];
+    packNames: () => string[];
+    confirm: (proposalText: string) => Promise<boolean>;
+    paths: WritePaths;               // from write.ts
+    log?: (m: string) => void;
+  };
+  // builder.ts
+  export function renderProposal(p: AgentProposal): string;   // human-readable consent text
+  export function buildAgent(need: string, deps: BuilderDeps): Promise<BuildResult>;
+  ```
 
-- [ ] **Step 1: Migrate `tests/cli/run-chat.test.ts` (RED)**
+- [ ] **Step 1: Write the failing test**
 
-Add imports (`createRun`, `initRunTelemetry`). Each case builds deps with `runsRoot: root, runId: 'run-N'`. Transform to create the run + init telemetry and pass `run`:
+Create `tests/agent-builder/builder.test.ts`:
 
 ```typescript
-const run = await createRun(root, 'run-1');
-const tel = initRunTelemetry(run.dir);
-let result;
-try {
-  result = await runChat({ orchestrator, task, run, /* routerNumCtx, capture */ });
-} finally {
-  await tel.shutdown();
-}
-```
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'bun:test';
+import type { BuilderDeps, BuilderModel } from '../../src/agent-builder/types.ts';
+import { buildAgent } from '../../src/agent-builder/builder.ts';
 
-Repeat for `run-2`, `run-span`, `run-nojournal`. Keep `join(root, 'run-1', 'spans.jsonl')` / `answer.txt` / `gap.txt` / `resource.txt` assertions unchanged. (The `run-span` case asserts a span in `spans.jsonl`; it still resolves because the test now owns telemetry.)
+const INDEX_SEED = `import type { ToolSet } from 'ai';
+import type { Agent } from '../src/core/agent-def.ts';
+// AGENT-BUILDER:IMPORTS (generated agent imports are inserted above this line — do not remove)
+export type AgentFactory = (tools: ToolSet) => Agent;
+export const AGENTS: Record<string, AgentFactory> = {
+  // AGENT-BUILDER:ENTRIES (generated agent entries are inserted above this line — do not remove)
+};
+`;
+
+// A model that returns a draft for the first call and a server pick for the second.
+function twoStepModel(serverPick: string[]): BuilderModel {
+  let call = 0;
+  return {
+    object: async () => {
+      call += 1;
+      if (call === 1) return { name: 'pdf_qa', description: 'PDF Q&A.', systemPrompt: 'Answer about a PDF.', role: 'pdf', rationale: 'no pdf agent' } as never;
+      return { servers: serverPick } as never;
+    },
+  };
+}
+
+async function deps(confirm: boolean, model: BuilderModel): Promise<BuilderDeps> {
+  const dir = await mkdtemp(join(tmpdir(), 'ab-build-'));
+  const agentsDir = join(dir, 'agents');
+  await Bun.write(join(agentsDir, 'index.ts'), INDEX_SEED);
+  return {
+    model,
+    existingNames: () => ['file_qa'],
+    packNames: () => ['filesystem', 'fetch'],
+    confirm: async () => confirm,
+    paths: { agentsDir, indexPath: join(agentsDir, 'index.ts'), mcpConfigPath: join(dir, 'mcp.json') },
+  };
+}
+
+describe('buildAgent', () => {
+  it('writes the agent on consent', async () => {
+    const d = await deps(true, twoStepModel(['filesystem']));
+    const r = await buildAgent('read pdfs', d);
+    expect(r.kind).toBe('written');
+    if (r.kind === 'written') {
+      expect(r.proposal.name).toBe('pdf_qa');
+      const idx = await readFile(d.paths.indexPath, 'utf8');
+      expect(idx).toContain('pdf_qa: createPdfQaAgent,');
+    }
+  });
+  it('writes nothing when consent is declined', async () => {
+    const d = await deps(false, twoStepModel(['filesystem']));
+    const r = await buildAgent('read pdfs', d);
+    expect(r.kind).toBe('declined');
+    const idx = await readFile(d.paths.indexPath, 'utf8');
+    expect(idx).not.toContain('pdf_qa');
+  });
+  it('returns invalid (no consent asked) when the draft fails validation', async () => {
+    let asked = false;
+    const model = twoStepModel(['filesystem']);
+    const d = await deps(true, model);
+    d.existingNames = () => ['file_qa', 'pdf_qa']; // force duplicate-name rejection
+    d.confirm = async () => { asked = true; return true; };
+    const r = await buildAgent('read pdfs', d);
+    expect(r.kind).toBe('invalid');
+    expect(asked).toBe(false);
+  });
+});
+```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/cli/run-chat.test.ts`
-Expected: FAIL — `ChatDeps` has no `run`; `runChat` still calls `createRun`/`initRunTelemetry`.
+Run: `bun test tests/agent-builder/builder.test.ts`
+Expected: FAIL — `builder.ts` / `BuilderDeps` not found.
 
-- [ ] **Step 3: Update `ChatDeps` + `runChat` in `src/cli/run-chat.ts`**
+- [ ] **Step 3: Add `ATTR` keys + `withAgentBuildSpan` to `src/telemetry/spans.ts`**
 
-Replace `runsRoot: string; runId: string;` (lines 12-13) with `run: RunHandle;`. Change the import on line 5:
+In the `ATTR` object (after the `agent.gap.*`/existing keys), add:
 
 ```typescript
-import { type RunHandle, writeArtifact } from '../run/run-store.ts';
+  BUILD_NEED: 'agent.build.need',
+  BUILD_AGENT: 'agent.build.agent_name',
+  BUILD_OUTCOME: 'agent.build.outcome',
+  BUILD_SERVERS: 'agent.build.server_count',
 ```
 
-Remove the `initRunTelemetry` import (line 6). Rewrite `runChat` (18-42):
+Add the span helper near the other `with*Span` helpers:
 
 ```typescript
-export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
-  const { run } = deps;
-  return await withRunSpan(run.id, deps.task, async () => {
-    const result = await runOrchestrator(
-      deps.orchestrator,
-      deps.task,
-      deps.routerNumCtx,
-      deps.capture,
-    );
-    setRunOutcome(result);
-    if (result.kind === 'answer') {
-      await writeArtifact(run, 'answer.txt', result.text);
-    } else if (result.kind === 'gap') {
-      await writeArtifact(run, 'gap.txt', result.message);
-    } else {
-      await writeArtifact(run, 'resource.txt', result.message);
-    }
-    return result;
+/** Root span for one agent-builder run (Slice 17). The body records stage
+ *  events (generated / validated / suggested / consent / written) and sets
+ *  the outcome + counts at the end via the returned recorder. */
+export function withAgentBuildSpan<T>(
+  need: string,
+  fn: (rec: {
+    event: (name: string, attrs?: Record<string, string | number | boolean>) => void;
+    outcome: (kind: string, agentName?: string, serverCount?: number) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('agent.build', async (span) => {
+    span.setAttribute(ATTR.BUILD_NEED, need);
+    return fn({
+      event: (name, attrs) => span.addEvent(name, attrs),
+      outcome: (kind, agentName, serverCount) => {
+        span.setAttribute(ATTR.BUILD_OUTCOME, kind);
+        if (agentName) span.setAttribute(ATTR.BUILD_AGENT, agentName);
+        if (serverCount !== undefined) span.setAttribute(ATTR.BUILD_SERVERS, serverCount);
+      },
+    });
   });
 }
 ```
 
-- [ ] **Step 4: Rewire `chat.ts` `main()` to use `withMcpRun`**
+(`inSpan` and `ATTR` already exist in this file; match the existing style.)
 
-In `src/cli/chat.ts`: add `import { withMcpRun } from './with-mcp-run.ts';`; remove `loadMcpConfig` (line 7), `mountAll` (line 8), `withMcpMountSpan` (line 25) imports. Replace lines 108-141 (mount block + `try/finally` around `runChat`) with:
+- [ ] **Step 4: Add `BuilderDeps` to `src/agent-builder/types.ts` and create `builder.ts`**
 
-```typescript
-  await withMcpRun(
-    { runsRoot: 'runs', runId: `run-${process.pid}` },
-    async ({ run, reg }) => {
-      const orchestrator = createSuperAgent(
-        reg.forAgent('file_qa'),
-        reg.forAgent('web_fetch'),
-        onBeforeDelegate,
-      );
-      const result = await runChat({
-        orchestrator,
-        task,
-        run,
-        routerNumCtx,
-        capture,
-      });
-      if (result.kind === 'answer') {
-        console.log(result.text);
-      } else if (result.kind === 'gap') {
-        console.log(result.message);
-      } else {
-        console.error(result.message);
-        process.exitCode = 1;
-      }
-    },
-  );
-  await manager.unloadAll();
-```
-
-> Note the ordering change: `manager.unloadAll()` now runs after `withMcpRun` returns (which itself closes the registry + flushes telemetry in its `finally`). Previously `reg.close()` and `manager.unloadAll()` shared one `finally`; the model manager is independent of the run scope, so unloading it after the run closes is correct. If `runChat` throws, `withMcpRun`'s `finally` still closes the registry + telemetry; wrap the `withMcpRun` call in `try { … } finally { await manager.unloadAll(); }` to preserve unload-on-error parity with the original.
-
-Concretely, use:
+Append to `types.ts`:
 
 ```typescript
-  try {
-    await withMcpRun(
-      { runsRoot: 'runs', runId: `run-${process.pid}` },
-      async ({ run, reg }) => {
-        /* …body from above… */
-      },
-    );
-  } finally {
-    await manager.unloadAll();
-  }
+import type { WritePaths } from './write.ts';
+
+export type BuilderDeps = {
+  model: BuilderModel;
+  existingNames: () => string[];
+  packNames: () => string[];
+  confirm: (proposalText: string) => Promise<boolean>;
+  paths: WritePaths;
+  log?: (m: string) => void;
+};
 ```
 
-- [ ] **Step 5: Migrate `tests/integration/run-viewer.live.test.ts`**
+Create `src/agent-builder/builder.ts`:
 
-Apply the Step 1 transform to its `runChat({ runsRoot, runId, ... })` call(s) (create run + init telemetry, pass `run`).
+```typescript
+import { withAgentBuildSpan } from '../telemetry/spans.ts';
+import { generateProposal } from './generate.ts';
+import { suggestServers } from './suggest-tools.ts';
+import type { AgentProposal, BuildResult, BuilderDeps } from './types.ts';
+import { validateProposal } from './validate.ts';
+import { writeAgent } from './write.ts';
 
-- [ ] **Step 6: Run tests + typecheck**
+/** Human-readable consent card for a proposal. */
+export function renderProposal(p: AgentProposal): string {
+  const servers = p.suggestedServers.length
+    ? p.suggestedServers.map((s) => `  • ${s.packName} (scoped to ${s.scopeToAgent})`).join('\n')
+    : '  • (none)';
+  return [
+    `Proposed agent: ${p.name}`,
+    `  ${p.description}`,
+    `Why: ${p.rationale}`,
+    `Tools (MCP servers to mount):`,
+    servers,
+    `Files that will be written: agents/${p.name}.ts, agents/index.ts` +
+      (p.suggestedServers.length ? `, mcp.json` : ''),
+  ].join('\n');
+}
 
-Run: `bun test tests/cli/run-chat.test.ts` (PASS), `bun run typecheck` (clean).
+/** generate → suggest → validate → consent → write. Consent is mandatory; on
+ *  decline or invalid, nothing is written. */
+export function buildAgent(need: string, deps: BuilderDeps): Promise<BuildResult> {
+  return withAgentBuildSpan(need, async (rec) => {
+    const draft = await generateProposal(need, deps.model);
+    rec.event('generated', { name: draft.name });
+    const proposal: AgentProposal = {
+      ...draft,
+      suggestedServers: await suggestServers(need, draft, deps.model),
+    };
+    rec.event('suggested', { count: proposal.suggestedServers.length });
 
-- [ ] **Step 7: Lint + commit**
+    const issues = validateProposal(proposal, deps.existingNames(), deps.packNames());
+    rec.event('validated', { ok: issues.length === 0, issues: issues.length });
+    if (issues.length > 0) {
+      rec.outcome('invalid');
+      return { kind: 'invalid', issues };
+    }
 
-Run: `bun run lint:file -- "src/cli/chat.ts" "src/cli/run-chat.ts" "tests/cli/run-chat.test.ts" "tests/integration/run-viewer.live.test.ts"`.
+    const granted = await deps.confirm(renderProposal(proposal));
+    rec.event('consent', { granted });
+    if (!granted) {
+      rec.outcome('declined', proposal.name);
+      return { kind: 'declined' };
+    }
+
+    const files = writeAgent(proposal, deps.paths);
+    rec.event('written', { files: files.length });
+    rec.outcome('written', proposal.name, proposal.suggestedServers.length);
+    deps.log?.(`Created agent "${proposal.name}" (${files.length} file(s)). It is live on the next run.`);
+    return { kind: 'written', proposal, files };
+  });
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `bun test tests/agent-builder/builder.test.ts`
+Expected: PASS (all 3 — written / declined / invalid-without-consent).
+
+- [ ] **Step 6: Typecheck, lint, commit**
+
+Run: `bun run typecheck`; `bun run lint:file -- "src/telemetry/spans.ts" "src/agent-builder/types.ts" "src/agent-builder/builder.ts" "tests/agent-builder/builder.test.ts"`.
 
 ```bash
-git add src/cli/chat.ts src/cli/run-chat.ts tests/cli/run-chat.test.ts tests/integration/run-viewer.live.test.ts
-git commit -m "refactor(cli): chat/runChat use withMcpRun; ChatDeps takes run:RunHandle (Slice 16 Task 6)"
+git add src/telemetry/spans.ts src/agent-builder/types.ts src/agent-builder/builder.ts tests/agent-builder/builder.test.ts
+git commit -m "feat(agent-builder): buildAgent orchestration (generate→suggest→validate→consent→write) + agent.build span (Slice 17 Task 6)"
 ```
 
 ---
