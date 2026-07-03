@@ -1,30 +1,69 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { defaultConfigPath, loadMcpConfig } from '../mcp/config.ts';
 import { getPackEntry, STARTER_PACK } from '../mcp/pack.ts';
+import type { PackEntry } from '../mcp/types.ts';
 
-/** Copy a starter-pack entry into mcp.json (atomic write; never overwrites). */
-export function addPackEntry(
-  name: string,
-  configPath: string = defaultConfigPath(),
-): { ok: boolean; message: string } {
-  const pack = getPackEntry(name);
-  if (!pack) {
+type PackWriteResult = { ok: boolean; message: string };
+type PackRoot = { mcpServers?: Record<string, unknown> };
+
+/** Per-config-path queue: serializes each file's read-modify-write critical
+ *  section so two concurrent `addPackEntry` calls can't interleave a stale
+ *  read with another's write (Slice-15 check-then-act finding). Settled
+ *  (never-rejecting) so one failed add can't wedge the queue for the path. */
+const fileLocks = new Map<string, Promise<unknown>>();
+
+function withFileLock<T>(path: string, fn: () => T | Promise<T>): Promise<T> {
+  const tail = fileLocks.get(path) ?? Promise.resolve();
+  const next = tail.then(fn, fn);
+  fileLocks.set(
+    path,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
+/** Load mcp.json, defaulting to an empty root when it doesn't exist yet. */
+async function readRoot(
+  configPath: string,
+): Promise<{ ok: true; root: PackRoot } | { ok: false; message: string }> {
+  let raw: string;
+  try {
+    raw = await readFile(configPath, 'utf8');
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: true, root: {} };
+    }
     return {
       ok: false,
-      message: `unknown pack entry "${name}" — run \`bun run mcp list\``,
+      message: `cannot read mcp.json: ${(cause as Error).message}`,
     };
   }
-  let root: { mcpServers?: Record<string, unknown> } = {};
-  if (existsSync(configPath)) {
-    try {
-      root = JSON.parse(readFileSync(configPath, 'utf8')) as typeof root;
-    } catch (cause) {
-      return {
-        ok: false,
-        message: `mcp.json is not valid JSON: ${(cause as Error).message}`,
-      };
-    }
+  try {
+    return { ok: true, root: JSON.parse(raw) as PackRoot };
+  } catch (cause) {
+    return {
+      ok: false,
+      message: `mcp.json is not valid JSON: ${(cause as Error).message}`,
+    };
   }
+}
+
+/** Read-modify-write critical section: always re-reads the file fresh (never
+ *  a snapshot captured before the caller's turn in the queue), so it only
+ *  ever sees the latest on-disk state — no lost updates, no duplicates.
+ *  Crash-atomic write via a per-call temp file + rename. */
+async function writePackEntry(
+  name: string,
+  pack: PackEntry,
+  configPath: string,
+): Promise<PackWriteResult> {
+  const loaded = await readRoot(configPath);
+  if (!loaded.ok) return loaded;
+  const { root } = loaded;
   const servers = root.mcpServers ?? {};
   if (servers[name]) {
     return {
@@ -33,16 +72,33 @@ export function addPackEntry(
     };
   }
   servers[name] = pack.server;
-  const tmp = `${configPath}.tmp`;
-  writeFileSync(
+  const tmp = `${configPath}.tmp-${randomUUID()}`;
+  await writeFile(
     tmp,
     `${JSON.stringify({ ...root, mcpServers: servers }, null, 2)}\n`,
   );
-  renameSync(tmp, configPath);
+  await rename(tmp, configPath);
   const keyNote = pack.requiresEnv?.length
     ? ` (dormant until ${pack.requiresEnv.join(', ')} is set)`
     : '';
   return { ok: true, message: `added "${name}" to ${configPath}${keyNote}` };
+}
+
+/** Copy a starter-pack entry into mcp.json (atomic write; never overwrites).
+ *  Concurrent calls for the same configPath are serialized (see
+ *  `withFileLock`) so no update is lost and no entry is duplicated. */
+export function addPackEntry(
+  name: string,
+  configPath: string = defaultConfigPath(),
+): Promise<PackWriteResult> {
+  const pack = getPackEntry(name);
+  if (!pack) {
+    return Promise.resolve({
+      ok: false,
+      message: `unknown pack entry "${name}" — run \`bun run mcp list\``,
+    });
+  }
+  return withFileLock(configPath, () => writePackEntry(name, pack, configPath));
 }
 
 function list(): void {
@@ -74,7 +130,7 @@ function status(): void {
   }
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const [cmd, arg] = process.argv.slice(2);
   if (cmd === 'list') {
     list();
@@ -85,7 +141,7 @@ function main(): void {
     return;
   }
   if (cmd === 'add' && arg) {
-    const r = addPackEntry(arg);
+    const r = await addPackEntry(arg);
     (r.ok ? console.log : console.error)(r.message);
     if (!r.ok) process.exitCode = 1;
     return;
@@ -94,4 +150,9 @@ function main(): void {
   process.exitCode = 1;
 }
 
-if (import.meta.main) main();
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
