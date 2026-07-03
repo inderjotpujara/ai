@@ -115,3 +115,48 @@ GREEN after the implementation.
   call on that source — correct for `runProvision`'s single discovery pass,
   but would go stale if a `CatalogSource` were reused across multiple
   discovery passes without re-listing in between.
+
+## Review-finding fixes
+
+Two findings from the Task-14 review were fixed:
+
+### Important — no direct test for the `snapshotFallback` truth-source
+
+`tests/provisioning/eval.test.ts` covered `snapshotFallback` only through a
+hand-mocked `CatalogSource` whose `usedSnapshotFallback()` was a fixed stub —
+it never exercised the real `withSnapshotFallback` closure that tracks
+`usedFallback`. Added four tests directly to
+`tests/provisioning/snapshot-source.test.ts` that call the real
+`withSnapshotFallback(primary, snapshot)` wrapper:
+
+- `usedSnapshotFallback()` is `false` after a live, non-empty
+  `listCandidates()` call.
+- `usedSnapshotFallback()` is `true` after the live source returns an empty
+  array (falls through to the snapshot).
+- `usedSnapshotFallback()` is `true` after the live source throws.
+- A subsequent live, non-empty call resets `usedSnapshotFallback()` back to
+  `false` (guards against a forgotten reset / stuck-`true` regression).
+
+Confirmed non-vacuous by temporarily hardcoding
+`usedSnapshotFallback: () => false` in `withSnapshotFallback` and re-running
+the file: 3 of the 4 new tests failed for the expected reason (expected
+`true`, got `false`). Reverted and re-ran to confirm GREEN (6 pass, 0 fail).
+
+### Minor — unnecessary cast in `provisioner.ts`
+
+`src/provisioning/provisioner.ts:115`: removed the redundant `c.runtime as
+string` cast in `[...new Set(selected.map((c) => c.runtime as string))]`.
+`RuntimeKind` is a string enum, already structurally assignable to `string`,
+so `ProvisionSpanInfo.runtimes: string[]` still typechecks with the cast
+removed (`bun run typecheck` → 0 errors).
+
+### Verify (inline only, as instructed)
+
+- `bun run typecheck` -> 0 errors.
+- `bun run lint:file -- src/provisioning/provisioner.ts
+  tests/provisioning/snapshot-source.test.ts` -> clean (exit 0; one
+  pre-existing unused-`host`-variable warning in the test file predates this
+  change and is out of scope).
+- `bun run test:file -- "tests/provisioning/snapshot-source.test.ts"` -> 6
+  pass, 0 fail, 11 expect() calls. (Did NOT run the full `bun test` suite per
+  instructions.)

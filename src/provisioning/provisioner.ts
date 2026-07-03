@@ -112,7 +112,7 @@ export async function runProvision(opts: {
   }
 
   // 6) Sequential download with a live bar; degrade-never-crash per model.
-  const runtimes = [...new Set(selected.map((c) => c.runtime as string))];
+  const runtimes = [...new Set(selected.map((c) => c.runtime))];
   return withProvisionSpan(
     {
       candidateCount: ranked.length,
