@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { WriteStream } from 'node:fs';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { mkdir, rename, unlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { ProviderError } from '../../core/errors.ts';
 import type { ProviderKind } from '../../core/types.ts';
 import { ProgressTracker } from '../progress-tracker.ts';
@@ -13,6 +13,28 @@ import {
 } from '../types.ts';
 
 const HF_RESOLVE = 'https://huggingface.co';
+
+/**
+ * Joins `relPath` onto `destDir`, rejecting NUL bytes, absolute paths, and
+ * any `..` traversal segment so the result cannot land outside `destDir`.
+ * `relPath` originates from an untrusted modelRef (or, later, an HF tree
+ * `path` entry) — reused by the multi-file snapshot writer for the same reason.
+ */
+export function safeJoin(destDir: string, relPath: string): string {
+  if (
+    relPath.includes('\0') ||
+    isAbsolute(relPath) ||
+    /(^|[/\\])\.\.([/\\]|$)/.test(relPath)
+  ) {
+    throw new ProviderError(`unsafe download path: ${relPath}`);
+  }
+  const base = resolve(destDir);
+  const resolved = resolve(base, relPath);
+  if (resolved !== base && !resolved.startsWith(base + sep)) {
+    throw new ProviderError(`download path escapes destDir: ${relPath}`);
+  }
+  return resolved;
+}
 
 export async function sha256File(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -109,7 +131,7 @@ export function createHfFetchProvider(
       const [repo, file] = modelRef.split('::');
       if (file) {
         const url = `${HF_RESOLVE}/${repo}/resolve/main/${file}`;
-        await downloadFile(url, join(destDir, file), {
+        await downloadFile(url, safeJoin(destDir, file), {
           onProgress,
           signal,
           tracker,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ProviderKind } from '../../src/core/types.ts';
 import { createHfFetchProvider } from '../../src/provisioning/providers/hf-fetch.ts';
 import { DownloadPhase } from '../../src/provisioning/types.ts';
@@ -56,5 +56,41 @@ describe('createHfFetchProvider', () => {
     expect(existsSync(`${out}.part`)).toBe(false);
     expect(phases).toContain(DownloadPhase.Finalizing);
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
+  });
+
+  it('rejects a modelRef with a traversal file component and writes nothing outside destDir', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const parent = dirname(dest);
+    const chunk = new Uint8Array(1000);
+    const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+    });
+    await expect(
+      provider.download('org/repo::../../evil.gguf', {
+        onProgress: () => {},
+        signal: new AbortController().signal,
+        destDir: dest,
+      }),
+    ).rejects.toThrow();
+    expect(existsSync(join(parent, 'evil.gguf'))).toBe(false);
+    expect(existsSync(join(dirname(parent), 'evil.gguf'))).toBe(false);
+  });
+
+  it('rejects a modelRef with an absolute-path file component', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const chunk = new Uint8Array(1000);
+    const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+    });
+    await expect(
+      provider.download('org/repo::/etc/evil', {
+        onProgress: () => {},
+        signal: new AbortController().signal,
+        destDir: dest,
+      }),
+    ).rejects.toThrow();
+    expect(existsSync('/etc/evil')).toBe(false);
   });
 });
