@@ -1,5 +1,5 @@
-import { generateObject, type LanguageModel } from 'ai';
-import type { z } from 'zod';
+import { generateText, type LanguageModel } from 'ai';
+import { z } from 'zod';
 import { agentNames } from '../../agents/index.ts';
 import { ollamaCtxOptions } from '../core/agent-def.ts';
 import { Capability, PreferPolicy } from '../core/types.ts';
@@ -13,14 +13,41 @@ import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
-type GenerateObjectFn = typeof generateObject;
+type GenerateTextFn = typeof generateText;
 
-/** Wrap a live model as the structured-generation seam. `generateImpl` is
- *  injectable for tests; defaults to the AI SDK's generateObject. */
+/** Strip a ```json fence (if present) and slice from the first `{` to the
+ *  last `}`, mirroring `src/verification/claims.ts`'s `extractJson`. Local
+ *  models often wrap JSON in commentary or markdown fences. */
+function extractJson(raw: string): string {
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = (fence ? fence[1] : raw)?.trim() ?? raw.trim();
+  const start = body.indexOf('{');
+  const end = body.lastIndexOf('}');
+  return start >= 0 && end > start ? body.slice(start, end + 1) : body;
+}
+
+/** Parse `raw` as JSON and validate it against `schema`; throws on either
+ *  failure so the caller can decide whether to retry. */
+function parseAgainst<T>(raw: string, schema: z.ZodType<T>): T {
+  const parsed: unknown = JSON.parse(extractJson(raw));
+  return schema.parse(parsed);
+}
+
+/** Wrap a live model as the structured-generation seam. `generateTextImpl`
+ *  is injectable for tests; defaults to the AI SDK's generateText.
+ *
+ *  Local Ollama models (e.g. qwen3.5:9b) don't reliably honor the AI SDK's
+ *  provider-native structured-output/JSON mode (`generateObject`) — they can
+ *  return free-form YAML-ish `key: value` text instead of JSON using the
+ *  schema's keys. The repo's proven pattern for structured extraction from
+ *  local models is generateText + JSON extraction + parse (see
+ *  `src/verification/claims.ts` + `src/verification/deps.ts`), so this seam
+ *  follows the same shape: prompt for strict JSON, extract, parse with zod,
+ *  and retry once with a stricter reminder before giving up. */
 export function makeBuilderModel(
   model: LanguageModel,
   numCtx?: number,
-  generateImpl: GenerateObjectFn = generateObject,
+  generateTextImpl: GenerateTextFn = generateText,
 ): BuilderModel {
   const providerOptions = numCtx ? ollamaCtxOptions(numCtx) : undefined;
   return {
@@ -28,13 +55,40 @@ export function makeBuilderModel(
       schema: z.ZodType<T>;
       prompt: string;
     }): Promise<T> => {
-      const { object } = await generateImpl({
+      const keys =
+        args.schema instanceof z.ZodObject
+          ? Object.keys(args.schema.shape)
+          : [];
+      const keyHint =
+        keys.length > 0
+          ? ` using EXACTLY these keys: ${keys.join(', ')}.`
+          : '.';
+      const basePrompt = `${args.prompt}\n\nRespond with ONLY a JSON object (no markdown fences, no commentary)${keyHint}`;
+
+      const first = await generateTextImpl({
         model,
-        schema: args.schema,
-        prompt: args.prompt,
+        prompt: basePrompt,
         ...(providerOptions ? { providerOptions } : {}),
       });
-      return object as T;
+      try {
+        return parseAgainst(first.text, args.schema);
+      } catch {
+        // fall through to the retry below
+      }
+
+      const retryPrompt = `${basePrompt}\n\nThe previous response was not valid JSON. Return ONLY the JSON object, nothing else.`;
+      const second = await generateTextImpl({
+        model,
+        prompt: retryPrompt,
+        ...(providerOptions ? { providerOptions } : {}),
+      });
+      try {
+        return parseAgainst(second.text, args.schema);
+      } catch {
+        throw new Error(
+          'agent-builder: model did not return valid JSON for the proposal',
+        );
+      }
     },
   };
 }
