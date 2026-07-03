@@ -23,18 +23,78 @@ function textResult(text: string, isError = false) {
   };
 }
 
+// Collapse every balanced `(...)` group to a single space, dropping its
+// contents. Used to see past CTE bodies / column lists so the read-only gate
+// can find a WITH-prefixed query's real leading statement keyword without
+// parsing full SQL grammar.
+function stripParenGroups(sql: string): string {
+  let depth = 0;
+  let out = '';
+  for (const ch of sql) {
+    if (ch === '(') {
+      depth++;
+      if (depth === 1) out += ' ';
+      continue;
+    }
+    if (ch === ')') {
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (depth === 0) out += ch;
+  }
+  return out;
+}
+
+// A query is read-only if it is a bare SELECT, or a WITH-prefixed query whose
+// main statement (after the CTE definitions) is a SELECT. A CTE can legally
+// wrap a data-modifying main statement (`WITH x AS (...) DELETE ...`), so the
+// WITH case must resolve past every `name [(cols)] AS (body)` CTE definition
+// to find the real leading keyword — degrade to "reject" on anything that
+// doesn't match the expected shape.
+function isReadOnlyQuery(sql: string): boolean {
+  if (/^select\b/i.test(sql)) return true;
+  if (!/^with\b/i.test(sql)) return false;
+
+  const tokens = stripParenGroups(sql)
+    .replace(/,/g, ' , ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => t.toLowerCase());
+
+  let i = 0;
+  if (tokens[i] !== 'with') return false;
+  i++;
+  if (tokens[i] === 'recursive') i++;
+
+  for (;;) {
+    const name = tokens[i];
+    if (!name || name === ',') return false; // malformed CTE header
+    i++;
+    if (tokens[i] !== 'as') return false; // CTEs require AS in SQLite
+    i++;
+    if (tokens[i] === ',') {
+      i++;
+      continue;
+    }
+    break;
+  }
+
+  return tokens[i] === 'select';
+}
+
 server.registerTool(
   'query',
   {
     title: 'SQL Query',
-    description: `Run a SQL SELECT against the ${dbPath} SQLite database and return rows as JSON. Only SELECT statements are accepted; use execute for writes.`,
+    description: `Run a SQL SELECT (including a read-only WITH...SELECT CTE) against the ${dbPath} SQLite database and return rows as JSON. Data-modifying statements are rejected; use execute for writes.`,
     inputSchema: { sql: z.string() },
   },
   async ({ sql }) => {
     const trimmed = sql.trim();
-    if (!/^select\b/i.test(trimmed)) {
+    if (!isReadOnlyQuery(trimmed)) {
       return textResult(
-        'query only accepts SELECT statements; use the execute tool for writes',
+        'query only accepts read-only SELECT (or WITH...SELECT) statements; use the execute tool for writes',
         true,
       );
     }

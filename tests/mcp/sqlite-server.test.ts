@@ -49,6 +49,27 @@ test('sqlite MCP server: schema/execute/query round-trip', async () => {
     };
     expect(still.content[0]?.text).toContain('1'); // row survived
 
+    // read-only WITH...SELECT CTEs must be allowed (Slice-15 review finding)
+    const cte = (await q.execute(
+      { sql: 'WITH x AS (SELECT 1 AS n) SELECT * FROM x' },
+      opts,
+    )) as { isError?: boolean; content: { text: string }[] };
+    expect(cte.isError).not.toBe(true);
+    expect(cte.content[0]?.text).toContain('1');
+
+    // a data-modifying CTE must still be rejected, even though it starts
+    // with WITH and contains a nested SELECT
+    const cteWrite = (await q.execute(
+      { sql: 'WITH x AS (SELECT 1) DELETE FROM notes' },
+      opts,
+    )) as { isError?: boolean; content: { text: string }[] };
+    expect(cteWrite.isError).toBe(true);
+    const survived = (await q.execute(
+      { sql: 'SELECT count(*) AS n FROM notes' },
+      opts,
+    )) as { content: { text: string }[] };
+    expect(survived.content[0]?.text).toContain('1'); // row still survived
+
     // schema handles legal table names containing a double quote
     await exec.execute(
       { sql: 'CREATE TABLE "weird""name" (id INTEGER)' },
