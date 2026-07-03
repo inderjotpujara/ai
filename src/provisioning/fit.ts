@@ -12,6 +12,14 @@ export type FitCandidate = Candidate & {
 const DEFAULT_KV_PER_TOKEN = 131072;
 const FIT_CONTEXT_TOKENS = 8192; // sizing context for the fit estimate
 
+// Sizing keep-decision (Slice-14 follow-on, WS4/Task-16): candidates get their
+// size from `fileSizeBytes` (HF tree API / Ollama manifest — see
+// discovery/huggingface-gguf.ts and provisioning/catalog/*) with the
+// weights+KV estimate below as a fallback/floor. We deliberately did NOT add
+// `gguf-parser-go` (a Go binary dependency) to parse remote GGUF headers for
+// sizing — the HF-tree/manifest sizes are accurate enough and keep this a
+// pure-JS/TS stack. Revisit only if that sizing proves unreliable in practice.
+
 /** Filter to models that fit, rank largest-that-fits, mark top-per-runtime recommended. */
 export function fitAndRank(
   candidates: Candidate[],

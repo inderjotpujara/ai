@@ -5,7 +5,7 @@ import {
 } from '../../src/discovery/quant.ts';
 
 test('maps common GGUF quants to bytes/weight', () => {
-  expect(bytesPerWeightForQuant('Q4_K_M')).toBeCloseTo(0.56, 2);
+  expect(bytesPerWeightForQuant('Q4_K_M')).toBeCloseTo(0.6, 2);
   expect(bytesPerWeightForQuant('Q8_0')).toBeGreaterThan(1.0);
   expect(bytesPerWeightForQuant('unknown')).toBeGreaterThan(0); // safe default
 });

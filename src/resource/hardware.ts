@@ -26,17 +26,54 @@ function envFraction(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 && n <= 1 ? n : fallback;
 }
 
-/** GPU-usable bytes for a given total-RAM figure (the static Metal cap). */
-export function gpuBudgetBytes(totalRamBytes: number): number {
+/** Injectable seam for reading a live GPU/Metal working-set ceiling. */
+export type HardwareDeps = {
+  /**
+   * Live read of the OS/GPU working-set ceiling — e.g. macOS
+   * `MTLDevice.recommendedMaxWorkingSetSize` — in bytes. Return `undefined`
+   * when no live figure is available so callers fall back to the static
+   * tier-fraction heuristic (`GPU_BUDGET_FRACTION`) below.
+   */
+  readMetalWorkingSetBytes?: () => number | undefined;
+};
+
+/**
+ * Default live-read: there is no dependency-free, cross-platform way to call
+ * `MTLDevice.recommendedMaxWorkingSetSize` from Node without a native addon
+ * or shelling out to a fragile Swift/ObjC helper — both rejected as brittle
+ * (Slice-14 follow-on, WS4). So the default reader only consults an env
+ * override; everything else degrades to the static heuristic. Never crashes.
+ */
+function defaultReadMetalWorkingSetBytes(): number | undefined {
+  const raw = process.env.AGENT_METAL_WORKING_SET_BYTES;
+  const n = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * GPU-usable bytes for a given total-RAM figure. Prefers a live working-set
+ * read (via `deps.readMetalWorkingSetBytes`, env-backed by default) and
+ * falls back to the static Metal-cap heuristic when no live figure exists.
+ */
+export function gpuBudgetBytes(
+  totalRamBytes: number,
+  deps: HardwareDeps = {},
+): number {
+  const readLive =
+    deps.readMetalWorkingSetBytes ?? defaultReadMetalWorkingSetBytes;
+  const live = readLive();
+  if (live !== undefined && Number.isFinite(live) && live > 0) {
+    return Math.floor(live);
+  }
   return Math.floor(
     totalRamBytes *
       envFraction('AGENT_GPU_BUDGET_FRACTION', GPU_BUDGET_FRACTION),
   );
 }
 
-/** Static Metal-cap budget for the current machine (fallback, not live-aware). */
-export function machineBudgetBytes(): number {
-  return gpuBudgetBytes(os.totalmem());
+/** Metal-cap budget for the current machine (live-read when available, else the static fallback). */
+export function machineBudgetBytes(deps: HardwareDeps = {}): number {
+  return gpuBudgetBytes(os.totalmem(), deps);
 }
 
 /**
@@ -76,8 +113,10 @@ export async function availableRamBytes(): Promise<number> {
  * free-RAM gate. Recomputed on demand so it tracks memory pressure instead of
  * trusting a figure frozen at process start.
  */
-export async function liveBudgetBytes(): Promise<number> {
-  const metalCap = machineBudgetBytes();
+export async function liveBudgetBytes(
+  deps: HardwareDeps = {},
+): Promise<number> {
+  const metalCap = machineBudgetBytes(deps);
   const available = await availableRamBytes();
   const freeCap = Math.floor(
     available * envFraction('AGENT_FREE_BUDGET_FRACTION', FREE_BUDGET_FRACTION),
