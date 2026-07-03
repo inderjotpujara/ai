@@ -31,7 +31,7 @@ export type MountedRegistry = {
   merged: ToolSet;
   /** The slice an agent sees: unscoped entries + entries listing this agent. */
   forAgent(name: string): ToolSet;
-  mounted: { name: string; toolCount: number }[];
+  mounted: { name: string; toolCount: number; kind: McpTransportKind }[];
   skipped: { name: string; reason: string }[];
   close(): Promise<void>;
 };
@@ -78,7 +78,8 @@ export async function mountAll(
   }
 
   const servers: { entry: McpServerEntry; server: MountedServer }[] = [];
-  const mounted: { name: string; toolCount: number }[] = [];
+  const mounted: { name: string; toolCount: number; kind: McpTransportKind }[] =
+    [];
   const skipped: { name: string; reason: string }[] = [];
 
   for (const entry of config.entries) {
@@ -132,6 +133,7 @@ export async function mountAll(
     mounted.push({
       name: entry.name,
       toolCount: Object.keys(server.tools).length,
+      kind: entry.kind,
     });
   }
 

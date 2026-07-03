@@ -430,7 +430,12 @@ export function withToolSpan<T>(
 /** Root span for an MCP mount pass; the body records one event per server. */
 export function withMcpMountSpan<T>(
   fn: (
-    record: (name: string, outcome: string, toolCount?: number) => void,
+    record: (
+      name: string,
+      outcome: string,
+      toolCount?: number,
+      transport?: string,
+    ) => void,
   ) => Promise<T>,
 ): Promise<T> {
   return inSpan('mcp.mount', async (span) => {
@@ -440,6 +445,7 @@ export function withMcpMountSpan<T>(
       name: string,
       outcome: string,
       toolCount?: number,
+      transport?: string,
     ): void => {
       if (outcome === 'mounted') {
         mountedServers += 1;
@@ -451,6 +457,7 @@ export function withMcpMountSpan<T>(
         ...(toolCount !== undefined
           ? { [ATTR.MCP_TOOL_COUNT]: toolCount }
           : {}),
+        ...(transport !== undefined ? { [ATTR.MCP_TRANSPORT]: transport } : {}),
       });
     };
     const out = await fn(record);

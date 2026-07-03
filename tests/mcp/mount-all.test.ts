@@ -55,6 +55,33 @@ describe('mountAll', () => {
     expect(reg.mounted).toHaveLength(2);
     await reg.close();
   });
+  it('tags each mounted entry with its transport kind', async () => {
+    const config: McpConfig = {
+      entries: [
+        entry('stdio-server'),
+        {
+          kind: McpTransportKind.Http as const,
+          name: 'http-server',
+          url: 'https://example.test/mcp',
+          headers: {},
+          raw: { url: 'https://example.test/mcp' },
+        },
+      ],
+      dormant: [],
+      warnings: [],
+    };
+    const reg = await mountAll(
+      config,
+      deps({
+        mount: async () => fakeServer(['t']),
+      }),
+    );
+    expect(reg.mounted.map((m) => ({ name: m.name, kind: m.kind }))).toEqual([
+      { name: 'stdio-server', kind: McpTransportKind.Stdio },
+      { name: 'http-server', kind: McpTransportKind.Http },
+    ]);
+    await reg.close();
+  });
   it('scopes agent slices: scoped entry only for its agents, unscoped for all', async () => {
     let calls = 0;
     const config: McpConfig = {
