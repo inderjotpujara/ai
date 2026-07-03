@@ -1,5 +1,6 @@
 import type { Capability } from '../core/types.ts';
 import { Capability as Cap, RuntimeKind } from '../core/types.ts';
+import { resolveDestDir } from '../provisioning/dest-dir.ts';
 import { providerFor } from '../provisioning/registry.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import {
@@ -84,10 +85,7 @@ export async function runDiscovery(
         return;
       }
       const ctrl = new AbortController();
-      const destDir =
-        process.env.HF_HOME ??
-        process.env.OLLAMA_MODELS ??
-        `${process.cwd()}/model-images`;
+      const destDir = resolveDestDir();
       await providerFor(candidate.provider).download(model, {
         onProgress: () => {},
         signal: ctrl.signal,

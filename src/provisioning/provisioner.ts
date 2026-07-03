@@ -5,6 +5,7 @@ import type {
   HostCapabilities,
 } from '../discovery/catalog-source.ts';
 import { ATTR, withProvisionSpan } from '../telemetry/spans.ts';
+import { resolveDestDir } from './dest-dir.ts';
 import { type FitCandidate, fitAndRank } from './fit.ts';
 import { checkDiskSpace } from './supervisor.ts';
 import {
@@ -111,10 +112,7 @@ export async function runProvision(opts: {
     },
     async (span) => {
       const ctrl = new AbortController();
-      const destDir =
-        process.env.HF_HOME ??
-        process.env.OLLAMA_MODELS ??
-        `${process.cwd()}/model-images`;
+      const destDir = resolveDestDir();
       for (const c of selected) {
         try {
           const provider = deps.providerFor(c.provider);

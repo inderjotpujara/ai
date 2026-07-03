@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ProviderKind } from '../../src/core/types.ts';
 import { createHfFetchProvider } from '../../src/provisioning/providers/hf-fetch.ts';
 import { DownloadPhase } from '../../src/provisioning/types.ts';
@@ -31,6 +34,27 @@ describe('createHfFetchProvider', () => {
       destDir: '/tmp/dest',
     });
     expect(phases).toContain(DownloadPhase.Downloading);
+    expect(phases.at(-1)).toBe(DownloadPhase.Done);
+  });
+
+  it('HfGguf: writes the file to destDir atomically and reaches Done', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const chunk = new Uint8Array(1000);
+    const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+    });
+    const phases: DownloadPhase[] = [];
+    await provider.download('org/repo::model.gguf', {
+      onProgress: (p) => phases.push(p.phase),
+      signal: new AbortController().signal,
+      destDir: dest,
+    });
+    const out = join(dest, 'model.gguf');
+    expect(existsSync(out)).toBe(true);
+    expect(readFileSync(out).byteLength).toBe(2000);
+    expect(existsSync(`${out}.part`)).toBe(false);
+    expect(phases).toContain(DownloadPhase.Finalizing);
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
   });
 });
