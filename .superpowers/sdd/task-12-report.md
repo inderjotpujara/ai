@@ -1,119 +1,113 @@
-# Task 12 report (Slice 13 — Grounded Verification): live MiniCheck test
+# Task 12 report (Slice 18, WS3): MLX opt-in runtime selection with degrade-to-Ollama
 
-NOTE: this file previously held a stale report from an unrelated Slice 12 task
-("wire memory into crews + workflows") that reused this filename/number in a
-different slice's numbering. Replaced below with the correct Task 12 report
-for Slice 13.
+NOTE: this file previously held a stale report from an unrelated task (a
+Slice-13 "live MiniCheck test" task that reused the `task-12` filename under a
+different slice's numbering). Replaced below with the correct report for this
+Task 12.
 
 ## Summary
 
-Added `tests/integration/verification.live.test.ts` — a live test that
-exercises the real MiniCheck judge model (`bespoke-minicheck`, via
-`verifyModel()`) end-to-end through the real `verify()` primitive, and skips
-cleanly when Ollama or the judge model is unavailable.
+`src/cli/select-hook.ts` now resolves the declared runtime, and — only for a
+**non-Ollama** runtime (e.g. `MlxServer`) — probes `isAvailable()` before
+using it. If unreachable, selection degrades to the Ollama runtime, logs a
+clear message naming both the unreachable runtime and the fallback, and never
+throws. Ollama's own happy path is unchanged: no probe, no behavior change.
 
-## Skip guard
+## Implementation (`src/cli/select-hook.ts`)
 
-Mirrors `tests/integration/memory.live.test.ts`'s `ollamaReady()` +
-`describe.skipIf` pattern, extended with a pull-or-skip step for the judge
-model:
+- Added two new optional `SelectHookDeps` fields, following the file's
+  existing individually-optional-callback convention (`notify`, `listLoaded`):
+  - `runtimeFor?: (kind: RuntimeKind) => Runtime` — overridable runtime
+    resolver; defaults to the real `runtimeFor` from `../runtime/registry.ts`
+    (imported as `defaultRuntimeFor` to avoid a name clash).
+  - `log?: (message: string) => void` — fired only on a degrade; there is no
+    generic logger seam in this codebase (confirmed by search: `console.error`
+    calls are inline per-file, e.g. `select-runtime.ts`'s `notify` closure),
+    so this mirrors that same "optional callback → caller wires it" pattern
+    rather than introducing a new logging abstraction.
+- Selection logic:
+  ```ts
+  let rt = resolveRuntime(decl.runtime);
+  if (decl.runtime !== RuntimeKind.Ollama && !(await rt.isAvailable())) {
+    deps.log?.(`Runtime "${decl.runtime}" is unreachable for model "${decl.model}"; falling back to Ollama.`);
+    rt = resolveRuntime(RuntimeKind.Ollama);
+  }
+  const model = rt.createModel(decl);
+  return { model, numCtx: rt.kind === RuntimeKind.Ollama ? numCtx : undefined };
+  ```
+  Gating `numCtx` on the **resolved** `rt.kind` (not `decl.runtime`) is the
+  key correctness point: a degraded-to-Ollama path still needs `numCtx`
+  passed through, since it's now actually running on Ollama.
+- No auto Apple-Silicon override was added — a `MlxServer` declaration is only
+  ever used when the MLX server actually answers; otherwise it silently and
+  transparently becomes an Ollama run.
 
-- `judgeReady()` first calls the existing `ollamaReady(EMBED_MODEL)` helper
-  (checks `/api/version` reachable + `qwen3-embedding:0.6b` installed —
-  needed because the test also ingests memory for citations).
-- If that's up, it checks `isModelInstalled('bespoke-minicheck')` (from
-  `src/resource/ollama-control.ts`); if missing, it attempts
-  `control.pull('bespoke-minicheck')` once and re-checks installation.
-- The whole thing is wrapped in try/catch — any failure (Ollama down, pull
-  fails, network error) resolves `false`, so `describe.skipIf(!ready)` skips
-  the suite. No hang, no throw.
-- `ready` is computed once at module load (top-level `await`), same as the
-  memory live test.
+## Production wiring (`src/cli/chat.ts`, `src/cli/select-runtime.ts`)
 
-## Real-deps wiring
+Both real call sites already wire a `notify` closure to `console.error(...)`
+for selection notices. I extended both with `log: (message) =>
+console.error(message)` so the degrade message introduced here is actually
+visible to a real user, not just observable in tests — leaving it unwired
+would have made "log it" true only in the type system. This is a one-line
+addition per file, matching the existing convention exactly. Confirmed via a
+subagent code search that this is the only existing user-facing logging
+pattern in the CLI layer (no shared `Logger`/`main.ts`); OpenTelemetry
+(`recordModelSelect` etc.) is the separate structured-telemetry channel and
+was left as-is.
 
-Built the same way the CLI does (`src/cli/verify-runtime.ts` /
-`src/cli/memory.ts`), inlined into the test (not via `makeRealVerifyDeps`
-directly) to keep the test self-contained/explicit, matching the style of
-`memory.live.test.ts`:
+## Tests (`tests/cli/select-hook.test.ts`)
 
-- `createModelManager()` for the real Model Manager.
-- `runtimeFor(ProviderKind.Ollama).control` for the real Ollama control
-  (`isInstalled`/`pull`/embed, etc.).
-- `makeEmbedder(...)` + `createMemoryStore(...)` — identical construction to
-  `memory.live.test.ts`, writing to a scratch dir `/tmp/verify-live` (cleaned
-  up before and after).
-- `makeVerifyDeps({ manager, control, generalModel: qwenRouter.model, store,
-  space: 'default' })` from `src/verification/deps.ts` (Task 10) — the exact
-  factory the CLI uses, with `qwenRouter.model` (`qwen3.5:4b`) as the real
-  general/decompose/grade model, matching `makeRealVerifyDeps` in
-  `verify-runtime.ts`.
+Added a `fakeRuntime(kind, available)` stub builder (implements the full
+`Runtime` shape so `deps.runtimeFor` can be overridden without touching a live
+server) and:
 
-Ingested two evidence chunks via `store.remember(text, { space, source, at })`
-with explicit `source` ids (`raft-fact`, `sky-fact`) so citation ids are
-deterministic (`${source}#0`) rather than depending on recall ranking. Added a
-sanity check that `store.getByIds` resolves the raft chunk's text before using
-it in a citation, so a failing assertion downstream points at the judge model
-rather than an id-wiring bug.
+1. **Updated** the pre-existing MLX test (previously relied on the *real*
+   singleton `mlxServerRuntime`, silently passing before this change only
+   because `isAvailable()` was never called). Confirmed via RED run that it
+   now fails without an injected stub (`mlxServerRuntime.isAvailable()`
+   returns `false` in this sandbox — no live MLX server — causing an
+   unintended degrade and `numCtx: 8192` where the test expected `undefined`).
+   Fixed by injecting `runtimeFor: (kind) => fakeRuntime(kind, true)`; renamed
+   to make the "MLX available → no degrade" case explicit, and asserts
+   `log` was never called.
+2. **New**: MLX unavailable → degrades to Ollama. Injects `runtimeFor` so only
+   `RuntimeKind.Ollama` reports available; asserts `pre.model` is truthy (no
+   throw), `numCtx` is `8192` (Ollama's, passed through post-degrade), `log`
+   was called exactly once, and the message names both `MlxServer` and
+   `Ollama`.
 
-## Assertions
+RED confirmed first (ran the suite before writing the fix — the pre-existing
+MLX test failed exactly as described above, which stood in for the "before"
+state since the brief's new degrade test doesn't compile until the `log`/
+`runtimeFor` deps exist). GREEN confirmed after implementing.
 
-1. **Grounded**: answer `"Raft elects a leader using randomized election
-   timeouts. [mem:raft-fact#0]"` against the Raft evidence chunk ("The Raft
-   consensus algorithm elects a leader via randomized election timeouts.") →
-   `verify(...)` expected `supported: true`.
-2. **Planted hallucination**: answer `"The sky appears blue because it is
-   reflecting the ocean. [mem:sky-fact#0]"` cites a chunk whose real text says
-   "The sky appears blue due to Rayleigh scattering." — contradicts it →
-   expected `supported: false`, and `unsupportedClaims` joined+lowercased
-   expected to match `/ocean|reflecting/` (the hallucinated claim text
-   itself).
+## Verification
 
-Both calls go through the real `verify()` (`src/verification/verify.ts`),
-exercising `decomposeClaims` → `getByIds` → `ensureJudge(verifyModel())` →
-`verifyFaithfulness`/`checkClaim` against the real MiniCheck model end-to-end.
-180s timeout on the `it(...)`, matching the memory live test.
-
-## Run results in this environment
-
-- Ollama is **not reachable** here (`curl localhost:11434/api/version`
-  returned nothing — connection refused). `judgeReady()` correctly resolved
-  `false`.
-- `bun test tests/integration/verification.live.test.ts` → `0 pass, 1 skip,
-  0 fail`, completed in 163ms — clean skip, no hang, no error.
-- `bun run typecheck` → clean.
-- `bun run lint:file -- "tests/integration/verification.live.test.ts"` →
-  clean (biome, no fixes needed).
-- Full `bun run check` (docs:check + typecheck + lint + full test suite) →
-  **green**: 293 pass, 19 skip, 0 fail, 631 expect() calls across 312 tests /
-  103 files. The new live test is one of the 19 skips.
-
-The test did **not** run against the real model in this environment (no
-Ollama available) — only the skip path was exercised. It has never been run
-"hot" against a live `bespoke-minicheck`, so that should be validated on a
-machine with Ollama + the model available before fully trusting the
-assertions' wording/thresholds match real MiniCheck output. The logic mirrors
-the offline gate (Task 11) and unit tests (`tests/verification/verify.test.ts`),
-which do pass, so confidence is reasonably high, but the live numeric
-threshold behavior (`verifyThreshold()` default 0.9) with real model variance
-is unverified.
+- `bun run typecheck` → clean, 0 errors (whole repo).
+- `bun run test:file -- "tests/cli/select-hook.test.ts"` → **5 pass, 0 fail**,
+  14 `expect()` calls.
+- Additionally ran (scoped, not the full suite) `tests/cli/select-runtime.test.ts`
+  and `tests/cli/run-chat.test.ts` since I touched those two files for the
+  `log` wiring — **5 pass, 0 fail**, 11 `expect()` calls.
+- Did not run the full `bun test` suite per instructions (caller runs it after
+  commit).
 
 ## Files touched
 
-- `/Users/inderjotsingh/ai/tests/integration/verification.live.test.ts` (new)
+- `src/cli/select-hook.ts` — degrade logic + new optional deps.
+- `src/cli/select-runtime.ts` — wire `log` to `console.error`.
+- `src/cli/chat.ts` — wire `log` to `console.error`.
+- `tests/cli/select-hook.test.ts` — fake-runtime stub + updated/added tests.
 
 ## Concerns
 
-- Cannot confirm the "RAN" path (real MiniCheck call) in this sandbox — no
-  Ollama daemon reachable. Recommend a follow-up manual run on a dev machine
-  with Ollama + `bespoke-minicheck` pulled to confirm the assertions hold
-  against real model output (especially the hallucination case, since
-  MiniCheck's yes/no framing could be sensitive to phrasing).
-- The pre-commit `docs:check` hook ran and passed automatically as part of the
-  commit (no `docs/architecture.md` change needed for a test-only addition).
-- Left other pre-existing modified files (`.remember/`, `.superpowers/sdd/*.md`
-  from sibling task agents) untouched/unstaged — commit only includes the new
-  test file, scoped to Task 12.
-
-Commit: `f0cc57b` — "test(verification): live MiniCheck faithfulness
-roundtrip (skips w/o model)"
+- No architecture-doc update was made for this change — it's an internal
+  selection-hook behavior change (opt-in + degrade), not a new subsystem or a
+  changed data-flow edge in `docs/architecture.md`; the MLX runtime and its
+  opt-in nature are already documented there from an earlier slice. Flagging
+  this call for the slice's final doc-accuracy review rather than silently
+  assuming it's out of scope.
+- Left all other modified files in the working tree (`.remember/`,
+  `.superpowers/sdd/task-*-brief.md` etc. from sibling task agents running in
+  parallel) untouched and unstaged — this commit is scoped to the four files
+  above.

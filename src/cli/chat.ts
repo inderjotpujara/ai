@@ -107,6 +107,7 @@ async function main(): Promise<void> {
     pinned: [qwenRouter.model],
     capture,
     notify,
+    log: (message) => console.error(message),
   });
 
   try {

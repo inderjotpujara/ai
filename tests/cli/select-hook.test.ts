@@ -1,3 +1,4 @@
+import type { LanguageModel } from 'ai';
 import { expect, mock, test } from 'bun:test';
 import { BOOTSTRAP } from '../../models/registry.ts';
 import { createSelectHook } from '../../src/cli/select-hook.ts';
@@ -9,6 +10,27 @@ import {
   PreferPolicy,
   RuntimeKind,
 } from '../../src/core/types.ts';
+import type { Runtime } from '../../src/runtime/runtime.ts';
+
+/** A minimal stub runtime for injecting via `SelectHookDeps.runtimeFor` in tests,
+ *  so degrade behavior can be exercised without a live MLX/Ollama server. */
+function fakeRuntime(kind: RuntimeKind, available: boolean): Runtime {
+  return {
+    kind,
+    isAvailable: async () => available,
+    createModel: () => ({ modelId: kind }) as unknown as LanguageModel,
+    control: {
+      isInstalled: async () => true,
+      pull: async () => {},
+      warm: async () => {},
+      unload: async () => {},
+      listLoaded: async () => [],
+      getModelMax: async () => undefined,
+      getModelKvArch: async () => undefined,
+      embed: async () => [],
+    },
+  };
+}
 
 function specialist(): Agent {
   return {
@@ -83,17 +105,43 @@ test('agent without modelReq is a no-op', async () => {
   expect(ensureReady).not.toHaveBeenCalled();
 });
 
-test('hook builds via MLX runtime for MlxServer decl: model defined, numCtx undefined', async () => {
+test('hook builds via MLX runtime for MlxServer decl when MLX is available: model defined, numCtx undefined, no degrade', async () => {
   const ensureReady = mock(async () => 8192);
   const capture = {};
+  const log = mock((_msg: string) => {});
   const hook = createSelectHook({
     registry: [mlxDecl],
     ensureReady,
     pinned: [],
     capture,
+    runtimeFor: (kind) => fakeRuntime(kind, true),
+    log,
   });
   const pre = await hook(specialist());
   expect(pre && 'model' in pre && pre.model).toBeTruthy();
   // numCtx is undefined for non-Ollama providers — num_ctx is an Ollama-specific option
   expect(pre && 'numCtx' in pre ? pre.numCtx : 'absent').toBeUndefined();
+  expect(log).not.toHaveBeenCalled();
+});
+
+test('hook degrades to Ollama when the declared MLX runtime is unreachable: no throw, degrade logged', async () => {
+  const ensureReady = mock(async () => 8192);
+  const capture = {};
+  const log = mock((_msg: string) => {});
+  const hook = createSelectHook({
+    registry: [mlxDecl],
+    ensureReady,
+    pinned: [],
+    capture,
+    runtimeFor: (kind) =>
+      fakeRuntime(kind, kind === RuntimeKind.Ollama), // only Ollama is reachable
+    log,
+  });
+  const pre = await hook(specialist());
+  expect(pre && 'model' in pre && pre.model).toBeTruthy();
+  // Degraded to Ollama, so the Ollama-specific numCtx option is passed through.
+  expect(pre && 'numCtx' in pre ? pre.numCtx : 'absent').toBe(8192);
+  expect(log).toHaveBeenCalledTimes(1);
+  expect(log.mock.calls[0]?.[0]).toContain('MlxServer');
+  expect(log.mock.calls[0]?.[0]).toContain('Ollama');
 });
