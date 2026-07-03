@@ -23,6 +23,24 @@ describe('hfTreeFiles', () => {
       { path: 'README.md', size: 1_000, oid: undefined },
     ]);
   });
+
+  it('excludes directory entries from the recursive tree', async () => {
+    const fakeFetch = async () =>
+      new Response(
+        JSON.stringify([
+          { path: 'onnx', type: 'directory', size: 0 },
+          { path: 'model.safetensors', type: 'file', size: 42 },
+        ]),
+        { status: 200 },
+      );
+    const files = await hfTreeFiles(
+      'mlx-community/x',
+      fakeFetch as unknown as typeof fetch,
+    );
+    expect(files).toEqual([
+      { path: 'model.safetensors', size: 42, oid: undefined },
+    ]);
+  });
 });
 
 describe('hfTreeSize', () => {

@@ -124,3 +124,114 @@ asserts the download still succeeds; it is not a failure.)
   already correct per Task 8.
 - Ran only the focused test file per instructions; did not run the full
   suite.
+
+## Review-finding fixes (post-landing)
+
+Three findings from the Task 9 review, fixed on `slice-18-debt-wrapup-mlx`.
+
+### Finding 1 (Important) — directory tree entries aborted the whole snapshot
+
+`hf-catalog.ts`'s `TreeEntry` didn't read HF's `type` field. HF's recursive
+tree (`tree/main?recursive=true`) returns `{ type: 'directory', size: 0 }`
+entries for repos with subfolders (e.g. an `onnx/` dir alongside the MLX
+weights). Each directory entry flowed into `hfTreeFiles` unfiltered, then
+into the snapshot download loop in `hf-fetch.ts`, where `downloadFile`
+fetched `resolve/main/<dir>`, got a non-2xx, threw `ProviderError`, and
+aborted the *entire* snapshot over one non-file entry.
+
+Fix: added `type?: string` to `TreeEntry`; `hfTreeFiles` now filters out
+`type === 'directory'` before mapping, so only files reach every caller
+(`hfTreeSize`, the single-file lookup, and the snapshot loop). `hfTreeSize`'s
+sum is unaffected — directories were already size 0, so excluding them
+entirely (rather than summing a 0) changes nothing numerically; the existing
+`hfTreeSize` tests still pass unmodified. Per-file failures are untouched: a
+real file's download failure still throws and aborts the snapshot, per the
+brief (a partial model install is useless).
+
+### Finding 2 (Important) — no traversal test on the snapshot path
+
+The single-file (`HfGguf`) branch already had a traversal test exercising
+`safeJoin`, but the snapshot (`HfSnapshot`) branch's `f.path` — sourced from
+the same untrusted HF tree response — had no equivalent. Added
+`'HfSnapshot: rejects a tree entry with a traversal path and writes nothing
+outside destDir'`: injects `treeFiles` returning `{ path: '../evil.bin',
+size: 2000 }`, asserts `download()` rejects and that `evil.bin` never lands
+in the parent of `destDir` (or its parent). No production code change was
+needed here — `safeJoin(destDir, \`${repo}/${f.path}\`)` in the snapshot
+loop already guards this path (the joined string contains a `/../` segment,
+which `safeJoin`'s regex rejects); this test closes the coverage gap and
+pins the behavior against regression.
+
+### Finding 3 (Minor) — Done emitted once, not per-file-plus-final
+
+Each `downloadFile` call ends in its own terminal `DownloadPhase.Done`. The
+snapshot loop's `onProgress` relay forwarded that phase unchanged (just
+byte-rescaled) to the outer `onProgress`, so a snapshot emitted one `Done`
+per file *plus* a final redundant `Done` after the loop — for a 2-file
+snapshot, 3 `Done` events total.
+
+Fix: in the relay, map a per-file `DownloadPhase.Done` to
+`DownloadPhase.Finalizing` (the phase that already precedes `Done` for that
+file) before feeding it through the outer tracker; the single `Done` emitted
+after the loop is now the only one. Progress stays monotonic because
+`Finalizing`'s `bytesCompleted` for a completed file equals what `Done`
+would have reported — no value or ordering regression, only fewer duplicate
+terminal events. Added an assertion to the existing 2-file snapshot test
+(`phases.filter((p) => p === DownloadPhase.Done)).toHaveLength(1)`) to pin
+this.
+
+### Also added — directory-filter test
+
+`tests/provisioning/hf-catalog.test.ts`: `'excludes directory entries from
+the recursive tree'` — a tree with `{ path: 'onnx', type: 'directory', size:
+0 }` plus a real file asserts `hfTreeFiles` returns only the file.
+
+### RED (before the fix, dir-filter + traversal tests only)
+
+The traversal test was GREEN from the start (no production change needed —
+see Finding 2). The dir-filter test failed against the pre-fix
+`hfTreeFiles` (returned both entries, including the directory) and the
+Done-count assertion failed against the pre-fix relay (`toHaveLength(1)`
+received `3`):
+
+```
+$ bun run test:file -- "tests/provisioning/hf-fetch.test.ts" "tests/provisioning/hf-catalog.test.ts"
+(pre-fix, dir-filter + Done-count only)
+error: expect(received).toEqual(expected)
+  // hfTreeFiles included { path: 'onnx', size: 0, oid: undefined }
+error: expect(received).toHaveLength(expected)
+Expected length: 1
+Received length: 3
+```
+
+### GREEN (after the fix)
+
+```
+$ bun run typecheck
+$ tsc --noEmit
+(clean, no output — exit 0)
+
+$ bun run test:file -- "tests/provisioning/hf-fetch.test.ts" "tests/provisioning/hf-catalog.test.ts"
+$ bun test tests/provisioning/hf-fetch.test.ts tests/provisioning/hf-catalog.test.ts
+HF tree lookup failed for org/repo::model.gguf: error: tree service unavailable
+  at treeFiles (tests/provisioning/hf-fetch.test.ts:112:19)
+  at resolveExpectedOid (src/provisioning/providers/hf-fetch.ts:170:27)
+  at download (src/provisioning/providers/hf-fetch.ts:187:35)
+  at <anonymous> (tests/provisioning/hf-fetch.test.ts:116:20)
+
+ 16 pass
+ 0 fail
+ 40 expect() calls
+Ran 16 tests across 2 files. [36.00ms]
+```
+
+(Same expected `console.error` degrade-and-log as before, from test 3 —
+not a failure.)
+
+### Concerns / notes (review-fix pass)
+
+- Ran only the two focused test files per instructions; did not run the
+  full suite (the caller runs it after commit).
+- Did not touch `hfTreeSize`'s summation logic — verified by inspection and
+  by the pre-existing, unmodified `hfTreeSize` tests still passing that
+  excluding size-0 directory entries changes no sums.

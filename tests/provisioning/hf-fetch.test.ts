@@ -82,6 +82,8 @@ describe('createHfFetchProvider', () => {
     expect(readFileSync(configPath).byteLength).toBe(3);
     expect(readFileSync(weightsPath).byteLength).toBe(5);
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
+    // Exactly one Done for the whole snapshot, not one per file.
+    expect(phases.filter((p) => p === DownloadPhase.Done)).toHaveLength(1);
   });
 
   it('HfSnapshot: a rejecting tree fetch degrades to a ProviderError, not a crash', async () => {
@@ -185,6 +187,26 @@ describe('createHfFetchProvider', () => {
     ).rejects.toThrow();
     expect(existsSync(join(parent, 'evil.gguf'))).toBe(false);
     expect(existsSync(join(dirname(parent), 'evil.gguf'))).toBe(false);
+  });
+
+  it('HfSnapshot: rejects a tree entry with a traversal path and writes nothing outside destDir', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const parent = dirname(dest);
+    const chunk = new Uint8Array(1000);
+    const provider = createHfFetchProvider(ProviderKind.HfSnapshot, {
+      fetchImpl: (async () =>
+        streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
+      treeFiles: async () => [{ path: '../evil.bin', size: 2000 }],
+    });
+    await expect(
+      provider.download('mlx-community/x', {
+        onProgress: () => {},
+        signal: new AbortController().signal,
+        destDir: dest,
+      }),
+    ).rejects.toThrow();
+    expect(existsSync(join(parent, 'evil.bin'))).toBe(false);
+    expect(existsSync(join(dirname(parent), 'evil.bin'))).toBe(false);
   });
 
   it('rejects (not crashes) when the write stream errors, and leaves no .part file', async () => {

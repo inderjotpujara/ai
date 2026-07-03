@@ -216,11 +216,16 @@ export function createHfFetchProvider(
         await downloadFile(fileUrl, destPath, {
           // Re-scale this file's own (isolated) tracker output onto the
           // whole-snapshot byte range so percent climbs monotonically across
-          // files instead of resetting/jumping backwards per file.
+          // files instead of resetting/jumping backwards per file. Each
+          // per-file download ends in its own terminal `Done` — relay that
+          // as `Finalizing` instead, so the snapshot emits exactly one
+          // `Done`, after the loop, once every file has landed.
           onProgress: (p) =>
             onProgress(
               tracker.update(
-                p.phase,
+                p.phase === DownloadPhase.Done
+                  ? DownloadPhase.Finalizing
+                  : p.phase,
                 bytesBeforeThisFile + p.bytesCompleted,
                 bytesTotal,
               ),

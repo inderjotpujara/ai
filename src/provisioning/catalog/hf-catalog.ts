@@ -12,6 +12,7 @@ const HF_API = 'https://huggingface.co/api';
 
 type TreeEntry = {
   path: string;
+  type?: string;
   size?: number;
   lfs?: { size?: number; oid?: string };
 };
@@ -43,11 +44,16 @@ export async function hfTreeFiles(
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ path: string; size: number; oid?: string }[]> {
   const tree = await fetchTree(repoId, fetchImpl);
-  return tree.map((e) => ({
-    path: e.path,
-    size: e.lfs?.size ?? e.size ?? 0,
-    oid: e.lfs?.oid,
-  }));
+  // HF's recursive tree includes `type: 'directory'` entries (size 0) for
+  // repos with subfolders. Only files are downloadable — a directory path
+  // fed into the snapshot resolve URL 404s and aborts the whole download.
+  return tree
+    .filter((e) => e.type !== 'directory')
+    .map((e) => ({
+      path: e.path,
+      size: e.lfs?.size ?? e.size ?? 0,
+      oid: e.lfs?.oid,
+    }));
 }
 
 /** Pre-download size: one GGUF file's size, or the summed tree for a snapshot. */
