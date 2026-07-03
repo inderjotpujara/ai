@@ -7,6 +7,7 @@ import { ProviderError } from '../../core/errors.ts';
 import type { ProviderKind } from '../../core/types.ts';
 import { hfTreeFiles } from '../catalog/hf-catalog.ts';
 import { ProgressTracker } from '../progress-tracker.ts';
+import { StallWatchdog, withRetry } from '../supervisor.ts';
 import {
   DownloadPhase,
   type DownloadProgress,
@@ -14,6 +15,24 @@ import {
 } from '../types.ts';
 
 const HF_RESOLVE = 'https://huggingface.co';
+const STALL_MS = 90_000; // same stall timeout as ollama.ts
+
+type RetryConfig = {
+  attempts: number;
+  baseMs: number;
+  capMs: number;
+  jitter: () => number;
+};
+
+// Per-file retry: gentler attempt count than Ollama's whole-pull retry (a
+// snapshot has many files, so one flaky file shouldn't cost as many attempts
+// as re-pulling everything), but the same backoff shape/jitter as ollama.ts.
+const DEFAULT_RETRY: RetryConfig = {
+  attempts: 4,
+  baseMs: 1_000,
+  capMs: 45_000,
+  jitter: () => 0.5 + Math.random() / 2, // same full-ish jitter as ollama.ts
+};
 
 /**
  * Joins `relPath` onto `destDir`, rejecting NUL bytes, absolute paths, and
@@ -92,19 +111,23 @@ export function createHfFetchProvider(
     treeFiles?: (
       repo: string,
     ) => Promise<{ path: string; size: number; oid?: string }[]>;
+    /** Test seam: override the per-file retry backoff (default mirrors ollama.ts's shape/jitter). */
+    retry?: RetryConfig;
   } = {},
 ): DownloadProvider {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const sha256 = deps.sha256 ?? sha256File;
   const openWriteStream = deps.openWriteStream ?? createWriteStream;
   const treeFiles = deps.treeFiles ?? hfTreeFiles;
+  const retry = deps.retry ?? DEFAULT_RETRY;
 
   /**
    * Streams a single HF file to `<destPath>.part`, verifies its sha256, then
    * atomically renames it into place. Degrades to a clean state on any
    * failure/abort: the `.part` file is always removed, never the final file.
+   * One attempt only — `downloadFile` below adds retry + stall-watchdog.
    */
-  async function downloadFile(
+  async function downloadFileOnce(
     url: string,
     destPath: string,
     opts: {
@@ -154,6 +177,61 @@ export function createHfFetchProvider(
       if (stream && !stream.destroyed) stream.destroy();
       if (existsSync(partPath)) await unlink(partPath);
     }
+  }
+
+  /**
+   * Retry + stall-watchdog parity with ollama.ts: a transient network blip
+   * (fetch throws, or the transfer stalls) retries this one file instead of
+   * failing the whole download outright. Each attempt re-invokes
+   * `downloadFileOnce` from scratch, so its own `.part` finally-cleanup runs
+   * per failed attempt and the next attempt always starts from a clean
+   * `.part` (never appends to a stale one). `signal` aborts promptly: it is
+   * threaded into both the retry loop (stops re-attempting) and a per-attempt
+   * AbortController (stops the in-flight fetch/read immediately).
+   */
+  async function downloadFile(
+    url: string,
+    destPath: string,
+    opts: {
+      onProgress: (p: DownloadProgress) => void;
+      signal: AbortSignal;
+      tracker: ProgressTracker;
+      expectedOid?: string;
+    },
+  ): Promise<void> {
+    const { onProgress, signal: outer, tracker, expectedOid } = opts;
+    await withRetry(
+      async () => {
+        const ctrl = new AbortController();
+        const onAbort = () => ctrl.abort();
+        outer.addEventListener('abort', onAbort);
+        const watchdog = new StallWatchdog(STALL_MS, () => ctrl.abort());
+        watchdog.start(5_000);
+        try {
+          await downloadFileOnce(url, destPath, {
+            onProgress: (p) => {
+              watchdog.beat(p.bytesCompleted);
+              onProgress(p);
+            },
+            signal: ctrl.signal,
+            tracker,
+            expectedOid,
+          });
+        } finally {
+          watchdog.stop();
+          outer.removeEventListener('abort', onAbort);
+        }
+      },
+      {
+        attempts: retry.attempts,
+        baseMs: retry.baseMs,
+        capMs: retry.capMs,
+        jitter: retry.jitter,
+        signal: outer,
+        onRetry: (n) =>
+          onProgress({ ...tracker.snapshot(), error: `retry ${n}` }),
+      },
+    );
   }
 
   /**

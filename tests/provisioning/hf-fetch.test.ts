@@ -134,6 +134,9 @@ describe('createHfFetchProvider', () => {
       treeFiles: async () => [
         { path: 'config.json', size: 3, oid: 'expected-hash' },
       ],
+      // A hash mismatch is permanent, not transient — single attempt keeps
+      // this test fast instead of burning through retry backoff.
+      retry: { attempts: 1, baseMs: 0, capMs: 0, jitter: () => 0 },
     });
     await expect(
       provider.download('mlx-community/x', {
@@ -217,6 +220,9 @@ describe('createHfFetchProvider', () => {
         streamingResponse([chunk, chunk], 2000)) as unknown as typeof fetch,
       openWriteStream: () => new ErroringWriteStream(),
       treeFiles: async () => [],
+      // The simulated write failure is deterministic (fails every attempt) —
+      // single attempt keeps this test fast instead of burning through retry backoff.
+      retry: { attempts: 1, baseMs: 0, capMs: 0, jitter: () => 0 },
     });
     await expect(
       provider.download('org/repo::model.gguf', {
@@ -258,6 +264,9 @@ describe('createHfFetchProvider', () => {
         expect(repo).toBe('org/repo');
         return [{ path: 'model.gguf', size: 2000, oid: 'expected-hash' }];
       },
+      // A hash mismatch is permanent, not transient — single attempt keeps
+      // this test fast instead of burning through retry backoff.
+      retry: { attempts: 1, baseMs: 0, capMs: 0, jitter: () => 0 },
     });
     await expect(
       provider.download('org/repo::model.gguf', {
@@ -288,6 +297,35 @@ describe('createHfFetchProvider', () => {
       destDir: dest,
     });
     expect(existsSync(join(dest, 'model.gguf'))).toBe(true);
+    expect(phases.at(-1)).toBe(DownloadPhase.Done);
+  });
+
+  it('retries a transient fetchImpl failure and completes the download on the second attempt', async () => {
+    const dest = mkdtempSync(join(tmpdir(), 'hf-'));
+    const chunk = new Uint8Array(1000);
+    let calls = 0;
+    const provider = createHfFetchProvider(ProviderKind.HfGguf, {
+      fetchImpl: (async () => {
+        calls++;
+        if (calls === 1)
+          throw new Error('ECONNRESET: simulated transient network blip');
+        return streamingResponse([chunk, chunk], 2000);
+      }) as unknown as typeof fetch,
+      treeFiles: async () => [],
+      // Fast, deterministic backoff: proves retry engaged without real timers.
+      retry: { attempts: 3, baseMs: 0, capMs: 0, jitter: () => 0 },
+    });
+    const phases: DownloadPhase[] = [];
+    await provider.download('org/repo::model.gguf', {
+      onProgress: (p) => phases.push(p.phase),
+      signal: new AbortController().signal,
+      destDir: dest,
+    });
+    expect(calls).toBe(2);
+    const out = join(dest, 'model.gguf');
+    expect(existsSync(out)).toBe(true);
+    expect(readFileSync(out).byteLength).toBe(2000);
+    expect(existsSync(`${out}.part`)).toBe(false);
     expect(phases.at(-1)).toBe(DownloadPhase.Done);
   });
 });
