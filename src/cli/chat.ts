@@ -45,13 +45,29 @@ export function warnUnknownChatAgents(
   warnUnknownAgents(config, agentNames(), warn);
 }
 
-/** Non-invasive first-boot offer: only fires interactively, and only on explicit consent. */
-async function maybeAutoProvision(): Promise<void> {
-  if (!(process.stderr.isTTY ?? false)) return;
+export type MaybeAutoProvisionDeps = {
+  /** Override the TTY gate for testing; defaults to interactiveTTY(). */
+  isTTY?: boolean;
+  detectMissing?: typeof detectMissing;
+  isModelInstalled?: typeof isModelInstalled;
+  askYesNo?: typeof askYesNo;
+};
+
+/** Non-invasive first-boot offer: only fires interactively (stdin AND stderr
+ *  both TTYs — see interactiveTTY()), and only on explicit consent. Judging
+ *  on stderr alone would let `cmd < /dev/null` hang on an ended stdin. */
+export async function maybeAutoProvision(
+  deps: MaybeAutoProvisionDeps = {},
+): Promise<void> {
+  const isTTY = deps.isTTY ?? interactiveTTY();
+  if (!isTTY) return;
+  const detect = deps.detectMissing ?? detectMissing;
+  const checkInstalled = deps.isModelInstalled ?? isModelInstalled;
+  const ask = deps.askYesNo ?? askYesNo;
   const autoYes = process.env.AGENT_PROVISION_AUTO_YES === '1';
-  const missing = await detectMissing(BOOTSTRAP, (m) => isModelInstalled(m));
+  const missing = await detect(BOOTSTRAP, (m) => checkInstalled(m));
   if (missing.length === 0) return;
-  const ok = await askYesNo(
+  const ok = await ask(
     `${missing.length} required model(s) not installed: ${missing.map((m) => m.model).join(', ')}. Provision now?`,
     { input: stdinInput(), autoYes },
   );
