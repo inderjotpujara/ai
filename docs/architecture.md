@@ -1608,7 +1608,10 @@ pick from, never invent.
   `deps.existingAgents()` is an in-memory snapshot that won't see an agent
   written to disk mid-run; the loop only computes which agents *would* need
   building (for `validate.ts`'s `toBeBuilt`), the actual build runs once the
-  user has approved the plan.
+  user has approved the plan. The `resolveMissingAgents` call is itself wrapped
+  in the builder's try/catch, so a *throwing* auto-build (e.g. the agent-builder
+  raising on a malformed proposal) folds into an `abandoned` result rather than
+  becoming an unhandled rejection.
 - **`deps.ts`** — `makeRealCrewBuilderDeps({autoYes?})`: assembles live deps by
   reusing the agent-builder's `makeRealBuilderDeps` (model + consent), wiring
   `agentNames()`, `STARTER_PACK`, `CREWS`, `WORKFLOWS`, and delegating
