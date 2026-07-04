@@ -254,7 +254,7 @@ function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
  *  agent whose suggested servers matter will need scoped MCP clients spun up
  *  for the staged, not-yet-registered agent before this is fully faithful. */
 export async function makeRealBuilderDeps(
-  opts: { autoYes?: boolean } = {},
+  opts: { autoYes?: boolean; force?: boolean } = {},
 ): Promise<{ deps: BuilderDeps; cleanup: () => Promise<void> }> {
   const manager = createModelManager();
   const registry = await buildRegistry();
@@ -333,6 +333,9 @@ export async function makeRealBuilderDeps(
       },
       generatorFamily: modelFamily(decl.model),
       dir: 'agents',
+      // `--force` (I1): downgrade a failing gate to an Unverified commit
+      // instead of aborting (see gate.ts).
+      force: opts.force === true,
       confirmReuse: async (kind, text) => {
         // Non-interactive policy (I3): autoYes auto-reuses a Reuse-band
         // match (it clears the confident band, reuse is the point of the

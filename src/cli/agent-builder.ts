@@ -1,26 +1,33 @@
 import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
+import { VerifiedLevel } from '../verified-build/types.ts';
 import { withRunTelemetry } from './with-run.ts';
 
-function parseArgs(argv: string[]): { need: string; autoYes: boolean } {
+export function parseArgs(argv: string[]): {
+  need: string;
+  autoYes: boolean;
+  force: boolean;
+} {
   const positional: string[] = [];
   let autoYes = false;
+  let force = false;
   for (const a of argv) {
     if (a === '--yes' || a === '-y') autoYes = true;
+    else if (a === '--force') force = true;
     else positional.push(a);
   }
-  return { need: positional.join(' ').trim(), autoYes };
+  return { need: positional.join(' ').trim(), autoYes, force };
 }
 
 async function main(): Promise<void> {
-  const { need, autoYes } = parseArgs(process.argv.slice(2));
+  const { need, autoYes, force } = parseArgs(process.argv.slice(2));
   if (need.length === 0) {
     console.error(
-      'Usage: bun run agent-builder "<capability you need>" [--yes]',
+      'Usage: bun run agent-builder "<capability you need>" [--yes] [--force]',
     );
     process.exit(1);
   }
-  const { deps, cleanup } = await makeRealBuilderDeps({ autoYes });
+  const { deps, cleanup } = await makeRealBuilderDeps({ autoYes, force });
   try {
     // Run scope + telemetry provider (C2a): without this the agent.build /
     // build.verify spans opened inside buildAgent are no-ops — with it they
@@ -33,6 +40,13 @@ async function main(): Promise<void> {
       console.log(
         `Created agent "${result.proposal.name}". Files: ${result.files.join(', ')}`,
       );
+      if (result.level === VerifiedLevel.Unverified) {
+        console.log(
+          'WARNING: committed UNVERIFIED (--force) — verification failed but the agent was registered anyway. Review it before relying on it.',
+        );
+      } else if (result.level !== undefined) {
+        console.log(`Verified: ${result.level}.`);
+      }
       console.log(
         'It is live on your next run. Its MCP server (if any) is consent-gated on first mount.',
       );

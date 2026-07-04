@@ -80,7 +80,7 @@ async function runArtifact(
  *  generator-family, and adding only `runArtifact` (crew/workflow-specific:
  *  wraps `runCrew`/`runWorkflow` instead of `runGuardedAgent`). */
 export async function makeRealCrewBuilderDeps(
-  opts: { autoYes?: boolean } = {},
+  opts: { autoYes?: boolean; force?: boolean } = {},
 ): Promise<{ deps: CrewBuilderDeps; cleanup: () => Promise<void> }> {
   const { deps: agentDeps, cleanup } = await makeRealBuilderDeps(opts);
   const verify: CrewBuilderVerifyDeps | undefined = agentDeps.verify && {
@@ -89,6 +89,8 @@ export async function makeRealCrewBuilderDeps(
     judge: agentDeps.verify.judge,
     generatorFamily: agentDeps.verify.generatorFamily,
     confirmReuse: agentDeps.verify.confirmReuse,
+    // `--force` (I1) threads through the agent-builder bundle unchanged.
+    force: agentDeps.verify.force,
     runArtifact,
   };
   const deps: CrewBuilderDeps = {
