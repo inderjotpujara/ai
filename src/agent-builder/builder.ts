@@ -36,7 +36,12 @@ import type {
 } from './types.ts';
 import { validateProposal } from './validate.ts';
 import { validateToolProposal } from './validate-tool.ts';
-import { registerAgent, writeAgent, writeAgentFile } from './write.ts';
+import {
+  atomicWrite,
+  registerAgent,
+  writeAgent,
+  writeAgentFile,
+} from './write.ts';
 import { writeToolProposal } from './write-tool.ts';
 
 /** Bounded same-run regeneration (Task 24): on a structural-validation
@@ -190,7 +195,7 @@ async function verifyAndCommitProposal(
         lastEvalPass: level === VerifiedLevel.Behaves,
       });
       if (golden) {
-        await Bun.write(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);
+        atomicWrite(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);
       }
     },
     vector,

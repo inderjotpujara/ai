@@ -1,6 +1,7 @@
 // src/crew-builder/builder.ts
 import { pathToFileURL } from 'node:url';
 import type { ValidationIssue } from '../agent-builder/types.ts';
+import { atomicWrite } from '../agent-builder/write.ts';
 import { embedOne } from '../memory/embed-one.ts';
 import { withCrewBuildSpan } from '../telemetry/spans.ts';
 import { representativeTask } from '../verified-build/dry-run.ts';
@@ -220,7 +221,7 @@ async function verifyAndCommitCrewOrWorkflow(
         lastEvalPass: level === VerifiedLevel.Behaves,
       });
       if (golden) {
-        await Bun.write(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);
+        atomicWrite(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);
       }
     },
     vector,
