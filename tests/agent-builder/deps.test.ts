@@ -59,4 +59,15 @@ describe('makeBuilderModel', () => {
       'agent-builder: model did not return valid JSON for the proposal',
     );
   });
+
+  it('text() returns the raw generateText output, unparsed', async () => {
+    const fakeGenerateText = async () => ({ text: '1. plan\n2. execute' });
+    const model = makeBuilderModel(
+      {} as never,
+      8192,
+      fakeGenerateText as never,
+    );
+    const out = await model.text({ prompt: 'x' });
+    expect(out).toBe('1. plan\n2. execute');
+  });
 });

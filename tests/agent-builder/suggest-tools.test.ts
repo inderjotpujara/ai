@@ -30,6 +30,7 @@ const PACK: PackEntry[] = [
 ];
 const pick = (names: string[]): BuilderModel => ({
   object: async () => ({ servers: names }) as never,
+  text: async () => '',
 });
 
 describe('suggestServers', () => {

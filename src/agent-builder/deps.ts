@@ -90,6 +90,14 @@ export function makeBuilderModel(
         );
       }
     },
+    text: async (args: { prompt: string }): Promise<string> => {
+      const r = await generateTextImpl({
+        model,
+        prompt: args.prompt,
+        ...(providerOptions ? { providerOptions } : {}),
+      });
+      return r.text;
+    },
   };
 }
 

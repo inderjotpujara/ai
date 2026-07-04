@@ -5,6 +5,7 @@ import { classifyNeed } from '../../src/crew-builder/classify.ts';
 
 const fakeModel = (obj: unknown): BuilderModel => ({
   object: async () => obj as never,
+  text: async () => '',
 });
 
 test('classifies role/task need as crew', async () => {

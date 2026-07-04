@@ -15,6 +15,7 @@ function stubModel(capturePrompt: (p: string) => void): BuilderModel {
       capturePrompt(prompt);
       return draft as never;
     },
+    text: async () => '',
   };
 }
 
