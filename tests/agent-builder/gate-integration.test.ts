@@ -14,7 +14,11 @@ import {
   upsertEntry,
 } from '../../src/verified-build/manifest.ts';
 import type { ManifestEntry } from '../../src/verified-build/types.ts';
-import { GoldenKind, VerifiedLevel } from '../../src/verified-build/types.ts';
+import {
+  GoldenKind,
+  ReuseKind,
+  VerifiedLevel,
+} from '../../src/verified-build/types.ts';
 
 /** All-hermetic tests for the reuse-check → generate → consent → stage →
  *  verify → commit gate (BuilderDeps.verify present). Mirrors the
@@ -159,6 +163,71 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
     expect(draftCalls()).toBe(0);
     const idx = await readFile(deps.paths.indexPath, 'utf8');
     expect(idx).not.toContain('createFreshAgentAgent');
+  });
+
+  it('reuse hit DECLINED via confirmReuse: falls through to generation', async () => {
+    const asked: ReuseKind[] = [];
+    const { model, draftCalls } = fakeModel({});
+    const { deps, agentsDir } = await makeDeps({
+      model,
+      verify: {
+        confirmReuse: async (kind) => {
+          asked.push(kind);
+          return false;
+        },
+      },
+    });
+    upsertEntry(agentsDir, 'existing_agent', manifestEntry([0, 1]));
+
+    const r = await buildAgent('need already covered', deps);
+
+    expect(asked).toEqual([ReuseKind.Reuse]);
+    expect(draftCalls()).toBe(1);
+    expect(r.kind).toBe('written');
+    if (r.kind === 'written') {
+      expect(r.proposal.name).toBe('fresh_agent');
+    }
+  });
+
+  it('offer band (0.75–0.85) accepted via confirmReuse: reused, nothing generated', async () => {
+    const asked: ReuseKind[] = [];
+    const { model, draftCalls } = fakeModel({});
+    const { deps, agentsDir } = await makeDeps({
+      model,
+      verify: {
+        confirmReuse: async (kind) => {
+          asked.push(kind);
+          return true;
+        },
+      },
+    });
+    // embed yields [0, 1] for any text; cosine([0,1],[0.6,0.8]) = 0.8 —
+    // inside the offer band (0.75–0.85).
+    upsertEntry(agentsDir, 'close_agent', manifestEntry([0.6, 0.8]));
+
+    const r = await buildAgent('a close-but-not-identical need', deps);
+
+    expect(asked).toEqual([ReuseKind.Offer]);
+    expect(r.kind).toBe('reused');
+    if (r.kind === 'reused') {
+      expect(r.name).toBe('close_agent');
+      expect(r.similarity).toBeCloseTo(0.8);
+    }
+    expect(draftCalls()).toBe(0);
+  });
+
+  it('offer band declined via confirmReuse: generates a fresh agent', async () => {
+    const { model, draftCalls } = fakeModel({});
+    const { deps, agentsDir } = await makeDeps({
+      model,
+      verify: { confirmReuse: async () => false },
+    });
+    upsertEntry(agentsDir, 'close_agent', manifestEntry([0.6, 0.8]));
+
+    const r = await buildAgent('a close-but-not-identical need', deps);
+
+    expect(r.kind).toBe('written');
+    expect(draftCalls()).toBe(1);
   });
 
   it('fresh need, passing gate: writes at VerifiedLevel.Behaves and registers the agent', async () => {

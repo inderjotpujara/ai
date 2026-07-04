@@ -1,7 +1,7 @@
 import type { z } from 'zod';
 import type { Agent } from '../core/agent-def.ts';
 import type { ModelRequirement } from '../core/types.ts';
-import type { VerifiedLevel } from '../verified-build/types.ts';
+import type { ReuseKind, VerifiedLevel } from '../verified-build/types.ts';
 import type { WritePaths } from './write.ts';
 
 /** A curated-pack MCP server the generated agent needs, scoped to that agent. */
@@ -71,6 +71,12 @@ export type BuilderVerifyDeps = {
   dir: string;
   /** Downgrade a failing gate to an Unverified commit instead of aborting. */
   force?: boolean;
+  /** Consent for reusing an existing artifact when the reuse check lands in
+   *  the Reuse (>=reuse band) or Offer (offer..reuse band) band. Absent ⇒
+   *  the builder falls back to the generic `confirm`. The real impl encodes
+   *  the non-interactive policy: autoYes auto-reuses a Reuse-band match but
+   *  DECLINES an Offer-band one (defaults to building new). */
+  confirmReuse?: (kind: ReuseKind, text: string) => Promise<boolean>;
 };
 
 export type BuilderDeps = {

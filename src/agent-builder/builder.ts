@@ -15,7 +15,7 @@ import { verifyAndCommit } from '../verified-build/gate.ts';
 import { generateGolden, goldenPathFor } from '../verified-build/golden.ts';
 import { selectJudge } from '../verified-build/judge.ts';
 import { upsertEntry } from '../verified-build/manifest.ts';
-import { reuseDecision } from '../verified-build/reuse.ts';
+import { renderReuseOffer, reuseDecision } from '../verified-build/reuse.ts';
 import {
   signatureFromNeed,
   signatureFromProposal,
@@ -299,13 +299,30 @@ export function buildAgent(
         similarity: decision.similarity,
       });
       recordReuseDecision(decision.kind, decision.similarity);
-      if (decision.kind === ReuseKind.Reuse && decision.match) {
-        rec.outcome('reused', decision.match);
-        return {
-          kind: 'reused',
-          name: decision.match,
-          similarity: decision.similarity,
-        };
+      // Reuse band: confirm, then reuse (declined ⇒ generate). Offer band:
+      // inform the user a close match exists and ask reuse-or-build (I3).
+      // `confirmReuse` (when wired) carries the non-interactive policy —
+      // autoYes auto-reuses Reuse but declines Offer; the generic `confirm`
+      // fallback keeps hermetic callers working unchanged.
+      if (decision.kind !== ReuseKind.Generate && decision.match) {
+        const text = renderReuseOffer(
+          'agent',
+          decision.kind,
+          decision.match,
+          decision.similarity,
+        );
+        const accept = deps.verify.confirmReuse
+          ? await deps.verify.confirmReuse(decision.kind, text)
+          : await deps.confirm(text);
+        rec.event('reuse_consent', { kind: decision.kind, granted: accept });
+        if (accept) {
+          rec.outcome('reused', decision.match);
+          return {
+            kind: 'reused',
+            name: decision.match,
+            similarity: decision.similarity,
+          };
+        }
       }
     }
 

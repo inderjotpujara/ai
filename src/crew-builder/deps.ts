@@ -88,6 +88,7 @@ export async function makeRealCrewBuilderDeps(
     judgeCandidates: agentDeps.verify.judgeCandidates,
     judge: agentDeps.verify.judge,
     generatorFamily: agentDeps.verify.generatorFamily,
+    confirmReuse: agentDeps.verify.confirmReuse,
     runArtifact,
   };
   const deps: CrewBuilderDeps = {

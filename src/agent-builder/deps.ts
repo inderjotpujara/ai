@@ -20,6 +20,7 @@ import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { dryRunMs } from '../verified-build/config.ts';
 import type { JudgeCandidate } from '../verified-build/judge.ts';
+import { ReuseKind } from '../verified-build/types.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
 type GenerateTextFn = typeof generateText;
@@ -332,6 +333,18 @@ export async function makeRealBuilderDeps(
       },
       generatorFamily: modelFamily(decl.model),
       dir: 'agents',
+      confirmReuse: async (kind, text) => {
+        // Non-interactive policy (I3): autoYes auto-reuses a Reuse-band
+        // match (it clears the confident band, reuse is the point of the
+        // check) but DECLINES an Offer-band one — a merely-close match
+        // defaults to building new rather than silently substituting.
+        if (kind === ReuseKind.Offer && opts.autoYes === true) return false;
+        process.stderr.write(`${text}\n`);
+        return askYesNo('Reuse it?', {
+          input,
+          autoYes: opts.autoYes === true,
+        });
+      },
     },
   };
   return { deps, cleanup: () => manager.unloadAll() };

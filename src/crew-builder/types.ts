@@ -5,7 +5,7 @@ import type {
   ValidationIssue,
 } from '../agent-builder/types.ts';
 import type { WritePaths } from '../agent-builder/write.ts';
-import type { VerifiedLevel } from '../verified-build/types.ts';
+import type { ReuseKind, VerifiedLevel } from '../verified-build/types.ts';
 import type { CrewIR, WorkflowIR } from './ir.ts';
 
 export type Shape = 'crew' | 'workflow';
@@ -63,6 +63,11 @@ export type CrewBuilderVerifyDeps = {
   generatorFamily?: string;
   /** Downgrade a failing gate to an Unverified commit instead of aborting. */
   force?: boolean;
+  /** Consent for reusing an existing artifact (Reuse/Offer bands) — mirrors
+   *  agent-builder's `BuilderVerifyDeps.confirmReuse`. Absent ⇒ fall back to
+   *  the generic `confirm`. Real impl: autoYes auto-reuses a Reuse-band
+   *  match but DECLINES an Offer-band one (defaults to building new). */
+  confirmReuse?: (kind: ReuseKind, text: string) => Promise<boolean>;
 };
 
 export type CrewBuilderDeps = {

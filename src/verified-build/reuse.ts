@@ -18,6 +18,21 @@ function comparableVectors(a: number[], b: number[]): boolean {
   return a.length > 0 && a.length === b.length;
 }
 
+/** Consent text for a reuse/offer match — shared by both builders' confirm
+ *  flows (I3). `noun` is the artifact kind shown to the user (agent / crew /
+ *  workflow). */
+export function renderReuseOffer(
+  noun: string,
+  kind: ReuseKind,
+  match: string,
+  similarity: number,
+): string {
+  const pct = Math.round(similarity * 100);
+  return kind === ReuseKind.Reuse
+    ? `An existing ${noun} "${match}" already covers this need (similarity ${pct}%). Reuse it instead of building a new one?`
+    : `A close match exists: ${noun} "${match}" (similarity ${pct}%). Reuse it instead of building new?`;
+}
+
 /** Decide reuse/offer/generate by cosine similarity against the manifest. */
 export async function reuseDecision(
   sig: CapabilitySignature,

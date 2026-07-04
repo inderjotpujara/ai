@@ -35,7 +35,11 @@ import {
   upsertEntry,
 } from '../../src/verified-build/manifest.ts';
 import type { ManifestEntry } from '../../src/verified-build/types.ts';
-import { GoldenKind, VerifiedLevel } from '../../src/verified-build/types.ts';
+import {
+  GoldenKind,
+  ReuseKind,
+  VerifiedLevel,
+} from '../../src/verified-build/types.ts';
 
 const INDEX_STUB =
   'export const X = {\n  // CREW-BUILDER:ENTRIES\n};\n// CREW-BUILDER:IMPORTS\n';
@@ -261,6 +265,62 @@ test('fresh workflow, passing gate: writes at VerifiedLevel.Behaves and register
   } finally {
     cleanup();
   }
+});
+
+test('reuse hit DECLINED via confirmReuse: falls through to generation', async () => {
+  const { paths, workflowsDir, cleanup } = repoRootPaths();
+  try {
+    const asked: ReuseKind[] = [];
+    const { model, planCalls } = fakeModel({});
+    const deps = baseDeps(
+      paths,
+      model,
+      fakeVerify({
+        confirmReuse: async (kind) => {
+          asked.push(kind);
+          return false;
+        },
+      }),
+    );
+    upsertEntry(workflowsDir, 'existing_flow', manifestEntry([0, 1]));
+
+    const r = await buildCrewOrWorkflow('need already covered', deps);
+
+    expect(asked).toEqual([ReuseKind.Reuse]);
+    expect(planCalls()).toBe(1);
+    expect(r.kind).toBe('written');
+  } finally {
+    cleanup();
+  }
+});
+
+test('offer band (0.75–0.85) accepted via confirmReuse: reused, nothing generated', async () => {
+  const { paths, workflowsDir } = tmpdirPaths();
+  const asked: ReuseKind[] = [];
+  const { model, planCalls } = fakeModel({});
+  const deps = baseDeps(
+    paths,
+    model,
+    fakeVerify({
+      confirmReuse: async (kind) => {
+        asked.push(kind);
+        return true;
+      },
+    }),
+  );
+  // embed yields [0, 1] for any text; cosine([0,1],[0.6,0.8]) = 0.8 —
+  // inside the offer band (0.75–0.85).
+  upsertEntry(workflowsDir, 'close_flow', manifestEntry([0.6, 0.8]));
+
+  const r = await buildCrewOrWorkflow('a close-but-not-identical need', deps);
+
+  expect(asked).toEqual([ReuseKind.Offer]);
+  expect(r.kind).toBe('reused');
+  if (r.kind === 'reused') {
+    expect(r.name).toBe('close_flow');
+    expect(r.similarity).toBeCloseTo(0.8);
+  }
+  expect(planCalls()).toBe(0);
 });
 
 test('generates the golden set exactly ONCE — the persisted set is the evaluated set', async () => {
