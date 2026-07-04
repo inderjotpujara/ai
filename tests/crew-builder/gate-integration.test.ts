@@ -48,8 +48,13 @@ function fakeModel(opts: {
   shape?: 'crew' | 'workflow';
   nodes?: unknown;
   ir?: unknown;
-}): { model: BuilderModel; planCalls: () => number } {
+}): {
+  model: BuilderModel;
+  planCalls: () => number;
+  goldenCalls: () => number;
+} {
   let planCalls = 0;
+  let goldenCalls = 0;
   const shape = opts.shape ?? 'workflow';
   const model: BuilderModel = {
     object: async ({ prompt }) => {
@@ -86,6 +91,7 @@ function fakeModel(opts: {
         return { aligned: true, reason: 'ok' } as never;
       }
       if (prompt.includes('Generate 3 to 7 golden test cases')) {
+        goldenCalls += 1;
         return {
           cases: [
             {
@@ -100,7 +106,11 @@ function fakeModel(opts: {
     },
     text: async () => 'plan',
   };
-  return { model, planCalls: () => planCalls };
+  return {
+    model,
+    planCalls: () => planCalls,
+    goldenCalls: () => goldenCalls,
+  };
 }
 
 function manifestEntry(vector: number[]): ManifestEntry {
@@ -247,6 +257,51 @@ test('fresh workflow, passing gate: writes at VerifiedLevel.Behaves and register
     expect(manifest.entries.fresh_flow?.verifiedLevel).toBe(
       VerifiedLevel.Behaves,
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('generates the golden set exactly ONCE — the persisted set is the evaluated set', async () => {
+  const { paths, workflowsDir, cleanup } = repoRootPaths();
+  try {
+    const { model, goldenCalls } = fakeModel({});
+    const deps = baseDeps(paths, model, fakeVerify());
+
+    const r = await buildCrewOrWorkflow('run a fresh flow', deps);
+
+    expect(r.kind).toBe('written');
+    expect(goldenCalls()).toBe(1);
+    const persisted = JSON.parse(
+      readFileSync(join(workflowsDir, 'fresh_flow.golden.json'), 'utf8'),
+    ) as { cases: unknown[] };
+    expect(persisted.cases).toHaveLength(1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('below-bar judge generates NO golden set and commits at runs', async () => {
+  const { paths, cleanup } = repoRootPaths();
+  try {
+    const { model, goldenCalls } = fakeModel({});
+    const deps = baseDeps(
+      paths,
+      model,
+      fakeVerify({
+        judgeCandidates: () => [
+          { model: 'too-small', params: 3e9, family: 'other-family' },
+        ],
+      }),
+    );
+
+    const r = await buildCrewOrWorkflow('run a fresh flow', deps);
+
+    expect(r.kind).toBe('written');
+    if (r.kind === 'written') {
+      expect(r.level).toBe(VerifiedLevel.Runs);
+    }
+    expect(goldenCalls()).toBe(0);
   } finally {
     cleanup();
   }

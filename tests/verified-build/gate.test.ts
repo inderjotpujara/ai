@@ -131,6 +131,48 @@ describe('verifyAndCommit gate', () => {
     expect(commits[0]?.level).toBe(VerifiedLevel.Runs);
   });
 
+  test('null makeGolden (judge below bar) skips goldenEval entirely and commits at runs', async () => {
+    let evals = 0;
+    const { deps, commits } = makeDeps({
+      makeGolden: async () => null,
+      goldenEval: async () => {
+        evals++;
+        return passEval;
+      },
+    });
+    const res = await verifyAndCommit(deps);
+    expect(res.kind).toBe('committed');
+    if (res.kind !== 'committed') return;
+    expect(res.level).toBe(VerifiedLevel.Runs);
+    expect(evals).toBe(0);
+    expect(commits[0]?.level).toBe(VerifiedLevel.Runs);
+  });
+
+  test('the golden set is generated once and the SAME set is evaluated and committed', async () => {
+    let makes = 0;
+    const evaluated: GoldenSet[] = [];
+    const committed: (GoldenSet | null)[] = [];
+    const { deps } = makeDeps({
+      makeGolden: async () => {
+        makes++;
+        return golden;
+      },
+      goldenEval: async (_def, g) => {
+        evaluated.push(g);
+        return passEval;
+      },
+      commit: async (_def, _level, g) => {
+        committed.push(g);
+      },
+    });
+    const res = await verifyAndCommit(deps);
+    expect(res.kind).toBe('committed');
+    expect(makes).toBe(1);
+    expect(evaluated).toHaveLength(1);
+    expect(evaluated[0]).toBe(golden);
+    expect(committed[0]).toBe(golden);
+  });
+
   test('failing golden eval without force fails at golden-eval', async () => {
     const { deps, commits } = makeDeps({ goldenEval: async () => failEval });
     const res = await verifyAndCommit(deps);

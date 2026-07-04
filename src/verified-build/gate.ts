@@ -18,14 +18,20 @@ export type GateDeps = {
   stage: (feedback?: string) => Promise<{ def: unknown }>;
   structural: (def: unknown) => Promise<string[]>;
   dryRunOnce: (def: unknown) => Promise<DryRunResult>;
-  goldenEval: (def: unknown) => Promise<EvalResult | null>;
+  /** Evaluate the def against the ONE golden set the gate generated via
+   *  `makeGolden` — the same set that gets persisted on commit, so the
+   *  sidecar always replays exactly what was proven (C4). */
+  goldenEval: (def: unknown, golden: GoldenSet) => Promise<EvalResult | null>;
   commit: (
     def: unknown,
     level: VerifiedLevel,
     golden: GoldenSet | null,
     vector: number[],
   ) => Promise<void>;
-  makeGolden: () => Promise<GoldenSet>;
+  /** Generate the golden set ONCE per gate pass — or return null when the
+   *  judge is below bar, so no golden generation is paid for at all and the
+   *  eval is skipped (degrade to VerifiedLevel.Runs). */
+  makeGolden: () => Promise<GoldenSet | null>;
   vector: number[];
   force: boolean;
 };
@@ -60,8 +66,13 @@ export async function verifyAndCommit(
       };
     }
 
+    // ONE golden set per gate pass (C4): generated here, evaluated below,
+    // and persisted unchanged by commit — never two independent LLM calls
+    // producing a persisted set that differs from the evaluated one. A null
+    // golden means the judge is below bar: skip the eval entirely (degrade
+    // to VerifiedLevel.Runs) without paying for golden generation.
     const golden = await deps.makeGolden();
-    const ev = await deps.goldenEval(def); // null => judge below bar / skipped
+    const ev = golden === null ? null : await deps.goldenEval(def, golden);
     rec.event(
       'golden_eval',
       ev

@@ -51,8 +51,10 @@ const DEFAULT_DRAFT: Draft = {
 function fakeModel(opts: { draft?: Draft; servers?: string[] }): {
   model: BuilderModel;
   draftCalls: () => number;
+  goldenCalls: () => number;
 } {
   let draftCalls = 0;
+  let goldenCalls = 0;
   const draft = opts.draft ?? DEFAULT_DRAFT;
   const servers = opts.servers ?? [];
   const model: BuilderModel = {
@@ -68,6 +70,7 @@ function fakeModel(opts: { draft?: Draft; servers?: string[] }): {
         return { servers } as never;
       }
       if (prompt.includes('golden test cases')) {
+        goldenCalls += 1;
         return {
           cases: [
             {
@@ -82,7 +85,11 @@ function fakeModel(opts: { draft?: Draft; servers?: string[] }): {
     },
     text: async () => '',
   };
-  return { model, draftCalls: () => draftCalls };
+  return {
+    model,
+    draftCalls: () => draftCalls,
+    goldenCalls: () => goldenCalls,
+  };
 }
 
 function manifestEntry(vector: number[]): ManifestEntry {
@@ -176,6 +183,40 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
     expect(manifest.entries.fresh_agent?.verifiedLevel).toBe(
       VerifiedLevel.Behaves,
     );
+  });
+
+  it('generates the golden set exactly ONCE — the persisted set is the evaluated set', async () => {
+    const { model, goldenCalls } = fakeModel({});
+    const { deps, agentsDir } = await makeDeps({ model, verify: {} });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    expect(goldenCalls()).toBe(1);
+    const persisted = JSON.parse(
+      await readFile(join(agentsDir, 'fresh_agent.golden.json'), 'utf8'),
+    ) as { cases: unknown[] };
+    expect(persisted.cases).toHaveLength(1);
+  });
+
+  it('below-bar judge generates NO golden set and commits at runs', async () => {
+    const { model, goldenCalls } = fakeModel({});
+    const { deps } = await makeDeps({
+      model,
+      verify: {
+        judgeCandidates: () => [
+          { model: 'too-small', params: 3e9, family: 'other-family' },
+        ],
+      },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    if (r.kind === 'written') {
+      expect(r.level).toBe(VerifiedLevel.Runs);
+    }
+    expect(goldenCalls()).toBe(0);
   });
 
   it('golden-eval judge runs on the model selectJudge picked, not the generator', async () => {

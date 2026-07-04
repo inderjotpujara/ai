@@ -198,15 +198,16 @@ async function verifyAndCommitCrewOrWorkflow(
         return { ran: false, error: String(err), repairs: 0 };
       }
     },
-    goldenEval: async (def) => {
+    goldenEval: async (def, golden) => {
       const { def: runnable } = def as StagedArtifact;
       const judgePick = selectJudge({
         candidates: verify.judgeCandidates,
         generatorFamily: verify.generatorFamily,
       });
+      // Unreachable when makeGolden gated golden generation on the same
+      // pick — kept as defense so a below-bar judge can never grade.
       if (judgePick.model === null) return null;
       const judgeModelId = judgePick.model;
-      const golden = await generateGolden(need, sig, deps.model);
       return evalCases(golden.cases, {
         runCase: async (input) => {
           try {
@@ -225,7 +226,16 @@ async function verifyAndCommitCrewOrWorkflow(
         belowBar: judgePick.belowBar,
       });
     },
-    makeGolden: () => generateGolden(need, sig, deps.model),
+    // The gate's ONE golden generation (C4). A below-bar judge returns null
+    // BEFORE generating — no golden is paid for when nothing can grade it.
+    makeGolden: async () => {
+      const judgePick = selectJudge({
+        candidates: verify.judgeCandidates,
+        generatorFamily: verify.generatorFamily,
+      });
+      if (judgePick.model === null) return null;
+      return generateGolden(need, sig, deps.model);
+    },
     commit: async (def, level, golden, vec) => {
       const { ir: staged } = def as StagedArtifact;
       registeredFiles = registerCrewOrWorkflow(staged.id, shape, deps.paths);
