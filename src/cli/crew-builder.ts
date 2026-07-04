@@ -35,6 +35,15 @@ async function main(): Promise<void> {
       console.error('Could not build a valid graph:');
       for (const i of r.issues) console.error(`  - ${i.field}: ${i.problem}`);
       process.exitCode = 1;
+    } else if (r.kind === 'reused') {
+      console.log(
+        `An existing crew/workflow "${r.name}" already covers this need (similarity ${r.similarity.toFixed(2)}). Nothing generated.`,
+      );
+    } else if (r.kind === 'failed-verification') {
+      console.error(
+        `Verification failed at "${r.stage}": ${r.detail}. Nothing was registered.`,
+      );
+      process.exitCode = 1;
     } else {
       console.error(`Abandoned: ${r.reason}`);
       process.exitCode = 1;

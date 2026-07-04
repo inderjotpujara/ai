@@ -62,12 +62,36 @@ const INDEX_FILES = new Set([
   'mcp.json',
 ]);
 
-/** Restore the registries + remove any generated crew/workflow def file and
- *  any auto-built agent files (named via `builtAgents`, which come back as
- *  bare names — not paths — from `CrewBuildResult`; see
- *  `src/agent-builder/write.ts`'s `${p.name}.ts` convention). Safe to call
- *  even when nothing was generated (git checkout is a no-op; existsSync
- *  guards the rm calls). */
+/** The verify-then-commit gate's sidecar manifests (Slice 20): each of
+ *  `agents/`, `crews/`, `workflows/` gets its own `.generated.json` (the
+ *  reuse-check manifest — see `src/verified-build/manifest.ts`). Auto-
+ *  building a missing member agent runs THROUGH the agent-builder's own gate
+ *  (its `makeRealBuilderDeps` always wires `deps.verify`), so even a crew
+ *  build that itself ends up `abandoned` can still commit into
+ *  `agents/.generated.json` — this must be swept regardless of the crew/
+ *  workflow build's own outcome, not just on a successful `written` result.
+ *  None of these three paths are tracked/committed (a fresh checkout starts
+ *  without them), so removing them unconditionally after a run restores the
+ *  pristine tree the next run assumes. */
+const SIDECAR_MANIFESTS = [
+  'agents/.generated.json',
+  'crews/.generated.json',
+  'workflows/.generated.json',
+];
+
+/** A generated def/agent file's sibling `.golden.json` (see
+ *  `src/verified-build/golden.ts`'s `goldenPathFor`: `${dir}/${name}.golden.json`). */
+function goldenSiblingOf(path: string): string {
+  return path.replace(/\.ts$/, '.golden.json');
+}
+
+/** Restore the registries + remove any generated crew/workflow def file (and
+ *  its golden sidecar) and any auto-built agent files/golden sidecars (named
+ *  via `builtAgents`, which come back as bare names — not paths — from
+ *  `CrewBuildResult`; see `src/agent-builder/write.ts`'s `${p.name}.ts`
+ *  convention), plus every gate sidecar manifest. Safe to call even when
+ *  nothing was generated (git checkout is a no-op; existsSync guards every
+ *  rm call). */
 function cleanupGeneratedArtifacts(
   generatedFiles: string[],
   builtAgents: string[],
@@ -77,11 +101,19 @@ function cleanupGeneratedArtifacts(
     { cwd: process.cwd() },
   );
   for (const f of generatedFiles) {
-    if (!INDEX_FILES.has(f) && existsSync(f)) rmSync(f);
+    if (INDEX_FILES.has(f)) continue;
+    if (existsSync(f)) rmSync(f);
+    const golden = goldenSiblingOf(f);
+    if (existsSync(golden)) rmSync(golden);
   }
   for (const name of builtAgents) {
     const p = `agents/${name}.ts`;
     if (existsSync(p)) rmSync(p);
+    const golden = goldenSiblingOf(p);
+    if (existsSync(golden)) rmSync(golden);
+  }
+  for (const m of SIDECAR_MANIFESTS) {
+    if (existsSync(m)) rmSync(m);
   }
 }
 

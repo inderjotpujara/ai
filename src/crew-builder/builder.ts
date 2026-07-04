@@ -1,6 +1,26 @@
 // src/crew-builder/builder.ts
+import { pathToFileURL } from 'node:url';
 import type { ValidationIssue } from '../agent-builder/types.ts';
+import { embedOne } from '../memory/embed-one.ts';
 import { withCrewBuildSpan } from '../telemetry/spans.ts';
+import { representativeTask } from '../verified-build/dry-run.ts';
+import { evalCases } from '../verified-build/eval.ts';
+import type { GateDeps } from '../verified-build/gate.ts';
+import { verifyAndCommit } from '../verified-build/gate.ts';
+import { generateGolden, goldenPathFor } from '../verified-build/golden.ts';
+import { selectJudge } from '../verified-build/judge.ts';
+import { upsertEntry } from '../verified-build/manifest.ts';
+import { reuseDecision } from '../verified-build/reuse.ts';
+import {
+  signatureFromIR,
+  signatureFromNeed,
+  signatureText,
+} from '../verified-build/signature.ts';
+import {
+  ArtifactKind,
+  ReuseKind,
+  VerifiedLevel,
+} from '../verified-build/types.ts';
 import { analyzeNeed } from './analyze.ts';
 import { classifyNeed } from './classify.ts';
 import type { CrewIR, WorkflowIR } from './ir.ts';
@@ -8,9 +28,18 @@ import { planEdges } from './plan-edges.ts';
 import { planNodes } from './plan-nodes.ts';
 import { referencedAgents, resolveMissingAgents } from './resolve-members.ts';
 import { transpile } from './transpile.ts';
-import type { CrewBuilderDeps, CrewBuildResult, Shape } from './types.ts';
-import { validateIR } from './validate.ts';
-import { writeCrewOrWorkflow } from './write.ts';
+import type {
+  CrewBuilderDeps,
+  CrewBuilderVerifyDeps,
+  CrewBuildResult,
+  Shape,
+} from './types.ts';
+import { validateIR, validateStructural } from './validate.ts';
+import {
+  registerCrewOrWorkflow,
+  writeCrewFile,
+  writeCrewOrWorkflow,
+} from './write.ts';
 
 const MAX_REGENERATIONS = 1;
 
@@ -81,6 +110,150 @@ function finish(
   return result;
 }
 
+/** The manifest/golden sidecar directory for a shape — crews and workflows
+ *  are separate registries, so (unlike agent-builder's single `agents/`
+ *  directory) this must be resolved per call from the shape. */
+function dirFor(shape: Shape, paths: CrewBuilderDeps['paths']): string {
+  return shape === 'crew' ? paths.crewsDir : paths.workflowsDir;
+}
+
+/** What flows through the gate's `def: unknown` for a crew/workflow build:
+ *  the IR (structural validation, commit/registration) and the runnable
+ *  CrewDef/WorkflowDef dynamically imported from the staged file (dry-run,
+ *  golden-eval). Mirrors agent-builder's `StagedAgent`. */
+type StagedArtifact = { ir: CrewIR | WorkflowIR; def: unknown };
+
+/** Build the `GateDeps` for one crew/workflow IR and run `verifyAndCommit`,
+ *  then map its `VerificationResult` onto `CrewBuildResult`. Split out of
+ *  `buildCrewOrWorkflow` to keep the consent-gated happy path readable —
+ *  mirrors agent-builder's `verifyAndCommitProposal`. */
+async function verifyAndCommitCrewOrWorkflow(
+  need: string,
+  ir: CrewIR | WorkflowIR,
+  shape: Shape,
+  builtAgents: string[],
+  deps: CrewBuilderDeps,
+  verify: CrewBuilderVerifyDeps,
+): Promise<CrewBuildResult> {
+  const sig = signatureFromIR(ir, shape);
+  const vector = await embedOne(signatureText(sig), verify.embed);
+  const dir = dirFor(shape, deps.paths);
+  let stagedPath: string | undefined;
+  let registeredFiles: string[] = [];
+
+  const gateDeps: GateDeps = {
+    kind: shape === 'crew' ? ArtifactKind.Crew : ArtifactKind.Workflow,
+    name: ir.id,
+    need,
+    signature: sig,
+    stage: async (_feedback) => {
+      // v1: feedback-driven repair of the IR itself isn't implemented yet —
+      // a re-stage (after a failed dry-run) just rewrites the SAME IR, a
+      // no-op regeneration acceptable for v1 per spec (mirrors
+      // agent-builder's `verifyAndCommitProposal.stage`).
+      // TODO(controller): route `_feedback` into a targeted regeneration.
+      const source = transpile(ir, shape);
+      stagedPath = writeCrewFile(ir.id, source, shape, deps.paths);
+      // Cache-bust: a repair re-stage overwrites the SAME path, and a bare
+      // `import()` would otherwise return the previously-cached module.
+      const mod = (await import(
+        `${pathToFileURL(stagedPath).href}?t=${Date.now()}`
+      )) as { default: unknown };
+      const staged: StagedArtifact = { ir, def: mod.default };
+      return { def: staged };
+    },
+    structural: async (def) => {
+      const { ir: staged } = def as StagedArtifact;
+      return validateStructural(staged, shape, {
+        existingAgents: [...deps.existingAgents(), ...builtAgents],
+        packNames: deps.packNames(),
+        toBeBuilt: [],
+        model: deps.model,
+      }).map((i) => `${i.field}: ${i.problem}`);
+    },
+    dryRunOnce: async (def) => {
+      const { def: runnable } = def as StagedArtifact;
+      const r = await verify.runArtifact(
+        runnable,
+        shape,
+        representativeTask(need, sig),
+      );
+      return {
+        ran: 'text' in r,
+        output: 'text' in r ? r.text : undefined,
+        error: 'error' in r ? r.error : undefined,
+        repairs: 0,
+      };
+    },
+    goldenEval: async (def) => {
+      const { def: runnable } = def as StagedArtifact;
+      const judgePick = selectJudge({
+        candidates: verify.judgeCandidates,
+        generatorFamily: verify.generatorFamily,
+      });
+      if (judgePick.model === null) return null;
+      const golden = await generateGolden(need, sig, deps.model);
+      return evalCases(golden.cases, {
+        runCase: async (input) => {
+          const r = await verify.runArtifact(runnable, shape, input);
+          return 'text' in r ? r.text : `error: ${r.error}`;
+        },
+        judge: verify.judge,
+        judgeModel: judgePick.model,
+        belowBar: judgePick.belowBar,
+      });
+    },
+    makeGolden: () => generateGolden(need, sig, deps.model),
+    commit: async (def, level, golden, vec) => {
+      const { ir: staged } = def as StagedArtifact;
+      registeredFiles = registerCrewOrWorkflow(staged.id, shape, deps.paths);
+      const goldenPath = goldenPathFor(dir, staged.id);
+      upsertEntry(dir, staged.id, {
+        need,
+        signature: signatureFromIR(staged, shape),
+        vector: vec,
+        verifiedLevel: level,
+        goldenPath,
+        createdAtMs: Date.now(),
+        lastUsedMs: 0,
+        useCount: 0,
+        lastEvalPass: level === VerifiedLevel.Behaves,
+      });
+      if (golden) {
+        await Bun.write(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);
+      }
+    },
+    vector,
+    force: verify.force ?? false,
+  };
+
+  const result = await verifyAndCommit(gateDeps);
+  if (result.kind === 'committed') {
+    const files = stagedPath
+      ? [stagedPath, ...registeredFiles]
+      : registeredFiles;
+    deps.log?.(
+      `Created ${shape} "${ir.id}" (${files.length} file(s), verified: ${result.level}). It is live on the next run.`,
+    );
+    return {
+      kind: 'written',
+      shape,
+      name: ir.id,
+      files,
+      builtAgents,
+      level: result.level,
+    };
+  }
+  if (result.kind === 'reused') {
+    return { kind: 'reused', name: result.name, similarity: result.similarity };
+  }
+  return {
+    kind: 'failed-verification',
+    stage: result.stage,
+    detail: result.detail,
+  };
+}
+
 /** Orchestrates the crew/workflow-builder end to end: classify the need's
  *  shape, analyze it into a prose plan, generate+validate an IR (with one
  *  bounded regeneration), get consent on a rendered summary, THEN build any
@@ -95,7 +268,15 @@ function finish(
  *  loop only computes which agents WOULD need building (`referencedAgents`
  *  minus `existingAgents()`) so validation's `toBeBuilt` can treat them as
  *  known — the actual build happens exactly once, after the user has
- *  consented to the plan. */
+ *  consented to the plan.
+ *
+ *  When `deps.verify` is present, a reuse-check runs right after
+ *  classification (shape must be known first, since crews/workflows are
+ *  separate registries) and short-circuits before any generation on a hit;
+ *  otherwise the flow continues as above through consent, then — after
+ *  `resolveMissingAgents` — the transpiled IR is staged and run through
+ *  `verifyAndCommit` (structural / dry-run / golden-eval) BEFORE it is
+ *  registered, mirroring the agent-builder's gate (Slice 20). */
 export function buildCrewOrWorkflow(
   need: string,
   deps: CrewBuilderDeps,
@@ -103,6 +284,25 @@ export function buildCrewOrWorkflow(
   return withCrewBuildSpan(need, async (rec) => {
     const shape = await classifyNeed(need, deps.model);
     rec.event('classified', { shape });
+
+    if (deps.verify) {
+      const needSig = await signatureFromNeed(need, deps.model);
+      const decision = await reuseDecision(needSig, {
+        embed: deps.verify.embed,
+        dir: dirFor(shape, deps.paths),
+      });
+      rec.event('reuse_checked', {
+        kind: decision.kind,
+        similarity: decision.similarity,
+      });
+      if (decision.kind === ReuseKind.Reuse && decision.match) {
+        return finish(rec, shape, {
+          kind: 'reused',
+          name: decision.match,
+          similarity: decision.similarity,
+        });
+      }
+    }
 
     const analysis = await analyzeNeed(need, shape, deps.model);
     rec.event('analyzed');
@@ -189,6 +389,19 @@ export function buildCrewOrWorkflow(
         kind: 'abandoned',
         reason: resolved.abandoned,
       });
+
+    if (deps.verify) {
+      const result = await verifyAndCommitCrewOrWorkflow(
+        need,
+        resolved.ir,
+        shape,
+        resolved.builtAgents,
+        deps,
+        deps.verify,
+      );
+      rec.event('gate_result', { kind: result.kind });
+      return finish(rec, shape, result, resolved.ir);
+    }
 
     const source = transpile(resolved.ir, shape);
     const files = writeCrewOrWorkflow(
