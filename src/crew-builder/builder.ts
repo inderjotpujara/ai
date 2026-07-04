@@ -137,6 +137,7 @@ async function verifyAndCommitCrewOrWorkflow(
   need: string,
   ir: CrewIR | WorkflowIR,
   shape: Shape,
+  analysis: string,
   builtAgents: string[],
   deps: CrewBuilderDeps,
   verify: CrewBuilderVerifyDeps,
@@ -146,26 +147,67 @@ async function verifyAndCommitCrewOrWorkflow(
   const dir = dirFor(shape, deps.paths);
   let stagedPath: string | undefined;
   let registeredFiles: string[] = [];
+  // The IR currently staged — starts as the consented one and is replaced
+  // by a repaired re-plan when a dry-run fails (I6).
+  let current = ir;
 
   const gateDeps: GateDeps = {
     kind: shape === 'crew' ? ArtifactKind.Crew : ArtifactKind.Workflow,
     name: ir.id,
     need,
     signature: sig,
-    stage: async (_feedback) => {
-      // v1: feedback-driven repair of the IR itself isn't implemented yet —
-      // a re-stage (after a failed dry-run) just rewrites the SAME IR, a
-      // no-op regeneration acceptable for v1 per spec (mirrors
-      // agent-builder's `verifyAndCommitProposal.stage`).
-      // TODO(controller): route `_feedback` into a targeted regeneration.
-      const source = transpile(ir, shape);
-      stagedPath = writeCrewFile(ir.id, source, shape, deps.paths);
+    stage: async (feedback) => {
+      if (feedback !== undefined) {
+        // Feed the REAL runtime error back into a fresh plan (I6): re-run
+        // node/edge planning with the dry-run error appended to the
+        // analysis. The repaired IR keeps the consented id (the user
+        // consented to that identity) so the staged path stays stable. A
+        // re-plan that fails generation or structural validation (e.g. it
+        // now references agents that don't exist) is DISCARDED and the
+        // previous IR re-staged — bounded, never worse than a plain retry.
+        try {
+          const repairContext = [
+            analysis,
+            '',
+            'A previous attempt at this plan failed its runtime dry-run with this error — produce a corrected plan that avoids it:',
+            feedback,
+          ].join('\n');
+          const nodes = await planNodes(
+            need,
+            shape,
+            repairContext,
+            deps.model,
+            deps.packNames(),
+          );
+          const replanned = await planEdges(
+            need,
+            shape,
+            repairContext,
+            nodes,
+            deps.model,
+          );
+          const repaired = { ...replanned, id: current.id } as
+            | CrewIR
+            | WorkflowIR;
+          const issues = validateStructural(repaired, shape, {
+            existingAgents: [...deps.existingAgents(), ...builtAgents],
+            packNames: deps.packNames(),
+            toBeBuilt: [],
+            model: deps.model,
+          });
+          if (issues.length === 0) current = repaired;
+        } catch {
+          // Keep the previous IR; the bounded repair loop re-runs it.
+        }
+      }
+      const source = transpile(current, shape);
+      stagedPath = writeCrewFile(current.id, source, shape, deps.paths);
       // Cache-bust: a repair re-stage overwrites the SAME path, and a bare
       // `import()` would otherwise return the previously-cached module.
       const mod = (await import(
         `${pathToFileURL(stagedPath).href}?t=${Date.now()}`
       )) as { default: unknown };
-      const staged: StagedArtifact = { ir, def: mod.default };
+      const staged: StagedArtifact = { ir: current, def: mod.default };
       return { def: staged };
     },
     structural: async (def) => {
@@ -455,6 +497,7 @@ export function buildCrewOrWorkflow(
         need,
         resolved.ir,
         shape,
+        analysis,
         resolved.builtAgents,
         deps,
         deps.verify,

@@ -57,9 +57,11 @@ function fakeModel(opts: { draft?: Draft; servers?: string[] }): {
   model: BuilderModel;
   draftCalls: () => number;
   goldenCalls: () => number;
+  draftPrompts: () => string[];
 } {
   let draftCalls = 0;
   let goldenCalls = 0;
+  const draftPrompts: string[] = [];
   const draft = opts.draft ?? DEFAULT_DRAFT;
   const servers = opts.servers ?? [];
   const model: BuilderModel = {
@@ -69,6 +71,7 @@ function fakeModel(opts: { draft?: Draft; servers?: string[] }): {
       }
       if (prompt.includes('Design a single specialized sub-agent')) {
         draftCalls += 1;
+        draftPrompts.push(prompt);
         return draft as never;
       }
       if (prompt.includes('Choose the MINIMAL set of MCP servers')) {
@@ -94,6 +97,7 @@ function fakeModel(opts: { draft?: Draft; servers?: string[] }): {
     model,
     draftCalls: () => draftCalls,
     goldenCalls: () => goldenCalls,
+    draftPrompts: () => draftPrompts,
   };
 }
 
@@ -340,6 +344,32 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
     expect(existsSync(join(deps.paths.agentsDir, 'fresh_agent.ts'))).toBe(
       false,
     );
+  });
+
+  it('a failed dry-run feeds the RUNTIME error back into a regeneration (repair)', async () => {
+    const { model, draftCalls, draftPrompts } = fakeModel({});
+    let runs = 0;
+    const { deps } = await makeDeps({
+      model,
+      verify: {
+        // First dry-run fails with a concrete runtime error; the repaired
+        // (regenerated) proposal then passes.
+        runAgent: async () => {
+          runs += 1;
+          return runs === 1
+            ? { error: 'boom: tool exploded at runtime' }
+            : { text: 'did the fresh thing' };
+        },
+      },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    // One consented draft + one repair regeneration...
+    expect(draftCalls()).toBe(2);
+    // ...and the regeneration prompt carried the REAL dry-run error (I6).
+    expect(draftPrompts()[1]).toContain('boom: tool exploded at runtime');
   });
 
   it('hung dry-run: bounded by AGENT_DRY_RUN_MS — fails with a timeout, does not hang', async () => {

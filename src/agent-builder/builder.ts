@@ -131,21 +131,43 @@ async function verifyAndCommitProposal(
   const vector = await embedOne(signatureText(sig), verify.embed);
   let stagedPath: string | undefined;
   let registeredFiles: string[] = [];
+  // The proposal currently staged — starts as the consented one and is
+  // replaced by a repaired regeneration when a dry-run fails (I6).
+  let current = proposal;
 
   const gateDeps: GateDeps = {
     kind: ArtifactKind.Agent,
     name: proposal.name,
     need,
     signature: sig,
-    stage: async (_feedback) => {
-      // v1: feedback-driven repair of the PROPOSAL itself isn't implemented
-      // yet — a re-stage (after a failed dry-run) just rewrites the SAME
-      // proposal, a no-op regeneration acceptable for v1 per spec.
-      // TODO(controller): route `_feedback` into a targeted regeneration.
-      stagedPath = writeAgentFile(proposal, deps.paths);
+    stage: async (feedback) => {
+      if (feedback !== undefined) {
+        // Feed the REAL runtime error back into a fresh generation (I6) —
+        // generateProposal's retryFeedback seam. The repaired proposal
+        // keeps the consented NAME (the user consented to that identity;
+        // a repair may only revise prompt/description/tools) so the staged
+        // path stays stable. If the regeneration itself fails validation or
+        // throws, keep the previous proposal — the repair attempt stays
+        // bounded and can never make things worse than a plain retry.
+        try {
+          const { proposal: repaired } = await draftAndValidate(need, deps, [
+            { field: 'dry-run', problem: feedback },
+          ]);
+          const renamed: AgentProposal = { ...repaired, name: current.name };
+          const issues = validateProposal(
+            renamed,
+            deps.existingNames(),
+            deps.packNames(),
+          );
+          if (issues.length === 0) current = renamed;
+        } catch {
+          // Keep the previous proposal; the bounded repair loop re-runs it.
+        }
+      }
+      stagedPath = writeAgentFile(current, deps.paths);
       const staged: StagedAgent = {
-        proposal,
-        agent: agentFromProposal(proposal),
+        proposal: current,
+        agent: agentFromProposal(current),
       };
       return { def: staged };
     },
@@ -258,9 +280,11 @@ async function verifyAndCommitProposal(
       ? [stagedPath, ...registeredFiles]
       : registeredFiles;
     deps.log?.(
-      `Created agent "${proposal.name}" (${files.length} file(s), verified: ${result.level}). It is live on the next run.`,
+      `Created agent "${current.name}" (${files.length} file(s), verified: ${result.level}). It is live on the next run.`,
     );
-    return { kind: 'written', proposal, files, level: result.level };
+    // `current`, not the consented `proposal` — a dry-run repair may have
+    // regenerated it (same name), and what was committed is what we report.
+    return { kind: 'written', proposal: current, files, level: result.level };
   }
   if (result.kind === 'reused') {
     return { kind: 'reused', name: result.name, similarity: result.similarity };

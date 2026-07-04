@@ -57,9 +57,11 @@ function fakeModel(opts: {
   model: BuilderModel;
   planCalls: () => number;
   goldenCalls: () => number;
+  planPrompts: () => string[];
 } {
   let planCalls = 0;
   let goldenCalls = 0;
+  const planPrompts: string[] = [];
   const shape = opts.shape ?? 'workflow';
   const model: BuilderModel = {
     object: async ({ prompt }) => {
@@ -71,6 +73,7 @@ function fakeModel(opts: {
       }
       if (prompt.includes('list the NODES only')) {
         planCalls += 1;
+        planPrompts.push(prompt);
         return (opts.nodes ?? {
           steps: [{ id: 'f', kind: 'tool', tool: 'fetch' }],
         }) as never;
@@ -115,6 +118,7 @@ function fakeModel(opts: {
     model,
     planCalls: () => planCalls,
     goldenCalls: () => goldenCalls,
+    planPrompts: () => planPrompts,
   };
 }
 
@@ -395,6 +399,38 @@ test('golden-eval judge runs on the model selectJudge picked, not the generator'
     expect(judgeIds.length).toBeGreaterThan(0);
     // Every judge call carries the cross-family pick — never the same-family twin.
     expect(new Set(judgeIds)).toEqual(new Set(['judge-big']));
+  } finally {
+    cleanup();
+  }
+});
+
+test('a failed dry-run feeds the RUNTIME error back into a re-plan (repair)', async () => {
+  const { paths, cleanup } = repoRootPaths();
+  try {
+    const { model, planCalls, planPrompts } = fakeModel({});
+    let runs = 0;
+    const deps = baseDeps(
+      paths,
+      model,
+      fakeVerify({
+        // First dry-run fails with a concrete runtime error; the repaired
+        // (re-planned) workflow then passes.
+        runArtifact: async () => {
+          runs += 1;
+          return runs === 1
+            ? { error: 'boom: step exploded at runtime' }
+            : { text: 'ran the flow' };
+        },
+      }),
+    );
+
+    const r = await buildCrewOrWorkflow('run a fresh flow', deps);
+
+    expect(r.kind).toBe('written');
+    // One consented plan + one repair re-plan...
+    expect(planCalls()).toBe(2);
+    // ...and the re-plan prompt carried the REAL dry-run error (I6).
+    expect(planPrompts()[1]).toContain('boom: step exploded at runtime');
   } finally {
     cleanup();
   }
