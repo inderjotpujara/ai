@@ -25,7 +25,7 @@ function factoryName(p: AgentProposal): string {
   return `create${pascalCase(p.name)}Agent`;
 }
 
-function atomicWrite(path: string, content: string): void {
+export function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, content);
   renameSync(tmp, path);
