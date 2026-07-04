@@ -1,5 +1,6 @@
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
+import { withRunTelemetry } from './with-run.ts';
 
 function parseArgs(argv: string[]): { need: string; autoYes: boolean } {
   const positional: string[] = [];
@@ -19,7 +20,13 @@ async function main(): Promise<void> {
   }
   const { deps, cleanup } = await makeRealCrewBuilderDeps({ autoYes });
   try {
-    const r = await buildCrewOrWorkflow(need, deps);
+    // Run scope + telemetry provider (C2a): without this the crew.build /
+    // build.verify spans opened inside buildCrewOrWorkflow are no-ops — with
+    // it they land in runs/<id>/spans.jsonl like every other CLI's spans.
+    const r = await withRunTelemetry(
+      { runsRoot: 'runs', runId: `crew-builder-${process.pid}` },
+      () => buildCrewOrWorkflow(need, deps),
+    );
     if (r.kind === 'written') {
       console.log(
         `Created ${r.shape} "${r.name}". Files: ${r.files.join(', ')}`,

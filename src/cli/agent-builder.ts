@@ -1,5 +1,6 @@
 import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
+import { withRunTelemetry } from './with-run.ts';
 
 function parseArgs(argv: string[]): { need: string; autoYes: boolean } {
   const positional: string[] = [];
@@ -21,7 +22,13 @@ async function main(): Promise<void> {
   }
   const { deps, cleanup } = await makeRealBuilderDeps({ autoYes });
   try {
-    const result = await buildAgent(need, deps);
+    // Run scope + telemetry provider (C2a): without this the agent.build /
+    // build.verify spans opened inside buildAgent are no-ops — with it they
+    // land in runs/<id>/spans.jsonl like every other CLI's spans.
+    const result = await withRunTelemetry(
+      { runsRoot: 'runs', runId: `agent-builder-${process.pid}` },
+      () => buildAgent(need, deps),
+    );
     if (result.kind === 'written') {
       console.log(
         `Created agent "${result.proposal.name}". Files: ${result.files.join(', ')}`,

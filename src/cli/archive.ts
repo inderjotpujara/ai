@@ -3,6 +3,7 @@ import type { ArchiveCandidate } from '../verified-build/archive.ts';
 import { archiveArtifact, archiveDecision } from '../verified-build/archive.ts';
 import { readManifest } from '../verified-build/manifest.ts';
 import { aggregateUsage } from '../verified-build/usage.ts';
+import { withRunTelemetry } from './with-run.ts';
 
 /** Registry dirs holding generated artifacts (each has a sidecar manifest). */
 export const REGISTRY_DIRS = ['agents', 'crews', 'workflows'] as const;
@@ -60,11 +61,19 @@ async function prune(reports: DirReport[]): Promise<number> {
 }
 
 async function main(): Promise<void> {
-  const reports = reportCandidates(REGISTRY_DIRS, runsRootDir(), Date.now());
-  console.log(renderReport(reports));
-  if (!process.argv.includes('--prune')) return;
-  const archived = await prune(reports);
-  console.log(`Archived ${archived} artifact(s).`);
+  const runsRoot = runsRootDir();
+  // Run scope + telemetry provider (C2a): spans opened during the archive
+  // pass land in runs/<id>/spans.jsonl like every other CLI's spans.
+  await withRunTelemetry(
+    { runsRoot, runId: `archive-${process.pid}` },
+    async () => {
+      const reports = reportCandidates(REGISTRY_DIRS, runsRoot, Date.now());
+      console.log(renderReport(reports));
+      if (!process.argv.includes('--prune')) return;
+      const archived = await prune(reports);
+      console.log(`Archived ${archived} artifact(s).`);
+    },
+  );
 }
 
 if (import.meta.main) {
