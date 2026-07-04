@@ -1,9 +1,11 @@
 import type { CrewDef } from '../src/crew/types.ts';
 import researchCrew from './research-crew.ts';
+// CREW-BUILDER:IMPORTS (generated crew imports are inserted above this line — do not remove)
 
 /** name -> crew definition (mirrors workflows/index.ts). */
 export const CREWS: Record<string, CrewDef> = {
   [researchCrew.id]: researchCrew,
+  // CREW-BUILDER:ENTRIES (generated crew entries are inserted above this line — do not remove)
 };
 
 export function getCrew(name: string): CrewDef | undefined {
