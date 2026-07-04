@@ -1,5 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+} from 'node:fs';
+import { join, resolve } from 'node:path';
 import { atomicWrite } from '../agent-builder/write.ts';
 import { cosine } from '../memory/embed-one.ts';
 import { archiveIdleDays, reuseBands } from './config.ts';
@@ -65,10 +71,77 @@ export function archiveDecision(
   return candidates;
 }
 
+/** Thrown when an archive candidate is still referenced by another registered
+ *  artifact (a crew member's `agentRef` or a workflow's agent step) — moving
+ *  it aside would strand the referencing artifact at run time. */
+export class LiveReferenceError extends Error {
+  constructor(name: string, refs: string[]) {
+    super(
+      `archiveArtifact: "${name}" is still referenced by ${refs.join(', ')} — refusing to archive a live artifact`,
+    );
+    this.name = 'LiveReferenceError';
+  }
+}
+
+/** Source patterns by which one registered artifact references another:
+ *  a crew member's `agentRef: "<name>"` or a workflow step's
+ *  `agent: "<name>"`. transpile.ts emits JSON.stringify'd double quotes;
+ *  single quotes are covered for hand-edited files. */
+function referenceNeedles(name: string): string[] {
+  return [
+    `agentRef: ${JSON.stringify(name)}`,
+    `agent: ${JSON.stringify(name)}`,
+    `agentRef: '${name}'`,
+    `agent: '${name}'`,
+  ];
+}
+
+/** Paths of artifact files in `refDirs` that still reference `name`. Scans
+ *  top-level `*.ts` files only (`archive/` and `index.ts` excluded;
+ *  `excludePath` skips the candidate's own file). Limitation: this is a
+ *  textual scan of the generated-source reference patterns — a hand-edited
+ *  file that references the artifact some other way is not detected. */
+export function findLiveReferences(
+  name: string,
+  refDirs: string[],
+  excludePath?: string,
+): string[] {
+  const needles = referenceNeedles(name);
+  const hits: string[] = [];
+  for (const refDir of refDirs) {
+    if (!existsSync(refDir)) continue;
+    for (const file of readdirSync(refDir)) {
+      if (!file.endsWith('.ts') || file === 'index.ts') continue;
+      const path = join(refDir, file);
+      if (excludePath !== undefined && resolve(path) === excludePath) continue;
+      const content = readFileSync(path, 'utf8');
+      if (needles.some((needle) => content.includes(needle))) hits.push(path);
+    }
+  }
+  return hits;
+}
+
 /** Move an artifact file into dir/archive/ (reversible-in-spirit: the file is
  *  preserved), drop its manifest entry, and drop any index.ts line that
- *  references it. */
-export function archiveArtifact(dir: string, name: string): void {
+ *  references it. Throws LiveReferenceError when another artifact in
+ *  `refDirs` still references the candidate. Limitation: `refDirs` defaults
+ *  to the candidate's own registry dir only — callers holding multiple
+ *  registries (agents/crews/workflows) should pass all of them so a
+ *  cross-registry reference (e.g. a crew using an agent) also blocks the
+ *  archive. */
+export function archiveArtifact(
+  dir: string,
+  name: string,
+  refDirs: string[] = [dir],
+): void {
+  const refs = findLiveReferences(
+    name,
+    refDirs,
+    resolve(join(dir, `${name}.ts`)),
+  );
+  if (refs.length > 0) {
+    throw new LiveReferenceError(name, refs);
+  }
   const archiveDir = join(dir, 'archive');
   mkdirSync(archiveDir, { recursive: true });
   renameSync(join(dir, `${name}.ts`), join(archiveDir, `${name}.ts`));

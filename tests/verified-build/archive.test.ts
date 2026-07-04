@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -11,6 +12,8 @@ import { join } from 'node:path';
 import {
   archiveArtifact,
   archiveDecision,
+  findLiveReferences,
+  LiveReferenceError,
 } from '../../src/verified-build/archive.ts';
 import {
   readManifest,
@@ -159,5 +162,74 @@ describe('archiveArtifact', () => {
     archiveArtifact(dir, 'foo');
     expect(existsSync(join(dir, 'archive', 'foo.ts'))).toBe(true);
     expect(readManifest(dir).entries).toEqual({});
+  });
+
+  test('refuses to archive an agent referenced by a crew in the same dir', () => {
+    writeFileSync(join(dir, 'summarizer.ts'), 'export const s = 1;\n');
+    writeFileSync(
+      join(dir, 'research-crew.ts'),
+      'members: [\n    {\n      name: "lead",\n      agentRef: "summarizer",\n    },\n  ],\n',
+    );
+    upsertEntry(dir, 'summarizer', entry('summarize', [1, 0, 0], 1));
+
+    expect(() => archiveArtifact(dir, 'summarizer')).toThrow(
+      LiveReferenceError,
+    );
+    expect(() => archiveArtifact(dir, 'summarizer')).toThrow(
+      'still referenced',
+    );
+    // nothing moved, manifest untouched
+    expect(existsSync(join(dir, 'summarizer.ts'))).toBe(true);
+    expect(readManifest(dir).entries.summarizer).toBeDefined();
+  });
+
+  test('refuses when a workflow step in a sibling registry dir references the agent', () => {
+    const agentsDir = join(dir, 'agents');
+    const workflowsDir = join(dir, 'workflows');
+    mkdirSync(agentsDir);
+    mkdirSync(workflowsDir);
+    writeFileSync(join(agentsDir, 'summarizer.ts'), 'export const s = 1;\n');
+    writeFileSync(
+      join(workflowsDir, 'digest.ts'),
+      'steps: [\n  {\n    id: "s1",\n    agent: "summarizer",\n  },\n],\n',
+    );
+    upsertEntry(agentsDir, 'summarizer', entry('summarize', [1, 0, 0], 1));
+
+    expect(() =>
+      archiveArtifact(agentsDir, 'summarizer', [agentsDir, workflowsDir]),
+    ).toThrow(LiveReferenceError);
+    // without the cross-registry refDirs the same-dir default cannot see it
+    archiveArtifact(agentsDir, 'summarizer');
+    expect(existsSync(join(agentsDir, 'archive', 'summarizer.ts'))).toBe(true);
+  });
+
+  test('the candidate file itself and archived files do not count as references', () => {
+    writeFileSync(
+      join(dir, 'self-crew.ts'),
+      'members: [{ name: "a", agentRef: "self-crew" }]\n', // self-reference
+    );
+    mkdirSync(join(dir, 'archive'));
+    writeFileSync(
+      join(dir, 'archive', 'old-crew.ts'),
+      'members: [{ name: "a", agentRef: "self-crew" }]\n',
+    );
+    upsertEntry(dir, 'self-crew', entry('crew things', [1, 0, 0], 1));
+    archiveArtifact(dir, 'self-crew');
+    expect(existsSync(join(dir, 'archive', 'self-crew.ts'))).toBe(true);
+  });
+
+  test('a same-named artifact in another dir still counts as a referencer', () => {
+    const agentsDir = join(dir, 'agents');
+    const crewsDir = join(dir, 'crews');
+    mkdirSync(agentsDir);
+    mkdirSync(crewsDir);
+    writeFileSync(join(agentsDir, 'digest.ts'), 'export const d = 1;\n');
+    writeFileSync(
+      join(crewsDir, 'digest.ts'),
+      'members: [{ name: "a", agentRef: "digest" }]\n',
+    );
+    expect(findLiveReferences('digest', [agentsDir, crewsDir])).toEqual([
+      join(crewsDir, 'digest.ts'),
+    ]);
   });
 });
