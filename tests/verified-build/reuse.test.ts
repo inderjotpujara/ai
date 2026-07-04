@@ -84,6 +84,24 @@ describe('reuseDecision', () => {
     expect(decision.match).toBe('twin');
   });
 
+  test('incomparable vectors (empty / mismatched length) are skipped, not a crash', async () => {
+    // `[]` is what `rebuildFromArtifacts` leaves; `[1, 0, 0]` mimics an entry
+    // embedded under a different embed model. Neither may crash the scan or
+    // win over a genuinely comparable entry.
+    upsertEntry(dir, 'rebuilt_no_vector', entry([]));
+    upsertEntry(dir, 'other_embed_model', entry([1, 0, 0]));
+    upsertEntry(dir, 'near', entry([0.8, 0.6]));
+    const decision = await reuseDecision(sig, { embed, dir });
+    expect(decision.kind).toBe(ReuseKind.Offer);
+    expect(decision.match).toBe('near');
+  });
+
+  test('only incomparable entries yields Generate with similarity 0', async () => {
+    upsertEntry(dir, 'rebuilt_no_vector', entry([]));
+    const decision = await reuseDecision(sig, { embed, dir });
+    expect(decision).toEqual({ kind: ReuseKind.Generate, similarity: 0 });
+  });
+
   test('equal similarity tie-breaks by higher useCount', async () => {
     upsertEntry(dir, 'rarely_used', entry([1, 0], 1));
     upsertEntry(dir, 'well_used', entry([1, 0], 9));

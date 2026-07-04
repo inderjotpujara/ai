@@ -10,6 +10,14 @@ export type ReuseDeps = {
   dir: string;
 };
 
+/** `cosine` throws on mismatched/empty vectors (e.g. entries embedded under
+ *  a different embed model, or `[]` from `rebuildFromArtifacts`); such
+ *  entries are "not comparable" and skipped — never a garbage similarity
+ *  score, never a crash of the reuse scan (mirrors archive.ts). */
+function comparableVectors(a: number[], b: number[]): boolean {
+  return a.length > 0 && a.length === b.length;
+}
+
 /** Decide reuse/offer/generate by cosine similarity against the manifest. */
 export async function reuseDecision(
   sig: CapabilitySignature,
@@ -20,6 +28,7 @@ export async function reuseDecision(
 
   let best: { name: string; similarity: number; useCount: number } | undefined;
   for (const [name, entry] of Object.entries(manifest.entries)) {
+    if (!comparableVectors(vector, entry.vector)) continue;
     const similarity = cosine(vector, entry.vector);
     const wins =
       best === undefined ||
