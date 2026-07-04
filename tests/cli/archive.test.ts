@@ -1,8 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderReport, reportCandidates } from '../../src/cli/archive.ts';
+import {
+  prune,
+  renderReport,
+  reportCandidates,
+} from '../../src/cli/archive.ts';
 import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
 import { upsertEntry } from '../../src/verified-build/manifest.ts';
 import type { ManifestEntry } from '../../src/verified-build/types.ts';
@@ -93,6 +103,90 @@ describe('archive CLI report', () => {
     const reports = reportCandidates([registryDir], runsRoot, NOW_MS);
     expect(reports[0]?.candidates).toEqual([]);
     expect(renderReport(reports)).toBe(`${registryDir}: no archive candidates`);
+  });
+
+  test('prune archives a consented candidate and moves its file aside', async () => {
+    const oldMs = NOW_MS - 40 * DAY_MS;
+    upsertEntry(registryDir, 'A', entry('summarize urls', [1, 0, 0], oldMs));
+    upsertEntry(
+      registryDir,
+      'B',
+      entry('summarize web pages', [1, 0, 0], oldMs),
+    );
+    writeFileSync(join(registryDir, 'A.ts'), 'export const a = 1;\n');
+    const runDir = join(runsRoot, 'run-1');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, 'spans.jsonl'),
+      `${JSON.stringify(span({ 'crew.id': 'B' }, NOW_MS - DAY_MS))}\n`,
+    );
+
+    const reports = reportCandidates([registryDir], runsRoot, NOW_MS);
+    const result = await prune(reports, [registryDir], async () => true);
+    expect(result.archived).toBe(1);
+    expect(result.skipped).toEqual([]);
+    expect(existsSync(join(registryDir, 'A.ts'))).toBe(false);
+    expect(existsSync(join(registryDir, 'archive', 'A.ts'))).toBe(true);
+  });
+
+  test('prune skips a candidate referenced from a DIFFERENT registry dir', async () => {
+    const oldMs = NOW_MS - 40 * DAY_MS;
+    upsertEntry(registryDir, 'A', entry('summarize urls', [1, 0, 0], oldMs));
+    upsertEntry(
+      registryDir,
+      'B',
+      entry('summarize web pages', [1, 0, 0], oldMs),
+    );
+    writeFileSync(join(registryDir, 'A.ts'), 'export const a = 1;\n');
+    // Another registry (workflows) still references A via an agent step.
+    const workflowsDir = join(root, 'workflows');
+    mkdirSync(workflowsDir, { recursive: true });
+    writeFileSync(
+      join(workflowsDir, 'w.ts'),
+      'export const w = { steps: [{ agent: "A" }] };\n',
+    );
+    const runDir = join(runsRoot, 'run-1');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, 'spans.jsonl'),
+      `${JSON.stringify(span({ 'crew.id': 'B' }, NOW_MS - DAY_MS))}\n`,
+    );
+
+    const reports = reportCandidates([registryDir], runsRoot, NOW_MS);
+    const result = await prune(
+      reports,
+      [registryDir, workflowsDir],
+      async () => true,
+    );
+    // The live reference blocks the archive but does NOT abort the loop.
+    expect(result.archived).toBe(0);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]?.name).toBe('A');
+    expect(result.skipped[0]?.reason).toContain('still referenced');
+    expect(existsSync(join(registryDir, 'A.ts'))).toBe(true);
+  });
+
+  test('prune leaves a declined candidate untouched', async () => {
+    const oldMs = NOW_MS - 40 * DAY_MS;
+    upsertEntry(registryDir, 'A', entry('summarize urls', [1, 0, 0], oldMs));
+    upsertEntry(
+      registryDir,
+      'B',
+      entry('summarize web pages', [1, 0, 0], oldMs),
+    );
+    writeFileSync(join(registryDir, 'A.ts'), 'export const a = 1;\n');
+    const runDir = join(runsRoot, 'run-1');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, 'spans.jsonl'),
+      `${JSON.stringify(span({ 'crew.id': 'B' }, NOW_MS - DAY_MS))}\n`,
+    );
+
+    const reports = reportCandidates([registryDir], runsRoot, NOW_MS);
+    const result = await prune(reports, [registryDir], async () => false);
+    expect(result.archived).toBe(0);
+    expect(result.skipped).toEqual([]);
+    expect(existsSync(join(registryDir, 'A.ts'))).toBe(true);
   });
 
   test('missing runs root still reports (idle without used duplicate = none)', () => {

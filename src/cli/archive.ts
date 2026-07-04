@@ -1,6 +1,11 @@
 import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
+import { withBuildArchiveSpan } from '../telemetry/spans.ts';
 import type { ArchiveCandidate } from '../verified-build/archive.ts';
-import { archiveArtifact, archiveDecision } from '../verified-build/archive.ts';
+import {
+  archiveArtifact,
+  archiveDecision,
+  LiveReferenceError,
+} from '../verified-build/archive.ts';
 import { readManifest } from '../verified-build/manifest.ts';
 import { aggregateUsage } from '../verified-build/usage.ts';
 import { withRunTelemetry } from './with-run.ts';
@@ -42,37 +47,63 @@ export function renderReport(reports: DirReport[]): string {
   return lines.join('\n');
 }
 
-/** Per-candidate consent, then archive. Returns how many were archived. */
-async function prune(reports: DirReport[]): Promise<number> {
-  const input = stdinInput();
+export type PruneResult = {
+  archived: number;
+  /** Candidates that were consented but refused by the live-reference guard —
+   *  reported instead of aborting the rest of the prune loop. */
+  skipped: { name: string; reason: string }[];
+};
+
+/** Per-candidate consent (via `ask`), then archive. ALL registry dirs go in
+ *  as `refDirs` so a candidate referenced from a DIFFERENT registry (e.g. a
+ *  workflow using an agent) is protected; a LiveReferenceError skips that
+ *  one candidate rather than aborting the whole loop. */
+export async function prune(
+  reports: DirReport[],
+  refDirs: readonly string[],
+  ask: (question: string) => Promise<boolean>,
+): Promise<PruneResult> {
   let archived = 0;
+  const skipped: PruneResult['skipped'] = [];
   for (const { dir, candidates } of reports) {
     for (const candidate of candidates) {
-      const yes = await askYesNo(
+      const yes = await ask(
         `Archive ${candidate.name}? (near-duplicate, idle)`,
-        { input, autoYes: false },
       );
       if (!yes) continue;
-      archiveArtifact(dir, candidate.name);
-      archived += 1;
+      try {
+        archiveArtifact(dir, candidate.name, [...refDirs]);
+        archived += 1;
+      } catch (err) {
+        if (!(err instanceof LiveReferenceError)) throw err;
+        skipped.push({ name: candidate.name, reason: err.message });
+      }
     }
   }
-  return archived;
+  return { archived, skipped };
 }
 
 async function main(): Promise<void> {
   const runsRoot = runsRootDir();
-  // Run scope + telemetry provider (C2a): spans opened during the archive
-  // pass land in runs/<id>/spans.jsonl like every other CLI's spans.
-  await withRunTelemetry(
-    { runsRoot, runId: `archive-${process.pid}` },
-    async () => {
+  // Run scope + telemetry provider (C2a): the build.archive span below lands
+  // in runs/<id>/spans.jsonl like every other CLI's spans.
+  await withRunTelemetry({ runsRoot, runId: `archive-${process.pid}` }, () =>
+    withBuildArchiveSpan(async (rec) => {
       const reports = reportCandidates(REGISTRY_DIRS, runsRoot, Date.now());
       console.log(renderReport(reports));
-      if (!process.argv.includes('--prune')) return;
-      const archived = await prune(reports);
+      const total = reports.reduce((n, r) => n + r.candidates.length, 0);
+      if (!process.argv.includes('--prune')) {
+        rec.done(total, 0);
+        return;
+      }
+      const input = stdinInput();
+      const { archived, skipped } = await prune(reports, REGISTRY_DIRS, (q) =>
+        askYesNo(q, { input, autoYes: false }),
+      );
+      for (const s of skipped) console.log(`Skipped ${s.name}: ${s.reason}`);
       console.log(`Archived ${archived} artifact(s).`);
-    },
+      rec.done(total, archived);
+    }),
   );
 }
 
