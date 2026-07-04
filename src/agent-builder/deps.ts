@@ -18,6 +18,7 @@ import { createModelManager } from '../resource/model-manager.ts';
 import { listLoadedModels } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
+import { dryRunMs } from '../verified-build/config.ts';
 import type { JudgeCandidate } from '../verified-build/judge.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
@@ -297,9 +298,16 @@ export async function makeRealBuilderDeps(
     verify: {
       embed: embedder.embed,
       judgeCandidates: () => registry.map(toJudgeCandidate),
-      runAgent: (agent, task) => runGuardedAgent(agent, task),
+      runAgent: (agent, task, signal) =>
+        runGuardedAgent(agent, task, undefined, signal),
       judge: async (prompt) => {
-        const r = await generateText({ model, prompt });
+        // Bounded like every other verify-gate model call: a hung judge
+        // aborts after dryRunMs() instead of hanging the build (C1).
+        const r = await generateText({
+          model,
+          prompt,
+          abortSignal: AbortSignal.timeout(dryRunMs()),
+        });
         return r.text.trim().toLowerCase().startsWith('yes');
       },
       generatorFamily: modelFamily(decl.model),

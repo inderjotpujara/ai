@@ -4,7 +4,11 @@ import type { ValidationIssue } from '../agent-builder/types.ts';
 import { atomicWrite } from '../agent-builder/write.ts';
 import { embedOne } from '../memory/embed-one.ts';
 import { withCrewBuildSpan } from '../telemetry/spans.ts';
-import { representativeTask } from '../verified-build/dry-run.ts';
+import { dryRunMs } from '../verified-build/config.ts';
+import {
+  representativeTask,
+  withWallClock,
+} from '../verified-build/dry-run.ts';
 import { evalCases } from '../verified-build/eval.ts';
 import type { GateDeps } from '../verified-build/gate.ts';
 import { verifyAndCommit } from '../verified-build/gate.ts';
@@ -172,19 +176,27 @@ async function verifyAndCommitCrewOrWorkflow(
         model: deps.model,
       }).map((i) => `${i.field}: ${i.problem}`);
     },
+    // Every dry-run/golden-eval run is wall-clock-bounded by dryRunMs():
+    // withWallClock rejects on timeout (caught here, reported as a failed
+    // run) so a hung crew/workflow run fails the gate instead of hanging the
+    // whole build (C1). Unlike the agent path there is no AbortSignal to
+    // thread — runCrew/runWorkflow don't accept one yet, so the bound is the
+    // wall clock at the call site.
     dryRunOnce: async (def) => {
       const { def: runnable } = def as StagedArtifact;
-      const r = await verify.runArtifact(
-        runnable,
-        shape,
-        representativeTask(need, sig),
-      );
-      return {
-        ran: 'text' in r,
-        output: 'text' in r ? r.text : undefined,
-        error: 'error' in r ? r.error : undefined,
-        repairs: 0,
-      };
+      try {
+        const r = await withWallClock(dryRunMs(), () =>
+          verify.runArtifact(runnable, shape, representativeTask(need, sig)),
+        );
+        return {
+          ran: 'text' in r,
+          output: 'text' in r ? r.text : undefined,
+          error: 'error' in r ? r.error : undefined,
+          repairs: 0,
+        };
+      } catch (err) {
+        return { ran: false, error: String(err), repairs: 0 };
+      }
     },
     goldenEval: async (def) => {
       const { def: runnable } = def as StagedArtifact;
@@ -196,8 +208,14 @@ async function verifyAndCommitCrewOrWorkflow(
       const golden = await generateGolden(need, sig, deps.model);
       return evalCases(golden.cases, {
         runCase: async (input) => {
-          const r = await verify.runArtifact(runnable, shape, input);
-          return 'text' in r ? r.text : `error: ${r.error}`;
+          try {
+            const r = await withWallClock(dryRunMs(), () =>
+              verify.runArtifact(runnable, shape, input),
+            );
+            return 'text' in r ? r.text : `error: ${r.error}`;
+          } catch (err) {
+            return `error: ${String(err)}`;
+          }
         },
         judge: verify.judge,
         judgeModel: judgePick.model,

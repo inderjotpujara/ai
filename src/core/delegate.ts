@@ -30,11 +30,14 @@ export type BeforeDelegate = (
 
 /** Run an agent through the full Slice-9 guarded delegation path:
  *  delegation span · depth guard · before-delegate hook · context wrap · return cap.
- *  Shared by the orchestrator's delegate tool and the workflow engine's agent step. */
+ *  Shared by the orchestrator's delegate tool and the workflow engine's agent
+ *  step. `abortSignal` (optional) is threaded down to the underlying
+ *  generateText so a caller can wall-clock-bound the run (verify gate). */
 export function runGuardedAgent(
   agent: Agent,
   task: string,
   onBeforeDelegate?: BeforeDelegate,
+  abortSignal?: AbortSignal,
 ): Promise<{ text: string } | { error: string }> {
   return withDelegationSpan(agent.name, async () => {
     const check = checkDelegation(agent.name);
@@ -51,7 +54,8 @@ export function runGuardedAgent(
       const { text } = await runInDelegationContext(
         agent.name,
         pre?.numCtx,
-        () => runDefinedAgent(agent, task, pre?.numCtx, pre?.model),
+        () =>
+          runDefinedAgent(agent, task, pre?.numCtx, pre?.model, abortSignal),
       );
       return { text: concise(text, callerNumCtx) };
     } catch (cause) {

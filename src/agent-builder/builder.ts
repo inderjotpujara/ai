@@ -3,7 +3,11 @@ import type { Agent } from '../core/agent-def.ts';
 import { embedOne } from '../memory/embed-one.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
 import { withAgentBuildSpan } from '../telemetry/spans.ts';
-import { representativeTask } from '../verified-build/dry-run.ts';
+import { dryRunMs } from '../verified-build/config.ts';
+import {
+  representativeTask,
+  withWallClock,
+} from '../verified-build/dry-run.ts';
 import { evalCases } from '../verified-build/eval.ts';
 import type { GateDeps } from '../verified-build/gate.ts';
 import { verifyAndCommit } from '../verified-build/gate.ts';
@@ -150,15 +154,31 @@ async function verifyAndCommitProposal(
         (i) => `${i.field}: ${i.problem}`,
       );
     },
+    // Every dry-run/golden-eval model call is wall-clock-bounded by
+    // dryRunMs(): withWallClock rejects on timeout (caught here, reported as
+    // a failed run) AND an AbortSignal.timeout is threaded down to the
+    // underlying generateText so the hung call itself aborts rather than
+    // running on unattended (C1 — a hung model must fail the gate, never
+    // hang the whole build).
     dryRunOnce: async (def) => {
       const { agent } = def as StagedAgent;
-      const r = await verify.runAgent(agent, representativeTask(need, sig));
-      return {
-        ran: 'text' in r,
-        output: 'text' in r ? r.text : undefined,
-        error: 'error' in r ? r.error : undefined,
-        repairs: 0,
-      };
+      try {
+        const r = await withWallClock(dryRunMs(), () =>
+          verify.runAgent(
+            agent,
+            representativeTask(need, sig),
+            AbortSignal.timeout(dryRunMs()),
+          ),
+        );
+        return {
+          ran: 'text' in r,
+          output: 'text' in r ? r.text : undefined,
+          error: 'error' in r ? r.error : undefined,
+          repairs: 0,
+        };
+      } catch (err) {
+        return { ran: false, error: String(err), repairs: 0 };
+      }
     },
     goldenEval: async (def) => {
       const { agent } = def as StagedAgent;
@@ -170,8 +190,14 @@ async function verifyAndCommitProposal(
       const golden = await generateGolden(need, sig, deps.model);
       return evalCases(golden.cases, {
         runCase: async (input) => {
-          const r = await verify.runAgent(agent, input);
-          return 'text' in r ? r.text : `error: ${r.error}`;
+          try {
+            const r = await withWallClock(dryRunMs(), () =>
+              verify.runAgent(agent, input, AbortSignal.timeout(dryRunMs())),
+            );
+            return 'text' in r ? r.text : `error: ${r.error}`;
+          } catch (err) {
+            return `error: ${String(err)}`;
+          }
         },
         judge: verify.judge,
         judgeModel: judgePick.model,

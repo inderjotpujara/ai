@@ -200,6 +200,42 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
     expect(manifest.entries.fresh_agent).toBeUndefined();
   });
 
+  it('hung dry-run: bounded by AGENT_DRY_RUN_MS — fails with a timeout, does not hang', async () => {
+    process.env.AGENT_DRY_RUN_MS = '50';
+    process.env.AGENT_BUILD_MAX_REPAIRS = '1';
+    try {
+      const { model } = fakeModel({});
+      const signals: (AbortSignal | undefined)[] = [];
+      const { deps } = await makeDeps({
+        model,
+        verify: {
+          // A model call that never resolves — the wall clock must win.
+          runAgent: (_agent, _task, signal) => {
+            signals.push(signal);
+            return new Promise(() => {});
+          },
+        },
+      });
+
+      const r = await buildAgent('do a fresh thing', deps);
+
+      expect(r.kind).toBe('failed-verification');
+      if (r.kind === 'failed-verification') {
+        expect(r.stage).toBe('dry-run');
+        expect(r.detail).toContain('timeout');
+      }
+      // The runner also received an AbortSignal so the hung generateText
+      // itself gets aborted, not just raced.
+      expect(signals.length).toBeGreaterThan(0);
+      expect(signals[0]).toBeInstanceOf(AbortSignal);
+      const idx = await readFile(deps.paths.indexPath, 'utf8');
+      expect(idx).not.toContain('fresh_agent');
+    } finally {
+      delete process.env.AGENT_DRY_RUN_MS;
+      delete process.env.AGENT_BUILD_MAX_REPAIRS;
+    }
+  });
+
   it('force true on a failing dry-run: commits at VerifiedLevel.Unverified', async () => {
     const { model } = fakeModel({});
     const { deps } = await makeDeps({

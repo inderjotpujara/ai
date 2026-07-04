@@ -252,6 +252,35 @@ test('fresh workflow, passing gate: writes at VerifiedLevel.Behaves and register
   }
 });
 
+test('hung dry-run: bounded by AGENT_DRY_RUN_MS — fails with a timeout, does not hang', async () => {
+  process.env.AGENT_DRY_RUN_MS = '50';
+  process.env.AGENT_BUILD_MAX_REPAIRS = '1';
+  const { paths, workflowsDir, cleanup } = repoRootPaths();
+  try {
+    const { model } = fakeModel({});
+    const deps = baseDeps(
+      paths,
+      model,
+      // A run that never resolves — the wall clock must win.
+      fakeVerify({ runArtifact: () => new Promise(() => {}) }),
+    );
+
+    const r = await buildCrewOrWorkflow('run a fresh flow', deps);
+
+    expect(r.kind).toBe('failed-verification');
+    if (r.kind === 'failed-verification') {
+      expect(r.stage).toBe('dry-run');
+      expect(r.detail).toContain('timeout');
+    }
+    const manifest = readManifest(workflowsDir);
+    expect(manifest.entries.fresh_flow).toBeUndefined();
+  } finally {
+    delete process.env.AGENT_DRY_RUN_MS;
+    delete process.env.AGENT_BUILD_MAX_REPAIRS;
+    cleanup();
+  }
+});
+
 test('failing dry-run, force false: fails verification and registers nothing', async () => {
   const { paths, workflowsDir, cleanup } = repoRootPaths();
   try {

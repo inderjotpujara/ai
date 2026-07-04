@@ -53,10 +53,13 @@ export type BuilderModel = {
 export type BuilderVerifyDeps = {
   embed: (t: string[]) => Promise<number[][]>;
   judgeCandidates: () => { model: string; params: number; family: string }[];
-  /** Wraps `runGuardedAgent` — runs a (not-yet-registered) agent def against one task. */
+  /** Wraps `runGuardedAgent` — runs a (not-yet-registered) agent def against
+   *  one task. `signal` (when the gate passes one) bounds the underlying
+   *  generateText so a hung model call aborts instead of hanging the build. */
   runAgent: (
     agent: Agent,
     task: string,
+    signal?: AbortSignal,
   ) => Promise<{ text: string } | { error: string }>;
   /** One yes/no judge call for a single rubric prompt. */
   judge: (prompt: string) => Promise<boolean>;
