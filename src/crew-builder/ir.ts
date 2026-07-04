@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CrewProcess } from '../crew/types.ts';
 
 /** How a step/task input closure is produced (JSON-safe descriptor, not a closure). */
 export const InputDescriptorSchema = z.discriminatedUnion('kind', [
@@ -101,11 +102,12 @@ export const CrewTaskIRSchema = z.object({
   dependsOn: z.array(z.string()).optional(),
   verify: z.boolean().optional(),
 });
+export type CrewTaskIR = z.infer<typeof CrewTaskIRSchema>;
 
 export const CrewIRSchema = z.object({
   id: z.string().min(1),
   description: z.string().optional(),
-  process: z.enum(['sequential', 'hierarchical']),
+  process: z.nativeEnum(CrewProcess),
   members: z.array(CrewMemberIRSchema).min(1),
   tasks: z.array(CrewTaskIRSchema).min(1),
 });

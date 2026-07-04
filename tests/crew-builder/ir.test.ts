@@ -72,3 +72,50 @@ test('WorkflowIRSchema rejects an unknown step kind', () => {
       .success,
   ).toBe(false);
 });
+
+test('WorkflowIRSchema accepts a valid map step', () => {
+  const ir = {
+    id: 'fetch_each',
+    steps: [
+      {
+        kind: 'tool',
+        id: 'list',
+        tool: 'list_urls',
+        input: { kind: 'fromInput' },
+      },
+      {
+        kind: 'map',
+        id: 'each',
+        dependsOn: ['list'],
+        over: { kind: 'mapOver', ref: 'list' },
+        step: {
+          kind: 'agent',
+          agent: 'web_fetch',
+          input: { kind: 'fromInput' },
+        },
+      },
+    ],
+  };
+  expect(WorkflowIRSchema.safeParse(ir).success).toBe(true);
+});
+
+test('WorkflowIRSchema rejects a map step missing its required step field', () => {
+  const ir = {
+    id: 'fetch_each',
+    steps: [
+      {
+        kind: 'tool',
+        id: 'list',
+        tool: 'list_urls',
+        input: { kind: 'fromInput' },
+      },
+      {
+        kind: 'map',
+        id: 'each',
+        dependsOn: ['list'],
+        over: { kind: 'mapOver', ref: 'list' },
+      },
+    ],
+  };
+  expect(WorkflowIRSchema.safeParse(ir).success).toBe(false);
+});
