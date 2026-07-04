@@ -11,4 +11,4 @@ export async function embedOne(
   return first;
 }
 
-export { cosine } from './chunk.ts';
+export { CosineDimensionError, cosine } from './chunk.ts';

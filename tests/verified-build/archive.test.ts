@@ -97,6 +97,28 @@ describe('archiveDecision', () => {
     });
     expect(archiveDecision(manifest, {}, NOW_MS)).toEqual([]);
   });
+
+  test('mismatched-dimension vectors are skipped, not compared (no crash)', () => {
+    const manifest = manifestWith({
+      A: entry('summarize urls', [1, 0, 0], oldMs),
+      B: entry('summarize web pages', [1, 0], oldMs), // other embed model
+    });
+    const usage: Record<string, UsageStat> = {
+      B: { lastUsedMs: NOW_MS - DAY_MS, useCount: 5 },
+    };
+    expect(archiveDecision(manifest, usage, NOW_MS)).toEqual([]);
+  });
+
+  test('empty vector (e.g. rebuilt entry) is skipped, not compared', () => {
+    const manifest = manifestWith({
+      A: entry('summarize urls', [], oldMs), // rebuildFromArtifacts default
+      B: entry('summarize web pages', [1, 0, 0], oldMs),
+    });
+    const usage: Record<string, UsageStat> = {
+      B: { lastUsedMs: NOW_MS - DAY_MS, useCount: 5 },
+    };
+    expect(archiveDecision(manifest, usage, NOW_MS)).toEqual([]);
+  });
 });
 
 describe('archiveArtifact', () => {
