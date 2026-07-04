@@ -70,6 +70,13 @@ export const ATTR = {
   BUILD_AGENT: 'agent.build.agent_name',
   BUILD_OUTCOME: 'agent.build.outcome',
   BUILD_SERVERS: 'agent.build.server_count',
+  CREW_BUILD_NEED: 'crew.build.need',
+  CREW_BUILD_SHAPE: 'crew.build.shape',
+  CREW_BUILD_ID: 'crew.build.id',
+  CREW_BUILD_MEMBERS: 'crew.build.member_count',
+  CREW_BUILD_STEPS: 'crew.build.step_count',
+  CREW_BUILD_MEMBERS_BUILT: 'crew.build.members_built',
+  CREW_BUILD_OUTCOME: 'crew.build.outcome',
 } as const;
 
 export type ModelSelectInfo = {
@@ -489,6 +496,46 @@ export function withAgentBuildSpan<T>(
         if (agentName) span.setAttribute(ATTR.BUILD_AGENT, agentName);
         if (serverCount !== undefined)
           span.setAttribute(ATTR.BUILD_SERVERS, serverCount);
+      },
+    });
+  });
+}
+
+/** Root span for one crew/workflow-builder run (Slice 19). Mirrors
+ *  withAgentBuildSpan: the body records stage events (classified /
+ *  generated / validated / written) and sets the outcome + member/step
+ *  counts at the end via the returned recorder. */
+export function withCrewBuildSpan<T>(
+  need: string,
+  fn: (rec: {
+    event: (
+      name: string,
+      attrs?: Record<string, string | number | boolean>,
+    ) => void;
+    outcome: (
+      kind: string,
+      shape?: string,
+      id?: string,
+      memberOrStepCount?: number,
+      membersBuilt?: number,
+    ) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('crew.build', async (span) => {
+    span.setAttribute(ATTR.CREW_BUILD_NEED, need);
+    return fn({
+      event: (name, attrs) => span.addEvent(name, attrs),
+      outcome: (kind, shape, id, count, built) => {
+        span.setAttribute(ATTR.CREW_BUILD_OUTCOME, kind);
+        if (shape) span.setAttribute(ATTR.CREW_BUILD_SHAPE, shape);
+        if (id) span.setAttribute(ATTR.CREW_BUILD_ID, id);
+        if (count !== undefined)
+          span.setAttribute(
+            shape === 'crew' ? ATTR.CREW_BUILD_MEMBERS : ATTR.CREW_BUILD_STEPS,
+            count,
+          );
+        if (built !== undefined)
+          span.setAttribute(ATTR.CREW_BUILD_MEMBERS_BUILT, built);
       },
     });
   });
