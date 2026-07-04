@@ -19,6 +19,7 @@ export type RunAgentInput = {
   temperature?: number;
   providerOptions?: ProviderOptions;
   functionId?: string;
+  abortSignal?: AbortSignal;
 };
 
 /** Run one agent turn: model + tools loop, bounded by a step guard. Returns text + steps. */
@@ -33,6 +34,7 @@ export async function runAgent(input: RunAgentInput): Promise<{
     tools: input.tools,
     temperature: input.temperature,
     providerOptions: input.providerOptions,
+    abortSignal: input.abortSignal,
     stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
     experimental_telemetry: {
       isEnabled: true,
