@@ -1,4 +1,5 @@
 // src/crew-builder/builder.ts
+import { rmSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { ValidationIssue } from '../agent-builder/types.ts';
 import { atomicWrite } from '../agent-builder/write.ts';
@@ -235,6 +236,16 @@ async function verifyAndCommitCrewOrWorkflow(
       });
       if (judgePick.model === null) return null;
       return generateGolden(need, sig, deps.model);
+    },
+    // A failed/throwing gate removes the staged (unregistered)
+    // <dir>/<id>.ts so it can't break the next typecheck/lint (I2). The
+    // shape's index was never touched for a non-committed def — commit is
+    // the only step that writes it.
+    discard: async () => {
+      if (stagedPath !== undefined) {
+        rmSync(stagedPath, { force: true });
+        stagedPath = undefined;
+      }
     },
     commit: async (def, level, golden, vec) => {
       const { ir: staged } = def as StagedArtifact;

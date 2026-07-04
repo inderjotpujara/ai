@@ -15,6 +15,7 @@
 // before generation), so it uses a plain system-tmpdir directory.
 import { expect, test } from 'bun:test';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync as mkdtempSyncNode,
   readFileSync,
@@ -391,6 +392,9 @@ test('failing dry-run, force false: fails verification and registers nothing', a
     expect(idx).not.toContain('fresh_flow');
     const manifest = readManifest(workflowsDir);
     expect(manifest.entries.fresh_flow).toBeUndefined();
+    // The staged (unregistered) file was discarded — nothing broken lingers
+    // to trip the next typecheck/lint (I2).
+    expect(existsSync(join(workflowsDir, 'fresh_flow.ts'))).toBe(false);
   } finally {
     cleanup();
   }

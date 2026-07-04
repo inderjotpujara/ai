@@ -41,10 +41,12 @@ function ranBad(): DryRunResult {
 type Harness = {
   deps: GateDeps;
   commits: { level: VerifiedLevel }[];
+  discards: () => number;
 };
 
 function makeDeps(overrides: Partial<GateDeps> = {}): Harness {
   const commits: { level: VerifiedLevel }[] = [];
+  let discards = 0;
   const deps: GateDeps = {
     kind: ArtifactKind.Agent,
     name: 'summarizer',
@@ -64,11 +66,14 @@ function makeDeps(overrides: Partial<GateDeps> = {}): Harness {
       commits.push({ level });
     },
     makeGolden: async () => golden,
+    discard: async () => {
+      discards++;
+    },
     vector: [1, 0, 0],
     force: false,
     ...overrides,
   };
-  return { deps, commits };
+  return { deps, commits, discards: () => discards };
 }
 
 describe('verifyAndCommit gate', () => {
@@ -182,6 +187,48 @@ describe('verifyAndCommit gate', () => {
       detail: '1/3',
     });
     expect(commits).toHaveLength(0);
+  });
+
+  test('a committed gate never discards the staged def', async () => {
+    const { deps, discards } = makeDeps();
+    const res = await verifyAndCommit(deps);
+    expect(res.kind).toBe('committed');
+    expect(discards()).toBe(0);
+  });
+
+  test('every failing stage discards the staged def', async () => {
+    const failures: Partial<GateDeps>[] = [
+      { structural: async () => ['x'] },
+      { dryRunOnce: async () => ranBad() },
+      { goldenEval: async () => failEval },
+    ];
+    for (const overrides of failures) {
+      const { deps, commits, discards } = makeDeps(overrides);
+      const res = await verifyAndCommit(deps);
+      expect(res.kind).toBe('failed');
+      expect(commits).toHaveLength(0);
+      expect(discards()).toBe(1);
+    }
+  });
+
+  test('a throwing stage still discards the staged def', async () => {
+    const { deps, discards } = makeDeps({
+      goldenEval: async () => {
+        throw new Error('judge exploded');
+      },
+    });
+    await expect(verifyAndCommit(deps)).rejects.toThrow('judge exploded');
+    expect(discards()).toBe(1);
+  });
+
+  test('a throw BEFORE staging discards nothing', async () => {
+    const { deps, discards } = makeDeps({
+      stage: async () => {
+        throw new Error('stage exploded');
+      },
+    });
+    await expect(verifyAndCommit(deps)).rejects.toThrow('stage exploded');
+    expect(discards()).toBe(0);
   });
 
   test('force with failing structural commits at unverified', async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -265,6 +266,11 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
     expect(idx).not.toContain('fresh_agent');
     const manifest = readManifest(deps.verify?.dir ?? '');
     expect(manifest.entries.fresh_agent).toBeUndefined();
+    // The staged (unregistered) file was discarded — nothing broken lingers
+    // to trip the next typecheck/lint (I2).
+    expect(existsSync(join(deps.paths.agentsDir, 'fresh_agent.ts'))).toBe(
+      false,
+    );
   });
 
   it('hung dry-run: bounded by AGENT_DRY_RUN_MS — fails with a timeout, does not hang', async () => {

@@ -1,3 +1,4 @@
+import { rmSync } from 'node:fs';
 import qwenFast from '../../models/qwen-fast.ts';
 import type { Agent } from '../core/agent-def.ts';
 import { embedOne } from '../memory/embed-one.ts';
@@ -217,6 +218,16 @@ async function verifyAndCommitProposal(
       });
       if (judgePick.model === null) return null;
       return generateGolden(need, sig, deps.model);
+    },
+    // A failed/throwing gate removes the staged (unregistered)
+    // agents/<name>.ts so it can't break the next typecheck/lint (I2).
+    // agents/index.ts and mcp.json were never touched for a non-committed
+    // def — commit is the only step that writes them.
+    discard: async () => {
+      if (stagedPath !== undefined) {
+        rmSync(stagedPath, { force: true });
+        stagedPath = undefined;
+      }
     },
     commit: async (def, level, golden, vec) => {
       const { proposal: p } = def as StagedAgent;

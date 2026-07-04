@@ -89,6 +89,7 @@ function gateDeps(overrides: Partial<GateDeps> = {}): GateDeps {
       belowBar: false,
     }),
     commit: async () => {},
+    discard: async () => {},
     vector: [1, 0],
     force: true,
     ...overrides,
