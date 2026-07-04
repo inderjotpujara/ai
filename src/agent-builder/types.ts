@@ -61,8 +61,11 @@ export type BuilderVerifyDeps = {
     task: string,
     signal?: AbortSignal,
   ) => Promise<{ text: string } | { error: string }>;
-  /** One yes/no judge call for a single rubric prompt. */
-  judge: (prompt: string) => Promise<boolean>;
+  /** One yes/no judge call for a single rubric prompt, run on the model
+   *  `selectJudge` picked (`judgeModelId`) — never the generator grading
+   *  itself. The real impl resolves a LanguageModel for that id via the
+   *  model manager and calls it at temperature 0. */
+  judge: (prompt: string, judgeModelId: string) => Promise<boolean>;
   generatorFamily?: string;
   /** Agents dir the manifest/golden sidecar files live under. */
   dir: string;

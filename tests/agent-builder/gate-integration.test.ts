@@ -178,6 +178,32 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
     );
   });
 
+  it('golden-eval judge runs on the model selectJudge picked, not the generator', async () => {
+    const judgeIds: string[] = [];
+    const { model } = fakeModel({});
+    const { deps } = await makeDeps({
+      model,
+      verify: {
+        judgeCandidates: () => [
+          { model: 'judge-big', params: 30e9, family: 'other-family' },
+          { model: 'generator-twin', params: 30e9, family: 'gen-family' },
+        ],
+        generatorFamily: 'gen-family',
+        judge: async (_prompt, judgeModelId) => {
+          judgeIds.push(judgeModelId);
+          return true;
+        },
+      },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    expect(judgeIds.length).toBeGreaterThan(0);
+    // Every judge call carries the cross-family pick — never the same-family twin.
+    expect(new Set(judgeIds)).toEqual(new Set(['judge-big']));
+  });
+
   it('failing dry-run, force false: fails verification and registers nothing', async () => {
     const { model } = fakeModel({});
     const { deps } = await makeDeps({

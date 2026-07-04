@@ -56,8 +56,10 @@ export type CrewBuilderVerifyDeps = {
     shape: Shape,
     task: string,
   ) => Promise<{ text: string } | { error: string }>;
-  /** One yes/no judge call for a single rubric prompt. */
-  judge: (prompt: string) => Promise<boolean>;
+  /** One yes/no judge call for a single rubric prompt, run on the model
+   *  `selectJudge` picked (`judgeModelId`) — never the generator grading
+   *  itself (mirrors agent-builder's `BuilderVerifyDeps.judge`). */
+  judge: (prompt: string, judgeModelId: string) => Promise<boolean>;
   generatorFamily?: string;
   /** Downgrade a failing gate to an Unverified commit instead of aborting. */
   force?: boolean;

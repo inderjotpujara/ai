@@ -246,8 +246,8 @@ function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
  *  Also wires `deps.verify` (Slice 20 — the verify-then-commit gate) against
  *  the same model manager + registry: a manager-backed embedder, judge
  *  candidates from the full discovered registry, `runGuardedAgent` for the
- *  dry-run/golden-eval calls, and a single-model yes/no judge built from the
- *  builder's own LanguageModel.
+ *  dry-run/golden-eval calls, and a yes/no judge that resolves and runs the
+ *  model `selectJudge` picked (never the generator grading itself).
  *  TODO(controller): `runAgent`'s staged `Agent` currently mounts NO real MCP
  *  tools (see `agentFromProposal` in builder.ts) — a live-verify pass on an
  *  agent whose suggested servers matter will need scoped MCP clients spun up
@@ -270,6 +270,23 @@ export async function makeRealBuilderDeps(
     },
   );
   const model = runtimeFor(decl.runtime).createModel(decl);
+  // Resolve (and cache) a LanguageModel for the judge `selectJudge` picked —
+  // the judge must run on THAT model, never the generator grading itself
+  // (C3). Judge ids come from this same registry, so the lookup only misses
+  // if the registry changed mid-run; degrade to the builder model then
+  // rather than crash the gate.
+  const judgeModels = new Map<string, LanguageModel>();
+  const judgeModelFor = async (id: string): Promise<LanguageModel> => {
+    if (id === decl.model) return model;
+    const cached = judgeModels.get(id);
+    if (cached) return cached;
+    const judgeDecl = registry.find((d) => d.model === id);
+    if (!judgeDecl) return model;
+    await manager.ensureReady(judgeDecl);
+    const judgeModel = runtimeFor(judgeDecl.runtime).createModel(judgeDecl);
+    judgeModels.set(id, judgeModel);
+    return judgeModel;
+  };
   const input = stdinInput();
   const embedModel =
     process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
@@ -300,12 +317,15 @@ export async function makeRealBuilderDeps(
       judgeCandidates: () => registry.map(toJudgeCandidate),
       runAgent: (agent, task, signal) =>
         runGuardedAgent(agent, task, undefined, signal),
-      judge: async (prompt) => {
-        // Bounded like every other verify-gate model call: a hung judge
-        // aborts after dryRunMs() instead of hanging the build (C1).
+      judge: async (prompt, judgeModelId) => {
+        // Runs on the SELECTED judge model (C3), deterministically
+        // (temperature 0, M5), and bounded like every other verify-gate
+        // model call: a hung judge aborts after dryRunMs() instead of
+        // hanging the build (C1).
         const r = await generateText({
-          model,
+          model: await judgeModelFor(judgeModelId),
           prompt,
+          temperature: 0,
           abortSignal: AbortSignal.timeout(dryRunMs()),
         });
         return r.text.trim().toLowerCase().startsWith('yes');

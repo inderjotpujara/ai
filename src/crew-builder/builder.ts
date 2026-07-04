@@ -205,6 +205,7 @@ async function verifyAndCommitCrewOrWorkflow(
         generatorFamily: verify.generatorFamily,
       });
       if (judgePick.model === null) return null;
+      const judgeModelId = judgePick.model;
       const golden = await generateGolden(need, sig, deps.model);
       return evalCases(golden.cases, {
         runCase: async (input) => {
@@ -217,8 +218,10 @@ async function verifyAndCommitCrewOrWorkflow(
             return `error: ${String(err)}`;
           }
         },
-        judge: verify.judge,
-        judgeModel: judgePick.model,
+        // Bind the SELECTED judge model id into every judge call (C3): the
+        // judge must run on the model selectJudge picked, not the generator.
+        judge: (prompt) => verify.judge(prompt, judgeModelId),
+        judgeModel: judgeModelId,
         belowBar: judgePick.belowBar,
       });
     },

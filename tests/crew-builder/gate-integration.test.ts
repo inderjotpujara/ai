@@ -252,6 +252,38 @@ test('fresh workflow, passing gate: writes at VerifiedLevel.Behaves and register
   }
 });
 
+test('golden-eval judge runs on the model selectJudge picked, not the generator', async () => {
+  const { paths, cleanup } = repoRootPaths();
+  try {
+    const judgeIds: string[] = [];
+    const { model } = fakeModel({});
+    const deps = baseDeps(
+      paths,
+      model,
+      fakeVerify({
+        judgeCandidates: () => [
+          { model: 'judge-big', params: 30e9, family: 'other-family' },
+          { model: 'generator-twin', params: 30e9, family: 'gen-family' },
+        ],
+        generatorFamily: 'gen-family',
+        judge: async (_prompt, judgeModelId) => {
+          judgeIds.push(judgeModelId);
+          return true;
+        },
+      }),
+    );
+
+    const r = await buildCrewOrWorkflow('run a fresh flow', deps);
+
+    expect(r.kind).toBe('written');
+    expect(judgeIds.length).toBeGreaterThan(0);
+    // Every judge call carries the cross-family pick — never the same-family twin.
+    expect(new Set(judgeIds)).toEqual(new Set(['judge-big']));
+  } finally {
+    cleanup();
+  }
+});
+
 test('hung dry-run: bounded by AGENT_DRY_RUN_MS — fails with a timeout, does not hang', async () => {
   process.env.AGENT_DRY_RUN_MS = '50';
   process.env.AGENT_BUILD_MAX_REPAIRS = '1';
