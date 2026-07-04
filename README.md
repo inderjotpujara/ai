@@ -16,29 +16,42 @@ Mini.
 > registry + starter pack (Slice 15), an MCP telemetry-ordering fix +
 > consent robustness hardening (Slice 16), Phase D's **agent-builder**
 > (Slice 17) — describe a capability gap, review a proposal, and the system
-> writes a new specialist — and a **debt wrap-up + MLX completion** slice
-> (Slice 18) — have landed. Phase-D breadth (a crew/workflow builder, then
-> triggers) is next (Slice 19+). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> writes a new specialist — a **debt wrap-up + MLX completion** slice
+> (Slice 18), and a **crew/workflow builder** (Slice 19) — describe a
+> *multi-step* need and the system composes existing **and** freshly-built
+> agents into a reviewed crew or workflow — have landed. A verified "works
+> out of the box" pass (dry-run + golden-eval + reuse) closes Phase D next
+> (Slice 20). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 18 complete — **Debt wrap-up + MLX completion**. One slice
-> discharging the dischargeable-now deferred work logged through Slice 17,
-> centered on MLX. The overloaded `ProviderKind` is split into a **download**
-> `ProviderKind` (`Ollama`/`HfGguf`/`HfSnapshot`/`LmStudio`) and a separate
-> **inference** `RuntimeKind` (`Ollama`/`MlxServer`/`LmStudio`); the shared
-> HuggingFace fetcher now **actually persists weights to disk** (atomic
-> `.part`→rename, HF-LFS-oid verify-when-present, traversal-guarded, retry +
-> stall parity) for both single-file GGUF and whole-repo MLX snapshots; the
-> **MLX inference runtime** is raised to Ollama's bar (`createMlxServerRuntime`,
-> filled control surface) and made **opt-in with graceful degrade-to-Ollama**;
-> and the accumulated Slice-14/15/16/17 debt is cleared (bounded-parallel
-> downloads + `MultiProgressBar`, truthful provisioning telemetry, an
-> engine-enforced read-only sqlite gate via `PRAGMA query_only`, MCP OAuth
-> `authProvider` wiring, `MCP_TRANSPORT` telemetry, and a consent-gated
-> agent-builder tool-code path that writes an inert `.proposal.ts`). The MLX
-> spine was **live-verified both ways** — direct `mlx_lm.server` inference and a
-> real HF-snapshot download to disk, with an Ollama regression pass. Also
-> shipped: Slice 17 (**Agent-builder**, Phase D — describe a need, review a
-> proposal, and the system writes a reviewed specialist, live on the next run),
+> **Status:** Slice 19 complete — **Crew/workflow builder** (Phase D). Extends
+> self-extension one level up: Slice 17 grows a single specialist agent, and
+> `src/crew-builder/` now composes several agents — existing **and**
+> freshly-built — into a **crew** (CrewAI-style role/goal/task team) or a
+> **workflow** (raw DAG, all 4 directly-planned `StepKind`s — agent/tool/branch/map; `Verify` is reachable only via a step's `verify` flag) from one plain-language multi-step
+> need. Generation is **staged** (classify → think-first analyze → plan-nodes
+> → plan-edges), producing a declarative, JSON-safe **IR** first — never a
+> one-shot DAG — because `CrewDef`/`WorkflowDef` carry live closures and
+> aren't serializable anyway; a small **safe-helper vocabulary**
+> (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/
+> `whenTruthy`/`mapOver`) is the only closures a model can pick from, and a
+> **deterministic transpiler** (no model in the loop) renders the IR to real
+> `crews/<id>.ts`/`workflows/<id>.ts` TS. A **two-tier validation gate**
+> (structural, then an LLM-judge goal-alignment check) runs before consent;
+> missing member agents are **auto-built via the Slice-17 agent-builder**,
+> consent-gated per agent, once the user has approved the overall plan. Two
+> triggers: `bun run crew-builder "<need>" [--yes]`, and a TTY-gated
+> `chat.ts` offer (tried before the existing single-agent offer, on a
+> multi-step-looking gap). **Live-verified end to end on Ollama** — a real
+> generated crew was written *and executed*, producing a correct result — the
+> first time this pipeline ran against a live model, which surfaced and fixed
+> 4 real defects (a nested-schema key-hint gap, under-specified IR prompt
+> constraints, a regeneration loop that didn't catch a throw, and a
+> tool-name/`ToolSet` type mismatch). Also shipped: Slice 18 (**Debt
+> wrap-up + MLX completion** — the download/inference enum split, `hf-fetch`
+> real disk persistence, the MLX runtime raised to Ollama's bar and
+> live-verified both ways, provisioning polish, and MCP/agent-builder debt),
+> Slice 17 (**Agent-builder**, Phase D — describe a need, review a proposal,
+> and the system writes a reviewed specialist, live on the next run),
 > Slice 16 (MCP telemetry-ordering fix
 > + consent robustness — `mcp.mount` now lands in `runs/<id>/spans.jsonl`,
 > consent judged on stdin **and** stderr TTY), Slice 15 (`mcp.json` mount
@@ -104,6 +117,8 @@ No manual steps. No API keys. Everything runs locally.
 **Agent-builder (Slice 17, Phase D).** The first self-extension slice: `src/agent-builder/` turns *"describe a need"* into a working specialist. `generateProposal` drafts a snake_case name/description/system-prompt/rationale from the need (inserted as `<need>…</need>` **delimited data**, never instructions, to blunt prompt injection); `suggestServers` picks the minimal MCP-server subset from the Slice 15 `STARTER_PACK` — **palette-only**, anything the model invents is dropped; `validateProposal` is a pure structural gate (unique snake_case name, non-empty fields, palette-only + correctly-scoped servers) that runs **before** consent is ever asked; `writeAgent` then atomically renders `agents/<name>.ts`, inserts one import + registry line into a new `agents/index.ts` **registry** (`AGENTS: Record<name, AgentFactory>` + `agentNames()` — `super.ts`/`chat.ts`/`flow.ts` now build their agent set from it instead of hardcoding factories) at marker comments, and scopes any suggested servers into `mcp.json` (deep-cloning pack entries so it never mutates the shared `STARTER_PACK`). `buildAgent` sequences generate→suggest→validate→consent→write under a new `agent.build` telemetry span (`agent.build.need`/`.outcome`/`.agent_name`/`.server_count`). Two triggers: `bun run agent-builder "<need>" [--yes]`, and a TTY-gated offer when `chat.ts` hits a `{kind:'gap'}` outcome (that outcome and its `agent.gap.missing_capability` attribute are unchanged — the offer is a purely additive branch). Safety model: **review-before-activate** (consent is mandatory, no bypass in the chat path), **palette-only tools**, **no same-run activation** (a written agent is live on the *next* run), and — through Slice 17 — no tool-code generation and no OAuth (both revisited in Slice 18). See [`docs/architecture.md`](docs/architecture.md) §18.
 
 **Debt wrap-up + MLX completion (Slice 18).** A single slice discharging the dischargeable-now deferred debt logged through Slice 17, centered on MLX. **Enum split:** `src/core/types.ts` now carries a download `ProviderKind` (`Ollama`/`HfGguf`/`HfSnapshot`/`LmStudio`) separate from an inference `RuntimeKind` (`Ollama`/`MlxServer`/`LmStudio`), bridged by `src/core/kind-map.ts` (`downloadKindFor`/`runtimeKindFor`); `ModelDeclaration` carries `runtime`, a provisioning `Candidate` carries both. **HF-fetch real disk download:** `src/provisioning/providers/hf-fetch.ts` now persists bytes — atomic `.part`→rename for a single-file GGUF and whole-tree enumeration for an MLX snapshot, HF-LFS-`oid` verify-when-present else compute-and-record, a `safeJoin` traversal guard, write-stream-error→`ProviderError`, and `withRetry`+`StallWatchdog` parity with Ollama. **MLX runtime:** `createMlxServerRuntime` fills the OpenAI-compatible control surface (`getModelMax`/`listLoaded`/best-effort `pull`, honest `undefined`/no-ops elsewhere); MLX is selected **opt-in** via a declaration's `runtime` and **degrades to Ollama** (using `fallbackModel`) when the server is unreachable, emitting `model.runtime.selected`/`.degraded`. **Provisioning polish:** TTY-gated bounded-parallel downloads (`DOWNLOAD_CONCURRENCY=2`) with a `MultiProgressBar`, truthful `provision.snapshot_fallback`/`.runtime`/`.deferred_verify` telemetry, a `bytesPerWeight` 0.56→0.6 bump + an injectable Metal reader (`AGENT_METAL_WORKING_SET_BYTES`), and a manual `scripts/refresh-snapshot.ts`. **MCP + agent-builder debt:** `mcp.transport` telemetry, an engine-enforced read-only sqlite gate (`PRAGMA query_only`, which also allows `WITH…SELECT` CTEs), an atomic `addPackEntry`, `warnUnknownAgents` in chat, MCP OAuth `authProvider` (contract-tested), an agent-builder same-run bounded retry, and a consent-gated tool-code path that writes an **inert `<name>.proposal.ts`** (no same-run activation). **Live-verified both ways** — real `mlx_lm.server` inference and a real HF-snapshot download, plus an Ollama regression pass. Still deferred (with reasons): LM Studio / llama.cpp as full *inference* runtimes, the live OAuth handshake, and the TS-SDK-v2 migration. See [`docs/architecture.md`](docs/architecture.md) §5/§13/§14/§18.
+
+**Crew/workflow builder (Slice 19, Phase D).** Self-extension one level up from Slice 17: `src/crew-builder/` turns a plain-language **multi-step** need into a working **crew** (CrewAI-style role/goal/task team, `sequential` or `hierarchical`) or **workflow** (a raw DAG covering all 4 directly-planned `StepKind`s — agent/tool/branch/map; `Verify` is reachable only via a step's `verify` flag), composing **existing and freshly-built** agents. Generation is staged, not one-shot: `classify` (crew vs workflow) → `analyze` (**think-first**, prose-only) → `plan-nodes` → `plan-edges` assemble a declarative, JSON-safe **IR** (`CrewIR`/`WorkflowIR`, Zod-validated) — never a `CrewDef`/`WorkflowDef` directly, since those carry live closures and aren't serializable. Step inputs, branch predicates, and map sources are expressed as a small **safe-helper vocabulary** (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/`whenTruthy`/`mapOver`) — the only closures a model can pick from, never invent. A **two-tier validation gate** (`validate.ts`) checks structure first (refs resolve, tools are palette-only, the graph is acyclic via a shared `assertAcyclic` now extracted into `workflow/define.ts`) and only then asks an LLM judge whether the graph actually accomplishes the need. After consent, `resolve-members.ts` **auto-builds any genuinely-missing member agents** by delegating to the Slice-17 agent-builder (its own per-agent consent), reconciling any renamed refs; a deterministic, model-free `transpile.ts` then renders the IR to real `crews/<id>.ts`/`workflows/<id>.ts` TS (every string `JSON.stringify`'d), and `write.ts` writes it + a registry entry atomically. `CrewMember` gained an optional `agentRef` (`src/crew/types.ts`) so a crew member can reuse a registered — or just-built — agent, resolved by `crewAgentMap` (`src/crew/engine.ts`). Two triggers: `bun run crew-builder "<need>" [--yes]`, and a TTY-gated `chat.ts` offer (`shouldOfferCrew`'s multi-step heuristic, tried before the existing single-agent offer). Safety model mirrors the agent-builder: review-before-activate, palette-only tools, per-agent auto-build consent, no same-run activation. **Live-verified end to end on Ollama** — a generated crew was written and then actually **executed** (`runCrew`) to a correct result, the first live run of this pipeline, which surfaced and fixed 4 real defects (a nested-schema key-hint gap in the shared `BuilderModel` seam, under-specified IR prompt constraints, a regeneration loop that didn't catch a throw, and a tool-name/`ToolSet` type mismatch). `crew.build` telemetry span. See [`docs/architecture.md`](docs/architecture.md) §19.
 
 ---
 
@@ -196,6 +211,7 @@ they're reusable across other agent tools (Claude Code, Cursor, …).
 | `src/mcp/` | `types.ts`/`config.ts` (`mcp.json` registry, per-entry degrade), `consent.ts` (spec/tools-hash pinning, `.mcp-approvals.json`), `mount.ts` (`mountAll`, per-agent slices), `pack.ts` (12-entry starter pack), `client.ts` (`mountMcpServer` primitive), `server.ts`/`sqlite-server.ts` (in-repo servers) |
 | `src/cli/` | `chat.ts` (entrypoint), `run-chat.ts` (testable orchestration), `flow.ts` (`bun run flow`), `crew.ts` (`bun run crew`), `with-mcp-run.ts` (per-run scope + telemetry + mount helper, Slice 16), `select-hook.ts` (selector-driven `onBeforeDelegate`), `selection-notice.ts` (per-delegation notice), `mcp.ts` (`bun run mcp list\|status\|add`), `agent-builder.ts` (`bun run agent-builder "<need>" [--yes]`, Slice 17) |
 | `src/agent-builder/` | Specialist agent generation (Slice 17): `types.ts`, `generate.ts` (prompt-injection-guarded draft), `suggest-tools.ts` (palette-only server pick), `validate.ts` (structural gate), `write.ts` (atomic file + registry + `mcp.json` scoping), `builder.ts` (`buildAgent`/`buildTool`: generate→suggest→validate→retry→consent→write), `deps.ts` (live tools-capable largest-that-fits model); Slice 18 adds the consent-gated inert tool-code path (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts` → `<name>.proposal.ts`) |
+| `src/crew-builder/` | Crew/workflow generation from a multi-step need (Slice 19, Phase D): `ir.ts` (`CrewIR`/`WorkflowIR` + Zod), `safe-helpers.ts` (the closure vocabulary), `classify.ts`/`analyze.ts`/`plan-nodes.ts`/`plan-edges.ts` (staged generation), `validate.ts` (two-tier structural+semantic gate), `resolve-members.ts` (auto-build missing agents via the agent-builder), `transpile.ts` (deterministic IR→TS), `write.ts` (atomic multi-write), `builder.ts` (`buildCrewOrWorkflow` orchestrator), `deps.ts`; CLI `bun run crew-builder "<need>" [--yes]` (`src/cli/crew-builder.ts`) + a TTY-gated `chat.ts` multi-step gap-offer (`src/cli/offer-crew.ts`) |
 | `models/` | model **declarations** (data, not weights) — `qwen-fast.ts`, `qwen-router.ts`, `registry.ts` (bootstrap capability ladder) |
 | `agents/` | agent definitions — **all agents live here** ([readme](agents/README.md)); `index.ts` is the `AGENTS` registry (`agentNames()`) generated agents register into (Slice 17) |
 | `model-images/` | local model blob files (git-ignored, [readme](model-images/README.md)) |
@@ -258,7 +274,8 @@ interface — no agent code changes. See
 | **16** | **MCP telemetry-ordering fix + consent robustness** (Phase C follow-on) — `src/cli/with-mcp-run.ts` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` for `chat`/`flow`/`crew` so `mcp.mount` now lands in `runs/<id>/spans.jsonl` (previously silently dropped); mount span gains `mcp.server.count` + a corrected (summed) `mcp.tool.count`; `runFlow`/`runCrewCli`/`runChat` now take `run: RunHandle` from the caller; consent interactivity now requires stdin **and** stderr TTY (`interactiveTTY()`), and `stdinInput()` resolves on stream `end` (no more hang on `< /dev/null`) | ✅ Done |
 | **17** | **Agent-builder** (Phase D) — generate a specialist on a capability gap: `src/agent-builder/` drafts a proposal (prompt-injection-guarded), suggests a minimal palette-only server subset from the Slice 15 pack, validates it structurally, requires explicit consent, then atomically writes the agent file + a new `agents/index.ts` registry entry + scoped `mcp.json`; triggers via `bun run agent-builder "<need>"` and a TTY-gated `chat.ts` gap-offer (the `{kind:'gap'}` outcome itself is unchanged); `agent.build` telemetry span; safety model = review-before-activate, palette-only, no same-run activation | ✅ Done |
 | **18** | **Debt wrap-up + MLX completion** — split the overloaded enum into download `ProviderKind` + inference `RuntimeKind` (+ `kind-map.ts`); `hf-fetch` now persists weights to disk (atomic `.part`→rename, HF-LFS-oid verify, single-file GGUF + MLX snapshot, traversal-guarded, retry/stall parity); MLX runtime raised to Ollama's bar (`createMlxServerRuntime`, opt-in + degrade-to-Ollama via `fallbackModel`); provisioning polish (bounded-parallel downloads + `MultiProgressBar`, truthful telemetry, Metal reader, `refresh-snapshot.ts`); MCP/agent-builder debt (engine-enforced read-only sqlite via `PRAGMA query_only`, MCP OAuth `authProvider`, `mcp.transport`, atomic `addPackEntry`, agent-builder retry + inert-`.proposal.ts` tool-code path). LM Studio download wired (contract-tested); MLX **live-verified both ways** | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **D** grow further — a crew/workflow builder composing existing + generated agents, and a verified "works out of the box" (dry-run + golden-eval + reuse) — **Slice 19+** → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **19** | **Crew/workflow builder** (Phase D) — compose, not just generate: `src/crew-builder/` turns a multi-step need into a **crew** or **workflow** via a staged, validated IR-then-transpile pipeline (`classify`→`analyze` think-first→`plan-nodes`→`plan-edges`→two-tier `validate`→consent→`resolve-members` auto-build via the agent-builder→deterministic `transpile`→atomic `write`); a small safe-helper vocabulary (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/`whenTruthy`/`mapOver`) is the only closures a model can pick from; shared `assertAcyclic` (`workflow/define.ts`) gates both shapes' graphs; `CrewMember.agentRef` lets a crew member reuse a registered (or freshly-built) agent; triggers via `bun run crew-builder "<need>"` and a TTY-gated `chat.ts` multi-step gap-offer; `crew.build` telemetry span. **Live-verified end to end on Ollama** — a generated crew executed to a correct result, surfacing + fixing 4 live-only defects | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **D** close out self-extension — a verified "works out of the box" pass (dry-run + golden-eval + reuse) — **Slice 20** → **E** automate (triggers · daemon) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

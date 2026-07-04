@@ -1,73 +1,85 @@
-# Task 16 report: provisioning fit-math tuning (WS4)
+# Task 16 report — `builder.ts` (crew/workflow-builder orchestrator)
 
-## Summary
+## Implemented
+- `src/crew-builder/builder.ts` — `buildCrewOrWorkflow(need, deps): Promise<CrewBuildResult>`, wrapped in `withCrewBuildSpan`.
+- `src/crew-builder/resolve-members.ts` — exported the previously-private `referencedAgents(ir, shape)` helper (no logic change).
+- `tests/crew-builder/builder.test.ts` — 2 end-to-end tests (written path, declined path), adapted from the brief to Directive 1/2's contract.
 
-Implemented the two logged Slice-14 tuning follow-ons plus the gguf-parser
-keep-decision note. Scope ended up spanning three files instead of just
-`fit.ts`, because the actual constants/heuristics the brief describes live
-one layer down from `fit.ts` — `fit.ts` only *consumes* them:
+## Ordering used (per Directive 2, overriding the brief's draft)
+1. `classify` → `rec.event('classified', {shape})`.
+2. `analyze` → `rec.event('analyzed')`.
+3. Regeneration loop (`attempt = 0..MAX_REGENERATIONS`, `MAX_REGENERATIONS = 1`):
+   a. `planNodes` → `planEdges` → `rec.event('generated', {attempt})`.
+   b. `planned = referencedAgents(ir, shape).filter(n => !existingAgents().has(n))` — no building here, just the diff.
+   c. `validateIR(ir, shape, { ..., toBeBuilt: planned }, need)` → `rec.event('validated', {attempt, issues})`.
+   d. break on `issues.length === 0`.
+4. No valid IR / issues remain → `finish(..., {kind:'invalid', issues})`.
+5. `deps.confirm(renderSummary(ir, shape, planned))` — summary shows the planned new-agent names. Declined → `finish(..., {kind:'declined'})`.
+6. `resolveMissingAgents(ir, shape, deps)` — the ONE point where agents are actually built + IR refs rewritten. `resolved.abandoned` → `finish(..., {kind:'abandoned', reason})`.
+7. `transpile(resolved.ir, shape)` → `writeCrewOrWorkflow(resolved.ir.id, source, shape, deps.paths)` → `rec.event('written')` → `finish(..., {kind:'written', shape, name: resolved.ir.id, files, builtAgents: resolved.builtAgents}, resolved.ir)`.
 
-1. **`bytesPerWeight` 0.56 → 0.6.** The real constant is the `Q4_0`/`Q4_K_M`
-   entries in `src/discovery/quant.ts`'s `BPW` map (not a literal in
-   `fit.ts` — `fit.ts` reads `candidate.footprint.bytesPerWeight`, which is
-   populated upstream from this map for GGUF candidates). Bumped both from
-   0.56 → 0.6 per the logged finding ("Q4_K_M ≈ 0.6 B/param, repo's 0.56 is
-   optimistic"), with a doc comment explaining why. Updated the one test
-   that pinned the old value (`tests/discovery/quant.test.ts`). Other tests
-   that hardcode a literal `0.56` (footprint.test.ts, verification/deps.ts,
-   several discovery/resource fixtures) pass a literal number directly and
-   never call `bytesPerWeightForQuant`, so they were unaffected and left
-   alone — touching them would have been unrelated scope creep.
+This satisfies Directive 2's constraint: `resolveMissingAgents` is called exactly once, after consent, never inside the regeneration loop — so a retry never re-builds an agent that was already built (which `existingAgents()`, an in-memory snapshot, wouldn't yet reflect).
 
-2. **Injectable Metal working-set reader.** The "static tier-fraction
-   heuristic" the brief refers to is `GPU_BUDGET_FRACTION` in
-   `src/resource/hardware.ts` (`gpuBudgetBytes`/`machineBudgetBytes`/
-   `liveBudgetBytes` — this is what ultimately becomes the `budgetBytes`
-   argument `fitAndRank` receives from callers). Added a `HardwareDeps` type
-   with `readMetalWorkingSetBytes?: () => number | undefined`, threaded as
-   an optional param (default `{}`) through all three functions — fully
-   backward-compatible, no caller changes required. Default reader consults
-   only `process.env.AGENT_METAL_WORKING_SET_BYTES`; returns `undefined`
-   otherwise (no native probe, no shell-out, never crashes) so callers fall
-   back to the existing `GPU_BUDGET_FRACTION` heuristic unchanged.
+`finish()` mirrors the brief's helper but computes the member/step count from `resolved.ir` (the rewritten IR) rather than the pre-resolve `ir`, and reports `result.builtAgents.length` (Directive 1's actual built list) rather than a loop-local count.
 
-3. **gguf-parser-go keep-decision.** Added a code comment at the top of
-   `src/provisioning/fit.ts` documenting the conscious decision to keep
-   HF-tree/Ollama-manifest sizing (`fileSizeBytes`) instead of adding
-   `gguf-parser-go` (a Go binary dependency), so it isn't re-litigated.
+## TDD
 
-## Files changed
+**RED** — wrote `tests/crew-builder/builder.test.ts` against a not-yet-existing `builder.ts`:
+```
+bun test tests/crew-builder/builder.test.ts
+→ error: Cannot find module '../../src/crew-builder/builder.ts'
+0 pass, 1 fail
+```
 
-- `src/discovery/quant.ts` — `Q4_0`/`Q4_K_M` bytes-per-weight 0.56 → 0.6 + comment.
-- `src/resource/hardware.ts` — `HardwareDeps` type + injectable
-  `readMetalWorkingSetBytes` seam on `gpuBudgetBytes`/`machineBudgetBytes`/
-  `liveBudgetBytes`, env-only fallback-safe default reader.
-- `src/provisioning/fit.ts` — gguf-parser keep-decision comment (no logic change).
-- `tests/discovery/quant.test.ts` — updated pinned value 0.56 → 0.6.
-- `tests/provisioning/fit.test.ts` — two new test groups:
-  - flows the tuned `bytesPerWeightForQuant('Q4_K_M')` (0.6) through
-    `fitAndRank`'s size estimate and checks the exact expected byte math.
-  - `gpuBudgetBytes` uses the injected reader when it returns a value, and
-    falls back to the static 0.75 heuristic (no throw) when it returns
-    `undefined`.
+**GREEN** — implemented `src/crew-builder/builder.ts`:
+```
+bun test tests/crew-builder/builder.test.ts
+→ 2 pass, 0 fail, 6 expect() calls
+```
 
-## Verification (inline, focused — no full suite run)
+**Full suite + typecheck + lint:**
+```
+bun run typecheck        → clean (tsc --noEmit, no errors)
+bun test tests/crew-builder/   → 52 pass, 0 fail, 104 expect() calls (13 files)
+bun run lint:file -- src/crew-builder/builder.ts src/crew-builder/resolve-members.ts tests/crew-builder/builder.test.ts
+  → first pass found 2 formatting violations (line-wrap style); auto-fixed via `bunx biome check --write` on the same 3 files
+  → re-run: "Checked 3 files in 4ms. No fixes applied." (clean)
+```
+Also re-ran `bun test tests/crew-builder/resolve-members.test.ts` right after exporting `referencedAgents` (before touching builder.ts) to confirm the export caused no breakage: 8 pass, 0 fail.
 
-- `bun run typecheck` → 0 errors.
-- `bun run lint:file -- src/discovery/quant.ts src/resource/hardware.ts src/provisioning/fit.ts tests/provisioning/fit.test.ts tests/discovery/quant.test.ts` → clean (one `--write` auto-format pass for line wrapping, then clean).
-- `bun run test:file -- "tests/provisioning/fit.test.ts"` → 8 pass / 0 fail (was RED on the 2 new tests before the constant bump + reader existed).
-- Also ran the two other directly-touched-module test files as a targeted
-  sanity check (not the full suite): `tests/discovery/quant.test.ts` +
-  `tests/resource/hardware.test.ts` → 7 pass / 0 fail combined.
+## Files
+- `/Users/inderjotsingh/ai/src/crew-builder/builder.ts` (new)
+- `/Users/inderjotsingh/ai/src/crew-builder/resolve-members.ts` (modified: `function referencedAgents` → `export function referencedAgents`, no other change)
+- `/Users/inderjotsingh/ai/tests/crew-builder/builder.test.ts` (new)
 
-## Notes / concerns
+## Self-review
+- Used `resolved.ir` (rewritten IR) for `transpile`/`writeCrewOrWorkflow`/`finish`'s count, not the pre-resolve `ir` — required by Directive 1 so a renamed agent ref actually lands in the generated source.
+- `renderSummary` takes `planned` (names not yet built, computed before consent) rather than `builtAgents` (names actually built, known only after consent) — matches "show the planned new-agent names" in the directive.
+- The written-path test sets `buildMissingAgent` to throw if called, and `existingAgents` includes the referenced agent (`web_fetch`) — confirms `planned` is empty and `resolveMissingAgents` performs no real build on this path, per the task's guidance.
+- The declined-path test also has `buildMissingAgent` throw-on-call — confirms building never happens before consent, i.e. `resolveMissingAgents` runs strictly after the `confirm` gate.
+- No `generateObject`, no `any`, no `console.log`; `type` (not `interface`) throughout; early returns in the loop/finish logic.
+- Committed only my 3 files (`git add <specific files>`, not `-A`) — the working tree had many other in-flight SDD-task changes from concurrent tasks in this slice; those were left untouched and unstaged.
 
-- The brief's "Files: Modify: `src/provisioning/fit.ts`" undersold the
-  actual blast radius — the two tunable values live in `quant.ts` and
-  `hardware.ts`, one layer beneath `fit.ts`. Kept `fit.ts` itself
-  logic-unchanged (comment only) since that's architecturally correct:
-  it consumes both values, it doesn't own either.
-- Backward compatibility: `gpuBudgetBytes`/`machineBudgetBytes`/
-  `liveBudgetBytes` all gained an optional trailing `deps` param defaulting
-  to `{}` — no existing call site required changes (verified via
-  `bun run typecheck`).
+## Concerns
+- None blocking. One minor note: `finish()`'s `ir` param is optional and only used for the `written` count; every other branch passes it as `undefined`, which is intentional (count is irrelevant for declined/invalid/abandoned) and matches the brief's original helper shape.
+- Commit went through the repo's `docs-check` pre-commit hook cleanly (no `src/<subsystem>` doc gap flagged) since `crew-builder` is already a documented subsystem in `docs/architecture.md` from earlier Slice-19 tasks.
+- Overwrote a stale `.superpowers/sdd/task-16-report.md` that contained unrelated content ("provisioning fit-math tuning (WS4)") from a different slice's task numbering — clearly a leftover file, not this task's report.
+
+## Follow-up: missing test coverage added (reviewer-flagged gap)
+
+A reviewer flagged that the original 2 tests (written-path, declined-path) never exercised the auto-build-agent branch, the invalid (goal-alignment-rejected) branch, or the abandoned branch — leaving the "build exactly once, after consent, never inside the regen loop" invariant (Directive 2, above) completely untested. Added 3 tests to `tests/crew-builder/builder.test.ts`; `src/crew-builder/builder.ts` was NOT touched (confirmed correct as shipped).
+
+1. **`auto-builds a missing referenced agent exactly once, after consent (D2 invariant)`** — `existingAgents: () => []`, a workflow IR references `web_fetch` via an agent step. `buildMissingAgent` is a call-counting stub gated on a `confirmed` flag set by `confirm`: it throws `'built before consent!'` if called before `confirm` resolves. Asserts `calls === 1` (not 0, not >1 — catches both a missed build and a double-build/inside-the-loop regression), `result.kind === 'written'`, and `result.builtAgents` contains `'web_fetch'`.
+2. **`returns invalid with a goal-alignment issue when the judge rejects both attempts`** — scripted queue covers both regeneration attempts (classify, then plan-nodes/plan-edges/judge ×2), judge returns `{aligned: false}` both times. Referenced agent (`web_fetch`) is already in `existingAgents()` so no build is attempted. `confirm` and `buildMissingAgent` both throw if called (proving consent/build are never reached on the invalid path — matches the code: the `issues.length > 0` early-return happens before `deps.confirm`). Asserts `result.kind === 'invalid'`, `issues` contains a `field: 'goal-alignment'` entry, `buildCalls === 0`, and no `wf.ts` file exists in the temp workflows dir.
+3. **`returns abandoned when a required agent build is declined/fails`** — referenced agent missing from `existingAgents()`, `confirm` grants consent, but `buildMissingAgent` returns `null` (decline/failure). Asserts `result.kind === 'abandoned'` and no `wf.ts` file was written.
+
+**Verification:**
+```
+bun test tests/crew-builder/builder.test.ts   → 5 pass, 0 fail, 15 expect() calls
+bun test tests/crew-builder/                  → 55 pass, 0 fail, 113 expect() calls (13 files) — no regressions
+bun run typecheck                             → clean
+bun run lint:file -- tests/crew-builder/builder.test.ts → clean (Checked 1 file, no fixes applied)
+```
+No bug surfaced in `builder.ts` — all three new tests confirmed the shipped orchestration order (build-once-after-consent, invalid short-circuits before consent, abandoned on declined/failed build) on the first try.
+
+Committed only `tests/crew-builder/builder.test.ts` (test-only change, `builder.ts` untouched).

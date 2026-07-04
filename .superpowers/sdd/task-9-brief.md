@@ -1,34 +1,140 @@
-### Task 9: hf-fetch — multi-file snapshot enumeration (HfSnapshot)
+### Task 9: transpile IR → TypeScript (`transpile.ts`)
 
-**Files:** Modify: `src/provisioning/providers/hf-fetch.ts`; Test: `tests/provisioning/hf-fetch.test.ts`.
+**Files:**
+- Create: `src/crew-builder/transpile.ts`
+- Test: `tests/crew-builder/transpile.test.ts`
 
 **Interfaces:**
-- Consumes: `hfTreeFiles(repo)` (Task 8), `downloadFile` (Task 6).
-- Produces: on `HfSnapshot` (bare `repo`, no `::file`), downloads every tree file to `<destDir>/<repo>/<path>`, each atomic + oid-verified when available.
+- Consumes: `CrewIR`/`WorkflowIR`, safe-helper names.
+- Produces: `transpile(ir, shape): string` — the full TS module source. Deterministic; no model. Output must re-parse through `defineCrew`/`defineWorkflow` (Task 10 contract test proves it).
 
-- [ ] **Step 1: Write the failing test** — fake `treeFiles` dep returns two files; fake fetch returns per-file bytes; assert both files exist under `<dest>/<repo>/…`, phases reach `Done`.
+- [ ] **Step 1: Write the failing test** (golden output + shape assertions)
 
 ```ts
-it('HfSnapshot: enumerates the repo tree and writes every file', async () => {
-  const dest = mkdtempSync(join(tmpdir(), 'hf-'));
-  const provider = createHfFetchProvider(ProviderKind.HfSnapshot, {
-    treeFiles: async () => [ { path: 'config.json', size: 3 }, { path: 'model.safetensors', size: 5 } ],
-    fetchImpl: (async (u: string) => streamingResponse([new Uint8Array(u.endsWith('config.json') ? 3 : 5)], u.endsWith('config.json') ? 3 : 5)) as unknown as typeof fetch,
-  });
-  await provider.download('mlx-community/x', { onProgress: () => {}, signal: new AbortController().signal, destDir: dest });
-  expect(existsSync(join(dest, 'mlx-community/x/config.json'))).toBe(true);
-  expect(existsSync(join(dest, 'mlx-community/x/model.safetensors'))).toBe(true);
+// tests/crew-builder/transpile.test.ts
+import { expect, test } from 'bun:test';
+import { transpile } from '../../src/crew-builder/transpile.ts';
+import type { CrewIR, WorkflowIR } from '../../src/crew-builder/ir.ts';
+
+test('workflow transpile renders defineWorkflow + safe-helper calls', () => {
+  const ir: WorkflowIR = { id: 'fetch_then_sum', description: 'd', steps: [
+    { kind: 'tool', id: 'fetch', tool: 'fetch', input: { kind: 'fromInput' } },
+    { kind: 'agent', id: 'sum', agent: 'web_fetch', dependsOn: ['fetch'], input: { kind: 'fromStep', ref: 'fetch' } },
+  ] };
+  const src = transpile(ir, 'workflow');
+  expect(src).toContain('export default defineWorkflow(');
+  expect(src).toContain('kind: StepKind.Tool');
+  expect(src).toContain('input: fromInput()');
+  expect(src).toContain("input: fromStep(\"fetch\")");
+  expect(src).toContain('"fetch_then_sum"');
+});
+
+test('crew transpile renders defineCrew + members (inline + agentRef)', () => {
+  const ir: CrewIR = { id: 'rc', process: 'sequential',
+    members: [{ name: 'researcher', role: 'r', goal: 'g', backstory: 'b', requires: ['tools'] }],
+    tasks: [{ id: 'gather', description: 'd', expectedOutput: 'o', member: 'researcher' }] };
+  const src = transpile(ir, 'crew');
+  expect(src).toContain('export default defineCrew(');
+  expect(src).toContain('CrewProcess.Sequential');
+  expect(src).toContain('"researcher"');
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails.**
-- [ ] **Step 3: Implement the snapshot branch** — when `file` is absent: `const files = await (deps.treeFiles ?? hfTreeFiles)(repo);` then for each file `await downloadFile(\`${HF_RESOLVE}/${repo}/resolve/main/${f.path}\`, join(destDir, repo, f.path), { ..., expectedOid: f.oid })`, creating parent dirs (`mkdir(dirname, { recursive: true })`). Aggregate progress across files (sum sizes for `bytesTotal`).
-- [ ] **Step 4: Run to verify it passes.**
+- [ ] **Step 2: Run — FAIL.**
+
+- [ ] **Step 3: Implement** — every string via `JSON.stringify`; StepKind/CrewProcess as member forms; input/predicate/over rendered as safe-helper calls. (Full renderer; verify agent-step ref resolution against the safe-helpers module import path `../src/crew-builder/safe-helpers.ts`.)
+
+```ts
+// src/crew-builder/transpile.ts
+import type { CrewIR, InputDescriptor, PredicateDescriptor, WorkflowIR } from './ir.ts';
+import type { Shape } from './types.ts';
+
+const j = (v: unknown): string => JSON.stringify(v);
+
+function renderInput(d: InputDescriptor): string {
+  if (d.kind === 'fromInput') return 'fromInput()';
+  if (d.kind === 'fromStep') return `fromStep(${j(d.ref)})`;
+  return `fromTemplate(${j(d.template)})`;
+}
+function renderPredicate(d: PredicateDescriptor): string {
+  if (d.kind === 'whenEquals') return `whenEquals(${j(d.ref)}, ${j(d.value)})`;
+  if (d.kind === 'whenContains') return `whenContains(${j(d.ref)}, ${j(d.substr)})`;
+  return `whenTruthy(${j(d.ref)})`;
+}
+const KIND: Record<string, string> = { agent: 'StepKind.Agent', tool: 'StepKind.Tool', branch: 'StepKind.Branch', map: 'StepKind.Map' };
+
+function renderWorkflowStep(s: WorkflowIR['steps'][number]): string {
+  const dep = 'dependsOn' in s && s.dependsOn ? `    dependsOn: ${j(s.dependsOn)},\n` : '';
+  const head = `  {\n    id: ${j(s.id)},\n    kind: ${KIND[s.kind]},\n${dep}`;
+  if (s.kind === 'agent') return `${head}    agent: ${j(s.agent)},\n    input: ${renderInput(s.input)},\n    output: z.string(),\n${s.verify ? '    verify: true,\n' : ''}  }`;
+  if (s.kind === 'tool') return `${head}    tool: ${j(s.tool)},\n    input: ${renderInput(s.input)},\n    output: z.unknown(),\n  }`;
+  if (s.kind === 'branch') return `${head}    predicate: ${renderPredicate(s.predicate)},\n    whenTrue: ${j(s.whenTrue)},\n    whenFalse: ${j(s.whenFalse)},\n    output: z.unknown(),\n  }`;
+  // map
+  const sub = s.step.kind === 'agent'
+    ? `{ kind: StepKind.Agent, agent: ${j(s.step.agent)}, input: ${renderInput(s.step.input)}, output: z.string() }`
+    : `{ kind: StepKind.Tool, tool: ${j(s.step.tool)}, input: ${renderInput(s.step.input)}, output: z.unknown() }`;
+  return `${head}    over: mapOver(${j(s.over.ref)}),\n    step: ${sub},\n    output: z.unknown(),\n  }`;
+}
+
+function transpileWorkflow(ir: WorkflowIR): string {
+  const steps = ir.steps.map(renderWorkflowStep).join(',\n');
+  return `import { z } from 'zod';
+import { defineWorkflow } from '../src/workflow/define.ts';
+import { StepKind } from '../src/workflow/types.ts';
+import { fromInput, fromStep, fromTemplate, mapOver, whenContains, whenEquals, whenTruthy } from '../src/crew-builder/safe-helpers.ts';
+
+// Generated by the crew/workflow-builder (Slice 19). Safe to edit by hand.
+export default defineWorkflow({
+  id: ${j(ir.id)},${ir.description ? `\n  description: ${j(ir.description)},` : ''}
+  steps: [
+${steps},
+  ],
+});
+`;
+}
+
+function transpileCrew(ir: CrewIR): string {
+  const members = ir.members.map((m) => {
+    const tools = m.tools && m.tools.length > 0 ? `,\n      tools: ${j(m.tools)}` : '';
+    const ref = m.agentRef ? `,\n      agentRef: ${j(m.agentRef)}` : '';
+    return `    {\n      name: ${j(m.name)},\n      role: ${j(m.role)},\n      goal: ${j(m.goal)},\n      backstory: ${j(m.backstory)},\n      requires: [Capability.Tools],\n      prefer: PreferPolicy.LargestThatFits${ref}${tools},\n    }`;
+  }).join(',\n');
+  const tasks = ir.tasks.map((t) => {
+    const dep = t.dependsOn ? `,\n      dependsOn: ${j(t.dependsOn)}` : '';
+    return `    {\n      id: ${j(t.id)},\n      description: ${j(t.description)},\n      expectedOutput: ${j(t.expectedOutput)},\n      member: ${j(t.member)}${dep},\n      output: z.string(),${t.verify ? '\n      verify: true,' : ''}\n    }`;
+  }).join(',\n');
+  const proc = ir.process === 'hierarchical' ? 'CrewProcess.Hierarchical' : 'CrewProcess.Sequential';
+  return `import { z } from 'zod';
+import { Capability, PreferPolicy } from '../src/core/types.ts';
+import { defineCrew } from '../src/crew/define.ts';
+import { CrewProcess } from '../src/crew/types.ts';
+
+// Generated by the crew/workflow-builder (Slice 19). Safe to edit by hand.
+export default defineCrew({
+  id: ${j(ir.id)},${ir.description ? `\n  description: ${j(ir.description)},` : ''}
+  process: ${proc},
+  members: [
+${members},
+  ],
+  tasks: [
+${tasks},
+  ],
+});
+`;
+}
+
+export function transpile(ir: CrewIR | WorkflowIR, shape: Shape): string {
+  return shape === 'crew' ? transpileCrew(ir as CrewIR) : transpileWorkflow(ir as WorkflowIR);
+}
+```
+
+- [ ] **Step 4: Run — PASS** (`bun test tests/crew-builder/transpile.test.ts && bun run typecheck`).
+
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/provisioning/providers/hf-fetch.ts tests/provisioning/hf-fetch.test.ts
-git commit -m "feat(provisioning): hf-fetch downloads whole MLX snapshots (multi-file) to disk"
+git add src/crew-builder/transpile.ts tests/crew-builder/transpile.test.ts
+git commit -m "feat(crew-builder): deterministic IR->TS transpiler"
 ```
 
 ---

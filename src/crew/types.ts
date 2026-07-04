@@ -16,6 +16,8 @@ export type CrewMember = {
   requires: Capability[]; // capability hard-filter for live model selection
   prefer: PreferPolicy; // soft rank over survivors
   tools?: ToolSet; // optional tools this member can call
+  /** When set, reuse this registered AGENTS specialist instead of an inline build. */
+  agentRef?: string;
 };
 
 /** A unit of work assigned to a member. expectedOutput is prompt guidance;

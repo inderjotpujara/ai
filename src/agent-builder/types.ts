@@ -27,6 +27,8 @@ export type BuildResult =
  *  The real impl (deps.ts) wraps `generateObject` with a live model. */
 export type BuilderModel = {
   object: <T>(args: { schema: z.ZodType<T>; prompt: string }) => Promise<T>;
+  /** Plain-text generation (think-first stages that must NOT be JSON-constrained). */
+  text: (args: { prompt: string }) => Promise<string>;
 };
 
 export type BuilderDeps = {

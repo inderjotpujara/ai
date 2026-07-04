@@ -1,84 +1,58 @@
-# Task 3 Report: Retype the inference runtime registry + `Runtime.kind`
+# Task 3 report: crew-builder result + deps types (Slice 19)
 
-## Status
-✅ COMPLETE
+## Implemented
+Created `src/crew-builder/types.ts` with the exact code from the brief:
+type-only module exporting `Shape`, `CrewBuildResult`, `CrewWritePaths`,
+`CrewBuilderDeps`, and re-exporting `BuilderDeps`/`ValidationIssue`/`CrewIR`/`WorkflowIR`.
 
-## Summary
+Import sources verified before writing (all names exist at the stated paths):
+- `BuilderDeps`, `BuilderModel`, `ValidationIssue` — `src/agent-builder/types.ts` (lines 18, 28, 32)
+- `WritePaths` — `src/agent-builder/write.ts` (line 6)
+- `CrewIR`, `WorkflowIR` — `src/crew-builder/ir.ts` (lines 114, 84)
 
-Retyped the inference-runtime side (`Runtime.kind`, `runtimeFor`) from
-`ProviderKind` to the new `RuntimeKind` (introduced in Task 1), following the
-brief's TDD steps exactly.
+No import path/name deviations were needed vs. the brief.
 
-## TDD steps followed
+## Deviation from brief's literal formatting
+The brief's verbatim code was written first, but `bun run lint:file` (biome check)
+failed on 2 formatting rules: the multi-field `'written'` union member needed to
+break onto multiple lines, and the trailing `//` comments needed single-space
+padding instead of aligned columns. Ran `bunx biome check --write
+src/crew-builder/types.ts` to auto-fix; this only reformatted whitespace/line
+breaks — no type, name, or logic changed. Re-ran typecheck (still clean) and
+lint (now clean) after the fix.
 
-1. **Failing test written** — replaced `tests/runtime/registry.test.ts` (which
-   pre-existed with an old `ProviderKind`-based API: `runtimeFor(ProviderKind)`,
-   plus a "throws on unknown kind" case) with the brief's exact test content
-   (2 `it` blocks under `describe('runtimeFor', …)`, asserting
-   `runtimeFor(RuntimeKind.Ollama).kind === RuntimeKind.Ollama` and the MLX
-   equivalent).
-2. **Verified it fails** — `bun run test:file -- "tests/runtime/registry.test.ts"`
-   failed with `error: No runtime registered for provider MlxServer` (1 pass /
-   1 fail), confirming the pre-change registry didn't resolve `RuntimeKind`
-   values correctly.
-3. **Implemented the brief's edits:**
-   - `src/runtime/runtime.ts`: import changed from `ProviderKind` to
-     `RuntimeKind`; `Runtime.kind: RuntimeKind`.
-   - `src/runtime/registry.ts`: import changed to `RuntimeKind`;
-     `runtimeFor(kind: RuntimeKind): Runtime`; body (`RUNTIMES` array, `find`,
-     throw message, `availableRuntimes`) left unchanged as instructed.
-   - `src/runtime/mlx-server.ts`: import changed from `ProviderKind` to
-     `RuntimeKind`; `kind: RuntimeKind.MlxServer`.
-   - `src/runtime/ollama.ts`: import changed from `ProviderKind` to
-     `RuntimeKind`; `kind: RuntimeKind.Ollama`.
-4. **Verified it passes** — `bun run test:file -- "tests/runtime/registry.test.ts"`
-   → `2 pass, 0 fail, 2 expect() calls`.
-5. **Committed** — `git add src/runtime/ tests/runtime/registry.test.ts` +
-   commit (see below). Only these 5 files were staged; the pre-existing
-   uncommitted doc/ledger changes in the working tree (`.remember/now.md`,
-   `.superpowers/sdd/progress.md`, `task-1-*`, `task-2-*`, `task-3-brief.md`)
-   were left untouched/unstaged, as they belong to other tasks/sessions.
+## Commands + output
 
-## Commit
+```
+$ bun run typecheck
+$ tsc --noEmit
+(clean, no output)
 
-- `101cdca` — `feat(runtime): retype runtimeFor + Runtime.kind to RuntimeKind`
-  (5 files changed: `src/runtime/mlx-server.ts`, `src/runtime/ollama.ts`,
-  `src/runtime/registry.ts`, `src/runtime/runtime.ts`,
-  `tests/runtime/registry.test.ts`)
+$ bun run lint:file -- src/crew-builder/types.ts
+$ biome check src/crew-builder/types.ts
+Checked 1 file in 2ms. No fixes applied.
+```
 
-## Test result
+## Files
+- `/Users/inderjotsingh/ai/src/crew-builder/types.ts` (created)
 
-`bun run test:file -- "tests/runtime/registry.test.ts"` → **2 pass, 0 fail**.
-
-## Known / expected residual breakage (not touched, per brief)
-
-- `tests/runtime/mlx-server.test.ts` line 6 still asserts
-  `mlxServerRuntime.kind === ProviderKind.MlxServer`. Since `mlxServerRuntime.kind`
-  is now `RuntimeKind.MlxServer` (string value `'MlxServer'`) while
-  `ProviderKind.MlxServer` no longer exists as an enum member (`ProviderKind`
-  now only has `Ollama`, `HfGguf`, `HfSnapshot`, `LmStudio` per Task 1), that
-  assertion now compares against `undefined` and fails
-  (`Expected: undefined, Received: "MlxServer"`). I ran this file only to
-  confirm the expected-breakage boundary — it is a **separate test file**
-  from `tests/runtime/registry.test.ts` (bun runs each test file as its own
-  module; no shared compilation unit), so it did not affect or block the
-  required focused run. Per the brief's guidance, since it did **not** break
-  compilation of my focused registry test run, I left it untouched for Task 4
-  to fix (update `ProviderKind.MlxServer` → `RuntimeKind.MlxServer` there).
-- Full `bun test` / `bun run typecheck` remain RED due to the known Task-4
-  consumers (`src/discovery/*`, `src/cli/select-hook.ts`,
-  `src/resource/model-manager.ts`,
-  `src/provisioning/catalog/hf-catalog.ts`) still referencing the removed
-  `ProviderKind.MlxServer` / using `.provider` for runtime lookup — expected,
-  not chased here, per instructions to run only the focused test.
-
-## Note on this file
-
-This report file previously held a stale Slice-17 Task-3 report
-("generate.ts — structured proposal draft") from an earlier slice that reused
-the same filename. It has been overwritten with this Slice-18 Task-3 report.
+## Self-review
+- Type-only module, no runtime code, no console.log — matches global constraints.
+- `type` used throughout (no `interface`), consistent with repo code-style rule.
+- No unit test file created — correct per brief: this module has zero runtime
+  behavior to exercise; `bun run typecheck` is the appropriate gate, and
+  downstream tasks (consumers) will exercise these types through their own
+  tests.
 
 ## Concerns
+None. The only wrinkle was the biome auto-format pass, which is cosmetic only
+(verified via typecheck being clean both before and after, and diffing showed
+only whitespace/line-break changes, no semantic edits).
 
-None. Scope was followed exactly as specified in the brief; no ambiguity
-encountered.
+## Note on this file
+This report file previously held a stale Slice-18 Task-3 report (runtime
+registry retyping) from an earlier slice that reused the same filename. It has
+been overwritten with this Slice-19 Task-3 report.
+
+## Commit
+`d967a9d` — "feat(crew-builder): result + deps types"

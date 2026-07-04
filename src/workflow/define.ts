@@ -44,6 +44,56 @@ function expandVerifiedSteps(
   return expanded;
 }
 
+/** Pure graph gate: every edge's endpoints (`[from, to]`, "from must complete
+ *  before to") must be a known id, and the graph must be acyclic (Kahn's
+ *  topological sort). No knowledge of steps/tasks/closures — just ids and
+ *  edges — so it's shared by `defineWorkflow`, `defineCrew`, and the
+ *  crew-builder IR validator (which checks a graph shape before any real
+ *  `Step`/`Task` closures exist). Throws a plain `Error`; callers wrap it in
+ *  their own domain error type for a domain-flavored message. */
+export function assertAcyclic(
+  ids: string[],
+  edges: Array<[from: string, to: string]>,
+): void {
+  const known = new Set(ids);
+  for (const [from, to] of edges) {
+    if (!known.has(from)) {
+      throw new Error(`dependency edge references unknown id "${from}"`);
+    }
+    if (!known.has(to)) {
+      throw new Error(`dependency edge references unknown id "${to}"`);
+    }
+  }
+
+  const indeg = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+  for (const id of ids) {
+    indeg.set(id, 0);
+    dependents.set(id, []);
+  }
+  for (const [from, to] of edges) {
+    indeg.set(to, (indeg.get(to) ?? 0) + 1);
+    dependents.get(from)?.push(to);
+  }
+
+  const queue = [...indeg.entries()]
+    .filter(([, d]) => d === 0)
+    .map(([id]) => id);
+  let visited = 0;
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    visited++;
+    for (const next of dependents.get(id) ?? []) {
+      const d = (indeg.get(next) ?? 0) - 1;
+      indeg.set(next, d);
+      if (d === 0) queue.push(next);
+    }
+  }
+  if (visited !== ids.length) {
+    throw new Error('dependency graph has a cycle');
+  }
+}
+
 /** Validate a workflow definition at construction:
  *  unique ids · resolvable deps + branch targets · acyclic dependency graph.
  *  When `verifyOpts` is supplied, any `AgentStep` that opts into `verify` gets
@@ -66,15 +116,9 @@ export function defineWorkflow(
     ids.add(step.id);
   }
 
-  // Every dependsOn (explicit) and branch target must resolve to a real step.
-  steps.forEach((step, i) => {
-    for (const dep of effectiveDeps(step, i, steps)) {
-      if (!ids.has(dep)) {
-        throw new WorkflowError(
-          `step ${step.id}: unknown dependsOn target "${dep}"`,
-        );
-      }
-    }
+  // Branch targets must resolve to a real step (not part of the dependency
+  // graph itself — a branch's own deps come from effectiveDeps below).
+  for (const step of steps) {
     if (step.kind === StepKind.Branch) {
       for (const target of [step.whenTrue, step.whenFalse]) {
         if (!ids.has(target)) {
@@ -84,36 +128,19 @@ export function defineWorkflow(
         }
       }
     }
-  });
+  }
 
-  // Acyclic check via Kahn's topological sort over the effective-deps graph.
-  const indeg = new Map<string, number>();
-  const dependents = new Map<string, string[]>();
-  steps.forEach((s) => {
-    indeg.set(s.id, 0);
-    dependents.set(s.id, []);
-  });
+  // dependsOn resolution + acyclicity, via the shared Kahn/reference-integrity gate.
+  const edges: Array<[string, string]> = [];
   steps.forEach((step, i) => {
     for (const dep of effectiveDeps(step, i, steps)) {
-      indeg.set(step.id, (indeg.get(step.id) ?? 0) + 1);
-      dependents.get(dep)?.push(step.id);
+      edges.push([dep, step.id]);
     }
   });
-  const queue = [...indeg.entries()]
-    .filter(([, d]) => d === 0)
-    .map(([id]) => id);
-  let visited = 0;
-  while (queue.length > 0) {
-    const id = queue.shift() as string;
-    visited++;
-    for (const next of dependents.get(id) ?? []) {
-      const d = (indeg.get(next) ?? 0) - 1;
-      indeg.set(next, d);
-      if (d === 0) queue.push(next);
-    }
-  }
-  if (visited !== steps.length) {
-    throw new WorkflowError(`workflow ${def.id} has a dependency cycle`);
+  try {
+    assertAcyclic([...ids], edges);
+  } catch (e) {
+    throw new WorkflowError(`workflow ${def.id}: ${(e as Error).message}`);
   }
 
   return def;

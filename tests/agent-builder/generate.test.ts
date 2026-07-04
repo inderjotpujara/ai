@@ -16,6 +16,7 @@ function stubModel(capturePrompt: (p: string) => void): BuilderModel {
         rationale: 'No existing agent can read PDFs.',
       } as never;
     },
+    text: async () => '',
   };
 }
 

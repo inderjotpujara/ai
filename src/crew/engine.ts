@@ -1,4 +1,5 @@
 import type { ToolSet } from 'ai';
+import { AGENTS } from '../../agents/index.ts';
 import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { runOrchestrator } from '../core/orchestrator.ts';
@@ -73,7 +74,10 @@ export function crewAgentMap(
     : {};
   for (const member of crew.members) {
     const memberTools = { ...(member.tools ?? tools), ...recallTools };
-    map[member.name] = buildCrewAgent(member, memberTools);
+    const factory = member.agentRef ? AGENTS[member.agentRef] : undefined;
+    map[member.name] = factory
+      ? factory(memberTools)
+      : buildCrewAgent(member, memberTools);
   }
   return map;
 }

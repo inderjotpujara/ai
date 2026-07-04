@@ -1,98 +1,137 @@
-### Task 1: Add `RuntimeKind` + extend `ProviderKind` + `downloadKindFor`
+### Task 1: IR types + Zod schemas (`ir.ts`)
 
 **Files:**
-- Modify: `src/core/types.ts` (enum `ProviderKind` at lines 2-5; `ModelDeclaration` at ~line 50)
-- Create: `src/core/kind-map.ts`
-- Test: `tests/core/kind-map.test.ts`
+- Create: `src/crew-builder/ir.ts`
+- Test: `tests/crew-builder/ir.test.ts`
 
 **Interfaces:**
-- Produces:
-  - `enum ProviderKind { Ollama='Ollama', HfGguf='HfGguf', HfSnapshot='HfSnapshot', LmStudio='LmStudio' }`
-  - `enum RuntimeKind { Ollama='Ollama', MlxServer='MlxServer', LmStudio='LmStudio' }`
-  - `ModelDeclaration.runtime: RuntimeKind` (was `.provider: ProviderKind`)
-  - `Candidate.provider: ProviderKind` (unchanged field name; retyped — see Task 2)
-  - `downloadKindFor(runtime: RuntimeKind, repoShape: 'gguf-file' | 'snapshot' | 'ollama'): ProviderKind`
+- Produces: `CrewIR`, `WorkflowIR`, `InputDescriptor`, `PredicateDescriptor`, and their Zod schemas `CrewIRSchema`, `WorkflowIRSchema`. Consumed by every later task.
 
-- [ ] **Step 1: Write the failing test** — `tests/core/kind-map.test.ts`
+- [ ] **Step 1: Write the failing test**
 
 ```ts
-import { describe, expect, it } from 'bun:test';
-import { RuntimeKind, ProviderKind } from '../../src/core/types.ts';
-import { downloadKindFor } from '../../src/core/kind-map.ts';
+// tests/crew-builder/ir.test.ts
+import { expect, test } from 'bun:test';
+import { CrewIRSchema, WorkflowIRSchema } from '../../src/crew-builder/ir.ts';
 
-describe('downloadKindFor', () => {
-  it('maps Ollama runtime to Ollama download', () => {
-    expect(downloadKindFor(RuntimeKind.Ollama, 'ollama')).toBe(ProviderKind.Ollama);
-  });
-  it('maps MLX runtime + snapshot repo to HfSnapshot download', () => {
-    expect(downloadKindFor(RuntimeKind.MlxServer, 'snapshot')).toBe(ProviderKind.HfSnapshot);
-  });
-  it('maps a single-file gguf under Ollama runtime to HfGguf download', () => {
-    expect(downloadKindFor(RuntimeKind.Ollama, 'gguf-file')).toBe(ProviderKind.HfGguf);
-  });
-  it('maps LmStudio runtime to LmStudio download', () => {
-    expect(downloadKindFor(RuntimeKind.LmStudio, 'snapshot')).toBe(ProviderKind.LmStudio);
-  });
+test('WorkflowIRSchema accepts a valid agent+tool+branch graph', () => {
+  const ir = {
+    id: 'fetch_and_check',
+    description: 'fetch then branch',
+    steps: [
+      { kind: 'tool', id: 'fetch', tool: 'fetch', input: { kind: 'fromInput' } },
+      { kind: 'agent', id: 'summarize', agent: 'web_fetch', dependsOn: ['fetch'], input: { kind: 'fromStep', ref: 'fetch' } },
+      { kind: 'branch', id: 'ok', dependsOn: ['summarize'], predicate: { kind: 'whenContains', ref: 'summarize', substr: 'error' }, whenTrue: 'summarize', whenFalse: 'summarize' },
+    ],
+  };
+  expect(WorkflowIRSchema.safeParse(ir).success).toBe(true);
+});
+
+test('CrewIRSchema accepts inline + agentRef members', () => {
+  const ir = {
+    id: 'research_crew', description: 'x', process: 'sequential',
+    members: [
+      { name: 'researcher', role: 'r', goal: 'g', backstory: 'b', requires: ['tools'] },
+      { name: 'web_fetch', agentRef: 'web_fetch', role: 'fetcher', goal: 'g', backstory: 'b', requires: ['tools'] },
+    ],
+    tasks: [{ id: 'gather', description: 'd', expectedOutput: 'o', member: 'researcher' }],
+  };
+  expect(CrewIRSchema.safeParse(ir).success).toBe(true);
+});
+
+test('WorkflowIRSchema rejects an unknown step kind', () => {
+  expect(WorkflowIRSchema.safeParse({ id: 'x', steps: [{ kind: 'nope', id: 'a' }] }).success).toBe(false);
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun run test:file -- "tests/core/kind-map.test.ts"`
-Expected: FAIL — `RuntimeKind`/`downloadKindFor` not exported.
+Run: `bun test tests/crew-builder/ir.test.ts`
+Expected: FAIL — cannot find module `ir.ts`.
 
-- [ ] **Step 3: Edit `src/core/types.ts`**
-
-Replace the two-member `ProviderKind` with the download enum, add `RuntimeKind`, and rename the declaration field:
+- [ ] **Step 3: Write the implementation**
 
 ```ts
-/** Which downloader fetches a model's weights. String enum per project style. */
-export enum ProviderKind {
-  Ollama = 'Ollama', // pull via the local Ollama daemon
-  HfGguf = 'HfGguf', // single GGUF file from a HuggingFace repo (repo::file.gguf)
-  HfSnapshot = 'HfSnapshot', // whole-repo snapshot (MLX weights) from HuggingFace
-  LmStudio = 'LmStudio', // download via the local LM Studio REST server
-}
+// src/crew-builder/ir.ts
+import { z } from 'zod';
 
-/** Which local engine runs inference for a model. */
-export enum RuntimeKind {
-  Ollama = 'Ollama', // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
-  MlxServer = 'MlxServer', // MLX via a local OpenAI-compatible server (mlx_lm / LM Studio)
-  LmStudio = 'LmStudio', // reserved: LM Studio as an inference runtime (download-only in Slice 18)
-}
+/** How a step/task input closure is produced (JSON-safe descriptor, not a closure). */
+export const InputDescriptorSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('fromInput') }),
+  z.object({ kind: z.literal('fromStep'), ref: z.string().min(1) }),
+  z.object({ kind: z.literal('fromTemplate'), template: z.string().min(1) }),
+]);
+export type InputDescriptor = z.infer<typeof InputDescriptorSchema>;
+
+/** How a branch predicate closure is produced. */
+export const PredicateDescriptorSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('whenEquals'), ref: z.string().min(1), value: z.string() }),
+  z.object({ kind: z.literal('whenContains'), ref: z.string().min(1), substr: z.string().min(1) }),
+  z.object({ kind: z.literal('whenTruthy'), ref: z.string().min(1) }),
+]);
+export type PredicateDescriptor = z.infer<typeof PredicateDescriptorSchema>;
+
+const AgentStepIR = z.object({
+  kind: z.literal('agent'), id: z.string().min(1), agent: z.string().min(1),
+  dependsOn: z.array(z.string()).optional(), input: InputDescriptorSchema, verify: z.boolean().optional(),
+});
+const ToolStepIR = z.object({
+  kind: z.literal('tool'), id: z.string().min(1), tool: z.string().min(1),
+  dependsOn: z.array(z.string()).optional(), input: InputDescriptorSchema,
+});
+const BranchStepIR = z.object({
+  kind: z.literal('branch'), id: z.string().min(1), dependsOn: z.array(z.string()).optional(),
+  predicate: PredicateDescriptorSchema, whenTrue: z.string().min(1), whenFalse: z.string().min(1),
+});
+const MapSubStepIR = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('agent'), agent: z.string().min(1), input: InputDescriptorSchema }),
+  z.object({ kind: z.literal('tool'), tool: z.string().min(1), input: InputDescriptorSchema }),
+]);
+const MapStepIR = z.object({
+  kind: z.literal('map'), id: z.string().min(1), dependsOn: z.array(z.string()).optional(),
+  over: z.object({ kind: z.literal('mapOver'), ref: z.string().min(1) }), step: MapSubStepIR,
+});
+
+export const WorkflowStepIRSchema = z.discriminatedUnion('kind', [AgentStepIR, ToolStepIR, BranchStepIR, MapStepIR]);
+export type WorkflowStepIR = z.infer<typeof WorkflowStepIRSchema>;
+
+export const WorkflowIRSchema = z.object({
+  id: z.string().min(1), description: z.string().optional(), steps: z.array(WorkflowStepIRSchema).min(1),
+});
+export type WorkflowIR = z.infer<typeof WorkflowIRSchema>;
+
+export const CrewMemberIRSchema = z.object({
+  name: z.string().min(1),
+  agentRef: z.string().optional(), // registered AGENTS name to reuse; absent = inline member
+  role: z.string().min(1), goal: z.string().min(1), backstory: z.string().min(1),
+  requires: z.array(z.string()).min(1), tools: z.array(z.string()).optional(),
+});
+export type CrewMemberIR = z.infer<typeof CrewMemberIRSchema>;
+
+export const CrewTaskIRSchema = z.object({
+  id: z.string().min(1), description: z.string().min(1), expectedOutput: z.string().min(1),
+  member: z.string().min(1), dependsOn: z.array(z.string()).optional(), verify: z.boolean().optional(),
+});
+
+export const CrewIRSchema = z.object({
+  id: z.string().min(1), description: z.string().optional(),
+  process: z.enum(['sequential', 'hierarchical']),
+  members: z.array(CrewMemberIRSchema).min(1), tasks: z.array(CrewTaskIRSchema).min(1),
+});
+export type CrewIR = z.infer<typeof CrewIRSchema>;
 ```
 
-In `ModelDeclaration`, change `provider: ProviderKind` → `runtime: RuntimeKind`.
+- [ ] **Step 4: Run test to verify it passes**
 
-- [ ] **Step 4: Create `src/core/kind-map.ts`**
+Run: `bun test tests/crew-builder/ir.test.ts && bun run typecheck`
+Expected: PASS (3 tests), typecheck clean.
 
-```ts
-import { ProviderKind, RuntimeKind } from './types.ts';
-
-export type RepoShape = 'gguf-file' | 'snapshot' | 'ollama';
-
-/** Map an inference runtime + repo shape to the download provider that fetches it. */
-export function downloadKindFor(runtime: RuntimeKind, shape: RepoShape): ProviderKind {
-  if (runtime === RuntimeKind.LmStudio) return ProviderKind.LmStudio;
-  if (runtime === RuntimeKind.MlxServer) return ProviderKind.HfSnapshot;
-  // RuntimeKind.Ollama:
-  if (shape === 'gguf-file') return ProviderKind.HfGguf;
-  return ProviderKind.Ollama;
-}
-```
-
-- [ ] **Step 5: Run test to verify it passes**
-
-Run: `bun run test:file -- "tests/core/kind-map.test.ts"`
-Expected: PASS (4 tests).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/types.ts src/core/kind-map.ts tests/core/kind-map.test.ts
-git commit -m "feat(core): split ProviderKind (download) from RuntimeKind (inference) + downloadKindFor"
+git add src/crew-builder/ir.ts tests/crew-builder/ir.test.ts
+git commit -m "feat(crew-builder): IR types + Zod schemas"
 ```
-(Typecheck will be red across consumers until Task 2–4 — that is expected and fixed within WS1.)
 
 ---
 

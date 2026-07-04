@@ -1,55 +1,61 @@
-### Task 3: Retype the inference runtime registry + `Runtime.kind`
+### Task 3: builder types (`types.ts`)
 
 **Files:**
-- Modify: `src/runtime/runtime.ts:22` (`Runtime.kind: RuntimeKind`)
-- Modify: `src/runtime/registry.ts` (`runtimeFor(kind: RuntimeKind)`, :8-12)
-- Modify: `src/runtime/mlx-server.ts:30` (`kind: RuntimeKind.MlxServer`)
-- Modify: `src/runtime/ollama.ts` (`kind: RuntimeKind.Ollama`)
-- Test: `tests/runtime/registry.test.ts` *(new)*
+- Create: `src/crew-builder/types.ts`
+- Test: none (type-only; covered by consumers).
 
 **Interfaces:**
-- Consumes: `RuntimeKind` (Task 1).
-- Produces: `runtimeFor(kind: RuntimeKind): Runtime`; `Runtime.kind: RuntimeKind`.
+- Consumes: `BuilderModel` from `src/agent-builder/types.ts`, `CrewIR`/`WorkflowIR` from `ir.ts`, `ValidationIssue` from `src/agent-builder/types.ts`, `WritePaths` from `src/agent-builder/write.ts`, `BuilderDeps` from `src/agent-builder/types.ts`.
+- Produces: `Shape`, `CrewBuildResult`, `CrewBuilderDeps`.
 
-- [ ] **Step 1: Write the failing test** — `tests/runtime/registry.test.ts`
+- [ ] **Step 1: Write the file** (type-only — no separate test; typecheck is the gate)
 
 ```ts
-import { describe, expect, it } from 'bun:test';
-import { RuntimeKind } from '../../src/core/types.ts';
-import { runtimeFor } from '../../src/runtime/registry.ts';
+// src/crew-builder/types.ts
+import type { BuilderDeps, BuilderModel, ValidationIssue } from '../agent-builder/types.ts';
+import type { WritePaths } from '../agent-builder/write.ts';
+import type { CrewIR, WorkflowIR } from './ir.ts';
 
-describe('runtimeFor', () => {
-  it('returns the Ollama runtime', () => {
-    expect(runtimeFor(RuntimeKind.Ollama).kind).toBe(RuntimeKind.Ollama);
-  });
-  it('returns the MLX server runtime', () => {
-    expect(runtimeFor(RuntimeKind.MlxServer).kind).toBe(RuntimeKind.MlxServer);
-  });
-});
+export type Shape = 'crew' | 'workflow';
+
+export type CrewBuildResult =
+  | { kind: 'written'; shape: Shape; name: string; files: string[]; builtAgents: string[] }
+  | { kind: 'declined' }
+  | { kind: 'invalid'; issues: ValidationIssue[] }
+  | { kind: 'abandoned'; reason: string };
+
+/** Where generated crews/workflows are written + how their registries are found. */
+export type CrewWritePaths = {
+  crewsDir: string; crewsIndexPath: string;
+  workflowsDir: string; workflowsIndexPath: string;
+};
+
+export type CrewBuilderDeps = {
+  model: BuilderModel;
+  existingAgents: () => string[];       // agentNames()
+  packNames: () => string[];            // STARTER_PACK names
+  existingCrews: () => string[];        // Object.keys(CREWS)
+  existingWorkflows: () => string[];    // Object.keys(WORKFLOWS)
+  confirm: (proposalText: string) => Promise<boolean>;
+  /** Auto-build a missing agent for a needed capability; returns built agent name or null on decline/failure. */
+  buildMissingAgent: (need: string) => Promise<string | null>;
+  paths: CrewWritePaths;
+  agentPaths: WritePaths;               // passed through to buildMissingAgent's deps
+  log?: (m: string) => void;
+};
+
+export type { BuilderDeps, ValidationIssue, CrewIR, WorkflowIR };
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Typecheck**
 
-Run: `bun run test:file -- "tests/runtime/registry.test.ts"`
-Expected: FAIL — types/kinds mismatch.
+Run: `bun run typecheck` — clean.
 
-- [ ] **Step 3: Edit the three runtime files**
-
-- `src/runtime/runtime.ts`: `import { RuntimeKind }`; `kind: RuntimeKind` on the `Runtime` type.
-- `src/runtime/registry.ts`: `runtimeFor(kind: RuntimeKind): Runtime` and `availableRuntimes` unchanged in body.
-- `src/runtime/mlx-server.ts:4,30`: import `RuntimeKind`; `kind: RuntimeKind.MlxServer`.
-- `src/runtime/ollama.ts`: import `RuntimeKind`; `kind: RuntimeKind.Ollama`.
-
-- [ ] **Step 4: Run to verify it passes**
-
-Run: `bun run test:file -- "tests/runtime/registry.test.ts"`
-Expected: PASS (2 tests).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add src/runtime/ tests/runtime/registry.test.ts
-git commit -m "feat(runtime): retype runtimeFor + Runtime.kind to RuntimeKind"
+git add src/crew-builder/types.ts
+git commit -m "feat(crew-builder): result + deps types"
 ```
 
 ---
