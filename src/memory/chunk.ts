@@ -10,7 +10,7 @@ function fixed(text: string, capChars: number): string[] {
   return out;
 }
 
-function cosine(a: number[], b: number[]): number {
+export function cosine(a: number[], b: number[]): number {
   let dot = 0,
     na = 0,
     nb = 0;

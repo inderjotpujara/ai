@@ -5,7 +5,8 @@ node_modules/
 runs/
 
 # Memory datastore (LanceDB tables + bun:sqlite; local, never committed). See docs/architecture.md §11
-memory/
+# Anchored to the repo root so src/memory/ + tests/memory/ stay tracked.
+/memory/
 
 # Local model image/blob files (large; never committed). See model-images/README.md
 model-images/*
