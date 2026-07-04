@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 import type { ValidationIssue } from '../agent-builder/types.ts';
 import { atomicWrite } from '../agent-builder/write.ts';
 import { embedOne } from '../memory/embed-one.ts';
-import { withCrewBuildSpan } from '../telemetry/spans.ts';
+import { recordReuseDecision, withCrewBuildSpan } from '../telemetry/spans.ts';
 import { dryRunMs } from '../verified-build/config.ts';
 import {
   representativeTask,
@@ -327,6 +327,7 @@ export function buildCrewOrWorkflow(
         kind: decision.kind,
         similarity: decision.similarity,
       });
+      recordReuseDecision(decision.kind, decision.similarity);
       if (decision.kind === ReuseKind.Reuse && decision.match) {
         return finish(rec, shape, {
           kind: 'reused',

@@ -1,4 +1,4 @@
-import { withBuildVerifySpan } from '../telemetry/spans.ts';
+import { ATTR, withBuildVerifySpan } from '../telemetry/spans.ts';
 import { repairLoop } from './repair.ts';
 import type {
   ArtifactKind,
@@ -58,6 +58,10 @@ export async function verifyAndCommit(
       return deps.dryRunOnce(def);
     });
     rec.event('dry_run', { ran: dr.ran, repairs: dr.repairs });
+    rec.attrs({
+      [ATTR.VERIFY_DRYRUN_RAN]: dr.ran,
+      [ATTR.VERIFY_DRYRUN_REPAIRS]: dr.repairs,
+    });
     if (!dr.ran && !deps.force) {
       return {
         kind: 'failed',
@@ -79,6 +83,18 @@ export async function verifyAndCommit(
         ? { passed: ev.passed, total: ev.total, passedCount: ev.passedCount }
         : { skipped: true },
     );
+    if (ev) {
+      rec.attrs({
+        [ATTR.VERIFY_JUDGE_MODEL]: ev.judgeModel,
+        [ATTR.VERIFY_JUDGE_BELOW_BAR]: ev.belowBar,
+        [ATTR.VERIFY_GOLDEN_PASSED]: ev.passedCount,
+        [ATTR.VERIFY_GOLDEN_TOTAL]: ev.total,
+      });
+    } else {
+      // A skipped eval means no judge cleared the bar (makeGolden returned
+      // null) — record the degradation so it is observable.
+      rec.attrs({ [ATTR.VERIFY_JUDGE_BELOW_BAR]: true });
+    }
     let level = VerifiedLevel.Runs;
     if (ev) {
       if (!ev.passed && !deps.force) {

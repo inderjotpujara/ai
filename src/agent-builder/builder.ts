@@ -2,7 +2,7 @@ import qwenFast from '../../models/qwen-fast.ts';
 import type { Agent } from '../core/agent-def.ts';
 import { embedOne } from '../memory/embed-one.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
-import { withAgentBuildSpan } from '../telemetry/spans.ts';
+import { recordReuseDecision, withAgentBuildSpan } from '../telemetry/spans.ts';
 import { dryRunMs } from '../verified-build/config.ts';
 import {
   representativeTask,
@@ -287,6 +287,7 @@ export function buildAgent(
         kind: decision.kind,
         similarity: decision.similarity,
       });
+      recordReuseDecision(decision.kind, decision.similarity);
       if (decision.kind === ReuseKind.Reuse && decision.match) {
         rec.outcome('reused', decision.match);
         return {

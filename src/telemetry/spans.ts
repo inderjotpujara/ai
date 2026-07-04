@@ -560,12 +560,14 @@ export function withCrewBuildSpan<T>(
 }
 
 /** Root span for one build-verification pass (reuse gate / dry-run / judge /
- *  golden set). Mirrors withCrewBuildSpan: the body records stage events and
- *  sets the earned VerifiedLevel at the end via the returned recorder. */
+ *  golden set). Mirrors withCrewBuildSpan: the body records stage events,
+ *  sets `verify.*` attributes as stages complete (via `attrs`), and sets the
+ *  earned VerifiedLevel at the end via the returned recorder. */
 export function withBuildVerifySpan<T>(
   kind: ArtifactKind,
   fn: (rec: {
     event(name: string, attrs?: Record<string, unknown>): void;
+    attrs(attrs: Record<string, unknown>): void;
     result(level: VerifiedLevel, attrs?: Record<string, unknown>): void;
   }) => Promise<T>,
 ): Promise<T> {
@@ -573,12 +575,26 @@ export function withBuildVerifySpan<T>(
     span.setAttribute(ATTR.ARTIFACT_KIND, kind);
     return fn({
       event: (name, attrs) => span.addEvent(name, attrs as Attributes),
+      attrs: (attrs) => span.setAttributes(attrs as Attributes),
       result: (level, attrs) => {
         span.setAttribute(ATTR.VERIFY_LEVEL, level);
         if (attrs) span.setAttributes(attrs as Attributes);
       },
     });
   });
+}
+
+/** Set the reuse decision + similarity on the active span (the agent.build /
+ *  crew.build span at the builders' reuse-check site) so a reuse hit/offer
+ *  is observable even though no build.verify span opens for it. */
+export function recordReuseDecision(
+  decision: string,
+  similarity: number,
+): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.setAttribute(ATTR.VERIFY_REUSE_DECISION, decision);
+  span.setAttribute(ATTR.VERIFY_REUSE_SIMILARITY, similarity);
 }
 
 /** Root span for one artifact-archive maintenance pass; the body reports the
