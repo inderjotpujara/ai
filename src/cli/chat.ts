@@ -6,6 +6,8 @@ import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
+import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
+import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
@@ -29,6 +31,7 @@ import {
   isModelInstalled,
   listLoadedModels,
 } from '../resource/ollama-control.ts';
+import { shouldOfferCrew } from './offer-crew.ts';
 import { runChat } from './run-chat.ts';
 import { createSelectHook } from './select-hook.ts';
 import { formatSelectionNotice } from './selection-notice.ts';
@@ -160,6 +163,32 @@ async function main(): Promise<void> {
           console.log(result.text);
         } else if (result.kind === 'gap') {
           console.log(result.message);
+          if (
+            interactiveTTY() &&
+            shouldOfferCrew(`${result.missingCapability} ${task}`)
+          ) {
+            const wantsCrew = await askYesNo(
+              `This looks multi-step. Propose a crew/workflow for "${result.missingCapability}"?`,
+              { input: stdinInput(), autoYes: false },
+            );
+            if (wantsCrew) {
+              const { deps, cleanup } = await makeRealCrewBuilderDeps();
+              try {
+                const built = await buildCrewOrWorkflow(
+                  `${result.missingCapability}. Original task: ${task}`,
+                  deps,
+                );
+                if (built.kind === 'written') {
+                  console.log(
+                    `Created ${built.shape} "${built.name}" — re-run to use it.`,
+                  );
+                }
+              } finally {
+                await cleanup();
+              }
+              return;
+            }
+          }
           if (interactiveTTY()) {
             const wants = await askYesNo(
               `Propose a new agent for "${result.missingCapability}"?`,
