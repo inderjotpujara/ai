@@ -1,5 +1,19 @@
 import { judgeMinParams } from './config.ts';
 
+/** Thrown when the `selectJudge`-chosen judge model cannot be resolved/loaded
+ *  (e.g. the runtime can't fit it in the live memory budget even after LRU
+ *  eviction). The builders' `goldenEval` catches this and degrades to skipping
+ *  behavioral eval (commit at `VerifiedLevel.Runs`) rather than crashing the
+ *  build — the repo's standing "never crash, always degrade" policy. Degrading
+ *  by grading on the GENERATOR model is deliberately NOT done (that would
+ *  reintroduce the self-grading the cross-family judge exists to prevent). */
+export class JudgeUnavailableError extends Error {
+  constructor(readonly modelId: string) {
+    super(`judge model unavailable: ${modelId}`);
+    this.name = 'JudgeUnavailableError';
+  }
+}
+
 export type JudgeCandidate = { model: string; params: number; family: string };
 
 export type JudgeDeps = {

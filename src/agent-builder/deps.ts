@@ -19,7 +19,10 @@ import { listLoadedModels } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { dryRunMs } from '../verified-build/config.ts';
-import type { JudgeCandidate } from '../verified-build/judge.ts';
+import {
+  type JudgeCandidate,
+  JudgeUnavailableError,
+} from '../verified-build/judge.ts';
 import { ReuseKind } from '../verified-build/types.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
@@ -282,11 +285,21 @@ export async function makeRealBuilderDeps(
     const cached = judgeModels.get(id);
     if (cached) return cached;
     const judgeDecl = registry.find((d) => d.model === id);
-    if (!judgeDecl) return model;
-    await manager.ensureReady(judgeDecl);
-    const judgeModel = runtimeFor(judgeDecl.runtime).createModel(judgeDecl);
-    judgeModels.set(id, judgeModel);
-    return judgeModel;
+    // Degrade (skip behavioral eval → commit `runs`), never self-grade on the
+    // generator model, and never crash: the golden-eval caller catches
+    // JudgeUnavailableError. Covers both "id vanished from the registry" and
+    // "found but the runtime can't load it" (e.g. ResourceError when it won't
+    // fit even after LRU eviction — realistic on constrained local hardware).
+    if (!judgeDecl) throw new JudgeUnavailableError(id);
+    try {
+      await manager.ensureReady(judgeDecl);
+      const judgeModel = runtimeFor(judgeDecl.runtime).createModel(judgeDecl);
+      judgeModels.set(id, judgeModel);
+      return judgeModel;
+    } catch (err) {
+      if (err instanceof JudgeUnavailableError) throw err;
+      throw new JudgeUnavailableError(id);
+    }
   };
   const input = stdinInput();
   const embedModel =

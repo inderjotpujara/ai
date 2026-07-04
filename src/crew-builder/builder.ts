@@ -14,7 +14,7 @@ import { evalCases } from '../verified-build/eval.ts';
 import type { GateDeps } from '../verified-build/gate.ts';
 import { verifyAndCommit } from '../verified-build/gate.ts';
 import { generateGolden, goldenPathFor } from '../verified-build/golden.ts';
-import { selectJudge } from '../verified-build/judge.ts';
+import { JudgeUnavailableError, selectJudge } from '../verified-build/judge.ts';
 import { upsertEntry } from '../verified-build/manifest.ts';
 import { renderReuseOffer, reuseDecision } from '../verified-build/reuse.ts';
 import {
@@ -251,23 +251,35 @@ async function verifyAndCommitCrewOrWorkflow(
       // pick — kept as defense so a below-bar judge can never grade.
       if (judgePick.model === null) return null;
       const judgeModelId = judgePick.model;
-      return evalCases(golden.cases, {
-        runCase: async (input) => {
-          try {
-            const r = await withWallClock(dryRunMs(), () =>
-              verify.runArtifact(runnable, shape, input),
-            );
-            return 'text' in r ? r.text : `error: ${r.error}`;
-          } catch (err) {
-            return `error: ${String(err)}`;
-          }
-        },
-        // Bind the SELECTED judge model id into every judge call (C3): the
-        // judge must run on the model selectJudge picked, not the generator.
-        judge: (prompt) => verify.judge(prompt, judgeModelId),
-        judgeModel: judgeModelId,
-        belowBar: judgePick.belowBar,
-      });
+      try {
+        return await evalCases(golden.cases, {
+          runCase: async (input) => {
+            try {
+              const r = await withWallClock(dryRunMs(), () =>
+                verify.runArtifact(runnable, shape, input),
+              );
+              return 'text' in r ? r.text : `error: ${r.error}`;
+            } catch (err) {
+              return `error: ${String(err)}`;
+            }
+          },
+          // Bind the SELECTED judge model id into every judge call (C3): the
+          // judge must run on the model selectJudge picked, not the generator.
+          judge: (prompt) => verify.judge(prompt, judgeModelId),
+          judgeModel: judgeModelId,
+          belowBar: judgePick.belowBar,
+        });
+      } catch (err) {
+        // Never-crash policy: a judge model that can't be loaded degrades to
+        // skipping behavioral eval (gate commits `runs`), never crashes.
+        if (err instanceof JudgeUnavailableError) {
+          console.error(
+            '[verify] judge model unavailable — skipping behavioral eval, committing verified: runs',
+          );
+          return null;
+        }
+        throw err;
+      }
     },
     // The gate's ONE golden generation (C4). A below-bar judge returns null
     // BEFORE generating — no golden is paid for when nothing can grade it.

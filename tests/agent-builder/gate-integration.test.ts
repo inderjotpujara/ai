@@ -9,6 +9,7 @@ import type {
   BuilderModel,
   BuilderVerifyDeps,
 } from '../../src/agent-builder/types.ts';
+import { JudgeUnavailableError } from '../../src/verified-build/judge.ts';
 import {
   readManifest,
   upsertEntry,
@@ -291,6 +292,31 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
       expect(r.level).toBe(VerifiedLevel.Runs);
     }
     expect(goldenCalls()).toBe(0);
+  });
+
+  it('judge model that cannot be loaded degrades to runs, never crashes', async () => {
+    const { model } = fakeModel({});
+    const { deps } = await makeDeps({
+      model,
+      verify: {
+        // A judge that CLEARS the param bar (so a golden set is generated and
+        // eval is attempted) but whose model cannot be resolved/loaded at
+        // grade time — the never-crash policy must degrade to `runs`.
+        judgeCandidates: () => [
+          { model: 'big-but-unloadable', params: 26e9, family: 'other-family' },
+        ],
+        judge: async () => {
+          throw new JudgeUnavailableError('big-but-unloadable');
+        },
+      },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    if (r.kind === 'written') {
+      expect(r.level).toBe(VerifiedLevel.Runs);
+    }
   });
 
   it('golden-eval judge runs on the model selectJudge picked, not the generator', async () => {
