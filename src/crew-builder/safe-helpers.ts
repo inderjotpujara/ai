@@ -2,7 +2,15 @@ import type { WorkflowContext } from '../workflow/types.ts';
 
 /** Stringify any ctx value deterministically (strings pass through). */
 function asStr(v: unknown): string {
-  return typeof v === 'string' ? v : v === undefined ? '' : JSON.stringify(v);
+  if (typeof v === 'string') return v;
+  if (v === undefined || v === null) return '';
+  if (typeof v === 'function' || typeof v === 'symbol') return '';
+  if (typeof v === 'bigint') return v.toString();
+  try {
+    return JSON.stringify(v) ?? '';
+  } catch {
+    return String(v);
+  }
 }
 
 /** input closure: the workflow's initial input. */

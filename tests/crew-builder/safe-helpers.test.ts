@@ -30,3 +30,15 @@ test('mapOver returns an array (empty when not array)', () => {
   expect(mapOver('a')({ a: [1, 2] })).toEqual([1, 2]);
   expect(mapOver('a')({ a: 'x' })).toEqual([]);
 });
+test('asStr-backed helpers never throw on hostile ctx values', () => {
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  expect(() => fromStep('a')({ a: circular })).not.toThrow();
+  expect(typeof fromStep('a')({ a: circular })).toBe('string');
+  expect(fromStep('a')({ a: 10n })).toBe('10'); // bigint
+  expect(fromStep('a')({ a: () => 1 })).toBe(''); // function
+  expect(fromStep('a')({ a: Symbol('x') })).toBe(''); // symbol
+  expect(whenContains('a', 'x')({ a: () => 1 })).toBe(false); // must not throw
+  expect(whenTruthy('a')({ a: () => 1 })).toBe(false); // function -> asStr '' -> length 0 -> false
+  expect(fromTemplate('{{a}}')({ a: 10n })).toBe('10');
+});
