@@ -67,6 +67,40 @@ function unwrapOptional(schema: z.ZodTypeAny): z.ZodTypeAny {
     : schema;
 }
 
+/** If `schema` is a `z.literal(...)` of a single string value, return it. */
+function literalStringValue(schema: z.ZodTypeAny): string | undefined {
+  if (!(schema instanceof z.ZodLiteral)) return undefined;
+  const v: unknown = schema.value;
+  return typeof v === 'string' ? v : undefined;
+}
+
+/** Render one discriminated-union variant's object shape, one level deep,
+ *  spelling out the discriminator field's literal value (e.g. `"kind":
+ *  "agent"`) so the model sees which variant is which, and `...` for every
+ *  other key — mirrors the plain-object-array case below. */
+function describeVariantShape(
+  variant: z.ZodTypeAny,
+  discriminator: string,
+): string {
+  if (!(variant instanceof z.ZodObject)) return '{...}';
+  const shape = variant.shape as Record<string, z.ZodTypeAny>;
+  const fields = Object.entries(shape).map(([key, value]) => {
+    if (key !== discriminator) return `"${key}": ...`;
+    const lit = literalStringValue(unwrapOptional(value));
+    return `"${key}": ${lit !== undefined ? `"${lit}"` : '...'}`;
+  });
+  return `{${fields.join(', ')}}`;
+}
+
+/** Render a `z.discriminatedUnion(...)`'s variants for the shape hint, e.g.
+ *  `{"kind": "agent", ...} | {"kind": "tool", ...}`. */
+function describeDiscriminatedUnion(du: z.ZodDiscriminatedUnion): string {
+  const { discriminator, options } = du.def;
+  return options
+    .map((o) => describeVariantShape(o as z.ZodTypeAny, discriminator))
+    .join(' | ');
+}
+
 /** Describe a top-level ZodObject's shape for the structured-JSON prompt.
  *  A bare key-name list (`"using EXACTLY these keys: members"`) is enough
  *  for flat schemas (every field agent-builder's `DraftSchema` uses is a
@@ -77,8 +111,14 @@ function unwrapOptional(schema: z.ZodTypeAny): z.ZodTypeAny {
  *  `CrewNodes`/`CrewIRSchema`, both `{ members: MemberNode[] }`-shaped; see
  *  Slice 19 Task 19). So for any field whose type is `array(object)`, spell
  *  out the inner object's keys as a literal shape example, one level deep —
- *  sufficient for every schema this seam currently serializes. */
-function describeSchemaShape(schema: z.ZodTypeAny): string {
+ *  sufficient for every schema this seam currently serializes. Array
+ *  elements typed as a `z.discriminatedUnion(...)` (e.g. `WorkflowIRSchema`'s
+ *  `steps: (AgentStepIR | ToolStepIR | BranchStepIR | MapStepIR)[]`) get the
+ *  same one-level-deep treatment per variant instead of falling through to
+ *  the plain-value case, which used to render the misleading
+ *  `["<string>", ...]` — the model then had no signal that each step is an
+ *  object shaped by its `kind` (found in review, Slice 19 close-review). */
+export function describeSchemaShape(schema: z.ZodTypeAny): string {
   if (!(schema instanceof z.ZodObject)) return '';
   const shape = schema.shape as Record<string, z.ZodTypeAny>;
   const fields = Object.entries(shape).map(([key, value]) => {
@@ -88,6 +128,9 @@ function describeSchemaShape(schema: z.ZodTypeAny): string {
       if (element instanceof z.ZodObject) {
         const innerKeys = Object.keys(element.shape);
         return `"${key}": [{${innerKeys.map((k) => `"${k}": ...`).join(', ')}}]`;
+      }
+      if (element instanceof z.ZodDiscriminatedUnion) {
+        return `"${key}": [${describeDiscriminatedUnion(element)}]`;
       }
       // Array of plain values (e.g. strings) — spell out "an array of
       // strings", not objects, to stop the model wrapping each element in

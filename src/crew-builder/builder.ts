@@ -163,7 +163,27 @@ export function buildCrewOrWorkflow(
     const granted = await deps.confirm(renderSummary(ir, shape, planned));
     if (!granted) return finish(rec, shape, { kind: 'declined' });
 
-    const resolved = await resolveMissingAgents(ir, shape, deps);
+    // `resolveMissingAgents` delegates each missing agent to the
+    // agent-builder, whose `generateProposal` THROWS when the model can't
+    // return valid JSON after its own bounded retries (found live: a crew
+    // that referenced a to-be-built agent hit `agent-builder: model did not
+    // return valid JSON for the proposal` and rejected the whole
+    // `buildCrewOrWorkflow` call). That's the same throw-vs-result-kind gap
+    // the generation loop above guards — a failed auto-build is exactly an
+    // `abandoned` outcome, not an unhandled rejection, so treat a throw here
+    // the same as `buildMissingAgent` returning null (Slice 19
+    // close-review). Only the model-driven resolve step is wrapped;
+    // transpile/write are deterministic and must still surface real bugs.
+    let resolved: Awaited<ReturnType<typeof resolveMissingAgents>>;
+    try {
+      resolved = await resolveMissingAgents(ir, shape, deps);
+    } catch (e) {
+      rec.event('build-failed');
+      return finish(rec, shape, {
+        kind: 'abandoned',
+        reason: `agent build failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
     if (resolved.abandoned)
       return finish(rec, shape, {
         kind: 'abandoned',
