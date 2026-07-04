@@ -235,9 +235,34 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 8a. ✅ **shipped, Slice 16** — **MCP telemetry-ordering fix + consent robustness**. A live-verify pass on Slice 15 found the `mcp.mount` span was recorded before that run's telemetry provider existed, so it silently never reached `runs/<id>/spans.jsonl`; `src/cli/with-mcp-run.ts` now owns `createRun` → `initRunTelemetry` → mount (in that order) for all three CLIs, fixing it. The mount span also gained a `mcp.server.count` attribute and a corrected (summed) `mcp.tool.count`. Consent prompting is now judged on stdin **and** stderr both being TTYs, closing a hang on piped-closed stdin. See `docs/architecture.md` §14.
 9. ✅ **shipped, Slice 17** — **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library). `src/agent-builder/` sequences generate (prompt-injection-guarded) → suggest (palette-only, from the Slice 15 pack) → validate (structural) → consent (mandatory) → write (atomic: agent file + a new `agents/index.ts` registry entry + scoped `mcp.json`), under an `agent.build` telemetry span. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on `chat.ts`'s existing `{kind:'gap'}` outcome (unchanged, purely additive). Safety model: review-before-activate, palette-only tools, no same-run activation (live next run only). See `docs/architecture.md` §18.
 9c. ✅ **shipped, Slice 18** — **Debt wrap-up + MLX completion**. One slice discharging the dischargeable-now deferred work logged through Slice 17: split the overloaded `ProviderKind` into a download `ProviderKind` + an inference `RuntimeKind` (`kind-map.ts` bridges them); made `hf-fetch` **actually persist weights to disk** (atomic `.part`→rename, HF-LFS-oid verify-when-present, single-file GGUF + MLX snapshot, traversal-guarded, retry/stall parity); raised **MLX** to a full inference runtime (`createMlxServerRuntime`, opt-in + degrade-to-Ollama via `fallbackModel`), **live-verified both ways** (direct `mlx_lm.server` + real HF-snapshot download + Ollama regression); wired **LM Studio's download** adapter into `providerFor`; and cleared the accumulated Slice-14/15/16/17 polish (bounded-parallel downloads + `MultiProgressBar`, truthful `provision.*` telemetry, an injectable Metal reader + `bytesPerWeight` 0.6, an engine-enforced read-only sqlite gate via `PRAGMA query_only`, MCP OAuth `authProvider` [contract-tested], `mcp.transport`, an atomic `addPackEntry`, and a consent-gated agent-builder tool-code path writing an inert `.proposal.ts`). Deferred with reasons (below): LM Studio / llama.cpp *inference* runtimes, the live OAuth handshake, GitHub-PAT live-verify, TS-SDK-v2 migration. See `docs/architecture.md` §5/§13/§14/§18.
-10. **Crew/workflow builder** (Phase D, **next — Slice 19**) — Slice 17 only grows *individual* specialists; composing generated + existing agents into a multi-step crew or workflow still needs a hand-written definition. The next Phase-D slice extends the same generate→validate→consent→write pattern one level up: describe a multi-step need, get a proposed `crews/`/`workflows/` definition wiring agents together, review it, write it.
-11. **Verified "works out of the box"** (Phase D, **Slice 19+**, path to real confidence) — an execution **dry-run** the moment an agent is written (prove it behaves before handing it to the user), a per-agent **golden-eval** (mirroring the verification layer's golden-set pattern, §12), and **reuse/archive** (detect a near-duplicate need and reuse the existing agent instead of generating another; prune unused ones). None of these exist yet — validation today is structural only, not behavioral.
-12. **Triggers / daemon** (Phase E) — turn workflows into automations (n8n's identity).
+### Committed forward plan (Slices 19–30) — locked 2026-07-04
+
+This is the full remaining sequence, agreed with the user so direction is not
+re-litigated each session. Ordering is dependency-forced except where noted;
+debt is placed where it unblocks the next phase.
+
+**Full-throttle posture (user directive 2026-07-04):** from Slice 19 on, every
+slice ships **complete** — the whole capability (not a v1 subset), all edge
+cases, all minors, all bugs, all scoping resolved, live-verified — within that
+same slice. **No new deferred follow-ons.** If a slice hits a genuinely external
+blocker (uninstalled runtime, missing credential, upstream API frozen till GA),
+it is either acquired in-slice (the Slice-18 "install mlx-lm ourselves" pattern)
+or raised to the user as a hard blocker — never silently punted. The pre-Slice-19
+"Deferred follow-ons" sections below are the *existing* debt to burn down (e.g.
+Slice 26), not license to create more.
+
+10. **Crew/workflow builder** ⭐ (Phase D, **Slice 19 — next**) — Slice 17 only grows *individual* specialists; composing generated + existing agents into a multi-step crew or workflow still needs a hand-written definition. Extends the generate→suggest→validate→consent→write pattern one level up: describe a multi-step need, get a proposed `crews/`/`workflows/` definition wiring agents together, review it, write it. **Key design constraint:** `WorkflowDef`/`CrewDef` carry live closures (`input`/`predicate`/`over`) + Zod schemas and are **not JSON-serializable**, so the builder must emit **TS source** (agent-builder `write.ts` model) or introduce a serializable IR that compiles to those types — decided in the slice spec.
+11. **Verified "works out of the box"** (Phase D + Phase-A eval, **Slice 20**) — an execution **dry-run** the moment an agent/crew is written, a per-agent/crew **golden-eval** (mirrors the verification golden-set pattern, §12), and **reuse/archive** (reuse a near-duplicate instead of generating; prune unused). Folds in Phase-A's deferred **telemetry+eval harness**. Moves validation from structural → behavioral; closes Phase D.
+12. **Graceful degradation + retries** (Phase A, **Slice 21**) — the last Phase-A gap: retry policies, fallback-model degradation, partial-failure handling across delegation/workflow. Reliability the daemon (Slice 24) leans on.
+13. **Codex heavy-lifting backup** (Phase C, **Slice 22**) — the last Phase-C item: tier-2 cloud delegate via `@openai/codex-sdk` (consent + cost design) for jobs too big for local models.
+14. **Dependency major-upgrade** (foundation, **Slice 23**) — `ai` 6→7, `typescript` 5→6, `@ai-sdk/mcp` 1→2, `@ai-sdk/openai-compatible` 1→3; re-green all tests. Placed **immediately before Phase E** deliberately: AI SDK 7's headline is `WorkflowAgent` + durable/resumable execution — the exact substrate Phase E needs. Doing it earlier is churn with no payoff. See `deferred-dependency-major-upgrades` memory.
+15. **Always-on daemon + task queue + resumable jobs + secure remote access** (Phase E, **Slice 24**) — `--resume <run-id>` (run store/journal already replay-capable), built on the Slice-23 `WorkflowAgent`. n8n's always-on identity begins here. **Includes secure remote access (user requirement 2026-07-04): drive the Mac-Mini daemon from anywhere** — an authenticated network entry point (API surface + auth/token; tunnel such as Tailscale/Cloudflare or reverse proxy rather than raw port exposure; TLS). Distinct from Slice 30's multi-machine *delegation* and A2A. Carries a real security/threat-model surface, so it gets explicit design in the slice spec (may split into its own sub-slice if scope demands).
+16. **Scheduled + triggered agents** (Phase E, **Slice 25**) — cron/webhook/event triggers. Depends on the daemon.
+17. **Alternate-runtime + remote-auth completion** (debt, **Slice 26**) — stand up **LM Studio + llama.cpp** as full *inference* runtimes + live-verify their download adapters; live **OAuth** handshake (PKCE/browser/token persistence) + **GitHub-PAT** remote-HTTP live-verify. *Gated on installing those runtimes / having creds — may slot earlier the moment hardware/creds exist.*
+18. **Multimodal input: vision + audio + video** (Phase F, **Slice 27**) — on-demand breadth, off the critical path.
+19. **Voice in/out + streaming CLI** (Phase F, **Slice 28**).
+20. **TUI / local web UI** (Phase F, **Slice 29**) — the visual surface; reuses the pure `render-trace.ts` renderers. Uncensored mode as a config option here.
+21. **Multi-machine + A2A interop** (Phase E, **Slice 30 — last**) — laptop delegates heavy work to the Mac Mini; expose this orchestrator as an agent others can call + consume external agents via A2A. **Moved to the very end** (user directive 2026-07-04): everything runs Mac-Mini-local by default and nothing else depends on it.
 
 > **North star for the D→E arc:** a user should be able to describe *any* need
 > in chat — one specialist, a multi-step crew, a scheduled automation — and
@@ -245,12 +270,11 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 > **grow it, verify it, and then run it**, entirely out of the box, with no
 > hand-written definition required. Slice 17 proves the *generate a
 > specialist* half; the crew/workflow builder (Slice 19) proves the *compose a
-> crew/workflow* half; the verified-out-of-the-box work (Slice 19+) closes
+> crew/workflow* half; the verified-out-of-the-box work (Slice 20) closes
 > the gap between "structurally valid" and "actually verified to work."
 
-Reliability (graceful degradation, telemetry/eval) folds into Phase A alongside
-the run-viewer. Modalities & memory (Phase F) come in on demand — not before the
-product core exists.
+Modalities & multi-machine (Phases F + the deferred A2A) come in on demand —
+after the compose→verify→automate core exists.
 
 ---
 
