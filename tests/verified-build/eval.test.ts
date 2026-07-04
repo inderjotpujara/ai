@@ -81,4 +81,50 @@ describe('evalCases', () => {
     expect(first).toContain('output for input a');
     expect(first).toContain('Answer only Yes or No.');
   });
+
+  test('a Grounded case is judged via checkClaim (document/claim), not the rubric', async () => {
+    const prompts: string[] = [];
+    const grounded: GoldenCase = {
+      id: 'g',
+      input: 'input g',
+      assert: 'the answer cites the doc',
+      kind: GoldenKind.Grounded,
+    };
+    const res = await evalCases(
+      [grounded],
+      deps(async (prompt) => {
+        prompts.push(prompt);
+        return true;
+      }),
+    );
+    expect(res.passed).toBe(true);
+    const first = prompts[0] ?? '';
+    // checkClaim's MiniCheck shape: the artifact output is the Document,
+    // the assert is the Claim.
+    expect(first).toContain('Document:\noutput for input g');
+    expect(first).toContain('Claim: the answer cites the doc');
+    expect(first).toContain('Is the claim fully supported by the document?');
+    expect(first).not.toContain('Does this output satisfy the requirement?');
+  });
+
+  test('a Grounded case with EMPTY output auto-fails without calling the judge', async () => {
+    let judgeCalls = 0;
+    const grounded: GoldenCase = {
+      id: 'g',
+      input: 'input g',
+      assert: 'the answer cites the doc',
+      kind: GoldenKind.Grounded,
+    };
+    const res = await evalCases([grounded], {
+      runCase: async () => '   ',
+      judge: async () => {
+        judgeCalls++;
+        return true;
+      },
+      judgeModel: 'judge-model',
+      belowBar: false,
+    });
+    expect(res.passed).toBe(false);
+    expect(judgeCalls).toBe(0);
+  });
 });
