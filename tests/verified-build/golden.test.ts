@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import type { BuilderModel } from '../../src/agent-builder/types.ts';
 import { atomicWrite } from '../../src/agent-builder/write.ts';
 import {
-  appendGolden,
   generateGolden,
   goldenPathFor,
   loadGolden,
@@ -96,20 +95,9 @@ describe('golden store', () => {
     expect(loadGolden(goldenPathFor(dir, 'missing'))).toBeNull();
   });
 
-  test('appendGolden adds a case to an existing set', () => {
-    const path = goldenPathFor(dir, 'summarizer');
-    atomicWrite(
-      path,
-      JSON.stringify({ need: 'n', cases: [{ id: 'c0', ...rawCase(0) }] }),
-    );
-    appendGolden(path, { id: 'c1', ...rawCase(1) });
-    const set = loadGolden(path);
-    expect(set?.cases.map((c) => c.id)).toEqual(['c0', 'c1']);
-  });
-
-  test('appendGolden initializes a fresh set when the file is absent', () => {
-    const path = goldenPathFor(dir, 'fresh');
-    appendGolden(path, { id: 'c0', ...rawCase(0) });
-    expect(loadGolden(path)?.cases).toHaveLength(1);
+  test('loadGolden returns null for a malformed file', () => {
+    const path = goldenPathFor(dir, 'broken');
+    atomicWrite(path, 'not json {{{');
+    expect(loadGolden(path)).toBeNull();
   });
 });

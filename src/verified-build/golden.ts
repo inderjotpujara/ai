@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { BuilderModel } from '../agent-builder/types.ts';
-import { atomicWrite } from '../agent-builder/write.ts';
 import type { CapabilitySignature, GoldenCase, GoldenSet } from './types.ts';
 import { GoldenKind } from './types.ts';
 
@@ -48,16 +47,12 @@ export function goldenPathFor(dir: string, name: string): string {
   return `${dir}/${name}.golden.json`;
 }
 
+/** Read a persisted golden set; absent or malformed yields null (used by
+ *  `manifest.rebuildFromArtifacts` to recover needs from sidecars). */
 export function loadGolden(path: string): GoldenSet | null {
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as GoldenSet;
   } catch {
     return null;
   }
-}
-
-export function appendGolden(path: string, c: GoldenCase): void {
-  const set = loadGolden(path) ?? { need: '', cases: [] };
-  set.cases.push(c);
-  atomicWrite(path, `${JSON.stringify(set, null, 2)}\n`);
 }
