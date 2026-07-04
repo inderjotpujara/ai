@@ -5,7 +5,10 @@ import type { CrewBuilderDeps, Shape } from './types.ts';
 /** Collect referenced agent names — workflow: agent steps + map agent
  *  sub-steps (mirrors validate.ts's map sub-step handling); crew: members
  *  with an `agentRef`. */
-function referencedAgents(ir: CrewIR | WorkflowIR, shape: Shape): string[] {
+export function referencedAgents(
+  ir: CrewIR | WorkflowIR,
+  shape: Shape,
+): string[] {
   const names = new Set<string>();
   if (shape === 'workflow') {
     for (const s of (ir as WorkflowIR).steps) {
