@@ -1,5 +1,7 @@
 import type { z } from 'zod';
+import type { Agent } from '../core/agent-def.ts';
 import type { ModelRequirement } from '../core/types.ts';
+import type { VerifiedLevel } from '../verified-build/types.ts';
 import type { WritePaths } from './write.ts';
 
 /** A curated-pack MCP server the generated agent needs, scoped to that agent. */
@@ -18,10 +20,22 @@ export type AgentProposal = {
 export type ValidationIssue = { field: string; problem: string };
 
 export type BuildResult =
-  | { kind: 'written'; proposal: AgentProposal; files: string[] }
+  | {
+      kind: 'written';
+      proposal: AgentProposal;
+      files: string[];
+      level?: VerifiedLevel;
+    }
   | { kind: 'declined' }
   | { kind: 'invalid'; issues: ValidationIssue[] }
-  | { kind: 'abandoned'; reason: string };
+  | { kind: 'abandoned'; reason: string }
+  /** Reuse-check hit an existing agent close enough in capability — nothing
+   *  was generated. */
+  | { kind: 'reused'; name: string; similarity: number }
+  /** Consent was granted and the proposal was staged, but it failed the
+   *  verify-then-commit gate (structural / dry-run / golden-eval) and
+   *  `deps.verify.force` was not set — nothing was registered. */
+  | { kind: 'failed-verification'; stage: string; detail: string };
 
 /** Structured-generation seam so the pure units never import the AI SDK.
  *  The real impl (deps.ts) wraps `generateObject` with a live model. */
@@ -31,6 +45,28 @@ export type BuilderModel = {
   text: (args: { prompt: string }) => Promise<string>;
 };
 
+/** Optional verify-then-commit bundle. Undefined ⇒ `buildAgent` keeps the OLD
+ *  behavior (write straight to the registry on consent, `{kind:'written'}`
+ *  with `level` omitted) — every existing caller/test is unaffected. Present
+ *  ⇒ `buildAgent` runs reuse-check → generate → consent → stage → verify →
+ *  commit (see `src/verified-build/gate.ts`). */
+export type BuilderVerifyDeps = {
+  embed: (t: string[]) => Promise<number[][]>;
+  judgeCandidates: () => { model: string; params: number; family: string }[];
+  /** Wraps `runGuardedAgent` — runs a (not-yet-registered) agent def against one task. */
+  runAgent: (
+    agent: Agent,
+    task: string,
+  ) => Promise<{ text: string } | { error: string }>;
+  /** One yes/no judge call for a single rubric prompt. */
+  judge: (prompt: string) => Promise<boolean>;
+  generatorFamily?: string;
+  /** Agents dir the manifest/golden sidecar files live under. */
+  dir: string;
+  /** Downgrade a failing gate to an Unverified commit instead of aborting. */
+  force?: boolean;
+};
+
 export type BuilderDeps = {
   model: BuilderModel;
   existingNames: () => string[];
@@ -38,6 +74,7 @@ export type BuilderDeps = {
   confirm: (proposalText: string) => Promise<boolean>;
   paths: WritePaths;
   log?: (m: string) => void;
+  verify?: BuilderVerifyDeps;
 };
 
 /** A drafted brand-new tool module (Task 24, discharges the Slice-17

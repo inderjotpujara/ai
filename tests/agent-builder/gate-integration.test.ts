@@ -1,0 +1,222 @@
+import { describe, expect, it } from 'bun:test';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildAgent } from '../../src/agent-builder/builder.ts';
+import type {
+  BuilderDeps,
+  BuilderModel,
+  BuilderVerifyDeps,
+} from '../../src/agent-builder/types.ts';
+import {
+  readManifest,
+  upsertEntry,
+} from '../../src/verified-build/manifest.ts';
+import type { ManifestEntry } from '../../src/verified-build/types.ts';
+import { GoldenKind, VerifiedLevel } from '../../src/verified-build/types.ts';
+
+/** All-hermetic tests for the reuse-check → generate → consent → stage →
+ *  verify → commit gate (BuilderDeps.verify present). Mirrors the
+ *  `INDEX_SEED` fixture from builder.test.ts. */
+const INDEX_SEED = `import type { ToolSet } from 'ai';
+import type { Agent } from '../src/core/agent-def.ts';
+// AGENT-BUILDER:IMPORTS (generated agent imports are inserted above this line — do not remove)
+export type AgentFactory = (tools: ToolSet) => Agent;
+export const AGENTS: Record<string, AgentFactory> = {
+  // AGENT-BUILDER:ENTRIES (generated agent entries are inserted above this line — do not remove)
+};
+`;
+
+type Draft = {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  role: string;
+  rationale: string;
+};
+
+const DEFAULT_DRAFT: Draft = {
+  name: 'fresh_agent',
+  description: 'Does a fresh thing.',
+  systemPrompt: 'You do a fresh thing.',
+  role: 'fresh',
+  rationale: 'no such agent exists',
+};
+
+/** A prompt-dispatching fake `BuilderModel` covering every structured call
+ *  the gated `buildAgent` path makes: need→signature distillation
+ *  (reuse-check), draft generation, server suggestion, and golden-case
+ *  generation. `draftCalls()` lets a reuse-hit test assert the generator was
+ *  never reached. */
+function fakeModel(opts: { draft?: Draft; servers?: string[] }): {
+  model: BuilderModel;
+  draftCalls: () => number;
+} {
+  let draftCalls = 0;
+  const draft = opts.draft ?? DEFAULT_DRAFT;
+  const servers = opts.servers ?? [];
+  const model: BuilderModel = {
+    object: async ({ prompt }) => {
+      if (prompt.includes('Distill this need')) {
+        return { purpose: 'does a fresh thing', tools: [] } as never;
+      }
+      if (prompt.includes('Design a single specialized sub-agent')) {
+        draftCalls += 1;
+        return draft as never;
+      }
+      if (prompt.includes('Choose the MINIMAL set of MCP servers')) {
+        return { servers } as never;
+      }
+      if (prompt.includes('golden test cases')) {
+        return {
+          cases: [
+            {
+              input: 'do the fresh thing',
+              assert: 'the response addresses the thing',
+              kind: GoldenKind.TaskSuccess,
+            },
+          ],
+        } as never;
+      }
+      throw new Error(`fakeModel: unrecognized prompt: ${prompt.slice(0, 80)}`);
+    },
+    text: async () => '',
+  };
+  return { model, draftCalls: () => draftCalls };
+}
+
+function manifestEntry(vector: number[]): ManifestEntry {
+  return {
+    need: 'seed',
+    signature: { purpose: 'seed', tools: [], modelTier: '', io: '', roles: [] },
+    vector,
+    verifiedLevel: VerifiedLevel.Behaves,
+    goldenPath: 'agents/existing_agent.golden.json',
+    createdAtMs: 1,
+    lastUsedMs: 2,
+    useCount: 3,
+    lastEvalPass: true,
+  };
+}
+
+async function makeDeps(opts: {
+  model: BuilderModel;
+  verify: Partial<BuilderVerifyDeps>;
+  confirm?: boolean;
+  existingNames?: string[];
+}): Promise<{ deps: BuilderDeps; agentsDir: string }> {
+  const dir = await mkdtemp(join(tmpdir(), 'ab-gate-'));
+  const agentsDir = join(dir, 'agents');
+  await Bun.write(join(agentsDir, 'index.ts'), INDEX_SEED);
+  const verify: BuilderVerifyDeps = {
+    embed: async (texts) => texts.map(() => [0, 1]),
+    judgeCandidates: () => [
+      { model: 'judge-big', params: 30e9, family: 'other-family' },
+    ],
+    runAgent: async () => ({ text: 'did the fresh thing' }),
+    judge: async () => true,
+    dir: agentsDir,
+    ...opts.verify,
+  };
+  const deps: BuilderDeps = {
+    model: opts.model,
+    existingNames: () => opts.existingNames ?? [],
+    packNames: () => ['filesystem'],
+    confirm: async () => opts.confirm ?? true,
+    paths: {
+      agentsDir,
+      indexPath: join(agentsDir, 'index.ts'),
+      mcpConfigPath: join(dir, 'mcp.json'),
+    },
+    verify,
+  };
+  return { deps, agentsDir };
+}
+
+describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
+  it('reuse hit: returns {kind:"reused"} and never calls the generator', async () => {
+    const { model, draftCalls } = fakeModel({});
+    const { deps, agentsDir } = await makeDeps({ model, verify: {} });
+    // Seed a manifest entry whose vector is identical to what the fake
+    // `embed` produces for ANY text — cosine 1.0, well above the reuse band.
+    upsertEntry(agentsDir, 'existing_agent', manifestEntry([0, 1]));
+
+    const r = await buildAgent('need already covered', deps);
+
+    expect(r.kind).toBe('reused');
+    if (r.kind === 'reused') {
+      expect(r.name).toBe('existing_agent');
+      expect(r.similarity).toBeCloseTo(1.0);
+    }
+    expect(draftCalls()).toBe(0);
+    const idx = await readFile(deps.paths.indexPath, 'utf8');
+    expect(idx).not.toContain('createFreshAgentAgent');
+  });
+
+  it('fresh need, passing gate: writes at VerifiedLevel.Behaves and registers the agent', async () => {
+    const { model } = fakeModel({ servers: [] });
+    const { deps } = await makeDeps({
+      model,
+      verify: {
+        runAgent: async () => ({ text: 'did the fresh thing' }),
+        judge: async () => true,
+      },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    if (r.kind === 'written') {
+      expect(r.proposal.name).toBe('fresh_agent');
+      expect(r.level).toBe(VerifiedLevel.Behaves);
+    }
+    const idx = await readFile(deps.paths.indexPath, 'utf8');
+    expect(idx).toContain('fresh_agent: createFreshAgentAgent,');
+    const manifest = readManifest(deps.verify?.dir ?? '');
+    expect(manifest.entries.fresh_agent?.verifiedLevel).toBe(
+      VerifiedLevel.Behaves,
+    );
+  });
+
+  it('failing dry-run, force false: fails verification and registers nothing', async () => {
+    const { model } = fakeModel({});
+    const { deps } = await makeDeps({
+      model,
+      verify: {
+        runAgent: async () => ({ error: 'boom: agent could not run' }),
+        force: false,
+      },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('failed-verification');
+    if (r.kind === 'failed-verification') {
+      expect(r.stage).toBe('dry-run');
+    }
+    const idx = await readFile(deps.paths.indexPath, 'utf8');
+    expect(idx).not.toContain('fresh_agent');
+    const manifest = readManifest(deps.verify?.dir ?? '');
+    expect(manifest.entries.fresh_agent).toBeUndefined();
+  });
+
+  it('force true on a failing dry-run: commits at VerifiedLevel.Unverified', async () => {
+    const { model } = fakeModel({});
+    const { deps } = await makeDeps({
+      model,
+      verify: {
+        runAgent: async () => ({ error: 'boom: agent could not run' }),
+        force: true,
+      },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    if (r.kind === 'written') {
+      expect(r.level).toBe(VerifiedLevel.Unverified);
+    }
+    const idx = await readFile(deps.paths.indexPath, 'utf8');
+    expect(idx).toContain('fresh_agent: createFreshAgentAgent,');
+  });
+});

@@ -471,3 +471,24 @@ Live-fix-review fixes: complete (commit 0fcb695). Findings 1-4 fixed + determini
 - PRODUCT NOTE (out-of-the-box): workflow-gen reliability needs the builder's model selector to pick a ≥~26b tools-capable model when hardware allows; on a 9b-only host, crews work but workflow-gen degrades. Live workflow test gated behind CREW_BUILDER_WORKFLOW_LIVE=1 (run with a big model).
 - Probe cleanup left workflows/index.ts deleted; controller restored it (git checkout). Tree: src+registries clean; only .superpowers/sdd scratch + .remember dirty.
 - Artifact (4th doc surface) REGENERATED + redeployed to same url c760844f (favicon 🧭, label slice-19-crew-workflow-builder): new Crew-builder node (x360/y120) + 7 edges, 16th tour step, 'Self-extension ·²' concept card, agent-builder 'next' line past-tensed, footer '19 slices · 617 tests'. 17 nodes/55 edges, JS-checked, CSS byte-identical (visual identity preserved). ALL 4 HARD-LINE SURFACES CURRENT.
+
+---
+
+## Slice 20 — Verified "works out of the box" (2026-07-04)
+
+Branch: `slice-20-verified-works-out-of-the-box`. Spec `eb98f09`, plan `4c21999`.
+Execution: subagent-driven, **Fable** implementers (quota conservation), per-phase review, full suite between phases.
+
+- [x] T1 types+config · [x] T2 embedOne+cosine · [x] T3 abortSignal · [x] T4 telemetry
+- [x] T5 signature · [x] T6 manifest · [x] T7 reuse
+- [x] T8 dry-run · [x] T9 repair
+- [x] T10 judge · [x] T11 golden · [x] T12 eval
+- [x] T13 gate · [x] T14 usage · [x] T15 archive
+- [x] T16 agent-builder integ · [ ] T17 crew-builder integ
+- [ ] T18 CLI/chat · [ ] T19 calibration eval · [ ] T20 docs
+
+T1 366ee94 · T2 af6676c · T3 c1a5d8b · T4 4da1a7b — Phase 0 complete, typecheck clean, 93 area-tests green.
+T5 7451e28 · T6 282b8f1 · T7 3b123f7 — Phase 1 (reuse stack) complete, 27 verified-build tests green. atomicWrite exported from agent-builder/write.ts. Shape left as string-union (minor, carry-forward).
+T8 4b5f730 · T9 d61d56e · T10 13d4a42 · T11 60e854d · T12 6ebfa16 — Phases 2+3 (execution+eval stacks) complete, 57 verified-build tests green.
+T13 dbca7f0 · T14 f77a572 · T15 927b719 — Phase 4 (gate+usage+archive) complete. (Fable misreported branch as main; verified commits ARE on slice branch, main untouched.) usage.ts uses a sync readSpansSync mirroring readSpans.
+T16 agent-builder integ — `buildAgent` now runs reuse-check → generate → consent → stage → verify → commit when `BuilderDeps.verify` is present; absent (every existing test) keeps the old write-straight-through path unchanged, so all 60 pre-existing agent-builder tests stayed green untouched. write.ts split into `writeAgentFile` (disk only) + `registerAgent` (index/mcp splice) — `writeAgent` = both, kept for existing callers. `BuildResult` gained `reused` and `failed-verification` variants + `level?` on `written`. `makeRealBuilderDeps` wired `verify` for real: manager-backed embedder (`qwen3-embedding:0.6b`), judge candidates from the full discovered registry (family heuristically parsed from the model tag — no family registry exists in the repo), `runGuardedAgent` for dry-run/golden-eval, single-model yes/no judge via `generateText`. TODO carried forward: the staged `Agent` used for dry-run/golden-eval mounts NO real MCP tools yet (`agentFromProposal` in builder.ts) — live-verify on tool-dependent agents needs scoped MCP clients spun up for a staged, not-yet-registered agent; also proposal-repair-on-feedback is a no-op re-stage in v1 (re-runs the same proposal), not a targeted regeneration. New `tests/agent-builder/gate-integration.test.ts` (4 tests, hermetic fakes): reuse-hit short-circuits before generation, fresh-need passing gate commits at `Behaves`, failing dry-run + force=false → `failed-verification`/`dry-run` with nothing registered, failing dry-run + force=true → committed at `Unverified`. 64/64 agent-builder tests green, typecheck clean, lint clean.

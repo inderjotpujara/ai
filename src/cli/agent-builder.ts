@@ -36,6 +36,15 @@ async function main(): Promise<void> {
       for (const i of result.issues)
         console.error(`  - ${i.field}: ${i.problem}`);
       process.exitCode = 1;
+    } else if (result.kind === 'reused') {
+      console.log(
+        `An existing agent "${result.name}" already covers this need (similarity ${result.similarity.toFixed(2)}). Nothing generated.`,
+      );
+    } else if (result.kind === 'failed-verification') {
+      console.error(
+        `Verification failed at "${result.stage}": ${result.detail}. Nothing was registered.`,
+      );
+      process.exitCode = 1;
     } else {
       console.error(`Abandoned: ${result.reason}`);
       process.exitCode = 1;

@@ -1,10 +1,33 @@
+import qwenFast from '../../models/qwen-fast.ts';
+import type { Agent } from '../core/agent-def.ts';
+import { embedOne } from '../memory/embed-one.ts';
+import { createOllamaModel } from '../providers/ollama.ts';
 import { withAgentBuildSpan } from '../telemetry/spans.ts';
+import { representativeTask } from '../verified-build/dry-run.ts';
+import { evalCases } from '../verified-build/eval.ts';
+import type { GateDeps } from '../verified-build/gate.ts';
+import { verifyAndCommit } from '../verified-build/gate.ts';
+import { generateGolden, goldenPathFor } from '../verified-build/golden.ts';
+import { selectJudge } from '../verified-build/judge.ts';
+import { upsertEntry } from '../verified-build/manifest.ts';
+import { reuseDecision } from '../verified-build/reuse.ts';
+import {
+  signatureFromNeed,
+  signatureFromProposal,
+  signatureText,
+} from '../verified-build/signature.ts';
+import {
+  ArtifactKind,
+  ReuseKind,
+  VerifiedLevel,
+} from '../verified-build/types.ts';
 import { generateProposal } from './generate.ts';
 import { generateToolProposal } from './generate-tool.ts';
 import { suggestServers } from './suggest-tools.ts';
 import type {
   AgentProposal,
   BuilderDeps,
+  BuilderVerifyDeps,
   BuildResult,
   ToolBuilderDeps,
   ToolBuildResult,
@@ -13,7 +36,7 @@ import type {
 } from './types.ts';
 import { validateProposal } from './validate.ts';
 import { validateToolProposal } from './validate-tool.ts';
-import { writeAgent } from './write.ts';
+import { registerAgent, writeAgent, writeAgentFile } from './write.ts';
 import { writeToolProposal } from './write-tool.ts';
 
 /** Bounded same-run regeneration (Task 24): on a structural-validation
@@ -61,16 +84,175 @@ async function draftAndValidate(
   return { proposal, issues };
 }
 
+/** Build the in-memory `Agent` a staged proposal would run as, WITHOUT
+ *  touching the registry. Mirrors `write.ts`'s `renderAgentFile` model choice
+ *  (qwenFast via Ollama) so a dry-run/golden-eval pass is representative of
+ *  what gets committed. Tools are intentionally empty: mounting the real,
+ *  scoped MCP clients for a not-yet-registered agent is heavier than a
+ *  pre-commit smoke check needs — TODO(controller): wire real scoped tools
+ *  here once verification can spin up MCP clients for a staged agent. */
+function agentFromProposal(p: AgentProposal): Agent {
+  return {
+    name: p.name,
+    description: p.description,
+    model: createOllamaModel(qwenFast),
+    systemPrompt: p.systemPrompt,
+    tools: {},
+    modelDecl: qwenFast,
+    modelReq: p.modelReq,
+  };
+}
+
+/** What flows through the gate's `def: unknown` for an agent build: the
+ *  proposal (structural validation, commit/registration) and the runnable
+ *  `Agent` built from it (dry-run, golden-eval). */
+type StagedAgent = { proposal: AgentProposal; agent: Agent };
+
+/** Build the `GateDeps` for one agent proposal and run `verifyAndCommit`,
+ *  then map its `VerificationResult` onto `BuildResult`. Split out of
+ *  `buildAgent` to keep the consent-gated happy path readable. */
+async function verifyAndCommitProposal(
+  need: string,
+  proposal: AgentProposal,
+  deps: BuilderDeps,
+  verify: BuilderVerifyDeps,
+): Promise<BuildResult> {
+  const sig = signatureFromProposal(proposal);
+  const vector = await embedOne(signatureText(sig), verify.embed);
+  let stagedPath: string | undefined;
+  let registeredFiles: string[] = [];
+
+  const gateDeps: GateDeps = {
+    kind: ArtifactKind.Agent,
+    name: proposal.name,
+    need,
+    signature: sig,
+    stage: async (_feedback) => {
+      // v1: feedback-driven repair of the PROPOSAL itself isn't implemented
+      // yet — a re-stage (after a failed dry-run) just rewrites the SAME
+      // proposal, a no-op regeneration acceptable for v1 per spec.
+      // TODO(controller): route `_feedback` into a targeted regeneration.
+      stagedPath = writeAgentFile(proposal, deps.paths);
+      const staged: StagedAgent = {
+        proposal,
+        agent: agentFromProposal(proposal),
+      };
+      return { def: staged };
+    },
+    structural: async (def) => {
+      const { proposal: p } = def as StagedAgent;
+      return validateProposal(p, deps.existingNames(), deps.packNames()).map(
+        (i) => `${i.field}: ${i.problem}`,
+      );
+    },
+    dryRunOnce: async (def) => {
+      const { agent } = def as StagedAgent;
+      const r = await verify.runAgent(agent, representativeTask(need, sig));
+      return {
+        ran: 'text' in r,
+        output: 'text' in r ? r.text : undefined,
+        error: 'error' in r ? r.error : undefined,
+        repairs: 0,
+      };
+    },
+    goldenEval: async (def) => {
+      const { agent } = def as StagedAgent;
+      const judgePick = selectJudge({
+        candidates: verify.judgeCandidates,
+        generatorFamily: verify.generatorFamily,
+      });
+      if (judgePick.model === null) return null;
+      const golden = await generateGolden(need, sig, deps.model);
+      return evalCases(golden.cases, {
+        runCase: async (input) => {
+          const r = await verify.runAgent(agent, input);
+          return 'text' in r ? r.text : `error: ${r.error}`;
+        },
+        judge: verify.judge,
+        judgeModel: judgePick.model,
+        belowBar: judgePick.belowBar,
+      });
+    },
+    makeGolden: () => generateGolden(need, sig, deps.model),
+    commit: async (def, level, golden, vec) => {
+      const { proposal: p } = def as StagedAgent;
+      registeredFiles = registerAgent(p, deps.paths);
+      const goldenPath = goldenPathFor(verify.dir, p.name);
+      upsertEntry(verify.dir, p.name, {
+        need,
+        signature: signatureFromProposal(p),
+        vector: vec,
+        verifiedLevel: level,
+        goldenPath,
+        createdAtMs: Date.now(),
+        lastUsedMs: 0,
+        useCount: 0,
+        lastEvalPass: level === VerifiedLevel.Behaves,
+      });
+      if (golden) {
+        await Bun.write(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);
+      }
+    },
+    vector,
+    force: verify.force ?? false,
+  };
+
+  const result = await verifyAndCommit(gateDeps);
+  if (result.kind === 'committed') {
+    const files = stagedPath
+      ? [stagedPath, ...registeredFiles]
+      : registeredFiles;
+    deps.log?.(
+      `Created agent "${proposal.name}" (${files.length} file(s), verified: ${result.level}). It is live on the next run.`,
+    );
+    return { kind: 'written', proposal, files, level: result.level };
+  }
+  if (result.kind === 'reused') {
+    return { kind: 'reused', name: result.name, similarity: result.similarity };
+  }
+  return {
+    kind: 'failed-verification',
+    stage: result.stage,
+    detail: result.detail,
+  };
+}
+
 /** generate → suggest → validate → consent → write. Consent is mandatory; on
  *  decline or invalid, nothing is written. A structural-validation failure
  *  gets ONE bounded same-run regeneration (feeding back what failed) before
  *  it is reported invalid — never a consent bypass, never same-run
- *  activation, just a second shot at passing validation (Task 24). */
+ *  activation, just a second shot at passing validation (Task 24).
+ *
+ *  When `deps.verify` is present, this becomes reuse-check → generate →
+ *  consent → stage → verify → commit: a reuse hit short-circuits before any
+ *  generation, and a granted proposal is staged to disk and run through
+ *  `verifyAndCommit` (structural / dry-run / golden-eval) BEFORE it is
+ *  registered — nothing broken lands in the registry. */
 export function buildAgent(
   need: string,
   deps: BuilderDeps,
 ): Promise<BuildResult> {
   return withAgentBuildSpan(need, async (rec) => {
+    if (deps.verify) {
+      const need_sig = await signatureFromNeed(need, deps.model);
+      const decision = await reuseDecision(need_sig, {
+        embed: deps.verify.embed,
+        dir: deps.verify.dir,
+      });
+      rec.event('reuse_checked', {
+        kind: decision.kind,
+        similarity: decision.similarity,
+      });
+      if (decision.kind === ReuseKind.Reuse && decision.match) {
+        rec.outcome('reused', decision.match);
+        return {
+          kind: 'reused',
+          name: decision.match,
+          similarity: decision.similarity,
+        };
+      }
+    }
+
     let { proposal, issues } = await draftAndValidate(need, deps);
     rec.event('generated', { name: proposal.name });
     rec.event('suggested', { count: proposal.suggestedServers.length });
@@ -102,6 +284,18 @@ export function buildAgent(
     if (!granted) {
       rec.outcome('declined', proposal.name);
       return { kind: 'declined' };
+    }
+
+    if (deps.verify) {
+      const result = await verifyAndCommitProposal(
+        need,
+        proposal,
+        deps,
+        deps.verify,
+      );
+      rec.event('gate_result', { kind: result.kind });
+      rec.outcome(result.kind, proposal.name, proposal.suggestedServers.length);
+      return result;
     }
 
     const files = writeAgent(proposal, deps.paths);

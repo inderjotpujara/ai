@@ -2,15 +2,23 @@ import { generateText, type LanguageModel } from 'ai';
 import { z } from 'zod';
 import { agentNames } from '../../agents/index.ts';
 import { ollamaCtxOptions } from '../core/agent-def.ts';
-import { Capability, PreferPolicy } from '../core/types.ts';
+import { runGuardedAgent } from '../core/delegate.ts';
+import {
+  Capability,
+  type ModelDeclaration,
+  PreferPolicy,
+  RuntimeKind,
+} from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { STARTER_PACK } from '../mcp/pack.ts';
+import { makeEmbedder } from '../memory/embed.ts';
 import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { listLoadedModels } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
+import type { JudgeCandidate } from '../verified-build/judge.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
 type GenerateTextFn = typeof generateText;
@@ -214,9 +222,35 @@ export function makeBuilderModel(
   };
 }
 
+/** Heuristic "model family" from its tag, e.g. "qwen3.5" from "qwen3.5:9b".
+ *  The repo has no canonical model-family registry — this is only used to
+ *  prefer a judge from a DIFFERENT family than the generator (selectJudge),
+ *  a soft preference, not a correctness requirement. */
+function modelFamily(modelName: string): string {
+  return modelName.split(':')[0] ?? modelName;
+}
+
+function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
+  return {
+    model: decl.model,
+    params: decl.footprint.approxParamsBillions * 1e9,
+    family: modelFamily(decl.model),
+  };
+}
+
 /** Assemble live builder deps: a tools-capable largest-that-fits model, the
  *  pack palette, the existing-agent names, a TTY consent prompt, and default fs
- *  paths. Returns a cleanup that unloads the model. */
+ *  paths. Returns a cleanup that unloads the model.
+ *
+ *  Also wires `deps.verify` (Slice 20 — the verify-then-commit gate) against
+ *  the same model manager + registry: a manager-backed embedder, judge
+ *  candidates from the full discovered registry, `runGuardedAgent` for the
+ *  dry-run/golden-eval calls, and a single-model yes/no judge built from the
+ *  builder's own LanguageModel.
+ *  TODO(controller): `runAgent`'s staged `Agent` currently mounts NO real MCP
+ *  tools (see `agentFromProposal` in builder.ts) — a live-verify pass on an
+ *  agent whose suggested servers matter will need scoped MCP clients spun up
+ *  for the staged, not-yet-registered agent before this is fully faithful. */
 export async function makeRealBuilderDeps(
   opts: { autoYes?: boolean } = {},
 ): Promise<{ deps: BuilderDeps; cleanup: () => Promise<void> }> {
@@ -236,6 +270,13 @@ export async function makeRealBuilderDeps(
   );
   const model = runtimeFor(decl.runtime).createModel(decl);
   const input = stdinInput();
+  const embedModel =
+    process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
+  const embedder = makeEmbedder({
+    ensureReady: (d) => manager.ensureReady(d),
+    control: runtimeFor(RuntimeKind.Ollama).control,
+    model: embedModel,
+  });
   const deps: BuilderDeps = {
     model: makeBuilderModel(model, numCtx),
     existingNames: () => agentNames(),
@@ -253,6 +294,17 @@ export async function makeRealBuilderDeps(
       mcpConfigPath: defaultConfigPath(),
     },
     log: (m) => console.error(m),
+    verify: {
+      embed: embedder.embed,
+      judgeCandidates: () => registry.map(toJudgeCandidate),
+      runAgent: (agent, task) => runGuardedAgent(agent, task),
+      judge: async (prompt) => {
+        const r = await generateText({ model, prompt });
+        return r.text.trim().toLowerCase().startsWith('yes');
+      },
+      generatorFamily: modelFamily(decl.model),
+      dir: 'agents',
+    },
   };
   return { deps, cleanup: () => manager.unloadAll() };
 }
