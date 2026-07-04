@@ -27,7 +27,7 @@ below becomes its own **brainstorm → spec → plan → subagent-driven build**
 ## Where we are vs. the target (the honest gap)
 
 Seven shipped slices built a deep, sophisticated **engine** (hardware-aware
-model/resource management). Eleven more (Slices 8–18) have since landed the
+model/resource management). Twelve more (Slices 8–19) have since landed the
 first wave of the **product** pivot: an OTel run-viewer, composition
 guardrails, a deterministic workflow/DAG engine, a crews & roles layer
 composed on top of it, a persistent semantic memory layer (LanceDB +
@@ -41,10 +41,10 @@ registry + 12-entry curated starter pack (Slice 15, consent-gated mounting,
 spec-hash/tools-hash pinning against tool-definition drift, `bun run mcp
 list|status|add`, replacing the 2 hardcoded mounts Slices 1–3 shipped), and
 an MCP telemetry-ordering fix + consent robustness hardening (Slice 16). Phase
-D now has its first slice too: **Slice 17's agent-builder** (`src/agent-builder/`)
+D now has three slices: **Slice 17's agent-builder** (`src/agent-builder/`)
 turns *"describe a need"* into a reviewed, working specialist — generate a
 proposal → suggest a minimal palette-only server subset → validate
-structurally → consent → write, live on the next run. And **Slice 18** was a
+structurally → consent → write, live on the next run; **Slice 18** was a
 **debt wrap-up + MLX completion** slice — one slice discharging the
 dischargeable-now deferred work logged through Slice 17: the download/inference
 enum split (`ProviderKind` vs `RuntimeKind`), `hf-fetch` actually persisting
@@ -52,11 +52,17 @@ weights to disk (atomic + oid-verified), the MLX inference runtime raised to
 Ollama's bar (opt-in + degrade), and the accumulated Slice-14/15/16/17 polish
 (bounded-parallel downloads, truthful telemetry, engine-enforced read-only
 sqlite, MCP OAuth wiring, an inert agent-builder tool-code path) — MLX
-live-verified both ways. The **product surface** is still thin beyond that: 3
-built-in agents (`super`, `file-qa`, `web-fetch`) plus whatever the
-agent-builder has grown; no crew/workflow builder yet (only individual
-specialists); no execution dry-run or reuse tracking for generated agents (the
-Phase-D breadth work, now **Slice 19+**).
+live-verified both ways; and **Slice 19's crew/workflow builder**
+(`src/crew-builder/`) extends self-extension one level up — describe a
+**multi-step** need and the system composes existing **and** freshly-built
+agents into a reviewed **crew** or **workflow**, via a staged declarative-IR
+pipeline (never one-shot), a two-tier structural+semantic validation gate, and
+consent-gated auto-build of missing member agents — live-verified end to end
+(a generated crew actually **executed**, not just wrote, to a correct
+result). The **product surface** is still thin beyond that: 3 built-in agents
+(`super`, `file-qa`, `web-fetch`) plus whatever the agent-builder/crew-builder
+have grown; no execution dry-run or reuse tracking for generated agents/crews
+yet (the remaining Phase-D breadth work, **Slice 20**).
 
 | n8n / CrewAI concept | Our analog | Status |
 |---|---|---|
@@ -71,6 +77,7 @@ Phase-D breadth work, now **Slice 19+**).
 | Execution view / run history | run-viewer | ✅ built (Slice 8 — OTel trace + `bun run runs`) |
 | Triggers (webhook / schedule / event) | scheduled & triggered agents | ❌ not built |
 | Create-a-node / create-an-agent | **agent-builder ⭐** | ✅ **shipped (Slice 17)** |
+| **Compose a crew/workflow from a need** | **crew/workflow builder ⭐** | ✅ **shipped (Slice 19)** |
 | **Shared agent memory (RAG + vector DB)** | memory subsystem | ✅ **built (Slice 12)** |
 | **Grounded answers / anti-hallucination** | verification layer (verifier/critic agents) | ✅ **built (Slice 13)** |
 | Reliability / retries | graceful degradation | ❌ not built |
@@ -158,8 +165,8 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 | Item | Why | Depends on |
 |---|---|---|
 | **Agent-builder** ⭐ — ✅ **shipped (Slice 17)** | On a reported capability need (`report_capability_gap`'s TTY offer, or a direct `bun run agent-builder "<need>"`), `src/agent-builder/` drafts a new agent definition (`generate.ts`, prompt-injection-guarded) **and suggests a minimal palette-only MCP-server subset to mount** (`suggest-tools.ts`, from the Slice 15 pack) — *"describe a need → the system grows the capability."* Structurally validated (`validate.ts`), consent-gated (review-before-activate — no write without an explicit yes), then written atomically: the agent file, a new `agents/index.ts` registry entry, and a scoped `mcp.json` (`write.ts`, `builder.ts`). Live on the *next* run, not the one that discovered the gap — no same-run activation, no tool-code generation, no OAuth. See [`docs/architecture.md`](architecture.md) §18. | Slices 2–3, B, C ✅ |
-| **Crew/workflow builder** (next Phase-D slice — **Slice 19**) | Slice 17 grows *individual* specialists only; composing several existing + newly-generated agents into a crew or workflow (roles/tasks/process, or a DAG) still requires hand-writing a `crews/`/`workflows/` definition. The natural next step toward "chat → any agent/crew out of the box": describe a multi-step need, and the builder proposes + writes a crew/workflow that wires generated and existing agents together. | Slice 17 |
-| **Verified "works out of the box"** (**Slice 19+**) | Today a generated agent is *structurally* valid (`validate.ts`) but never actually run before being handed to the user — there's no proof it behaves as intended. The path to a genuinely verified "just works": (1) an **execution dry-run** — invoke the freshly-written agent against a small representative task the moment it's created, before declaring success; (2) a **golden-eval** per generated agent (a few need→expected-behavior cases, mirroring the verification layer's golden-set pattern, §12); (3) **reuse/archive** — detect when a new need matches an already-generated agent closely enough to reuse it instead of generating a near-duplicate, and archive/prune agents that stop being used. None of these three exist yet. | Slice 17 |
+| **Crew/workflow builder** ⭐ — ✅ **shipped (Slice 19)** | Slice 17 grows *individual* specialists only; `src/crew-builder/` extends the same generate→consent→write pattern one level up — describe a **multi-step** need and get a proposed `crews/`/`workflows/` definition wiring **existing and freshly-built** agents together (roles/tasks/process, or a full DAG). Because `CrewDef`/`WorkflowDef` carry live closures and aren't serializable, generation is staged through a declarative, Zod-validated **IR** (`classify`→think-first `analyze`→`plan-nodes`→`plan-edges`) expressed in a small safe-helper vocabulary, gated by a **two-tier validate** (structural, then an LLM-judge goal-alignment check) before a **deterministic, model-free transpiler** renders real TS. Missing member agents are auto-built via the agent-builder, consent-gated per agent. Two triggers: `bun run crew-builder "<need>"` and a TTY-gated `chat.ts` multi-step offer. **Live-verified end to end** — a generated crew was written *and executed* to a correct result. See [`docs/architecture.md`](architecture.md) §19. | Slice 17 ✅ |
+| **Verified "works out of the box"** (next Phase-D slice — **Slice 20**) | Today a generated agent/crew is *structurally* (and, since Slice 19, semantically-judged) valid but never actually run before being handed to the user as a general guarantee — Slice 19's live-verify proved **one** hand-picked case end to end, not a repeatable per-generation check. The path to a genuinely verified "just works": (1) an **execution dry-run** — invoke the freshly-written agent/crew/workflow against a small representative task the moment it's created, before declaring success; (2) a **golden-eval** per generated artifact (a few need→expected-behavior cases, mirroring the verification layer's golden-set pattern, §12); (3) **reuse/archive** — detect when a new need matches an already-generated agent/crew closely enough to reuse it instead of generating a near-duplicate, and archive/prune ones that stop being used. None of these three exist yet. | Slice 19 |
 
 ## Phase E — Run it always  *(triggers & automation — n8n's identity)*
 
@@ -235,7 +242,8 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 8a. ✅ **shipped, Slice 16** — **MCP telemetry-ordering fix + consent robustness**. A live-verify pass on Slice 15 found the `mcp.mount` span was recorded before that run's telemetry provider existed, so it silently never reached `runs/<id>/spans.jsonl`; `src/cli/with-mcp-run.ts` now owns `createRun` → `initRunTelemetry` → mount (in that order) for all three CLIs, fixing it. The mount span also gained a `mcp.server.count` attribute and a corrected (summed) `mcp.tool.count`. Consent prompting is now judged on stdin **and** stderr both being TTYs, closing a hang on piped-closed stdin. See `docs/architecture.md` §14.
 9. ✅ **shipped, Slice 17** — **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library). `src/agent-builder/` sequences generate (prompt-injection-guarded) → suggest (palette-only, from the Slice 15 pack) → validate (structural) → consent (mandatory) → write (atomic: agent file + a new `agents/index.ts` registry entry + scoped `mcp.json`), under an `agent.build` telemetry span. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on `chat.ts`'s existing `{kind:'gap'}` outcome (unchanged, purely additive). Safety model: review-before-activate, palette-only tools, no same-run activation (live next run only). See `docs/architecture.md` §18.
 9c. ✅ **shipped, Slice 18** — **Debt wrap-up + MLX completion**. One slice discharging the dischargeable-now deferred work logged through Slice 17: split the overloaded `ProviderKind` into a download `ProviderKind` + an inference `RuntimeKind` (`kind-map.ts` bridges them); made `hf-fetch` **actually persist weights to disk** (atomic `.part`→rename, HF-LFS-oid verify-when-present, single-file GGUF + MLX snapshot, traversal-guarded, retry/stall parity); raised **MLX** to a full inference runtime (`createMlxServerRuntime`, opt-in + degrade-to-Ollama via `fallbackModel`), **live-verified both ways** (direct `mlx_lm.server` + real HF-snapshot download + Ollama regression); wired **LM Studio's download** adapter into `providerFor`; and cleared the accumulated Slice-14/15/16/17 polish (bounded-parallel downloads + `MultiProgressBar`, truthful `provision.*` telemetry, an injectable Metal reader + `bytesPerWeight` 0.6, an engine-enforced read-only sqlite gate via `PRAGMA query_only`, MCP OAuth `authProvider` [contract-tested], `mcp.transport`, an atomic `addPackEntry`, and a consent-gated agent-builder tool-code path writing an inert `.proposal.ts`). Deferred with reasons (below): LM Studio / llama.cpp *inference* runtimes, the live OAuth handshake, GitHub-PAT live-verify, TS-SDK-v2 migration. See `docs/architecture.md` §5/§13/§14/§18.
-### Committed forward plan (Slices 19–30) — locked 2026-07-04
+9d. ✅ **shipped, Slice 19** — **Crew/workflow builder** ⭐ (Phase D) — self-extension one level up from the agent-builder. `src/crew-builder/` sequences classify (crew vs workflow) → analyze (think-first, prose-only) → plan-nodes → plan-edges (assemble a declarative, Zod-validated IR — `CrewIR`/`WorkflowIR` — never a one-shot `CrewDef`/`WorkflowDef`, since those carry live closures and aren't serializable) → **two-tier validate** (structural, then an LLM-judge goal-alignment check) → consent → `resolve-members` (auto-build genuinely-missing member agents via the agent-builder, per-agent consent, once, after consent) → deterministic model-free `transpile` → atomic `write`, under a `crew.build` telemetry span. A small **safe-helper vocabulary** (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/`whenTruthy`/`mapOver`) is the only closures a model can pick from. The pure graph-cycle gate (`assertAcyclic`) was extracted out of `defineWorkflow`/`defineCrew` into a shared `workflow/define.ts` export, reused by the crew-builder's validator. `CrewMember` gained an optional `agentRef` so a crew member can reuse a registered (or freshly-built) agent. Two triggers: `bun run crew-builder "<need>" [--yes]` and a TTY-gated `chat.ts` multi-step gap-offer (tried before the existing single-agent offer). **Live-verified end to end on Ollama** — the first live run of this pipeline generated a crew, wrote it, and then **executed** it (`runCrew`) to a correct result, surfacing and fixing 4 real defects (a nested-schema key-hint gap in the shared `BuilderModel` seam, under-specified IR prompt constraints, a regeneration loop that didn't catch a throw, and a tool-name/`ToolSet` type mismatch). Full suite 617 pass/4 skip/0 fail. See `docs/architecture.md` §19.
+### Committed forward plan (Slices 20–30) — locked 2026-07-04
 
 This is the full remaining sequence, agreed with the user so direction is not
 re-litigated each session. Ordering is dependency-forced except where noted;
@@ -251,8 +259,8 @@ or raised to the user as a hard blocker — never silently punted. The pre-Slice
 "Deferred follow-ons" sections below are the *existing* debt to burn down (e.g.
 Slice 26), not license to create more.
 
-10. **Crew/workflow builder** ⭐ (Phase D, **Slice 19 — next**) — Slice 17 only grows *individual* specialists; composing generated + existing agents into a multi-step crew or workflow still needs a hand-written definition. Extends the generate→suggest→validate→consent→write pattern one level up: describe a multi-step need, get a proposed `crews/`/`workflows/` definition wiring agents together, review it, write it. **Key design constraint:** `WorkflowDef`/`CrewDef` carry live closures (`input`/`predicate`/`over`) + Zod schemas and are **not JSON-serializable**, so the builder must emit **TS source** (agent-builder `write.ts` model) or introduce a serializable IR that compiles to those types — decided in the slice spec.
-11. **Verified "works out of the box"** (Phase D + Phase-A eval, **Slice 20**) — an execution **dry-run** the moment an agent/crew is written, a per-agent/crew **golden-eval** (mirrors the verification golden-set pattern, §12), and **reuse/archive** (reuse a near-duplicate instead of generating; prune unused). Folds in Phase-A's deferred **telemetry+eval harness**. Moves validation from structural → behavioral; closes Phase D.
+10. ✅ **shipped, Slice 19** — **Crew/workflow builder** ⭐ (Phase D) — Slice 17 only grew *individual* specialists; `src/crew-builder/` extends the generate→consent→write pattern one level up: describe a multi-step need, get a proposed `crews/`/`workflows/` definition composing existing + freshly-built agents, review it, write it. **Key design constraint resolved:** `WorkflowDef`/`CrewDef` carry live closures (`input`/`predicate`/`over`) + Zod schemas and are **not JSON-serializable**, so the builder emits TS source via a **declarative IR that compiles to those types** (staged generation + a deterministic, model-free transpiler + a small safe-helper vocabulary for the closures) — not a one-shot emit. Live-verified end to end. See item 9d above / `docs/architecture.md` §19.
+11. **Verified "works out of the box"** (Phase D + Phase-A eval, **Slice 20 — next**) — an execution **dry-run** the moment an agent/crew is written, a per-agent/crew **golden-eval** (mirrors the verification golden-set pattern, §12), and **reuse/archive** (reuse a near-duplicate instead of generating; prune unused). Folds in Phase-A's deferred **telemetry+eval harness**. Moves validation from structural → behavioral; closes Phase D.
 12. **Graceful degradation + retries** (Phase A, **Slice 21**) — the last Phase-A gap: retry policies, fallback-model degradation, partial-failure handling across delegation/workflow. Reliability the daemon (Slice 24) leans on.
 13. **Codex heavy-lifting backup** (Phase C, **Slice 22**) — the last Phase-C item: tier-2 cloud delegate via `@openai/codex-sdk` (consent + cost design) for jobs too big for local models.
 14. **Dependency major-upgrade** (foundation, **Slice 23**) — `ai` 6→7, `typescript` 5→6, `@ai-sdk/mcp` 1→2, `@ai-sdk/openai-compatible` 1→3; re-green all tests. Placed **immediately before Phase E** deliberately: AI SDK 7's headline is `WorkflowAgent` + durable/resumable execution — the exact substrate Phase E needs. Doing it earlier is churn with no payoff. See `deferred-dependency-major-upgrades` memory.
@@ -268,10 +276,12 @@ Slice 26), not license to create more.
 > in chat — one specialist, a multi-step crew, a scheduled automation — and
 > have the system either **run it now** (an existing agent/crew) or
 > **grow it, verify it, and then run it**, entirely out of the box, with no
-> hand-written definition required. Slice 17 proves the *generate a
-> specialist* half; the crew/workflow builder (Slice 19) proves the *compose a
-> crew/workflow* half; the verified-out-of-the-box work (Slice 20) closes
-> the gap between "structurally valid" and "actually verified to work."
+> hand-written definition required. Slice 17 proved the *generate a
+> specialist* half; **Slice 19's crew/workflow builder proved the *compose a
+> crew/workflow* half** (live-verified — a generated crew was written and
+> actually executed to a correct result); the verified-out-of-the-box work
+> (Slice 20) closes the remaining gap between "structurally/semantically
+> valid" and "reliably verified to work every time."
 
 Modalities & multi-machine (Phases F + the deferred A2A) come in on demand —
 after the compose→verify→automate core exists.
@@ -317,14 +327,22 @@ Recorded so nothing is silently lost (see the Slice-15 spec §12 + `docs/archite
 ### Slice 17 follow-ons (deferred deliberately — MUST be included in future, not dropped)
 
 Recorded so nothing is silently lost (see `docs/architecture.md` §18):
-- **Crew/workflow builder** (next Phase-D slice — **Slice 19**) — Slice 17 only grows individual specialists; composing generated + existing agents into a multi-step crew or workflow still needs a hand-written `crews/`/`workflows/` definition. Extends the same generate→suggest→validate→consent→write pattern one level up.
-- **Execution dry-run at write-time** — a freshly-written agent is validated structurally (`validate.ts`) but never actually run before being handed to the user; no proof it behaves as intended. Invoking it against a small representative task at build time is the first step toward a genuinely *verified* "works out of the box."
-- **Per-agent golden-eval** — mirror the verification layer's golden-set pattern (§12): a few need→expected-behavior cases per generated agent, run before declaring the build a success.
-- **Reuse / archive** — detect when a new need is close enough to an already-generated agent to reuse it rather than generate a near-duplicate; archive/prune generated agents that stop being used.
+- ~~**Crew/workflow builder**~~ — ✅ **shipped (Slice 19)**: `src/crew-builder/` extends the same generate→consent→write pattern one level up, composing generated + existing agents into a multi-step crew or workflow. See item 9d / `docs/architecture.md` §19.
+- **Execution dry-run at write-time** — a freshly-written agent/crew is validated structurally (+ semantically, since Slice 19's goal-alignment judge) but never actually run before being handed to the user as a *repeatable, general* guarantee; no proof it behaves as intended every time. Invoking it against a small representative task at build time is the first step toward a genuinely *verified* "works out of the box." **Slice 20.**
+- **Per-agent/crew golden-eval** — mirror the verification layer's golden-set pattern (§12): a few need→expected-behavior cases per generated artifact, run before declaring the build a success. **Slice 20.**
+- **Reuse / archive** — detect when a new need is close enough to an already-generated agent/crew to reuse it rather than generate a near-duplicate; archive/prune generated artifacts that stop being used. **Slice 20.**
 - **Same-run retry of the original task** — after a chat gap-offer writes a new agent, the user must manually re-run their task; the new agent isn't picked up mid-process. Deliberately deferred (the "no same-run activation" safety property), not a bug. (Slice 18 added a bounded same-run *regeneration* on validation failure — distinct from same-run *activation*, which stays off.)
 - **OAuth-gated server suggestions** — the agent-builder only ever suggests from the palette-only, static-key-or-keyless pack entries (same posture as Slice 15's own OAuth deferral above); it doesn't gain a credential flow of its own.
 - ~~**Tool-code generation**~~ — ✅ **shipped, declawed (Slice 18)**: `buildTool` (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts`) can now generate a *new* tool implementation, but only behind mandatory consent and only to an **inert `tool-proposals/<name>.proposal.ts`** — never wired into any registry/index/`mcp.json`, so there is **no same-run activation**. A `bun run` CLI entry point for it is still a future step.
-- **`*.live.test.ts` for the agent-builder** — no live end-to-end pass exists yet proving generate→consent→write→next-run-works against a real Ollama model; unit tests with injected fakes cover every unit, but the full loop is unverified live.
+- ~~**`*.live.test.ts` for the agent-builder**~~ — ✅ **shipped (Slice 19)**: `tests/crew-builder/crew-builder.live.test.ts` is the first live end-to-end pass through the shared `BuilderModel`/consent seam (generate→consent→write→executes-correctly against real Ollama) — it discharges this debt for the shared agent-builder↔crew-builder path; a *dedicated* single-agent-only `agent-builder.live.test.ts` still doesn't exist separately.
+
+### Slice 19 follow-ons (deferred deliberately — MUST be included in future, not dropped)
+
+Recorded so nothing is silently lost (see the Slice-19 ledger MINORs + spec non-goals). Per the full-throttle posture, Slice 19 shipped complete — these are **opportunistic cleanups logged during review**, not deferred features:
+- **`agent-builder/write.ts`'s `pascalCase` has the same latent underscore-collision weakness** the crew-builder's `write.ts` `NAME_PATTERN` fix addressed (Task 13) — worth tightening for consistency, not a live bug today.
+- **`assertAcyclic`'s error messages are id-only** (no step/task name) — a DX nicety, not a correctness gap; tests pass either way.
+- **`Shape = 'crew' | 'workflow'` is a string-literal union, not a string enum** — a defensible internal discriminator (mirrors the pre-existing `RepoShape`/`StepError` precedent), flagged only for CLAUDE.md's "prefer enum for finite named sets" style guidance.
+- **Member-scoped MCP tool resolution doesn't exist** — a crew member's validated tool-name strings have nowhere to resolve to a real per-member `ToolSet` yet, so `transpile.ts` deliberately omits the field (fix #4 from the live-verify, §19); every generated crew member runs with crew-level tools only until this exists.
 
 ### Slice 18 follow-ons (deferred deliberately — MUST be included in future, not dropped)
 

@@ -320,7 +320,7 @@ graph TD
 | **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
 | **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`) → **bounded-parallel** downloads (`DOWNLOAD_CONCURRENCY=2` on a TTY, sequential otherwise) through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`, keyed by the download `ProviderKind`) with a unified progress protocol; adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF single-file + MLX whole-snapshot) now persists bytes to disk atomically and was real-snapshot live-verified in Slice 18**, **LM Studio download wired into `providerFor` but contract-tested only** (not installed on the dev machine); dest-dir resolution (`dest-dir.ts`); dependency-free UI (`ui/`, incl. `MultiProgressBar`); a manual `scripts/refresh-snapshot.ts`; CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (download `ProviderKind` + inference `RuntimeKind`) + `core/kind-map.ts`, `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
 | **Agent-builder** | `src/agent-builder/` | Specialist agent generation (Slice 17, Phase D): draft a proposal from a plain-language need (`generate.ts`), pick a minimal palette-only MCP-server subset (`suggest-tools.ts`), gate it structurally (`validate.ts`), get explicit consent, then write the agent file + registry entry + scoped `mcp.json` atomically (`write.ts`); `builder.ts`'s `buildAgent` sequences generate→suggest→validate→(bounded same-run retry)→consent→write under an `agent.build` span; `deps.ts` assembles the live tools-capable largest-that-fits model + fs paths + TTY consent prompt. Slice 18 (Task 24) adds the consent-gated **tool-code** path (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts`, `builder.ts`'s `buildTool`): it writes an **inert `<name>.proposal.ts`** for review only — never wired into any registry/index/`mcp.json`, so nothing in the run can import or activate it. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on a `{kind:'gap'}` chat outcome. See §18 | `core/types.ts` (`ModelRequirement`, `Capability`, `PreferPolicy`), `mcp/pack.ts` (`STARTER_PACK`, `getPackEntry`), `agents/index.ts` (`agentNames`, the write target), `resource/selector.ts` + `resource/model-manager.ts` + `runtime/registry.ts` (live model), `telemetry/spans.ts` (`withAgentBuildSpan`) |
-| **Crew-builder** *(in progress, Slice 19)* | `src/crew-builder/` | Crew/workflow generation from a plain-language need (Phase D follow-on to the agent-builder). Declarative IR (`ir.ts`): Zod-validated `WorkflowIR`/`CrewIR` graphs — JSON-safe `InputDescriptor`/`PredicateDescriptor` closures (`fromInput`/`fromStep`/`fromTemplate`, `whenEquals`/`whenContains`/`whenTruthy`) so step inputs/branch predicates stay declarative data rather than compiled closures; step kinds `agent`/`tool`/`branch`/`map` (`WorkflowStepIRSchema`, discriminated union); crew members support inline definitions or `agentRef` reuse of a registered agent (`CrewMemberIRSchema`), with `CrewTaskIRSchema` binding a task to a member. `buildCrewOrWorkflow` (`builder.ts`) sequences **classify → analyze → (bounded regenerate: planNodes → planEdges → validate) → consent → resolveMissingAgents → transpile → write** under a `crew.build` span: `classify.ts` picks crew-vs-workflow, `analyze.ts` think-first prose-plans the decomposition, `plan-nodes.ts`/`plan-edges.ts` generate the node list then the fully-wired IR via the model, `validate.ts` structurally gates it (palette-only tools, known/to-be-built agent refs, snake_case id, member/task-id integrity), `resolve-members.ts` auto-builds genuinely-missing agents (delegating to the agent-builder) **once, after consent**, `transpile.ts` deterministically renders the IR to a `crews/<id>.ts`/`workflows/<id>.ts` module (every value `JSON.stringify`'d, never raw-interpolated), and `write.ts` inserts it + a registry-index entry atomically. `deps.ts`'s `makeRealCrewBuilderDeps` reuses the agent-builder's live model/consent and wires the crew/workflow/agent/pack registries. **Task 19 live-verify** (first real end-to-end run against a live Ollama model, `tests/crew-builder/crew-builder.live.test.ts`) found and fixed three live-only defects invisible to the fake-model unit tests: (1) `agent-builder/deps.ts`'s `makeBuilderModel` keyHint only listed top-level schema keys, which a 9B tools-capable local model resolved for an array-of-objects field (`members`, `dependsOn`) by collapsing each element to a bare string — `describeSchemaShape` now spells out one level of nested shape (object fields, or `["<string>", ...]` for scalar arrays), `parseAgainst` now also strips trailing commas and drops `null`-valued keys (local models routinely emit both) and the retry prompt echoes the SPECIFIC failure (JSON error or zod issue) instead of a generic nudge; (2) `plan-edges.ts`'s prompt didn't specify the `id`/`requires`/`verify` field constraints validation enforces, so the model round-tripped on `snake_case` ids, an empty `requires`, or a hallucinated non-boolean `verify` — three explicit prompt lines fixed this; (3) `builder.ts`'s regeneration loop only retried on a `validateIR` issue list, not on planNodes/planEdges *throwing* (which a still-malformed model response does after its own internal retry) — now caught and folded into the same bounded-regeneration attempt; (4) `transpile.ts` was rendering `CrewMemberIRSchema.tools` (validated pack/tool-NAME strings, mirroring agent-builder's `suggestedServers`) straight into `CrewMember.tools` (a real AI-SDK `ToolSet`) — no code resolves names to Tool objects yet, so a string array there silently corrupted the member's tool-calling (spread as `{0: "brave-search"}`) and could exhaust its step ceiling; the per-member `tools` field is no longer emitted (members fall back to the crew-level `tools` `crewAgentMap` already merges in) until member-scoped MCP mounting exists | `agent-builder/` (model/consent reuse, `buildAgent` delegation), `crew/` + `workflow/` (compiled-to defs, `crewAgentMap`/`buildCrewAgent`'s `agentRef`-miss-falls-back-to-inline-build behavior is what lets a freshly-built agent run in-process pre-restart), `agents/`, `mcp/pack.ts`, `telemetry/spans.ts` (`withCrewBuildSpan`) |
+| **Crew-builder** | `src/crew-builder/` | Crew/workflow generation from a plain-language need (Slice 19, Phase D follow-on to the agent-builder — see §19 for the full narrative). Declarative IR (`ir.ts`): Zod-validated `WorkflowIR`/`CrewIR` graphs — JSON-safe `InputDescriptor`/`PredicateDescriptor` closures (`fromInput`/`fromStep`/`fromTemplate`, `whenEquals`/`whenContains`/`whenTruthy`, `mapOver`; rendered by the matching `safe-helpers.ts` factories) so step inputs/branch predicates/map sources stay declarative data rather than compiled closures; step kinds `agent`/`tool`/`branch`/`map` (`WorkflowStepIRSchema`, discriminated union); crew members support inline definitions or `agentRef` reuse of a registered agent (`CrewMemberIRSchema`), with `CrewTaskIRSchema` binding a task to a member. `buildCrewOrWorkflow` (`builder.ts`) sequences **classify → analyze → (bounded regenerate: planNodes → planEdges → validate) → consent → resolveMissingAgents → transpile → write** under a `crew.build` span: `classify.ts` picks crew-vs-workflow, `analyze.ts` think-first prose-plans the decomposition (`.text`, no JSON), `plan-nodes.ts`/`plan-edges.ts` generate the node list then the fully-wired IR via the model, `validate.ts` structurally gates it (palette-only tools, known/to-be-built agent refs, snake_case id, member/task-id integrity, acyclicity via the **shared** `assertAcyclic` now extracted to `workflow/define.ts`) then semantically (an LLM-judge goal-alignment check, reached only when structural is clean), `resolve-members.ts` auto-builds genuinely-missing agents (delegating to the agent-builder's `buildAgent`) **once, after consent**, reconciling any renamed refs, `transpile.ts` deterministically renders the IR to a `crews/<id>.ts`/`workflows/<id>.ts` module (every value `JSON.stringify`'d, never raw-interpolated), and `write.ts` inserts it + a registry-index entry atomically. Two triggers: `bun run crew-builder "<need>" [--yes]` (`src/cli/crew-builder.ts`) and a TTY-gated `chat.ts` gap-offer (`offer-crew.ts`'s `shouldOfferCrew` multi-step heuristic, tried **before** falling through to the single-agent agent-builder offer). `deps.ts`'s `makeRealCrewBuilderDeps` reuses the agent-builder's live model/consent and wires the crew/workflow/agent/pack registries. **Live-verified** end to end on Ollama (§19) | `agent-builder/` (model/consent reuse, `buildAgent` delegation), `crew/` + `workflow/` (`defineCrew`/`defineWorkflow` + `assertAcyclic` reuse; `crewAgentMap`/`buildCrewAgent`'s `agentRef`-miss-falls-back-to-inline-build behavior is what lets a freshly-built agent run in-process pre-restart), `agents/`, `mcp/pack.ts`, `telemetry/spans.ts` (`withCrewBuildSpan`) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -1494,3 +1494,258 @@ yet (it exists + is unit-tested; a `bun run` entry point is a future step).
 now the consent-gated inert `.proposal.ts` path above (there is a *bounded
 same-run regeneration* on validation failure now, distinct from same-run
 *activation*, which stays off).
+
+## 19. Crew/workflow-builder (Slice 19, Phase D)
+
+Extends Phase-D self-extension one level up: Slice 17's agent-builder grows a
+single specialist; `src/crew-builder/` composes **several** agents — existing
+**and** freshly-built — into a **crew** (CrewAI-style role/goal/task team) or a
+**workflow** (raw `StepKind` DAG), review it, and write it. Together they
+prove the two halves of the Phase-D north-star: *generate a specialist*
+(Slice 17) and *compose a crew/workflow* (Slice 19).
+
+### Why staged IR-then-transpile
+
+A small local model **one-shotting a DAG succeeds only ~29%** of the time
+(external research cited in the slice spec); think-first/serialize-later and
+staged generation lift that materially. Separately, `WorkflowDef`/`CrewDef`
+carry **live closures** (`input`/`predicate`/`over`) and Zod schemas, so they
+are not JSON-serializable — a model cannot emit them as data at all. The
+declarative IR (`ir.ts`) solves both problems at once: the model produces
+flat, Zod-validatable JSON across four small stages, and a **deterministic,
+model-free transpiler** (`transpile.ts`) renders correct-by-construction TS —
+including the closures, via a small safe-helper vocabulary the model can only
+pick from, never invent.
+
+### Module map (`src/crew-builder/`)
+
+- **`ir.ts`** — `WorkflowIR`/`CrewIR` + their Zod schemas. `InputDescriptorSchema`
+  (`fromInput`/`fromStep`/`fromTemplate`) and `PredicateDescriptorSchema`
+  (`whenEquals`/`whenContains`/`whenTruthy`) are JSON-safe **tagged-union
+  descriptors**, not closures. `WorkflowStepIRSchema` is a discriminated union
+  over all four step kinds (`agent`/`tool`/`branch`/`map`; a `map` step's inner
+  `MapSubStepIR` is itself `agent`|`tool`). `CrewMemberIRSchema` carries an
+  optional `agentRef` (reuse a registered agent) alongside always-present
+  `role`/`goal`/`backstory`/`requires`; `CrewTaskIRSchema` binds a task to a
+  member name with optional `dependsOn`/`verify`. `CrewIRSchema.process` is the
+  real `CrewProcess` **enum** (`z.nativeEnum`), not a string literal — the
+  transpiler compares against `CrewProcess.Hierarchical`, never a `'hierarchical'`
+  string (a plan-sample-code defect caught in task review).
+- **`safe-helpers.ts`** — the complete closure vocabulary: `fromInput()`,
+  `fromStep(ref)`, `fromTemplate(template)` → `(ctx) => string`;
+  `whenEquals`/`whenContains`/`whenTruthy` → `(ctx) => boolean`; `mapOver(ref)`
+  → `(ctx) => unknown[]`. Every helper's internal `asStr` is hardened against
+  circular/bigint/function/symbol context values (never throws) — a
+  plan-sample-code defect caught in task review. `transpile.ts` renders calls
+  to these exact factory names; `validate.ts` checks every descriptor's `ref`
+  resolves to a real upstream step before transpile ever runs.
+- **`types.ts`** — `Shape = 'crew' | 'workflow'`; `CrewBuildResult`
+  (`written`/`declined`/`invalid`/`abandoned`, agent-builder parity);
+  `CrewBuilderDeps` (model, registry lookups, `confirm`, `buildMissingAgent`,
+  write paths, optional `log`).
+- **`classify.ts`** — `classifyNeed(need, model)`: one small-schema `model.object`
+  call picks `crew` vs `workflow` (defaults to `crew` on an unexpected answer).
+- **`analyze.ts`** — `analyzeNeed(need, shape, model)`: **think-first** —
+  `model.text` (no JSON) produces a short numbered prose plan that feeds every
+  later stage as context. This is what added the `.text` seam to `BuilderModel`
+  (`src/agent-builder/types.ts`/`deps.ts`) — `.object` alone couldn't express
+  "reason in prose, don't serialize yet."
+- **`plan-nodes.ts`** — `planNodes(...)`: emits the member/agent list (crew) or
+  step list (workflow) only — no wiring yet. Crew member tools are filtered to
+  the given `packNames` (palette-only) before being returned.
+- **`plan-edges.ts`** — `planEdges(...)`: wires the full `CrewIR`/`WorkflowIR`
+  (dependencies, safe-helper descriptors for inputs/predicates/maps) from the
+  node plan + prose analysis, documenting the safe-helper vocabulary inline in
+  the prompt and parsing the model's response through the IR Zod schema (an
+  invalid shape throws, which `builder.ts` treats as a retryable failure).
+- **`validate.ts`** — the **two-tier gate**, run on the IR before transpile:
+  **Tier 1 structural** (sync, no model call) — snake_case `id`
+  (`ID_PATTERN`), unique step/task/member ids, agent refs resolve to
+  `existingAgents ∪ toBeBuilt`, tool refs are palette-only (including a map
+  step's inner sub-step), every `fromStep`/`fromTemplate` ref (including
+  `{{ref}}` placeholders extracted via `TEMPLATE_REF_RE`) and branch/map
+  target names a real upstream step, and the graph is acyclic via the
+  **shared** `assertAcyclic` (see below). **Tier 2 semantic** (async,
+  reached only when tier 1 is clean — a structurally-broken graph never
+  spends a model call) — a lightweight LLM-judge call (`goalAlignment`)
+  answering "does this graph accomplish `<need>`?" as `{aligned, reason}`.
+- **`transpile.ts`** — `transpile(ir, shape)`: deterministic IR → TS. No model
+  in the loop. Every string value goes through `JSON.stringify` (the `j`
+  helper) before being emitted — never raw-interpolated — so IR content can't
+  break out of the generated source. Emits `crews/<id>.ts` calling
+  `defineCrew` (with `Capability.Tools`/`PreferPolicy.LargestThatFits` per
+  member, mirroring `research-crew.ts`) or `workflows/<id>.ts` calling
+  `defineWorkflow`, importing the safe-helper factories from
+  `crew-builder/safe-helpers.ts`. A generated crew member's `tools` field is
+  **deliberately never emitted** (see "Known gap" below).
+- **`resolve-members.ts`** — `resolveMissingAgents(ir, shape, deps)`: diffs
+  every referenced agent name (`referencedAgents` — workflow agent steps + map
+  agent sub-steps; crew `agentRef`s) against `deps.existingAgents()`, and for
+  each missing one calls `deps.buildMissingAgent` (→ the agent-builder's
+  `buildAgent`, per-agent consent). Because the agent-builder derives its own
+  snake_case name from the need, the built name can differ from the
+  requested one — `resolve-members.ts` then **rewrites every reference** in
+  the IR (`renameWorkflowAgentRef`/`renameCrewAgentRef`, immutable) so the
+  final graph is internally consistent. Returns `abandoned` if a required
+  build is declined or fails.
+- **`write.ts`** — `writeCrewOrWorkflow(name, source, shape, paths)`: atomic
+  (`.tmp`+`renameSync`) def-file write, with the target index's
+  `CREW-BUILDER:IMPORTS`/`:ENTRIES` markers **asserted present before** the
+  def file is written (so a missing marker never leaves an orphan file on
+  disk). `NAME_PATTERN` (`^[a-z][a-z0-9]*(_[a-z0-9]+)*$` — single underscores
+  only) is re-checked here too, as defense-in-depth: a name with repeated
+  underscores would otherwise camelCase-collide with a different name on the
+  same `import` line and corrupt the index (a defect caught in task review).
+- **`builder.ts`** — `buildCrewOrWorkflow(need, deps)`, the orchestrator,
+  wrapped in `withCrewBuildSpan`: **classify → analyze → (bounded
+  regenerate: planNodes → planEdges → validate, `MAX_REGENERATIONS=1`) →
+  consent → resolveMissingAgents (build once, after consent) → transpile →
+  write**. The regeneration loop also catches `planNodes`/`planEdges`
+  *throwing* (a still-malformed model response after the model seam's own
+  internal retry) and folds it into the same bounded attempt rather than
+  crashing the build. Missing-agent resolution happens **exactly once, after
+  consent** — never inside the regeneration loop — because
+  `deps.existingAgents()` is an in-memory snapshot that won't see an agent
+  written to disk mid-run; the loop only computes which agents *would* need
+  building (for `validate.ts`'s `toBeBuilt`), the actual build runs once the
+  user has approved the plan.
+- **`deps.ts`** — `makeRealCrewBuilderDeps({autoYes?})`: assembles live deps by
+  reusing the agent-builder's `makeRealBuilderDeps` (model + consent), wiring
+  `agentNames()`, `STARTER_PACK`, `CREWS`, `WORKFLOWS`, and delegating
+  `buildMissingAgent` to the agent-builder's `buildAgent`.
+
+### Shared `assertAcyclic` (`src/workflow/define.ts`)
+
+Task 8 extracted the pure graph-cycle gate — "every edge's endpoints must be a
+known id, and the graph must be acyclic" (Kahn's algorithm) — out of
+`defineWorkflow`/`defineCrew`'s private logic into an exported
+`assertAcyclic(ids, edges)` with **no knowledge of steps/tasks/closures**, just
+ids and `[from, to]` edges. `defineWorkflow`, `defineCrew`, and
+`crew-builder/validate.ts` (checking a graph shape **before** any real
+`Step`/`Task` closures exist) all call the same function — one cycle-detection
+implementation instead of three. It throws a plain `Error`; each caller wraps
+it in its own domain error type. (MINOR, logged: its error messages are
+id-only — no step/task name — a DX nicety, not a correctness gap.)
+
+### `CrewMember.agentRef` (`src/crew/types.ts`, `src/crew/engine.ts`)
+
+`CrewMember` gained an optional `agentRef?: string` field. `crewAgentMap`
+(`engine.ts`) now checks it first: `member.agentRef ? AGENTS[member.agentRef] :
+undefined`, falling back to the existing inline `buildCrewAgent` construction
+when absent (or when the ref doesn't resolve). This is what lets a
+crew-builder-generated crew reference a **freshly-built** agent and have it
+resolve correctly the moment the process restarts and the new `agents/index.ts`
+entry loads — no crew-engine change beyond this one lookup.
+
+### Two triggers
+
+1. **`bun run crew-builder "<need>" [--yes]`** (`src/cli/crew-builder.ts`) —
+   direct path, mirrors the agent-builder CLI: parses the need + optional
+   auto-yes, calls `makeRealCrewBuilderDeps`/`buildCrewOrWorkflow`, prints the
+   outcome and always `cleanup()`s in `finally`.
+2. **A TTY-gated offer inside `chat.ts`** — on a `{kind:'gap'}` outcome,
+   `chat.ts` now checks `shouldOfferCrew` (`src/cli/offer-crew.ts`, a
+   multi-step signal-word heuristic — `then`/`after that`/`steps`/`workflow`/
+   `team`/`crew`/`pipeline`) **before** the existing single-agent
+   agent-builder offer. A multi-step-looking gap offers the crew/workflow
+   builder first; declining or not matching falls through unchanged to the
+   Slice-17 single-agent offer.
+
+### Safety model (agent-builder parity)
+
+- **Review-before-activate** — one mandatory consent prompt shows the
+  proposed IR (rendered human-readable — tasks/steps + any agents that will
+  be built) before anything is written; declining writes nothing.
+- **Palette-only tools** — `plan-nodes.ts` filters to the given `packNames`
+  and `validate.ts` independently re-checks the same constraint (defense in
+  depth, mirroring the agent-builder's suggest/validate split).
+- **Auto-build is per-agent consent-gated** — `resolveMissingAgents` delegates
+  to the *unmodified* agent-builder `buildAgent` for each missing member, so
+  every auto-built agent gets its own agent-builder consent prompt; there is
+  no bulk "yes to all" for the agents a crew pulls in.
+- **No same-run activation** — the crew/workflow file and any newly-built
+  agent files are live on the **next** process start (`crews/index.ts` /
+  `workflows/index.ts` / `agents/index.ts` are all read at module-load time).
+
+### Telemetry
+
+`withCrewBuildSpan(need, fn)` (`src/telemetry/spans.ts`) opens one root
+`crew.build` span per `buildCrewOrWorkflow` call, sets `ATTR.CREW_BUILD_NEED`
+(`crew.build.need`) up front, and hands the callback a recorder mirroring
+`withAgentBuildSpan`'s shape: `event(name, attrs)` (`span.addEvent`, used for
+`classified`/`analyzed`/`generated`/`generation-failed`/`validated`/`written`
+stage markers, plus attempt numbers and issue counts) and `outcome(kind,
+shape?, id?, memberOrStepCount?, membersBuilt?)`, which sets
+`ATTR.CREW_BUILD_OUTCOME` always, plus `ATTR.CREW_BUILD_SHAPE`,
+`ATTR.CREW_BUILD_ID`, `ATTR.CREW_BUILD_MEMBERS`/`ATTR.CREW_BUILD_STEPS`
+(whichever matches the shape), and `ATTR.CREW_BUILD_MEMBERS_BUILT` when known.
+Each auto-built member nests its own `agent.build` span (the agent-builder's
+own telemetry, unmodified) inside the `crew.build` span. Transport is
+untouched — same OTel provider/JSONL exporter every other subsystem uses.
+
+### Live-verify (Task 19) — first real run against a live model
+
+Tasks 1–18 built the whole pipeline against fake `BuilderModel`s. Task 19
+(`tests/crew-builder/crew-builder.live.test.ts`) ran it for real against
+Ollama `qwen3.5:9b`: a real NL need → `buildCrewOrWorkflow` generates a crew →
+the written `crews/<id>.ts` is dynamic-imported to prove `defineCrew` accepted
+it → the crew is **executed** in-process via `runCrew` with real file+fetch
+MCP tools and live model selection, asserting a non-`'failed'` outcome with
+real generated prose (a 2-task research→3-bullet-summary crew produced a real
+summary of "the Roman aqueducts"). This closes the loop the design's §7
+mandated: not just "the pipeline writes a file" but "the file it writes
+actually runs and produces a correct result." It surfaced four live-only
+defects the fakes could never catch, all fixed in-slice:
+
+1. **Nested-schema key hints under-specified** (`agent-builder/deps.ts`) —
+   `describeSchemaShape`'s hint only listed top-level schema keys, which was
+   enough for the agent-builder's flat `DraftSchema` but not for
+   crew-builder's nested `CrewNodes`/`CrewIRSchema`; the model resolved an
+   array-of-objects field (`members`, `dependsOn`) by collapsing each element
+   to a bare string. Fixed by spelling out one level of nested shape (object
+   fields, or `["<string>", ...]` for scalar arrays); `parseAgainst` also now
+   strips trailing commas and drops `null`-valued keys (routine local-model
+   JSON quirks), and the one retry echoes the *specific* prior failure
+   instead of a generic "not valid JSON" nudge.
+2. **Under-specified IR field constraints** (`plan-edges.ts`) — the prompt
+   didn't state the `id`/`requires`/`verify` constraints `validate.ts`
+   enforces, so the model round-tripped on non-snake_case ids, an empty
+   `requires`, or a non-boolean `verify`. Fixed with three explicit prompt
+   lines.
+3. **Regeneration loop didn't catch a throw** (`builder.ts`) — `planNodes`/
+   `planEdges` calling the model seam directly (not through `validateIR`)
+   meant a response that survived the seam's own internal retry but was still
+   malformed would *throw*, crashing the whole build instead of consuming one
+   bounded-regeneration attempt. Fixed: the throw is now caught and folded
+   into the same retry loop as a validation failure.
+4. **Member tool names rendered into a real `ToolSet` field** (`transpile.ts`)
+   — a member's validated tool-NAME strings (mirroring the agent-builder's
+   `suggestedServers`, checked against the palette) were being emitted
+   straight into `CrewMember.tools`, which the engine treats as a real AI-SDK
+   `ToolSet` — no code resolves names to `Tool` objects yet. A string array
+   there silently corrupted the member's tool-calling (spread as
+   `{0: "brave-search"}`) and could exhaust its step ceiling. Fixed by simply
+   not emitting the per-member `tools` field — members fall back to the
+   crew-level `tools` `crewAgentMap` already merges in.
+
+### Known gap (logged, not silently dropped)
+
+**Member-scoped tool resolution doesn't exist yet** — a crew member's
+`tools` (validated pack-name strings) has nowhere to resolve to a real
+per-member `ToolSet`, so `transpile.ts` deliberately omits the field (fix #4
+above); every generated crew member runs with the crew-level tools only.
+Wiring member-scoped MCP mounting into the transpiler is future work, not a
+Slice 19 scope item (the design's non-goals explicitly park behavioral
+verification — dry-run/golden-eval/reuse — for Slice 20).
+
+### Deferred / non-goals (by design, not punted)
+
+- **Behavioral verification** of a generated crew (execution dry-run +
+  golden-eval + reuse/archive) — Slice 20's whole purpose, not a subset
+  skipped here. Slice 19's bar is structural + semantic validity plus one
+  real live-verify pass, not an automated behavioral guarantee for arbitrary
+  generated crews.
+- **A serialized runtime IR format / loader** for hand-authored crews — the
+  IR here is build-time-internal; the runtime format stays hand-written TS
+  calling `defineCrew`/`defineWorkflow`.
+- Triggers/scheduling (Phase E), multimodal (Phase F).
