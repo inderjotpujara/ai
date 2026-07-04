@@ -113,7 +113,7 @@ export async function makeRealBuilderDeps(
       listLoaded: () => listLoadedModels(),
     },
   );
-  const model = runtimeFor(decl.provider).createModel(decl);
+  const model = runtimeFor(decl.runtime).createModel(decl);
   const input = stdinInput();
   const deps: BuilderDeps = {
     model: makeBuilderModel(model, numCtx),

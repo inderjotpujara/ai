@@ -1,4 +1,4 @@
-import { ProviderKind } from '../core/types.ts';
+import { RuntimeKind } from '../core/types.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
 import { createMemoryStore, type MemoryStore } from '../memory/store.ts';
@@ -49,7 +49,7 @@ function makeRealStore(flags: Flags): {
   manager: ReturnType<typeof createModelManager>;
 } {
   const manager = createModelManager();
-  const control = runtimeFor(ProviderKind.Ollama).control;
+  const control = runtimeFor(RuntimeKind.Ollama).control;
   const model =
     flags.embed ??
     process.env.AGENT_MEMORY_EMBED_MODEL ??

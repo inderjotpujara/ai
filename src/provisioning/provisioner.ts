@@ -5,6 +5,7 @@ import type {
   HostCapabilities,
 } from '../discovery/catalog-source.ts';
 import { ATTR, withProvisionSpan } from '../telemetry/spans.ts';
+import { resolveDestDir } from './dest-dir.ts';
 import { type FitCandidate, fitAndRank } from './fit.ts';
 import { checkDiskSpace } from './supervisor.ts';
 import {
@@ -36,7 +37,18 @@ export type ProvisionDeps = {
   enrichSize: (c: Candidate) => Promise<number>;
   freeDiskBytes: () => Promise<number>;
   ui: ProvisionUi;
+  /** Whether the current process is attached to an interactive terminal.
+   *  Gates bounded-parallel downloads (a multi-bar only renders sanely on a
+   *  TTY); non-interactive runs (CI, piped output) always download
+   *  sequentially with a single bar. Defaults to `false` (sequential) when
+   *  omitted so existing callers/tests keep their prior behavior. */
+  isTTY?: boolean;
 };
+
+/** How many models download at once when running on a TTY. Small enough that
+ *  a multi-bar still fits on screen and we don't saturate bandwidth/disk I/O;
+ *  large enough to meaningfully overlap network-bound downloads. */
+const DOWNLOAD_CONCURRENCY = 2;
 
 /** Orchestrates the first-boot flow. All deps injectable; degrade-never-crash. */
 export async function runProvision(opts: {
@@ -58,12 +70,21 @@ export async function runProvision(opts: {
     budgetBytes: host.liveBudgetBytes,
     hostTotalRamBytes: host.totalRamBytes,
   };
+  const applicableSources = deps.catalogSources.filter((s) =>
+    s.appliesTo(host),
+  );
   const lists = await Promise.all(
-    deps.catalogSources
-      .filter((s) => s.appliesTo(host))
-      .map((s) => s.listCandidates(query).catch(() => [] as Candidate[])),
+    applicableSources.map((s) =>
+      s.listCandidates(query).catch(() => [] as Candidate[]),
+    ),
   );
   const candidates = lists.flat();
+  // Truthful signal (not hardcoded): true when ANY applicable source's most
+  // recent listCandidates() call above served from the committed snapshot
+  // catalog rather than a live source (see withSnapshotFallback).
+  const snapshotFallback = applicableSources.some(
+    (s) => s.usedSnapshotFallback?.() ?? false,
+  );
 
   // 2) Fit-filter + rank; recommended pre-marked.
   const ranked = fitAndRank(candidates, host.liveBudgetBytes);
@@ -101,26 +122,34 @@ export async function runProvision(opts: {
     }
   }
 
-  // 6) Sequential download with a live bar; degrade-never-crash per model.
+  // 6) Download with a live bar; degrade-never-crash per model. Bounded-
+  // parallel on a TTY (multi-bar), sequential otherwise (single bar).
+  const runtimes = [...new Set(selected.map((c) => c.runtime))];
   return withProvisionSpan(
     {
       candidateCount: ranked.length,
       selectedCount: selected.length,
       bytesTotal: required,
-      snapshotFallback: false,
+      snapshotFallback,
+      runtimes,
     },
     async (span) => {
       const ctrl = new AbortController();
-      for (const c of selected) {
+      const destDir = resolveDestDir();
+      let deferredVerify = false;
+
+      const downloadOne = async (c: FitCandidate): Promise<void> => {
         try {
           const provider = deps.providerFor(c.provider);
-          await provider.download(c.model, {
+          const outcome = await provider.download(c.model, {
             onProgress: (p) =>
               p.phase === DownloadPhase.Done || p.phase === DownloadPhase.Failed
                 ? deps.ui.bar.done(p)
                 : deps.ui.bar.render(p),
             signal: ctrl.signal,
+            destDir,
           });
+          if (outcome?.deferredVerify) deferredVerify = true;
           result.downloaded.push(c.model);
         } catch (err) {
           result.failed.push({
@@ -128,12 +157,32 @@ export async function runProvision(opts: {
             error: (err as Error).message,
           });
         }
+      };
+
+      if (deps.isTTY) {
+        // Bounded-parallel: a small pool of workers drains the shared queue
+        // so at most DOWNLOAD_CONCURRENCY downloads are in flight; a
+        // rejection inside downloadOne is already caught there, so one
+        // worker's failure never stops the others from draining the queue.
+        let next = 0;
+        const poolSize = Math.min(DOWNLOAD_CONCURRENCY, selected.length);
+        const workers = Array.from({ length: poolSize }, async () => {
+          while (next < selected.length) {
+            const c = selected[next++] as FitCandidate;
+            await downloadOne(c);
+          }
+        });
+        await Promise.all(workers);
+      } else {
+        for (const c of selected) await downloadOne(c);
       }
+
       span.setAttribute(
         ATTR.PROVISION_DOWNLOADED_COUNT,
         result.downloaded.length,
       );
       span.setAttribute(ATTR.PROVISION_FAILED_COUNT, result.failed.length);
+      span.setAttribute(ATTR.PROVISION_DEFERRED_VERIFY, deferredVerify);
       return result;
     },
   );

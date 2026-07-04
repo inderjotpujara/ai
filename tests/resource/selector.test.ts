@@ -3,7 +3,7 @@ import {
   Capability,
   type ModelDeclaration,
   PreferPolicy,
-  ProviderKind,
+  RuntimeKind,
 } from '../../src/core/types.ts';
 import { selectCandidates } from '../../src/resource/selector.ts';
 
@@ -14,7 +14,7 @@ function m(
   bpw = 0.56,
 ): ModelDeclaration {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: {},
     role: 'test',

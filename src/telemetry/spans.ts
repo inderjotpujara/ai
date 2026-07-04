@@ -20,6 +20,8 @@ export const ATTR = {
   MODEL_FOOTPRINT_BYTES: 'model.footprint_bytes',
   MODEL_BUDGET_BYTES: 'model.budget_bytes',
   MODEL_SIZE_BYTES: 'model.size_bytes',
+  MODEL_RUNTIME_SELECTED: 'model.runtime.selected',
+  MODEL_RUNTIME_DEGRADED: 'model.runtime.degraded',
   EVICT_REASON: 'model.evict.reason',
   USAGE_INPUT_TOKENS: 'gen_ai.usage.input_tokens',
   USAGE_OUTPUT_TOKENS: 'gen_ai.usage.output_tokens',
@@ -47,6 +49,9 @@ export const ATTR = {
   VERIFICATION_CRAG_GRADE: 'verification.crag_grade',
   VERIFICATION_RETRIES: 'verification.retries',
   VERIFICATION_FALLBACK: 'verification.fallback',
+  /** Distinct RuntimeKind values across the models selected for this
+   *  provisioning run — the inference runtime the download will serve,
+   *  not the download `ProviderKind` (see `Candidate.provider` for that). */
   PROVISION_RUNTIME: 'provision.runtime',
   PROVISION_CANDIDATE_COUNT: 'provision.candidate_count',
   PROVISION_SELECTED_COUNT: 'provision.selected_count',
@@ -72,6 +77,10 @@ export type ModelSelectInfo = {
   provider: string;
   numCtx: number;
   paramsBillions?: number;
+  /** The runtime that actually served the request (post-degrade, if any). */
+  runtime?: string;
+  /** True when the declared runtime was unreachable and selection fell back to another. */
+  degraded?: boolean;
 };
 
 export type ModelLoadInfo = {
@@ -163,6 +172,12 @@ export function recordModelSelect(info: ModelSelectInfo): void {
     [ATTR.MODEL_NUM_CTX]: info.numCtx,
     ...(info.paramsBillions !== undefined
       ? { [ATTR.MODEL_PARAMS_B]: info.paramsBillions }
+      : {}),
+    ...(info.runtime !== undefined
+      ? { [ATTR.MODEL_RUNTIME_SELECTED]: info.runtime }
+      : {}),
+    ...(info.degraded !== undefined
+      ? { [ATTR.MODEL_RUNTIME_DEGRADED]: info.degraded }
       : {}),
   });
 }
@@ -380,6 +395,8 @@ export type ProvisionSpanInfo = {
   selectedCount: number;
   bytesTotal: number;
   snapshotFallback: boolean;
+  /** Distinct RuntimeKind values (as strings) backing the selected models. */
+  runtimes: string[];
 };
 
 /** Root span for a first-boot provisioning run (Slice 14). */
@@ -392,6 +409,7 @@ export function withProvisionSpan<T>(
     span.setAttribute(ATTR.PROVISION_SELECTED_COUNT, info.selectedCount);
     span.setAttribute(ATTR.PROVISION_BYTES_TOTAL, info.bytesTotal);
     span.setAttribute(ATTR.PROVISION_SNAPSHOT_FALLBACK, info.snapshotFallback);
+    span.setAttribute(ATTR.PROVISION_RUNTIME, info.runtimes);
     return fn(span);
   });
 }
@@ -412,7 +430,12 @@ export function withToolSpan<T>(
 /** Root span for an MCP mount pass; the body records one event per server. */
 export function withMcpMountSpan<T>(
   fn: (
-    record: (name: string, outcome: string, toolCount?: number) => void,
+    record: (
+      name: string,
+      outcome: string,
+      toolCount?: number,
+      transport?: string,
+    ) => void,
   ) => Promise<T>,
 ): Promise<T> {
   return inSpan('mcp.mount', async (span) => {
@@ -422,6 +445,7 @@ export function withMcpMountSpan<T>(
       name: string,
       outcome: string,
       toolCount?: number,
+      transport?: string,
     ): void => {
       if (outcome === 'mounted') {
         mountedServers += 1;
@@ -433,6 +457,7 @@ export function withMcpMountSpan<T>(
         ...(toolCount !== undefined
           ? { [ATTR.MCP_TOOL_COUNT]: toolCount }
           : {}),
+        ...(transport !== undefined ? { [ATTR.MCP_TRANSPORT]: transport } : {}),
       });
     };
     const out = await fn(record);

@@ -65,6 +65,7 @@ export async function createSelectionRuntime(opts?: {
     pinned: opts?.pinned ?? [],
     capture,
     notify,
+    log: (message) => console.error(message),
   });
 
   return { onBeforeDelegate, capture, close: () => manager.unloadAll() };

@@ -84,4 +84,32 @@ describe('withMcpRun', () => {
     expect(order).toEqual(['body', 'close']);
     await rm(runsRoot, { recursive: true, force: true });
   });
+
+  it('records mcp.transport=stdio on the per-server mount event for a stdio server', async () => {
+    const runsRoot = await mkdtemp(join(tmpdir(), 'withmcprun-'));
+    const approvalsFile = join(runsRoot, 'approvals.json');
+    await withMcpRun(
+      {
+        runsRoot,
+        runId: 'r3',
+        config: ONE_SERVER_CONFIG,
+        mountDeps: {
+          consent: { autoYes: true },
+          approvalsFile,
+          mount: async () => ({ tools: {}, close: async () => {} }),
+        },
+      },
+      async () => {},
+    );
+    const lines = (await readFile(join(runsRoot, 'r3', 'spans.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    const mountSpan = lines.find((s) => s.name === 'mcp.mount');
+    const mountEvent = mountSpan?.events?.find(
+      (e: { name: string }) => e.name === 'mcp.server.mount',
+    );
+    expect(mountEvent?.attributes?.['mcp.transport']).toBe('stdio');
+    await rm(runsRoot, { recursive: true, force: true });
+  });
 });

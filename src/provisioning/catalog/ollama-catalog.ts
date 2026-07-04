@@ -1,5 +1,5 @@
 import { ProviderError } from '../../core/errors.ts';
-import { ProviderKind } from '../../core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../core/types.ts';
 import type {
   Candidate,
   CatalogSource,
@@ -51,7 +51,7 @@ export function createOllamaCatalogSource(
   return {
     name: 'ollama-catalog',
     appliesTo: (host: HostCapabilities) =>
-      host.runtimes.includes(ProviderKind.Ollama),
+      host.runtimes.includes(RuntimeKind.Ollama),
     async listCandidates(_q: DiscoveryQuery): Promise<Candidate[]> {
       const res = await fetchImpl(CATALOG_JSON);
       if (!res.ok)
@@ -60,6 +60,7 @@ export function createOllamaCatalogSource(
       return entries
         .filter((e) => e.name)
         .map((e) => ({
+          runtime: RuntimeKind.Ollama,
           provider: ProviderKind.Ollama,
           model: e.tag ? `${e.name}:${e.tag}` : (e.name as string),
           params: {},

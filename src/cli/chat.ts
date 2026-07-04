@@ -1,3 +1,4 @@
+import { agentNames } from '../../agents/index.ts';
 import { createSuperAgent } from '../../agents/super.ts';
 import qwenRouter from '../../models/qwen-router.ts';
 import { BOOTSTRAP } from '../../models/registry.ts';
@@ -6,6 +7,8 @@ import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
+import { warnUnknownAgents } from '../mcp/mount.ts';
+import type { McpConfig } from '../mcp/types.ts';
 import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
 import { detectMissing } from '../provisioning/detect-missing.ts';
 import { runProvision } from '../provisioning/provisioner.ts';
@@ -31,13 +34,40 @@ import { createSelectHook } from './select-hook.ts';
 import { formatSelectionNotice } from './selection-notice.ts';
 import { withMcpRun } from './with-mcp-run.ts';
 
-/** Non-invasive first-boot offer: only fires interactively, and only on explicit consent. */
-async function maybeAutoProvision(): Promise<void> {
-  if (!(process.stderr.isTTY ?? false)) return;
+/** Typo guard for mcp.json's per-entry `agents` field, mirroring flow.ts's
+ *  wiring (src/cli/flow.ts): chat's orchestrator (createSuperAgent) covers
+ *  every registered specialist via `agentNames()`, the same known-agent set
+ *  flow.ts builds from `AGENTS`. Advisory only — never aborts the run. */
+export function warnUnknownChatAgents(
+  config: McpConfig,
+  warn: (msg: string) => void = (m) => console.error(m),
+): void {
+  warnUnknownAgents(config, agentNames(), warn);
+}
+
+export type MaybeAutoProvisionDeps = {
+  /** Override the TTY gate for testing; defaults to interactiveTTY(). */
+  isTTY?: boolean;
+  detectMissing?: typeof detectMissing;
+  isModelInstalled?: typeof isModelInstalled;
+  askYesNo?: typeof askYesNo;
+};
+
+/** Non-invasive first-boot offer: only fires interactively (stdin AND stderr
+ *  both TTYs — see interactiveTTY()), and only on explicit consent. Judging
+ *  on stderr alone would let `cmd < /dev/null` hang on an ended stdin. */
+export async function maybeAutoProvision(
+  deps: MaybeAutoProvisionDeps = {},
+): Promise<void> {
+  const isTTY = deps.isTTY ?? interactiveTTY();
+  if (!isTTY) return;
+  const detect = deps.detectMissing ?? detectMissing;
+  const checkInstalled = deps.isModelInstalled ?? isModelInstalled;
+  const ask = deps.askYesNo ?? askYesNo;
   const autoYes = process.env.AGENT_PROVISION_AUTO_YES === '1';
-  const missing = await detectMissing(BOOTSTRAP, (m) => isModelInstalled(m));
+  const missing = await detect(BOOTSTRAP, (m) => checkInstalled(m));
   if (missing.length === 0) return;
-  const ok = await askYesNo(
+  const ok = await ask(
     `${missing.length} required model(s) not installed: ${missing.map((m) => m.model).join(', ')}. Provision now?`,
     { input: stdinInput(), autoYes },
   );
@@ -107,12 +137,14 @@ async function main(): Promise<void> {
     pinned: [qwenRouter.model],
     capture,
     notify,
+    log: (message) => console.error(message),
   });
 
   try {
     await withMcpRun(
       { runsRoot: 'runs', runId: `run-${process.pid}` },
-      async ({ run, reg }) => {
+      async ({ run, reg, config }) => {
+        warnUnknownChatAgents(config);
         const orchestrator = createSuperAgent(
           (name) => reg.forAgent(name),
           onBeforeDelegate,
@@ -161,7 +193,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

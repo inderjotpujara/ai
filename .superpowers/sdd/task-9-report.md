@@ -1,188 +1,237 @@
-# Task 9 report — raw-workflow opt-in verify wiring
+# Task 9 report — hf-fetch multi-file MLX snapshot enumeration (WS2)
 
-## Was there anything distinct left to build?
+## Summary
 
-Yes. Investigated whether crew compilation and raw `defineWorkflow` are the
-same code path (in which case Task 8 would already cover this) — they are
-**two separate authoring surfaces** that share only the runtime engine
-(`runWorkflow`/`runStepByKind`, `StepKind.Verify`, `expandVerification`):
+`HfSnapshot` (bare `repo`, no `::file`) previously fetched `resolve/main/`
+(a directory URL) and discarded the bytes — nothing useful landed on disk.
+It now enumerates the repo tree once via `hfTreeFiles`/`deps.treeFiles`,
+downloads every entry atomically through the existing `downloadFile` +
+`safeJoin` building blocks to `<destDir>/<repo>/<path>`, verifies each
+file's sha256 against its tree `oid` when present, and aggregates progress
+across all files into a single monotonic percent.
 
-- **Crew path**: `CrewDef` (tasks/members) → `compileToWorkflow(crew, verifyOpts?)`
-  (`src/crew/compile.ts`) builds a `WorkflowDef`, splicing `expandVerification(...)`
-  after any task with `task.verify ?? crew.verify`. `runCrew` (`src/crew/engine.ts`)
-  then calls `runWorkflow`, and **separately** scans `outcome.output` for an
-  `UnverifiedMarker` via its own `findUnverified` helper, mapping it to
-  `CrewOutcome {kind:'unverified'}`.
-- **Raw workflow path**: authors call `defineWorkflow(def)` directly with a
-  hand-built `Step[]` (no `CrewDef`, no tasks/members) and run it via
-  `runWorkflow` (`src/workflow/engine.ts`), consumed directly by
-  `src/cli/flow.ts`. Before this task, `defineWorkflow` only validated the step
-  graph (unique ids, resolvable deps, acyclic) — it had **no** verify-splicing,
-  `AgentStep` had **no** `verify` field, and `WorkflowOutcome` had **no**
-  `unverified` variant. `runWorkflow` returned only `done`/`failed`.
+## Implementation (`src/provisioning/providers/hf-fetch.ts`)
 
-So nothing was redundant to build: raw workflow authors had no opt-in path at
-all. `expandVerification` itself (the sub-graph) and `StepKind.Verify`
-dispatch in `run-step.ts` were already fully engine-level/generic from Task 8
-and are reused verbatim, unmodified.
+Replaced the placeholder "count bytes from `resolve/main/`" block in the
+`download()` snapshot branch with:
 
-This is confirmed by the Task 8 commit message itself: "Shared
-expandVerification() helper (src/verification/expand.ts) so the workflow path
-(Task 9) reuses the exact sub-graph" — Task 8's author explicitly deferred
-this wiring to Task 9.
+1. `const files = await treeFiles(repo ?? '')` wrapped in try/catch — on
+   rejection, throw a `ProviderError` (there's nothing to enumerate for a
+   snapshot, so the provisioner catches it into `result.failed` — degrade,
+   don't crash). Contrast with the single-file branch's `resolveExpectedOid`,
+   which already degrades a tree-fetch failure to `undefined` (compute-and-
+   record) — untouched, still correct.
+2. `bytesTotal = files.reduce((sum, f) => sum + f.size, 0) || null` — one
+   sum, not per file.
+3. For each file: `safeJoin(destDir, \`${repo}/${f.path}\`)` (reusing the
+   Task 6 traversal guard for tree-sourced paths, exactly as the brief
+   flagged) then `downloadFile(...)` with `expectedOid: f.oid`. Parent-dir
+   creation is already inside `downloadFile` (`mkdir(dirname(destPath), {
+   recursive: true })`) — not duplicated.
+4. Progress aggregation: each file gets its own throwaway `ProgressTracker`
+   instance (so `downloadFile`'s internal per-chunk `tracker.update` calls
+   compute percent on that file's own byte range, not the whole snapshot's).
+   The `onProgress` callback handed to `downloadFile` re-scales that per-file
+   `bytesCompleted` onto the whole-snapshot range —
+   `bytesBeforeThisFile + p.bytesCompleted` against the summed `bytesTotal`
+   — and feeds it through the *outer* shared `tracker`, whose monotonic
+   `maxPercent` then correctly climbs across files instead of resetting to a
+   small fraction (and clamping high) each time a new file starts.
 
-## What was wired
+## Tests (TDD) — `tests/provisioning/hf-fetch.test.ts`
 
-1. **`src/workflow/types.ts`**
-   - `AgentStep.verify?: boolean` — opt-in flag, mirrors `Task.verify` in
-     `src/crew/types.ts`.
-   - `WorkflowOutcome` gained a third variant:
-     `{ kind: 'unverified'; failedStepId?: string; unsupportedClaims: string[]; faithfulness: number; draft: string }`,
-     mirroring `CrewOutcome`'s `unverified` variant field-for-field (renamed
-     `failedTaskId` → `failedStepId` since this is step-, not task-, scoped).
+RED first, then GREEN, for each new case:
 
-2. **`src/workflow/define.ts`**
-   - New exported type `DefineVerifyOpts` (verifyDeps/space/maxRetries/threshold),
-     the workflow-level mirror of `CompileVerifyOpts` in `src/crew/compile.ts`.
-   - `defineWorkflow(def, verifyOpts?)` — new optional second parameter. When
-     supplied, a new `expandVerifiedSteps` helper walks `def.steps` and splices
-     `expandVerification({...})` (imported verbatim from
-     `src/verification/expand.ts`, zero duplication) immediately after any
-     `StepKind.Agent` step with `verify: true`. The existing validation logic
-     (unique ids, resolvable deps, branch targets, acyclic check) now runs over
-     the expanded step list, for free — the same DAG guarantees crew-compiled
-     verify sub-graphs get.
-   - When `verifyOpts` is omitted, `defineWorkflow` is byte-for-byte the
-     original function (same steps array, same validation, same return).
+1. **Snapshot happy path** (brief's Step 1 test, added verbatim plus byte-size
+   assertions): 2 injected tree files (`config.json` 3B, `model.safetensors`
+   5B) + per-file `fetchImpl`; asserts both files exist under
+   `<dest>/<repo>/…` with correct sizes and phases end at `Done`.
+2. **Snapshot tree-fetch rejects → ProviderError, no crash**: `treeFiles`
+   throws → `download()` rejects with `/HF tree listing failed/`.
+3. **Single-file (`HfGguf`) tree-fetch rejects → degrades to compute-and-
+   record**: closes the gap Task 8 logged — `treeFiles` throws, but
+   `download()` still resolves and writes `model.gguf` to disk (no gate).
+4. **Snapshot oid mismatch → no final file or `.part`**: extends the
+   existing single-file mismatch test (already present, "HfGguf: threads
+   the tree oid…") to the new snapshot code path — `expectedOid` doesn't
+   match the computed hash → rejects with `/sha256 mismatch/` and neither
+   `config.json` nor `config.json.part` exist afterward.
 
-3. **`src/workflow/engine.ts`**
-   - New internal `findUnverified(ctx)` helper — mirrors
-     `findUnverified(output)` in `src/crew/engine.ts` exactly (scans context
-     values for `isUnverifiedMarker`).
-   - `runWorkflow`, on reaching its final `{kind:'done'}` return, now scans the
-     finished context first; if an `UnverifiedMarker` is present it returns
-     `{kind:'unverified', ...}` instead. No behavior change when no marker is
-     present (which is always true unless a `verify:true` step's sub-graph ran
-     and hit its abstain terminal).
+Also updated the pre-existing "emits Downloading progress that reaches
+Done" test (`HfSnapshot`, no `treeFiles` injected): before this task the
+snapshot branch never called `treeFiles`, so the test passed without
+providing one. After this task the snapshot branch always calls
+`treeFiles` first, so that test now injects
+`treeFiles: async () => [{ path: 'model.bin', size: 2000 }]` and a real
+`mkdtempSync` `destDir` (previously a bare `/tmp/dest`, unused since no
+files were written) so it still exercises a full write instead of leaking
+an uncontrolled directory.
 
-4. **`src/crew/engine.ts`** (consumer fix, not new wiring)
-   - Because `runWorkflow` can now itself return `{kind:'unverified'}`,
-     `runCrew`'s existing `if (outcome.kind === 'done') { ...findUnverified... }`
-     branch needed a sibling `else if (outcome.kind === 'unverified')` to stay
-     total (TypeScript's discriminated-union narrowing caught this — the old
-     `else` implicitly assumed `failed`, and `tsc --noEmit` failed on
-     `outcome.failedStep`/`outcome.message` not existing on the widened union).
-     Crews still primarily detect unverified via their own compile-time splice
-     + `findUnverified` on `outcome.output` (unchanged); this new branch only
-     fires if a crew's `runWorkflow` call is ever given verify-expanded steps
-     directly outside `compileToWorkflow`'s own splice, which doesn't happen
-     today — added purely so the union stays exhaustively handled.
+Net: 7 pre-existing tests (1 modified) + 4 new = 11 tests in the file.
 
-5. **`src/cli/flow.ts`** (consumer update, mirrors `src/cli/crew.ts`)
-   - `runFlow`: added an `unverified` branch that writes `unverified.txt`
-     (mirrors `runCrewCli`'s `unverified.txt` artifact).
-   - `main()`: added an `unverified` branch printing an abstain message and
-     setting `process.exitCode = 1` (mirrors the crew CLI's console message).
+## RED (before implementation)
 
-## Backward-compat evidence
+Ran the file with the old placeholder implementation still in place and the
+new Step-1 test added:
 
-- `defineWorkflow(def)` (no second arg) — new test
-  `no verifyOpts at all → defineWorkflow output identical to before` passes;
-  `def.steps.length` stays 1, no verify machinery runs.
-- `defineWorkflow(def, verifyOpts)` where the step lacks `verify: true` — new
-  test `no verify flag → unchanged` passes; asserts `def.steps.length` stays 1
-  (no splice) and that the injected fake judge's `generate` is **never called**
-  (`generateCalls` stays 0) — i.e. verifyDeps is provably inert for a
-  non-opted-in step, exactly the crew path's precedent
-  (`tests/crew/verify-wiring.test.ts` asserts the same thing for
-  `CrewDeps.verifyDeps`).
-- Full existing suites stayed green with no test changes needed:
-  `tests/workflow/` (21 pass) and `tests/crew/` (20 pass) — Task 8's crew
-  verify tests (`tests/crew/verify-wiring.test.ts`, 4 tests) and all pre-Slice-13
-  workflow tests pass unmodified.
-- `AgentStep.verify` is optional and `WorkflowOutcome`'s new member is additive
-  to the union — `tsc --noEmit` caught the two call sites that needed updating
-  for exhaustiveness (`src/crew/engine.ts`, `src/cli/flow.ts`, both fixed
-  above); no other call site existed anywhere in `src/`.
+```
+$ bun test tests/provisioning/hf-fetch.test.ts
+error: expect(received).toBe(expected)
+Expected: true
+Received: false
+  at <anonymous> (tests/provisioning/hf-fetch.test.ts:...) // existsSync(config.json) === false
+```
 
-## TDD RED/GREEN evidence
+(config.json/model.safetensors were never written — the snapshot branch
+only counted bytes from a directory-listing URL.)
 
-- RED: wrote `tests/workflow/verify-wiring.test.ts` against the *target* API
-  (`defineWorkflow(def, verifyOpts)`, `WorkflowOutcome.kind === 'unverified'`)
-  before touching any `src/` file. First run:
-  ```
-  Expected: "unverified"
-  Received: "done"
-  (fail) workflow verify wiring > verify:true + failing judge → outcome surfaces unverified
-  2 pass / 1 fail
-  ```
-  (2 pass because those two other cases happened to match pre-wiring behavior
-  trivially — e.g. the "no verify flag" case was already a plain `done`; the
-  failing-judge assertion on `outcome.kind === 'unverified'` is what caught
-  the missing wiring.)
-- GREEN after implementing `types.ts` + `define.ts` + `engine.ts`:
-  ```
-  4 pass / 0 fail / 14 expect() calls
-  Ran 4 tests across 1 file.
-  ```
+## GREEN (after implementation)
 
-## Verification gate — all green, in order
+```
+$ bun run typecheck
+$ tsc --noEmit
+(clean, no output — exit 0)
 
-1. `bun run typecheck` — clean (after fixing the two exhaustiveness call
-   sites it flagged: `src/crew/engine.ts`, `src/cli/flow.ts`).
-2. `bun run lint:file -- "src/workflow/types.ts" "src/workflow/define.ts" "src/workflow/engine.ts" "src/crew/engine.ts" "src/cli/flow.ts" "tests/workflow/verify-wiring.test.ts"` —
-   clean after one `biome check --write` pass for import-sort/line-wrap
-   formatting only (no logic changes).
-3. `bun test tests/workflow/verify-wiring.test.ts` — 4 pass / 0 fail.
-4. `bun test tests/workflow/` — 21 pass / 0 fail. `bun test tests/crew/` — 20
-   pass / 0 fail.
-5. `bun run test` (full suite) — **280 pass, 18 skip (pre-existing), 0 fail,
-   577 expect() calls, 298 tests across 100 files**.
-6. `bun run docs:check` — passed with no doc changes needed (same as Task 8's
-   own commit, which also didn't touch `docs/architecture.md`; the hook only
-   enforces that `src/verification/` and `src/workflow/` are named in
-   `architecture.md`, which they already were before this task).
+$ bun run test:file -- "tests/provisioning/hf-fetch.test.ts"
+$ bun test tests/provisioning/hf-fetch.test.ts
+HF tree lookup failed for org/repo::model.gguf: error: tree service unavailable
+  at treeFiles (tests/provisioning/hf-fetch.test.ts:110:19)
+  at resolveExpectedOid (src/provisioning/providers/hf-fetch.ts:170:27)
+  at download (src/provisioning/providers/hf-fetch.ts:187:35)
+  at <anonymous> (tests/provisioning/hf-fetch.test.ts:114:20)
 
-## Files changed (absolute paths)
+ 11 pass
+ 0 fail
+ 32 expect() calls
+Ran 11 tests across 1 file. [34.00ms]
+```
 
-- `/Users/inderjotsingh/ai/src/workflow/types.ts` — `AgentStep.verify?`,
-  `WorkflowOutcome` `unverified` variant.
-- `/Users/inderjotsingh/ai/src/workflow/define.ts` — `DefineVerifyOpts`,
-  `expandVerifiedSteps`, `defineWorkflow(def, verifyOpts?)`.
-- `/Users/inderjotsingh/ai/src/workflow/engine.ts` — `findUnverified`,
-  `runWorkflow` unverified-outcome mapping.
-- `/Users/inderjotsingh/ai/src/crew/engine.ts` — added `unverified` branch to
-  `runCrew`'s `runWorkflow`-outcome handling (exhaustiveness fix, no crew
-  behavior change).
-- `/Users/inderjotsingh/ai/src/cli/flow.ts` — `unverified` branches in
-  `runFlow` (artifact) and `main()` (console + exit code), mirroring
-  `src/cli/crew.ts`.
-- `/Users/inderjotsingh/ai/tests/workflow/verify-wiring.test.ts` (new) — 4
-  tests: unsupported→unverified, supported→done, no-verify-flag→untouched
-  (asserts verifyDeps never called), no-verifyOpts-at-all→unchanged.
+(The one `console.error` line is the existing, expected degrade-and-log
+from `resolveExpectedOid` — test 3 intentionally exercises that path and
+asserts the download still succeeds; it is not a failure.)
 
-## Concerns / follow-ups
+## Concerns / notes
 
-- `docs/architecture.md` still has zero mentions of `expandVerification`,
-  `StepKind.Verify`, `UnverifiedMarker`, or this workflow-level opt-in — this
-  matches Task 8's own precedent (the doc explicitly defers "full section" to
-  Task 14) and the task brief's instruction not to do a full docs pass here,
-  but it means Task 14 (or whichever task owns the docs pass) has two
-  commits' worth of undocumented mechanism to write up, not one.
-- The `src/crew/engine.ts` `unverified` branch added here is currently dead
-  code in practice: `runCrew`'s call to `runWorkflow` never routes through
-  `defineWorkflow`'s new optional `verifyOpts` param (the crew compiler does
-  its own splice via `compileToWorkflow`'s direct call to
-  `expandVerification`, bypassing `defineWorkflow`'s second arg entirely), so
-  `runWorkflow` itself can never observe an `UnverifiedMarker` on the crew
-  path — the crew's existing `findUnverified(outcome.output)` on the `done`
-  branch is what actually fires. The new branch exists only for
-  type-exhaustiveness/defensive correctness, not because it's reachable
-  today. Worth a note if a future slice consolidates the two mapping sites.
-- No workflow declaration under `workflows/*` opts into `verify` yet (out of
-  scope here), and `src/cli/flow.ts`'s `main()` still calls plain
-  `getWorkflow(name)` without ever passing `verifyOpts` through
-  `defineWorkflow`, so no real CLI-run workflow will actually produce an
-  `unverified` outcome yet. That's expected: wiring real Ollama-backed
-  `VerifyDeps` into the CLI (for both crew and workflow surfaces) is Task
-  10's job per Task 8's commit message.
+- Per-file `ProgressTracker` instances are cheap (plain class, no I/O) —
+  no measurable overhead even for large snapshots with many files.
+- Files download strictly sequentially (one `downloadFile` at a time), not
+  concurrently. The brief didn't ask for concurrency and sequential keeps
+  the progress-aggregation math simple and monotonic; a future task could
+  parallelize with a concurrency cap if snapshot download latency becomes a
+  concern.
+- Did not touch the single-file (`HfGguf`) branch beyond adding a
+  regression test for its pre-existing degrade behavior — that path was
+  already correct per Task 8.
+- Ran only the focused test file per instructions; did not run the full
+  suite.
+
+## Review-finding fixes (post-landing)
+
+Three findings from the Task 9 review, fixed on `slice-18-debt-wrapup-mlx`.
+
+### Finding 1 (Important) — directory tree entries aborted the whole snapshot
+
+`hf-catalog.ts`'s `TreeEntry` didn't read HF's `type` field. HF's recursive
+tree (`tree/main?recursive=true`) returns `{ type: 'directory', size: 0 }`
+entries for repos with subfolders (e.g. an `onnx/` dir alongside the MLX
+weights). Each directory entry flowed into `hfTreeFiles` unfiltered, then
+into the snapshot download loop in `hf-fetch.ts`, where `downloadFile`
+fetched `resolve/main/<dir>`, got a non-2xx, threw `ProviderError`, and
+aborted the *entire* snapshot over one non-file entry.
+
+Fix: added `type?: string` to `TreeEntry`; `hfTreeFiles` now filters out
+`type === 'directory'` before mapping, so only files reach every caller
+(`hfTreeSize`, the single-file lookup, and the snapshot loop). `hfTreeSize`'s
+sum is unaffected — directories were already size 0, so excluding them
+entirely (rather than summing a 0) changes nothing numerically; the existing
+`hfTreeSize` tests still pass unmodified. Per-file failures are untouched: a
+real file's download failure still throws and aborts the snapshot, per the
+brief (a partial model install is useless).
+
+### Finding 2 (Important) — no traversal test on the snapshot path
+
+The single-file (`HfGguf`) branch already had a traversal test exercising
+`safeJoin`, but the snapshot (`HfSnapshot`) branch's `f.path` — sourced from
+the same untrusted HF tree response — had no equivalent. Added
+`'HfSnapshot: rejects a tree entry with a traversal path and writes nothing
+outside destDir'`: injects `treeFiles` returning `{ path: '../evil.bin',
+size: 2000 }`, asserts `download()` rejects and that `evil.bin` never lands
+in the parent of `destDir` (or its parent). No production code change was
+needed here — `safeJoin(destDir, \`${repo}/${f.path}\`)` in the snapshot
+loop already guards this path (the joined string contains a `/../` segment,
+which `safeJoin`'s regex rejects); this test closes the coverage gap and
+pins the behavior against regression.
+
+### Finding 3 (Minor) — Done emitted once, not per-file-plus-final
+
+Each `downloadFile` call ends in its own terminal `DownloadPhase.Done`. The
+snapshot loop's `onProgress` relay forwarded that phase unchanged (just
+byte-rescaled) to the outer `onProgress`, so a snapshot emitted one `Done`
+per file *plus* a final redundant `Done` after the loop — for a 2-file
+snapshot, 3 `Done` events total.
+
+Fix: in the relay, map a per-file `DownloadPhase.Done` to
+`DownloadPhase.Finalizing` (the phase that already precedes `Done` for that
+file) before feeding it through the outer tracker; the single `Done` emitted
+after the loop is now the only one. Progress stays monotonic because
+`Finalizing`'s `bytesCompleted` for a completed file equals what `Done`
+would have reported — no value or ordering regression, only fewer duplicate
+terminal events. Added an assertion to the existing 2-file snapshot test
+(`phases.filter((p) => p === DownloadPhase.Done)).toHaveLength(1)`) to pin
+this.
+
+### Also added — directory-filter test
+
+`tests/provisioning/hf-catalog.test.ts`: `'excludes directory entries from
+the recursive tree'` — a tree with `{ path: 'onnx', type: 'directory', size:
+0 }` plus a real file asserts `hfTreeFiles` returns only the file.
+
+### RED (before the fix, dir-filter + traversal tests only)
+
+The traversal test was GREEN from the start (no production change needed —
+see Finding 2). The dir-filter test failed against the pre-fix
+`hfTreeFiles` (returned both entries, including the directory) and the
+Done-count assertion failed against the pre-fix relay (`toHaveLength(1)`
+received `3`):
+
+```
+$ bun run test:file -- "tests/provisioning/hf-fetch.test.ts" "tests/provisioning/hf-catalog.test.ts"
+(pre-fix, dir-filter + Done-count only)
+error: expect(received).toEqual(expected)
+  // hfTreeFiles included { path: 'onnx', size: 0, oid: undefined }
+error: expect(received).toHaveLength(expected)
+Expected length: 1
+Received length: 3
+```
+
+### GREEN (after the fix)
+
+```
+$ bun run typecheck
+$ tsc --noEmit
+(clean, no output — exit 0)
+
+$ bun run test:file -- "tests/provisioning/hf-fetch.test.ts" "tests/provisioning/hf-catalog.test.ts"
+$ bun test tests/provisioning/hf-fetch.test.ts tests/provisioning/hf-catalog.test.ts
+HF tree lookup failed for org/repo::model.gguf: error: tree service unavailable
+  at treeFiles (tests/provisioning/hf-fetch.test.ts:112:19)
+  at resolveExpectedOid (src/provisioning/providers/hf-fetch.ts:170:27)
+  at download (src/provisioning/providers/hf-fetch.ts:187:35)
+  at <anonymous> (tests/provisioning/hf-fetch.test.ts:116:20)
+
+ 16 pass
+ 0 fail
+ 40 expect() calls
+Ran 16 tests across 2 files. [36.00ms]
+```
+
+(Same expected `console.error` degrade-and-log as before, from test 3 —
+not a failure.)
+
+### Concerns / notes (review-fix pass)
+
+- Ran only the two focused test files per instructions; did not run the
+  full suite (the caller runs it after commit).
+- Did not touch `hfTreeSize`'s summation logic — verified by inspection and
+  by the pre-existing, unmodified `hfTreeSize` tests still passing that
+  excluding size-0 directory entries changes no sums.

@@ -1,8 +1,9 @@
+import { downloadKindFor } from '../core/kind-map.ts';
 import {
   Capability,
   ContentPolicy,
   type ModelDeclaration,
-  ProviderKind,
+  RuntimeKind,
 } from '../core/types.ts';
 import { kvCacheBytes, weightsBytes } from '../resource/footprint.ts';
 import { MIN_CTX } from '../resource/model-manager.ts';
@@ -118,7 +119,7 @@ async function candidateFor(
   const approxParamsBillions = bestSummedBytes / 1e9 / bpw;
 
   const decl: ModelDeclaration = {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model: `hf.co/${repo}:${bestQuant}`,
     params: {},
     role: 'discovered general reasoning + tool use',
@@ -134,6 +135,7 @@ async function candidateFor(
   };
   return {
     ...decl,
+    provider: downloadKindFor(RuntimeKind.Ollama, 'gguf-file'),
     repo,
     quant: bestQuant,
     fileSizeBytes: bestSummedBytes,

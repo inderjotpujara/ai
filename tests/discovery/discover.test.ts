@@ -1,8 +1,13 @@
-import { expect, test } from 'bun:test';
-import { Capability, ProviderKind } from '../../src/core/types.ts';
+import { afterEach, expect, spyOn, test } from 'bun:test';
+import { Capability, ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import { runDiscovery } from '../../src/discovery/discover.ts';
 
+afterEach(() => {
+  (globalThis.fetch as unknown as { mockRestore?: () => void }).mockRestore?.();
+});
+
 const makeCandidate = (model: string, dl: number, params: number) => ({
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model,
   params: {},
@@ -22,7 +27,7 @@ test('fetches from applicable sources, filters/ranks, writes, pre-pulls top-1', 
     host: {
       totalRamBytes: 24e9,
       liveBudgetBytes: 12e9,
-      runtimes: [ProviderKind.Ollama],
+      runtimes: [RuntimeKind.Ollama],
     },
     sources: [
       {
@@ -49,7 +54,7 @@ test('failing pullTop populates pullFailed', async () => {
     host: {
       totalRamBytes: 24e9,
       liveBudgetBytes: 12e9,
-      runtimes: [ProviderKind.Ollama],
+      runtimes: [RuntimeKind.Ollama],
     },
     sources: [
       {
@@ -76,4 +81,71 @@ test('failing pullTop populates pullFailed', async () => {
   if (!failure) throw new Error('expected a failure entry');
   expect(failure.model).toBe('hf.co/bad:Q4_K_M');
   expect(failure.reason.length).toBeGreaterThan(0);
+});
+
+test('default pre-pull routes an Ollama-runtime candidate to the daemon, not providerFor', async () => {
+  // Regression: a HfGguf-provider candidate whose model is an Ollama-native
+  // `hf.co/<repo>:<quant>` ref must still pull via the Ollama daemon (it
+  // resolves hf.co refs natively) — routing on download `provider` instead
+  // of inference `runtime` would send this to providerFor(HfGguf).download
+  // and build a malformed huggingface.co URL.
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response('{}', { status: 200 }),
+  );
+  const candidate = {
+    ...makeCandidate('hf.co/foo:Q4_K_M', 99, 7),
+    runtime: RuntimeKind.Ollama,
+    provider: ProviderKind.HfGguf,
+  };
+  await runDiscovery({
+    host: {
+      totalRamBytes: 24e9,
+      liveBudgetBytes: 12e9,
+      runtimes: [RuntimeKind.Ollama],
+    },
+    sources: [
+      {
+        name: 's',
+        appliesTo: () => true,
+        listCandidates: async () => [candidate],
+      },
+    ],
+    writeCatalog: () => {},
+    catalogPathStr: '/tmp/catalog.json',
+  });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  const [url] = fetchSpy.mock.calls[0] as [string];
+  expect(url).toContain('/api/pull'); // Ollama daemon endpoint, not huggingface.co
+});
+
+test('default pre-pull routes a non-Ollama-runtime candidate to providerFor', async () => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(new ReadableStream({ start: (c) => c.close() }), {
+      status: 200,
+    }),
+  );
+  const candidate = {
+    ...makeCandidate('org/repo', 99, 7),
+    runtime: RuntimeKind.MlxServer,
+    provider: ProviderKind.HfSnapshot,
+  };
+  await runDiscovery({
+    host: {
+      totalRamBytes: 24e9,
+      liveBudgetBytes: 12e9,
+      runtimes: [RuntimeKind.MlxServer],
+    },
+    sources: [
+      {
+        name: 's',
+        appliesTo: () => true,
+        listCandidates: async () => [candidate],
+      },
+    ],
+    writeCatalog: () => {},
+    catalogPathStr: '/tmp/catalog.json',
+  });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  const [url] = fetchSpy.mock.calls[0] as [string];
+  expect(url).toContain('huggingface.co'); // routed through the HF DownloadProvider
 });

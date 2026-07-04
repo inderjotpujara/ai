@@ -69,6 +69,7 @@ export function createOllamaProvider(
   return {
     kind: ProviderKind.Ollama,
     async download(modelRef, { onProgress, signal }) {
+      // destDir is ignored: the Ollama daemon owns its own model store on disk.
       await withRetry(() => streamPull(baseUrl, modelRef, onProgress, signal), {
         attempts: 6,
         baseMs: 1_000,

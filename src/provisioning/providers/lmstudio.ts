@@ -24,8 +24,9 @@ export function createLmStudioProvider(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const pollMs = deps.pollMs ?? 1000;
   return {
-    kind: ProviderKind.MlxServer, // LM Studio serves GGUF+MLX; shares the MlxServer kind today
+    kind: ProviderKind.LmStudio,
     async download(modelRef, { onProgress, signal }) {
+      // destDir is ignored: the LM Studio daemon owns its own model store on disk.
       const tracker = new ProgressTracker(modelRef);
       onProgress(tracker.update(DownloadPhase.Resolving, 0, null));
       const start = await fetchImpl(`${baseUrl}/api/v1/models/download`, {
@@ -38,7 +39,7 @@ export function createLmStudioProvider(
         throw new ProviderError(`LM Studio download returned ${start.status}`);
       const job = (await start.json()) as DownloadJob;
       if (job.status === 'already_downloaded') {
-        onProgress(tracker.update(DownloadPhase.Done, 0, 0));
+        onProgress(tracker.update(DownloadPhase.Done, 0, null));
         return;
       }
       const total = job.total_size_bytes ?? null;

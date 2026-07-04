@@ -1,126 +1,79 @@
-# Task 1 Report: `agents/index.ts` registry + behavior-preserving rewiring (Slice 17)
+# Task 1 Report: Add `RuntimeKind` + extend `ProviderKind` + `downloadKindFor` (Slice 18)
 
-## Status
-DONE
+## Status: DONE
 
-## Commit
-`refactor(agents): agents/index.ts registry; super/chat/flow build agent set from it (Slice 17 Task 1)`
+## What was implemented
 
-## What changed
+Followed the task brief (`.superpowers/sdd/task-1-brief.md`) verbatim, via TDD:
 
-- **Created `agents/index.ts`** — exactly as specified in the brief: `AgentFactory` type,
-  `AGENTS: Record<string, AgentFactory>` (insertion order `file_qa`, `web_fetch`),
-  `agentNames()`, and the two literal marker comments
-  `// AGENT-BUILDER:IMPORTS ...` and `// AGENT-BUILDER:ENTRIES ...` for a later task to
-  splice generated agents into.
-- **Rewrote `agents/super.ts`** — `createSuperAgent` signature changed from
-  `(fileQaTools: ToolSet, fetchTools: ToolSet, onBeforeDelegate?)` to
-  `(toolsFor: (name: string) => ToolSet, onBeforeDelegate?)`. It now builds the agent
-  list by mapping `agentNames()` through `AGENTS[name](toolsFor(name))` instead of
-  hand-wiring the two specialists.
-- **`src/cli/chat.ts`** (~line 110) — updated the one caller to
-  `createSuperAgent((name) => reg.forAgent(name), onBeforeDelegate)`.
-- **`src/cli/flow.ts`** (~line 130) — replaced the hand-built two-line agent map with a
-  loop over `agentNames()` pulling factories from `AGENTS`; removed the now-unused
-  `createFileQaAgent` / `createWebFetchAgent` imports, added
-  `import { AGENTS, agentNames } from '../../agents/index.ts';`. `warnUnknownAgents` call
-  is unchanged. `crew.ts` was not touched (uses `reg.merged`, not per-agent — per brief).
-- **New test `tests/agents/registry.test.ts`** — written first (brief's exact content),
-  confirmed RED, then GREEN after implementation.
+1. **`src/core/types.ts`** — replaced the two-member `ProviderKind` (previously
+   overloaded as both download-routing and inference-routing) with a four-member
+   download-side `ProviderKind` (`Ollama | HfGguf | HfSnapshot | LmStudio`), added a
+   new inference-side `RuntimeKind` enum (`Ollama | MlxServer | LmStudio`), and
+   renamed `ModelDeclaration.provider: ProviderKind` → `ModelDeclaration.runtime:
+   RuntimeKind`.
+2. **`src/core/kind-map.ts`** (new) — pure helper `downloadKindFor(runtime, shape):
+   ProviderKind` mapping an inference runtime + repo shape to the download provider
+   that fetches it: LmStudio→LmStudio, MlxServer→HfSnapshot, Ollama+gguf-file→HfGguf,
+   Ollama+other shape→Ollama.
+3. **`tests/core/kind-map.test.ts`** (new) — the 4 tests specified in the brief,
+   verbatim.
 
-## Deviation from the brief's literal code (typecheck-driven)
+## TDD evidence
 
-This repo's `tsconfig.json` has `noUncheckedIndexedAccess: true`. Under that flag, **both**
-bracket access (`AGENTS[name]`) **and dot access** (`AGENTS.file_qa`) on a
-`Record<string, AgentFactory>` type resolve through the index signature and are typed
-`AgentFactory | undefined`, so the brief's verbatim `AGENTS[name](toolsFor(name))` /
-`AGENTS.file_qa(empty)` calls fail `tsc --noEmit` with "Cannot invoke an object which is
-possibly 'undefined'." Fixed minimally, invariants unchanged:
-- `agents/super.ts` and `src/cli/flow.ts`: look up the factory into a local `const`,
-  `if (!factory) throw new Error(...)` (early-return style, no `!` non-null assertions —
-  none exist elsewhere in the codebase), then call it. The throw is unreachable in
-  practice since `name` always comes from `Object.keys(AGENTS)`.
-- `tests/agents/registry.test.ts`: changed `AGENTS.file_qa(empty)` /
-  `AGENTS.web_fetch(empty)` to `AGENTS.file_qa?.(empty)` / `AGENTS.web_fetch?.(empty)` —
-  same runtime assertion, satisfies strict TS.
-
-All other test/interface content matches the brief verbatim.
-
-## Additional fixes required to keep the build green (not listed in the brief but necessary)
-
-The `createSuperAgent` signature change breaks every other caller using the old two-ToolSet
-positional form. Fixed to preserve identical behavior:
-- `tests/agents/super.test.ts` — updated both tests to call
-  `createSuperAgent(() => ({ read_file: {...} }))` (a `toolsFor` closure) instead of two
-  positional ToolSets.
-- `tests/integration/orchestrator.live.test.ts` (2 call sites),
-  `tests/integration/orchestrator-web.live.test.ts`,
-  `tests/integration/run-viewer.live.test.ts` — these `.live.test.ts` files (real-Ollama
-  integration tests, `describe.skipIf`) called `createSuperAgent(tools, {})` /
-  `createSuperAgent(fileServer.tools, fetchServer.tools)`. Rewrote each as a `toolsFor`
-  closure routing by agent name (`(name) => (name === 'file_qa' ? tools : {})`, etc.) —
-  identical tool assignment to before, just expressed as a function. These are skipped
-  without a live Ollama, but they must still typecheck (they're in scope of
-  `bun run typecheck`), and this preserves their intended live-verify coverage.
-- `tests/integration/workflow.live.test.ts` was **not** touched — it calls
-  `createFileQaAgent`/`createWebFetchAgent` directly (unaffected signatures).
-
-## RED → GREEN evidence
-
-RED (before `agents/index.ts` existed):
+**RED** — before `kind-map.ts` existed:
 ```
-$ bun test tests/agents/registry.test.ts
-error: Cannot find module '../../agents/index.ts' from '/Users/inderjotsingh/ai/tests/agents/registry.test.ts'
- 0 pass
- 1 fail
- 1 error
+$ bun run test:file -- "tests/core/kind-map.test.ts"
+$ bun test tests/core/kind-map.test.ts
+error: Cannot find module '../../src/core/kind-map.ts' from '/Users/inderjotsingh/ai/tests/core/kind-map.test.ts'
+0 pass
+1 fail
+1 error
+Ran 1 test across 1 file. [14.00ms]
 ```
 
-GREEN (after implementation):
+**GREEN** — after implementing `types.ts` + `kind-map.ts`:
 ```
-$ bun test tests/agents/registry.test.ts tests/cli/flow.test.ts
- 7 pass
+$ bun run test:file -- "tests/core/kind-map.test.ts"
+$ bun test tests/core/kind-map.test.ts
+ 4 pass
  0 fail
- 18 expect() calls
-Ran 7 tests across 2 files. [306.00ms]
+ 4 expect() calls
+Ran 4 tests across 1 file. [11.00ms]
 ```
 
-Including `tests/agents/super.test.ts` (also touched):
-```
-$ bun test tests/agents/registry.test.ts tests/cli/flow.test.ts tests/agents/super.test.ts
- 9 pass
- 0 fail
- 23 expect() calls
-Ran 9 tests across 3 files. [250.00ms]
-```
+## Files changed
 
-## Full-suite behavior-preservation check
+- `src/core/types.ts` (modified) — `ProviderKind` redefined (2→4 members),
+  `RuntimeKind` added, `ModelDeclaration.provider` → `.runtime`.
+- `src/core/kind-map.ts` (new) — `RepoShape` type + `downloadKindFor()`.
+- `tests/core/kind-map.test.ts` (new) — 4 tests.
 
-```
-$ bun test
- 431 pass
- 2 skip
- 0 fail
- 932 expect() calls
-Ran 433 tests across 130 files. [244.50s]
-```
-(The 2 skips are pre-existing `describe.skipIf(!ready)` live-Ollama gates, unrelated to
-this change — no Ollama server running in this environment.)
+Commit: `1c0723e` — "feat(core): split ProviderKind (download) from RuntimeKind
+(inference) + downloadKindFor"
 
-## Gates
+## Self-review
 
-- `bun run typecheck` — clean, no errors.
-- `bun run lint:file -- "agents/index.ts" "agents/super.ts" "src/cli/chat.ts" "src/cli/flow.ts" "tests/agents/registry.test.ts" "tests/agents/super.test.ts" "tests/integration/orchestrator.live.test.ts" "tests/integration/orchestrator-web.live.test.ts" "tests/integration/run-viewer.live.test.ts"` — `Checked 9 files in 37ms. No fixes applied.`
-- Confirmed `createFileQaAgent` / `createWebFetchAgent` imports removed from
-  `src/cli/flow.ts` (grep + lint pass with no unused-import complaints).
+- Enum members, doc comments, and the helper signature match the brief's exact
+  interfaces verbatim — no deviation.
+- Per the task's explicit instructions, did NOT touch any consumer file
+  (registry.ts, runtime files, discovery, select-hook, etc.) — those are expected
+  to break and are fixed in Tasks 2-4 of this slice's WS1.
+- Did NOT run the full `bun run typecheck` or full `bun test` suite, per
+  instructions — only the scoped `tests/core/kind-map.test.ts` (the broader build
+  is expected red by design until Tasks 2-4 land).
+- The pre-commit `docs:check` hook ran automatically on commit and passed (no
+  living-doc gap introduced — `kind-map.ts` lives inside the already-documented
+  `src/core` subsystem in `docs/architecture.md`, and no new subsystem was added).
+- Only the three files specified in the brief (`src/core/types.ts`,
+  `src/core/kind-map.ts`, `tests/core/kind-map.test.ts`) were staged and
+  committed, confirmed via `git status --short` before commit. Other unrelated
+  working-tree modifications present at the time (`.remember/now.md`,
+  `.superpowers/sdd/progress.md`, `.superpowers/sdd/task-1-brief.md` —  from the
+  surrounding slice orchestration, not this task) were deliberately left
+  unstaged/untouched.
 
 ## Concerns
 
-None blocking. Two intentional, documented deviations from the brief's literal code
-(both forced by `noUncheckedIndexedAccess: true`, not by choice), and four extra files
-fixed beyond the brief's file list — all strictly required for the signature change to
-compile/behave identically, none change intended behavior. No `docs/architecture.md` /
-README / ROADMAP / SDD-ledger updates included in this task's commit — this is one task
-of a multi-task slice; the brief's Step 8 commit scope covers code + tests only, and the
-slice-level docs updates belong at the slice's final review per the project's
-documentation hard-line.
+None. The task was self-contained and unambiguous; no deviations from the brief
+were needed.

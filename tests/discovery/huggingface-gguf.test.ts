@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { Capability, ProviderKind } from '../../src/core/types.ts';
+import { Capability, ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import {
   detectTools,
   hfGgufSource,
@@ -46,7 +46,9 @@ test('builds a fitting tool-capable GGUF candidate', async () => {
   expect(cands.length).toBe(1);
   const cand = cands[0];
   if (!cand) throw new Error('expected a candidate');
-  expect(cand.provider).toBe(ProviderKind.Ollama);
+  // GGUF single-file: runs on Ollama, but is fetched via the HF GGUF downloader.
+  expect(cand.runtime).toBe(RuntimeKind.Ollama);
+  expect(cand.provider).toBe(ProviderKind.HfGguf);
   expect(cand.model).toBe('hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M');
   expect(cand.capabilities).toContain(Capability.Tools);
   expect(cand.quant).toBe('Q4_K_M');

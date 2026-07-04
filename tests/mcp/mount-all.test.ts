@@ -2,10 +2,15 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { MountedServer } from '../../src/mcp/client.ts';
+import type { McpHttpSpec, MountedServer } from '../../src/mcp/client.ts';
 import { readApprovals } from '../../src/mcp/consent.ts';
 import { mountAll, warnUnknownAgents } from '../../src/mcp/mount.ts';
-import { type McpConfig, McpTransportKind } from '../../src/mcp/types.ts';
+import {
+  McpAuthKind,
+  type McpConfig,
+  McpTransportKind,
+} from '../../src/mcp/types.ts';
+import { mockOAuthProvider } from './client.test.ts';
 
 const entry = (name: string, agents?: string[]) => ({
   kind: McpTransportKind.Stdio as const,
@@ -53,6 +58,33 @@ describe('mountAll', () => {
     // both entries have args: [] so both serve t_shared → collision: later wins, warn
     expect(Object.keys(reg.merged)).toEqual(['t_shared']);
     expect(reg.mounted).toHaveLength(2);
+    await reg.close();
+  });
+  it('tags each mounted entry with its transport kind', async () => {
+    const config: McpConfig = {
+      entries: [
+        entry('stdio-server'),
+        {
+          kind: McpTransportKind.Http as const,
+          name: 'http-server',
+          url: 'https://example.test/mcp',
+          headers: {},
+          raw: { url: 'https://example.test/mcp' },
+        },
+      ],
+      dormant: [],
+      warnings: [],
+    };
+    const reg = await mountAll(
+      config,
+      deps({
+        mount: async () => fakeServer(['t']),
+      }),
+    );
+    expect(reg.mounted.map((m) => ({ name: m.name, kind: m.kind }))).toEqual([
+      { name: 'stdio-server', kind: McpTransportKind.Stdio },
+      { name: 'http-server', kind: McpTransportKind.Http },
+    ]);
     await reg.close();
   });
   it('scopes agent slices: scoped entry only for its agents, unscoped for all', async () => {
@@ -231,6 +263,105 @@ describe('mountAll', () => {
         Object.defineProperty(process.stderr, 'isTTY', stderrDescriptor);
       }
     }
+  });
+  it('OAuth entry with a registered authProvider constructs the client with it (mocked token, contract-tested)', async () => {
+    const provider = mockOAuthProvider('mock-access-token');
+    const config: McpConfig = {
+      entries: [
+        {
+          kind: McpTransportKind.Http as const,
+          name: 'oauth-server',
+          url: 'https://example.test/mcp',
+          headers: {},
+          auth: { kind: McpAuthKind.OAuth },
+          raw: { type: 'http', url: 'https://example.test/mcp' },
+        },
+      ],
+      dormant: [],
+      warnings: [],
+    };
+    let received: McpHttpSpec | undefined;
+    const reg = await mountAll(
+      config,
+      deps({
+        authProviders: { 'oauth-server': provider },
+        mount: async (spec: McpHttpSpec) => {
+          received = spec;
+          return fakeServer(['t']);
+        },
+      }),
+    );
+    expect(received?.authProvider).toBe(provider);
+    expect(await received?.authProvider?.tokens()).toEqual(
+      expect.objectContaining({ access_token: 'mock-access-token' }),
+    );
+    await reg.close();
+  });
+
+  it('OAuth entry with no registered authProvider degrades: warns and mounts without auth (live OAuth deferred)', async () => {
+    const config: McpConfig = {
+      entries: [
+        {
+          kind: McpTransportKind.Http as const,
+          name: 'oauth-server',
+          url: 'https://example.test/mcp',
+          headers: {},
+          auth: { kind: McpAuthKind.OAuth },
+          raw: { type: 'http', url: 'https://example.test/mcp' },
+        },
+      ],
+      dormant: [],
+      warnings: [],
+    };
+    const warnings: string[] = [];
+    let received: McpHttpSpec | undefined;
+    const reg = await mountAll(
+      config,
+      deps({
+        warn: (m: string) => warnings.push(m),
+        mount: async (spec: McpHttpSpec) => {
+          received = spec;
+          return fakeServer(['t']);
+        },
+      }),
+    );
+    expect(received?.authProvider).toBeUndefined();
+    expect(reg.mounted.map((m) => m.name)).toEqual(['oauth-server']);
+    expect(
+      warnings.some(
+        (w) => w.includes('oauth-server') && w.includes('deferred'),
+      ),
+    ).toBe(true);
+    await reg.close();
+  });
+
+  it('static-key HTTP entry (no auth field) is unchanged: headers passed through, no authProvider', async () => {
+    const config: McpConfig = {
+      entries: [
+        {
+          kind: McpTransportKind.Http as const,
+          name: 'static-server',
+          url: 'https://example.test/mcp',
+          headers: { Authorization: 'Bearer static-pat' },
+          raw: { type: 'http', url: 'https://example.test/mcp' },
+        },
+      ],
+      dormant: [],
+      warnings: [],
+    };
+    let received: McpHttpSpec | undefined;
+    const reg = await mountAll(
+      config,
+      deps({
+        mount: async (spec: McpHttpSpec) => {
+          received = spec;
+          return fakeServer(['t']);
+        },
+      }),
+    );
+    expect(received?.headers).toEqual({ Authorization: 'Bearer static-pat' });
+    expect(received?.authProvider).toBeUndefined();
+    await reg.close();
   });
 });
 

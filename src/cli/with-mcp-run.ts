@@ -33,7 +33,7 @@ export async function withMcpRun<T>(
   const config = opts.config ?? loadMcpConfig();
   const reg = await withMcpMountSpan(async (record) => {
     const r = await mountAll(config, opts.mountDeps);
-    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount);
+    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount, m.kind);
     for (const s of r.skipped) record(s.name, s.reason);
     for (const d of config.dormant) record(d.name, 'dormant');
     return r;

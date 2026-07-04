@@ -1,3 +1,4 @@
+import { runtimeKindFor } from '../../core/kind-map.ts';
 import type { Capability, ProviderKind } from '../../core/types.ts';
 import type {
   Candidate,
@@ -22,6 +23,7 @@ type SnapshotEntry = {
 /** Read the committed snapshot catalog into Candidates. The robustness floor. */
 export function loadSnapshot(): Candidate[] {
   return (snapshot as SnapshotEntry[]).map((e) => ({
+    runtime: runtimeKindFor(e.provider as ProviderKind),
     provider: e.provider as ProviderKind,
     model: e.model,
     params: {},
@@ -52,16 +54,28 @@ export function withSnapshotFallback(
   source: CatalogSource,
   fallback: CatalogSource,
 ): CatalogSource {
+  // Tracks whether the MOST RECENT listCandidates() call served from the
+  // committed snapshot (fallback) rather than the live source, so callers
+  // (the provisioner's telemetry) can report a truthful snapshotFallback
+  // instead of a hardcoded value.
+  let usedFallback = false;
   return {
     name: `${source.name}+snapshot`,
     appliesTo: source.appliesTo,
     async listCandidates(q: DiscoveryQuery): Promise<Candidate[]> {
       try {
         const live = await source.listCandidates(q);
-        return live.length > 0 ? live : fallback.listCandidates(q);
+        if (live.length > 0) {
+          usedFallback = false;
+          return live;
+        }
+        usedFallback = true;
+        return fallback.listCandidates(q);
       } catch {
+        usedFallback = true;
         return fallback.listCandidates(q);
       }
     },
+    usedSnapshotFallback: () => usedFallback,
   };
 }

@@ -1,6 +1,6 @@
 import { embedMany } from 'ai';
 import { createOllama } from 'ollama-ai-provider-v2';
-import { ProviderKind } from '../core/types.ts';
+import { RuntimeKind } from '../core/types.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
 import {
   getModelKvArch,
@@ -31,7 +31,7 @@ async function ollamaEmbed(
 }
 
 export const ollamaRuntime: Runtime = {
-  kind: ProviderKind.Ollama,
+  kind: RuntimeKind.Ollama,
   async isAvailable() {
     try {
       const res = await fetch(`${BASE}/api/version`, {

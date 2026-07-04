@@ -34,7 +34,7 @@ function defaultDeps(): ManagerDeps {
   return {
     budgetBytes: liveBudgetBytes,
     warn: (message) => console.error(message),
-    controlFor: (decl) => runtimeFor(decl.provider).control,
+    controlFor: (decl) => runtimeFor(decl.runtime).control,
   };
 }
 

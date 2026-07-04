@@ -126,6 +126,7 @@ function toEntry(
       name,
       url: url.value,
       headers: expandRecord(data.headers ?? {}, env, missing),
+      auth: data.auth,
       agents: data.agents,
       raw,
     };

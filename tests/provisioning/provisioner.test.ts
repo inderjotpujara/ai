@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { ProviderKind } from '../../src/core/types.ts';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
 import { runProvision } from '../../src/provisioning/provisioner.ts';
 import {
   DownloadPhase,
@@ -9,9 +9,10 @@ import {
 const host = {
   totalRamBytes: 24e9,
   liveBudgetBytes: 8e9,
-  runtimes: [ProviderKind.Ollama],
+  runtimes: [RuntimeKind.Ollama],
 };
 const cand = (model: string, size: number) => ({
+  runtime: RuntimeKind.Ollama,
   provider: ProviderKind.Ollama,
   model,
   params: {},
@@ -111,6 +112,21 @@ describe('runProvision', () => {
     expect(res.downloaded).toEqual([]);
   });
 
+  it('passes a non-empty destDir to the download provider', async () => {
+    let seenDestDir: string | undefined;
+    const d = deps({
+      providerFor: () => ({
+        kind: ProviderKind.Ollama,
+        download: async (_m: string, o: any) => {
+          seenDestDir = o.destDir;
+        },
+      }),
+    });
+    await runProvision({ deps: d, autoYes: false });
+    expect(typeof seenDestDir).toBe('string');
+    expect((seenDestDir ?? '').length).toBeGreaterThan(0);
+  });
+
   it('degrades: a failing download is recorded in failed, others still proceed', async () => {
     const d = deps({
       catalogSources: [
@@ -135,5 +151,97 @@ describe('runProvision', () => {
     const res = await runProvision({ deps: d, autoYes: false });
     expect(res.failed.map((f) => f.model)).toContain('bad');
     expect(res.downloaded).toContain('good');
+  });
+
+  it('on a TTY, downloads two selected candidates concurrently (bounded)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const d = deps({
+      isTTY: true,
+      catalogSources: [
+        {
+          name: 's',
+          appliesTo: () => true,
+          listCandidates: async () => [cand('a', 3e9), cand('b', 3e9)],
+        },
+      ],
+      providerFor: () => ({
+        kind: ProviderKind.Ollama,
+        download: async (_m: string) => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, 20));
+          inFlight--;
+        },
+      }),
+      ui: {
+        askYesNo: async () => true,
+        selectModels: async (items: any[]) => items,
+        bar: { render() {}, done() {} },
+      },
+    });
+    const res = await runProvision({ deps: d, autoYes: false });
+    // Non-vacuous proof of overlap: both downloads were in flight at once.
+    expect(maxInFlight).toBe(2);
+    expect(res.downloaded.sort()).toEqual(['a', 'b']);
+  });
+
+  it('on a TTY, one-of-two failing still lets the other succeed (failure isolation)', async () => {
+    const d = deps({
+      isTTY: true,
+      catalogSources: [
+        {
+          name: 's',
+          appliesTo: () => true,
+          listCandidates: async () => [cand('good', 3e9), cand('bad', 3e9)],
+        },
+      ],
+      providerFor: () => ({
+        kind: ProviderKind.Ollama,
+        download: async (m: string) => {
+          if (m === 'bad') throw new Error('pull failed');
+        },
+      }),
+      ui: {
+        askYesNo: async () => true,
+        selectModels: async (items: any[]) => items,
+        bar: { render() {}, done() {} },
+      },
+    });
+    const res = await runProvision({ deps: d, autoYes: false });
+    expect(res.failed.map((f) => f.model)).toContain('bad');
+    expect(res.downloaded).toContain('good');
+  });
+
+  it('when not a TTY, falls back to sequential downloads (no overlap)', async () => {
+    const order: string[] = [];
+    const d = deps({
+      isTTY: false,
+      catalogSources: [
+        {
+          name: 's',
+          appliesTo: () => true,
+          listCandidates: async () => [cand('a', 3e9), cand('b', 3e9)],
+        },
+      ],
+      providerFor: () => ({
+        kind: ProviderKind.Ollama,
+        download: async (m: string) => {
+          order.push(`start:${m}`);
+          await new Promise((r) => setTimeout(r, 5));
+          order.push(`end:${m}`);
+        },
+      }),
+      ui: {
+        askYesNo: async () => true,
+        selectModels: async (items: any[]) => items,
+        bar: { render() {}, done() {} },
+      },
+    });
+    const res = await runProvision({ deps: d, autoYes: false });
+    // Strictly sequential: each model's start/end pair completes before the
+    // next model's download begins — never interleaved.
+    expect(order).toEqual(['start:a', 'end:a', 'start:b', 'end:b']);
+    expect(res.downloaded.sort()).toEqual(['a', 'b']);
   });
 });

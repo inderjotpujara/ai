@@ -1,7 +1,16 @@
-/** Which local runtime backs a model. String enum per project style. */
+/** Which downloader fetches a model's weights. String enum per project style. */
 export enum ProviderKind {
+  Ollama = 'Ollama', // pull via the local Ollama daemon
+  HfGguf = 'HfGguf', // single GGUF file from a HuggingFace repo (repo::file.gguf)
+  HfSnapshot = 'HfSnapshot', // whole-repo snapshot (MLX weights) from HuggingFace
+  LmStudio = 'LmStudio', // download via the local LM Studio REST server
+}
+
+/** Which local engine runs inference for a model. */
+export enum RuntimeKind {
   Ollama = 'Ollama', // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
-  MlxServer = 'MlxServer', // MLX via a local OpenAI-compatible server (LM Studio / vllm-mlx)
+  MlxServer = 'MlxServer', // MLX via a local OpenAI-compatible server (mlx_lm / LM Studio)
+  LmStudio = 'LmStudio', // reserved: LM Studio as an inference runtime (download-only in Slice 18)
 }
 
 /** A capability a model advertises and an agent can require. Selector hard-filters on these. */
@@ -47,7 +56,7 @@ export type ModelParams = {
  * later slices can resolve a capability/role to a discovered model.
  */
 export type ModelDeclaration = {
-  provider: ProviderKind;
+  runtime: RuntimeKind;
   model: string;
   params: ModelParams;
   role: string;
@@ -67,4 +76,11 @@ export type ModelDeclaration = {
    * Ollama; set this only to deliberately cap below it or as a probe fallback.
    */
   maxContext?: number;
+  /**
+   * A valid Ollama model tag to use when this declaration's runtime is
+   * unreachable and selection degrades to Ollama. Non-Ollama runtimes (e.g.
+   * MLX/HF repo ids) are not resolvable by Ollama, so without this the
+   * degrade path honestly reuses `model` (and logs it) rather than guessing.
+   */
+  fallbackModel?: string;
 };

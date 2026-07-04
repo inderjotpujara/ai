@@ -1,15 +1,21 @@
-## Task 10: CLI `--verify` + real `VerifyDeps` wiring (consent-pull) + `unverified.txt`
+### Task 10: hf-fetch — retry + stall-watchdog parity
 
-**Files:** Modify `src/cli/crew.ts`, `src/cli/flow.ts`; Create `src/verification/deps.ts` (the real `VerifyDeps` factory); Test `tests/cli/verify-deps.test.ts`
+**Files:** Modify: `src/provisioning/providers/hf-fetch.ts` (wrap the fetch/loop in `withRetry` + `StallWatchdog` from `supervisor.ts`, mirroring `ollama.ts:26-27,72-88`); Test: `tests/provisioning/hf-fetch.test.ts`.
 
-**Interfaces:** Produces `makeVerifyDeps({ manager, control, generalModel }): VerifyDeps` where:
-- `generate(model, prompt)` = ensureReady(model decl) → `generateText({ model: createOllamaModel({model}), prompt })` → `.text`.
-- `getByIds` = the store's `getByIds`.
-- `ensureJudge(model)` = if `control.isInstalled(model)` → `{model, fallback:false}`; else per `autoPullPolicy()`: `always`→pull; `prompt`+TTY→ask y/n (readline), pull on yes else `{generalModel, fallback:true}`; `never`→`{generalModel, fallback:true}`. Log the notice on fallback.
+- [ ] **Step 1: Write the failing test** — a `fetchImpl` that throws on first call, succeeds on second; assert the file still downloads (retry engaged).
+- [ ] **Step 2: Run to verify it fails.**
+- [ ] **Step 3: Wrap** the per-file download in `withRetry(fn, { attempts: 4, baseMs, capMs, jitter: true, signal })` and beat a `StallWatchdog(90_000, onStall)` on each chunk. On retry, the `.part` `finally`-cleanup from Task 6 guarantees a clean restart.
+- [ ] **Step 4: Run to verify it passes.**
+- [ ] **Step 5: Commit**
 
-- [ ] **Step 1: Failing test** — unit-test `ensureJudge` policy with a fake control (installed → no pull; not-installed + policy 'never' → fallback; 'always' → pull called). No TTY in tests → prompt path uses 'never'/fallback.
-- [ ] **Step 2–4:** Implement `makeVerifyDeps`; add `--verify` parsing to `crew.ts`/`flow.ts` that sets the crew/workflow `verify` flag and passes `VerifyDeps`; on an `unverified` outcome write `runs/<id>/unverified.txt` (draft + unsupported claims + faithfulness) instead of `result.txt` and exit non-zero.
-- [ ] **Step 5: Run tests + typecheck + lint** → PASS. Commit `feat(cli): --verify flag + consent-pull judge wiring + unverified.txt`.
+```bash
+git add src/provisioning/providers/hf-fetch.ts tests/provisioning/hf-fetch.test.ts
+git commit -m "feat(provisioning): hf-fetch retry + stall-watchdog parity with Ollama"
+```
+
+**WS2 checkpoint:** `bun run typecheck && bun test` green; `hf-fetch` persists GGUF + MLX snapshots atomically.
 
 ---
+
+## WS3 — MLX runtime to Ollama's bar
 

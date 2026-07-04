@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline';
 import { generateText } from 'ai';
-import { ProviderKind } from '../core/types.ts';
+import { RuntimeKind } from '../core/types.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import type { RetrievalResult } from '../memory/types.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
@@ -23,7 +23,7 @@ export type MakeVerifyDepsArgs = {
  *  short claim-check/decompose/grade prompts verify issues. */
 function chatDecl(model: string) {
   return {
-    provider: ProviderKind.Ollama,
+    runtime: RuntimeKind.Ollama,
     model,
     params: { temperature: 0.1, numCtx: 8192 },
     role: 'verification judge / general',

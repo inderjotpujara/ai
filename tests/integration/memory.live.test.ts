@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { rmSync } from 'node:fs';
-import { ProviderKind } from '../../src/core/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import { makeEmbedder, probeEmbedder } from '../../src/memory/embed.ts';
 import { createMemoryStore } from '../../src/memory/store.ts';
 import { createModelManager } from '../../src/resource/model-manager.ts';
@@ -24,7 +24,7 @@ describe.skipIf(!ready)('memory.live', () => {
     expect(probed.maxInput).toBeGreaterThan(0);
 
     const manager = createModelManager();
-    const control = runtimeFor(ProviderKind.Ollama).control;
+    const control = runtimeFor(RuntimeKind.Ollama).control;
     const embedder = makeEmbedder({
       ensureReady: (decl) => manager.ensureReady(decl),
       control,
