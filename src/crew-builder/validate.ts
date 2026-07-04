@@ -1,8 +1,23 @@
 import { z } from 'zod';
 import type { BuilderModel, ValidationIssue } from '../agent-builder/types.ts';
 import { assertAcyclic } from '../workflow/define.ts';
-import type { CrewIR, WorkflowIR } from './ir.ts';
+import type { CrewIR, InputDescriptor, WorkflowIR } from './ir.ts';
 import type { Shape } from './types.ts';
+
+/** Same placeholder regex as `fromTemplate` (safe-helpers.ts) — kept in sync
+ *  so every `{{ref}}` a template can resolve is also a ref we validate. */
+const TEMPLATE_REF_RE = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
+
+/** Refs named by a single input descriptor: a `fromStep` ref, or every
+ *  `{{ref}}` placeholder embedded in a `fromTemplate` template. */
+function refsOfInput(input: InputDescriptor): string[] {
+  if (input.kind === 'fromStep') return [input.ref];
+  if (input.kind === 'fromTemplate')
+    return [...input.template.matchAll(TEMPLATE_REF_RE)]
+      .map((m) => m[1])
+      .filter((ref): ref is string => ref !== undefined);
+  return [];
+}
 
 export type ValidateCtx = {
   existingAgents: string[];
@@ -13,17 +28,17 @@ export type ValidateCtx = {
 
 const AlignSchema = z.object({ aligned: z.boolean(), reason: z.string() });
 
-/** Collect every fromStep/predicate/map ref a workflow step names. `dependsOn`
- *  is deliberately excluded here — the acyclicity gate below resolves and
+/** Collect every fromStep/fromTemplate/predicate/map ref a workflow step
+ *  names — including a map step's inner sub-step input. `dependsOn` is
+ *  deliberately excluded here — the acyclicity gate below resolves and
  *  checks those edges (mirrors `effectiveDeps`). */
 function refsOf(step: WorkflowIR['steps'][number]): string[] {
   const out: string[] = [];
-  if ('input' in step && step.input.kind === 'fromStep')
-    out.push(step.input.ref);
+  if ('input' in step) out.push(...refsOfInput(step.input));
   if (step.kind === 'branch') out.push(step.predicate.ref);
   if (step.kind === 'map') {
     out.push(step.over.ref);
-    if (step.step.input.kind === 'fromStep') out.push(step.step.input.ref);
+    out.push(...refsOfInput(step.step.input));
   }
   return out;
 }
@@ -81,6 +96,23 @@ function structuralWorkflow(
         field: 'tool',
         problem: `step ${step.id} uses tool "${step.tool}" not in the palette`,
       });
+    }
+    if (step.kind === 'map') {
+      if (step.step.kind === 'agent' && !known.has(step.step.agent)) {
+        issues.push({
+          field: 'agent',
+          problem: `step ${step.id} references unknown agent "${step.step.agent}"`,
+        });
+      }
+      if (
+        step.step.kind === 'tool' &&
+        !ctx.packNames.includes(step.step.tool)
+      ) {
+        issues.push({
+          field: 'tool',
+          problem: `step ${step.id} uses tool "${step.step.tool}" not in the palette`,
+        });
+      }
     }
     for (const ref of refsOf(step)) {
       if (!ids.has(ref)) {
@@ -196,10 +228,11 @@ async function goalAlignment(
 }
 
 /** Two-tier IR validation gate.
- *  Tier 1 STRUCTURAL (sync): agent refs resolve to existingAgents ∪ toBeBuilt,
- *  tool refs are palette-only, every fromStep/predicate/map ref names a real
- *  upstream step, branch targets exist, member `agentRef` resolves, and the
- *  dependency graph is id-unique + acyclic (`assertAcyclic`).
+ *  Tier 1 STRUCTURAL (sync): agent refs resolve to existingAgents ∪ toBeBuilt
+ *  (including a map step's inner sub-step agent), tool refs are palette-only
+ *  (ditto for a map sub-step tool), every fromStep/fromTemplate/predicate/map
+ *  ref names a real upstream step, branch targets exist, member `agentRef`
+ *  resolves, and the dependency graph is id-unique + acyclic (`assertAcyclic`).
  *  Tier 2 SEMANTIC (async): an LLM-judge goal-alignment check, reached only
  *  when tier 1 found nothing — a structurally-broken graph never spends a
  *  model call. Empty array = valid. */

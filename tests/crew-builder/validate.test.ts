@@ -68,6 +68,58 @@ test('passes a valid workflow (agent known, ref resolves, goal aligned)', async 
   expect(issues).toEqual([]);
 });
 
+test('flags a map sub-step referencing an unknown agent', async () => {
+  const ir: WorkflowIR = {
+    id: 'w',
+    steps: [
+      {
+        kind: 'map',
+        id: 'm',
+        over: { kind: 'mapOver', ref: 'f' },
+        step: {
+          kind: 'agent',
+          agent: 'ghost_agent',
+          input: { kind: 'fromInput' },
+        },
+      },
+    ],
+  };
+  const issues = await validateIR(ir, 'workflow', {
+    existingAgents: ['web_fetch'],
+    packNames: [],
+    toBeBuilt: [],
+    model: okJudge,
+  });
+  expect(
+    issues.some(
+      (i) => i.field === 'agent' && i.problem.includes('ghost_agent'),
+    ),
+  ).toBe(true);
+});
+
+test('flags a fromTemplate placeholder that names no upstream step', async () => {
+  const ir: WorkflowIR = {
+    id: 'w',
+    steps: [
+      {
+        kind: 'agent',
+        id: 'a',
+        agent: 'web_fetch',
+        input: { kind: 'fromTemplate', template: 'x {{ghoststep}} y' },
+      },
+    ],
+  };
+  const issues = await validateIR(ir, 'workflow', {
+    existingAgents: ['web_fetch'],
+    packNames: [],
+    toBeBuilt: [],
+    model: okJudge,
+  });
+  expect(
+    issues.some((i) => i.field === 'ref' && i.problem.includes('ghoststep')),
+  ).toBe(true);
+});
+
 test('surfaces a goal-misaligned graph (semantic tier)', async () => {
   const noJudge: BuilderModel = {
     object: async () =>

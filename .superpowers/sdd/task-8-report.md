@@ -178,3 +178,62 @@ $ bun run docs:check
   different slice/numbering — looked like a stale leftover at this path, not
   something from this session. Flagging in case the ledger/controller
   expected that content to be preserved elsewhere.
+
+## Post-landing fix: two Important validator gaps closed
+
+Two holes let invalid IRs pass tier-1 structural validation as valid:
+
+- **Gap 1 — map sub-step agent/tool not validated.** `structuralWorkflow`'s
+  per-step loop checked top-level `step.kind === 'agent'`/`'tool'` refs but
+  never looked inside a `step.kind === 'map'`'s inner `step.step`. Fixed by
+  adding a `step.kind === 'map'` branch that checks `step.step.kind ===
+  'agent'` against `known` (`existingAgents ∪ toBeBuilt`) and `step.step.kind
+  === 'tool'` against `ctx.packNames`, pushing the same `{field:'agent'|
+  'tool', problem}` issue shape/wording as the existing top-level checks.
+- **Gap 2 — `fromTemplate` refs not validated.** `refsOf` only extracted a ref
+  for `input.kind === 'fromStep'`; a `fromTemplate` descriptor's `template`
+  embeds `{{ref}}` placeholders (resolved at runtime by `fromTemplate` in
+  `src/crew-builder/safe-helpers.ts` via `/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g`)
+  that were never checked against the step-id set. Fixed by extracting a
+  `refsOfInput(input: InputDescriptor)` helper (using the identical regex,
+  named `TEMPLATE_REF_RE`, kept next to the import) that returns the
+  `fromStep` ref or every `{{ref}}` placeholder name for `fromTemplate`;
+  `refsOf` now calls it for both a step's own `input` and a map step's inner
+  `step.step.input`, so map sub-step template refs are covered too.
+
+### Tests added (`tests/crew-builder/validate.test.ts`)
+
+- `flags a map sub-step referencing an unknown agent` — a `map` step whose
+  sub-step is `{kind:'agent', agent:'ghost_agent', input:{kind:'fromInput'}}`;
+  asserts an issue with `field === 'agent'` naming `ghost_agent`.
+- `flags a fromTemplate placeholder that names no upstream step` — a step
+  with `input:{kind:'fromTemplate', template:'x {{ghoststep}} y'}`; asserts
+  an issue with `field === 'ref'` naming `ghoststep`.
+- The original 4 tests are untouched and still pass.
+
+### Verification
+
+```
+$ bun test tests/crew-builder/validate.test.ts
+ 6 pass
+ 0 fail
+ 6 expect() calls
+Ran 6 tests across 1 file. [84.00ms]
+
+$ bun test tests/crew-builder/
+ 28 pass
+ 0 fail
+ 43 expect() calls
+Ran 28 tests across 7 files. [100.00ms]
+
+$ bun run typecheck
+$ tsc --noEmit
+(clean, no output)
+
+$ bun run lint:file -- src/crew-builder/validate.ts tests/crew-builder/validate.test.ts
+Checked 2 files in 5ms. No fixes applied.
+```
+
+No `any`/`as never` introduced. `docs/architecture.md` untouched — this is a
+bugfix inside the already-documented `crew-builder` subsystem, no new
+subsystem/mechanism introduced.
