@@ -1,32 +1,49 @@
-### Task 18 report: MCP `MCP_TRANSPORT` attr emission
+### Task 18: chat multi-step gap trigger — report
+
+> Note: this report path previously held an unrelated Task-18 report from an
+> earlier slice's numbering ("MCP `MCP_TRANSPORT` attr emission"). Replaced
+> here with the correct Slice-19 Task-18 report per the brief's instructions.
 
 **Status:** Done.
 
-**Problem:** `ATTR.MCP_TRANSPORT` (`mcp.transport`) was defined in `src/telemetry/spans.ts` but never set on any span or event (flagged in the Slice-15 review as dead telemetry).
+**Commit:** `190afc9` — `feat(cli): route multi-step chat gaps to the crew/workflow builder`
 
-**Root cause / where transport is known:** `mountAll` in `src/mcp/mount.ts` iterates `config.entries: McpServerEntry[]`, and each entry already carries `kind: McpTransportKind` (`Stdio` | `Http`, from `src/mcp/types.ts`, set by `toEntry()` in `src/mcp/config.ts` based on whether the raw mcp.json entry has a `command` or a `url`). That's the one place transport kind is unambiguously known per server.
+**Files:**
+- Added `src/cli/offer-crew.ts` — exports `shouldOfferCrew(text: string): boolean`, a pure regex heuristic (`/\b(then|after that|steps?|workflow|team|crew|pipeline)\b/i`). No console output; pure function per the constraint.
+- Added `tests/cli/offer-crew.test.ts` — 6 tests: multi-step phrasing → true, single capability → false, plus extra phrasings ("steps"/"workflow", "team"/"crew", "pipeline"/"after that", case-insensitivity).
+- Modified `src/cli/chat.ts` — 3 new imports (`buildCrewOrWorkflow` from `../crew-builder/builder.ts`, `makeRealCrewBuilderDeps` from `../crew-builder/deps.ts`, `shouldOfferCrew` from `./offer-crew.ts`) and a new branch inserted inside the existing `else if (result.kind === 'gap')` block, before the pre-existing single-agent offer.
 
-**Implementation:**
-1. `src/mcp/mount.ts` — `MountedRegistry.mounted` now carries `kind: McpTransportKind` alongside `name`/`toolCount`; the `mounted.push(...)` call in the mount loop sets it from `entry.kind`. `skipped`/`dormant` shapes are untouched (skipped can fail before a transport-relevant attempt in some paths, and dormant entries don't retain `kind` in `McpConfig.dormant` — kept minimal/honest rather than fabricating a value).
-2. `src/telemetry/spans.ts` — `withMcpMountSpan`'s `record` callback gained an optional 4th parameter `transport?: string`. When supplied, the `mcp.server.mount` event now includes `[ATTR.MCP_TRANSPORT]: transport`; when omitted (skipped/dormant calls), the attribute is simply not set — same optional-attribute pattern already used for `toolCount`. No new dependency from `telemetry` on `mcp/types.ts`: the param stays a plain `string`, keeping telemetry decoupled from the MCP domain type.
-3. `src/cli/with-mcp-run.ts` — the `mounted` loop now passes `m.kind` through: `record(m.name, 'mounted', m.toolCount, m.kind)`. `skipped`/`dormant` calls unchanged (no transport recorded there, honest to what's known/relevant).
+**How chat.ts's gap branch actually looked (vs. the brief):**
+The brief's snippet matched the real code closely. The actual gap branch is:
+```ts
+} else if (result.kind === 'gap') {
+  console.log(result.message);
+  if (interactiveTTY()) {
+    const wants = await askYesNo(`Propose a new agent for "${result.missingCapability}"?`, ...);
+    if (wants) { ... buildAgent ... }
+  }
+}
+```
+No pre-existing `multiStep` field on the gap result — went with the heuristic fallback as the brief allowed ("gate on a heuristic in chat.ts ... fall back to the heuristic only if the core change balloons"). Did not touch `src/core`'s gap-result shape at all — purely additive in `chat.ts`.
 
-Values recorded are exactly the existing `McpTransportKind` enum values (`'stdio'` | `'http'`) — no new naming invented.
+**Integration:** Inserted the crew-offer branch first, gated on `interactiveTTY() && shouldOfferCrew(\`${result.missingCapability} ${task}\`)`. On yes: `makeRealCrewBuilderDeps()` → `buildCrewOrWorkflow(...)` inside try/finally (cleanup in finally) → on `built.kind === 'written'` print `Created ${built.shape} "${built.name}" — re-run to use it.` → unconditional `return` inside the `if (wantsCrew)` block (so declining the crew *offer* falls through to the existing single-agent offer, but accepting it — written or not — returns and skips the single-agent offer, matching the brief's "handled; skip the single-agent offer" comment). The pre-existing `if (interactiveTTY()) { ... Propose a new agent ... }` block is untouched and still runs verbatim when `shouldOfferCrew` is false or the user declines the crew offer.
 
-**Tests (TDD, focused):**
-- `tests/mcp/tool-span-emission.test.ts` — two new cases on `withMcpMountSpan`: (a) `record(name, 'mounted', toolCount, transport)` for a stdio server and an http server produces two `mcp.server.mount` events each carrying the correct `ATTR.MCP_TRANSPORT`; (b) calling `record` without a transport arg (e.g. skipped/consent-denied path) leaves `ATTR.MCP_TRANSPORT` unset on that event (degrade-honest, not fabricated).
-- `tests/mcp/mount-all.test.ts` — new case: `mountAll` over one stdio + one http entry tags `reg.mounted[i].kind` with `McpTransportKind.Stdio` / `.Http` respectively.
-- `tests/cli/with-mcp-run.test.ts` — new integration case: a real `withMcpRun` pass over a stdio `ONE_SERVER_CONFIG` writes `mcp.mount`'s `mcp.server.mount` event to `spans.jsonl` with `attributes['mcp.transport'] === 'stdio'`, proving the attribute survives the full mount → span → JSONL-exporter path, not just the unit-level plumbing.
+**TDD:**
+- RED: `bun test tests/cli/offer-crew.test.ts` failed with `Cannot find module '../../src/cli/offer-crew.ts'` before the source file existed.
+- GREEN: after writing `src/cli/offer-crew.ts`, all 6 tests pass.
 
-**RED→GREEN verified:** stashed the three implementation files (`spans.ts`, `mount.ts`, `with-mcp-run.ts`) and reran the three test files — all 3 new assertions failed with `undefined` where `'stdio'`/`'http'` was expected (14 pass / 3 fail). Restored the implementation — 17 pass / 0 fail.
+**Verification:**
+- `bun run typecheck` — clean.
+- `bun test tests/cli/ tests/crew-builder/` — 102 pass, 0 fail, 207 expect() calls across 26 files (no regressions; `tests/cli/chat.test.ts` doesn't exercise the gap branch at all — it only covers `maybeAutoProvision`/`warnUnknownChatAgents` — so risk of breaking it was low, and it stayed green).
+- `bun run lint:file -- src/cli/offer-crew.ts src/cli/chat.ts tests/cli/offer-crew.test.ts` — clean (biome, no fixes needed).
+- `git commit` ran the pre-commit `docs-check` hook, which passed (this task didn't touch `docs/architecture.md` since it's a purely additive CLI wiring change to an already-documented subsystem, not a new one).
 
-**Verify (inline only, no full suite run per instructions):**
-- `bun run typecheck` → clean (0 errors), both before and after the stash round-trip.
-- `bun run lint:file -- src/telemetry/spans.ts src/mcp/mount.ts src/cli/with-mcp-run.ts tests/mcp/tool-span-emission.test.ts tests/mcp/mount-all.test.ts tests/cli/with-mcp-run.test.ts` → clean after one `--write` pass (2 formatting-only fixes: a line-wrap in `with-mcp-run.ts` and an `expect(...)` chain wrap in `mount-all.test.ts`).
-- `bun run test:file -- "tests/mcp/tool-span-emission.test.ts" "tests/mcp/mount-all.test.ts" "tests/cli/with-mcp-run.test.ts"` → 17 pass / 0 fail / 36 expect() calls.
+**Self-review:**
+- Import ordering: initially misplaced the `./offer-crew.ts` import mid-way through the `../resource/*` group; caught it before running lint and moved it to sort correctly among the same-directory (`./`) imports at the end of the import block. Lint confirmed clean after the fix.
+- Confirmed only my three files were staged before committing (`git status --short` showed a long list of unrelated `M` files from other in-flight SDD tasks in this slice — none were `git add`ed).
+- `return` inside the `if (wantsCrew)` block returns from the async callback passed to `withMcpRun`, not from `main()` directly — same pattern the brief's snippet used; verified this is a normal function-scope return, not a loop/switch fall-through issue.
 
-**Concerns / follow-ups (none blocking):**
-- `skipped` and `dormant` mount outcomes don't carry `MCP_TRANSPORT` — `dormant` genuinely can't (transport isn't retained in `McpConfig.dormant`), and `skipped` was left alone to avoid widening the diff and to keep the existing exact-equality test in `mount-all.test.ts` (`expect(reg.skipped).toEqual([{ name: 'boom', reason: 'spawn failed' }])`) passing unchanged. If a future slice wants transport on skipped/dormant too, that's a small additive change (thread `kind` through `skipped.push`/`config.dormant` the same way) but is out of scope for "emit the dead attr on the mount span."
-- No new deps; no hardcoded values — transport values are the pre-existing `McpTransportKind` enum members.
+**Concerns:**
+- None blocking. One judgment call worth flagging: per the brief, `return` fires whenever the user says yes to the crew offer, even if `buildCrewOrWorkflow` returns `declined`/`invalid`/`abandoned` (not just `written`) — the single-agent offer is skipped either way once the user has engaged with the crew flow. This matches the brief's explicit snippet and comment, but means a user who says "yes, propose a crew" and then rejects the *proposed* crew IR won't be re-offered the single-agent path in the same run (they'd need to re-run `chat`). Flagging for awareness, not changing without direction since it matches the brief exactly.
 
-**Commit:** `feat(telemetry): emit MCP_TRANSPORT on mcp mount spans`
+**Report path:** `/Users/inderjotsingh/ai/.superpowers/sdd/task-18-report.md`

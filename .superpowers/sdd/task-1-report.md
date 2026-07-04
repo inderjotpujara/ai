@@ -1,79 +1,173 @@
-# Task 1 Report: Add `RuntimeKind` + extend `ProviderKind` + `downloadKindFor` (Slice 18)
+# Task 1 report: IR types + Zod schemas (`ir.ts`) — Slice 19
 
 ## Status: DONE
 
 ## What was implemented
 
-Followed the task brief (`.superpowers/sdd/task-1-brief.md`) verbatim, via TDD:
+Created `src/crew-builder/ir.ts` — the declarative IR consumed by every later
+Slice-19 crew-builder task — exactly as specified in the task brief, plus
+`tests/crew-builder/ir.test.ts` with the brief's 3 tests verbatim.
 
-1. **`src/core/types.ts`** — replaced the two-member `ProviderKind` (previously
-   overloaded as both download-routing and inference-routing) with a four-member
-   download-side `ProviderKind` (`Ollama | HfGguf | HfSnapshot | LmStudio`), added a
-   new inference-side `RuntimeKind` enum (`Ollama | MlxServer | LmStudio`), and
-   renamed `ModelDeclaration.provider: ProviderKind` → `ModelDeclaration.runtime:
-   RuntimeKind`.
-2. **`src/core/kind-map.ts`** (new) — pure helper `downloadKindFor(runtime, shape):
-   ProviderKind` mapping an inference runtime + repo shape to the download provider
-   that fetches it: LmStudio→LmStudio, MlxServer→HfSnapshot, Ollama+gguf-file→HfGguf,
-   Ollama+other shape→Ollama.
-3. **`tests/core/kind-map.test.ts`** (new) — the 4 tests specified in the brief,
-   verbatim.
+Exports: `InputDescriptorSchema`/`InputDescriptor`, `PredicateDescriptorSchema`/
+`PredicateDescriptor`, `WorkflowStepIRSchema`/`WorkflowStepIR`,
+`WorkflowIRSchema`/`WorkflowIR`, `CrewMemberIRSchema`/`CrewMemberIR`,
+`CrewTaskIRSchema`, `CrewIRSchema`/`CrewIR`. Step kinds are a Zod
+`discriminatedUnion('kind', …)` over `agent`/`tool`/`branch`/`map` — kept as
+`type` + discriminated union per the plan's constraint (IR unions stay `type`,
+not converted to `enum`).
+
+No deviations from the brief's code — it typechecked and passed as written.
 
 ## TDD evidence
 
-**RED** — before `kind-map.ts` existed:
+**Step 1/2 — RED** (test file written first, referencing not-yet-existing `ir.ts`):
+
 ```
-$ bun run test:file -- "tests/core/kind-map.test.ts"
-$ bun test tests/core/kind-map.test.ts
-error: Cannot find module '../../src/core/kind-map.ts' from '/Users/inderjotsingh/ai/tests/core/kind-map.test.ts'
+$ bun test tests/crew-builder/ir.test.ts
+error: Cannot find module '../../src/crew-builder/ir.ts' from '/Users/inderjotsingh/ai/tests/crew-builder/ir.test.ts'
 0 pass
 1 fail
 1 error
-Ran 1 test across 1 file. [14.00ms]
+Ran 1 test across 1 file. [22.00ms]
 ```
 
-**GREEN** — after implementing `types.ts` + `kind-map.ts`:
+**Step 3/4 — GREEN** (implemented `src/crew-builder/ir.ts` per brief, unchanged):
+
 ```
-$ bun run test:file -- "tests/core/kind-map.test.ts"
-$ bun test tests/core/kind-map.test.ts
- 4 pass
- 0 fail
- 4 expect() calls
-Ran 4 tests across 1 file. [11.00ms]
+$ bun test tests/crew-builder/ir.test.ts
+3 pass
+0 fail
+3 expect() calls
+Ran 3 tests across 1 file. [39.00ms]
+
+$ bun run typecheck
+$ tsc --noEmit
+(clean, no output)
 ```
+
+**Lint** — `bun run lint:file -- src/crew-builder/ir.ts tests/crew-builder/ir.test.ts`
+initially failed on Biome formatting (the brief's sample code has
+multi-property object literals collapsed onto one line, which Biome's
+formatter rejects). Fixed via `bunx biome check --write` (auto-format only —
+no logic changes), then re-verified:
+
+```
+$ bun run lint:file -- src/crew-builder/ir.ts tests/crew-builder/ir.test.ts
+Checked 2 files in 4ms. No fixes applied.
+
+$ bun test tests/crew-builder/ir.test.ts
+3 pass / 0 fail
+
+$ bun run typecheck
+(clean)
+```
+
+No `console.log` present (verified via grep — no matches, exit code 1).
+
+## Deviation: docs hard-line (pre-commit gate)
+
+The brief's Step 5 commit command failed on first attempt:
+
+```
+✖ docs-check failed (1):
+  - subsystem src/crew-builder/ is not documented in docs/architecture.md
+```
+
+This is the repo's pre-commit hook (`bun run docs:check`), which blocks any
+commit introducing a new `src/<subsystem>/` not mentioned in
+`docs/architecture.md` — the brief didn't anticipate this since it only
+scoped `ir.ts` + its test, and there is no `DOCS_OK` bypass for pre-commit
+(only for pre-push). Per repo CLAUDE.md ("Don't ship a `src/**` change
+without updating `docs/architecture.md`"), I added one new module-map table
+row to `docs/architecture.md` (right after the Agent-builder row): a
+**truthful, scoped** description marked `*(in progress, Slice 19)*` covering
+only what Task 1 actually delivers (the IR schemas/types), explicitly noting
+that generation/validation/compile land in later Slice-19 tasks and that
+this entry will grow with them. This is not scope creep on the IR code
+itself — only the minimum doc line the automated gate requires. Later tasks
+should extend this same row rather than add a competing one.
+
+Only `src/crew-builder/ir.ts`, `tests/crew-builder/ir.test.ts`, and this one
+`docs/architecture.md` row were staged/committed — unrelated pending changes
+already present in the working tree (`.remember/today-2026-07-04.md`,
+`.superpowers/sdd/progress.md`, `.superpowers/sdd/task-1-brief.md` — from
+surrounding slice/session orchestration, not this task) were left untouched
+and unstaged.
 
 ## Files changed
 
-- `src/core/types.ts` (modified) — `ProviderKind` redefined (2→4 members),
-  `RuntimeKind` added, `ModelDeclaration.provider` → `.runtime`.
-- `src/core/kind-map.ts` (new) — `RepoShape` type + `downloadKindFor()`.
-- `tests/core/kind-map.test.ts` (new) — 4 tests.
+- `src/crew-builder/ir.ts` (new)
+- `tests/crew-builder/ir.test.ts` (new)
+- `docs/architecture.md` (+1 module-map table row, docs-check compliance)
 
-Commit: `1c0723e` — "feat(core): split ProviderKind (download) from RuntimeKind
-(inference) + downloadKindFor"
+## Commit
+
+`fa58d74` — `feat(crew-builder): IR types + Zod schemas`
 
 ## Self-review
 
-- Enum members, doc comments, and the helper signature match the brief's exact
-  interfaces verbatim — no deviation.
-- Per the task's explicit instructions, did NOT touch any consumer file
-  (registry.ts, runtime files, discovery, select-hook, etc.) — those are expected
-  to break and are fixed in Tasks 2-4 of this slice's WS1.
-- Did NOT run the full `bun run typecheck` or full `bun test` suite, per
-  instructions — only the scoped `tests/core/kind-map.test.ts` (the broader build
-  is expected red by design until Tasks 2-4 land).
-- The pre-commit `docs:check` hook ran automatically on commit and passed (no
-  living-doc gap introduced — `kind-map.ts` lives inside the already-documented
-  `src/core` subsystem in `docs/architecture.md`, and no new subsystem was added).
-- Only the three files specified in the brief (`src/core/types.ts`,
-  `src/core/kind-map.ts`, `tests/core/kind-map.test.ts`) were staged and
-  committed, confirmed via `git status --short` before commit. Other unrelated
-  working-tree modifications present at the time (`.remember/now.md`,
-  `.superpowers/sdd/progress.md`, `.superpowers/sdd/task-1-brief.md` —  from the
-  surrounding slice orchestration, not this task) were deliberately left
-  unstaged/untouched.
+- Brief's schema/type code used verbatim; only Biome reformatting applied
+  (mechanical, no logic change).
+- `WorkflowIRSchema` requires `steps.min(1)`; `CrewIRSchema` requires
+  `members.min(1)` and `tasks.min(1)` — matches brief.
+- Discriminated unions correctly reject unknown `kind` values (test 3
+  confirms `WorkflowIRSchema` rejects `kind: 'nope'`).
+- `MapStepIR`/`MapSubStepIR` are defined but not exercised by any of the 3
+  brief tests — that's in-brief scope (the brief specifies exactly these 3
+  tests); a later task exercising `map` steps should add coverage.
+- No lint suppressions, no `any`, no `console.log`.
 
 ## Concerns
 
-None. The task was self-contained and unambiguous; no deviations from the brief
-were needed.
+- None blocking. The one open item is the docs-hard-line addition above —
+  flagged for the slice's final review to confirm the `crew-builder` row's
+  wording stays accurate as later tasks land (generation, registry
+  validation, compile-to-`WorkflowDef`/`CrewDef`), per the repo's "review
+  audits docs against the diff for truth" rule.
+
+## Review-fix follow-up (post-Task-1)
+
+Applied 3 review findings to `ir.ts` + its test:
+
+1. **Reuse canonical enum** — `CrewIRSchema.process` was
+   `z.enum(['sequential', 'hierarchical'])`, a string-literal duplicate of
+   the canonical `CrewProcess` string enum in `src/crew/types.ts`. Added
+   `import { CrewProcess } from '../crew/types.ts';` and changed the field
+   to `process: z.nativeEnum(CrewProcess)`. Since `CrewProcess.Sequential =
+   'sequential'` and `CrewProcess.Hierarchical = 'hierarchical'`, existing
+   JSON `"process":"sequential"` still parses identically — no behavior
+   change, just removes the duplicate literal union.
+2. **Missing inferred type export** — `CrewTaskIRSchema` had no
+   corresponding `CrewTaskIR` type export, unlike every sibling schema
+   (`CrewMemberIR`, `WorkflowStepIR`, etc.). Added
+   `export type CrewTaskIR = z.infer<typeof CrewTaskIRSchema>;` immediately
+   after the schema definition.
+3. **Map-step test gap** — the original 3 tests never exercised the `map`
+   step kind (flagged as an open concern above). Added two tests to
+   `tests/crew-builder/ir.test.ts`: one asserting a valid workflow with a
+   `tool` step producing `list` feeding a `map` step (`over: { kind:
+   'mapOver', ref: 'list' }`, sub-step `{ kind: 'agent', agent: 'web_fetch',
+   input: { kind: 'fromInput' } }`) parses successfully; one asserting the
+   same graph with the `map` step's `step` field omitted is rejected.
+
+### Commands run
+
+```
+$ bun test tests/crew-builder/ir.test.ts
+ 5 pass
+ 0 fail
+ 5 expect() calls
+Ran 5 tests across 1 file. [31.00ms]
+
+$ bun run typecheck
+$ tsc --noEmit
+(clean, no output)
+
+$ bun run lint:file -- src/crew-builder/ir.ts tests/crew-builder/ir.test.ts
+$ biome check src/crew-builder/ir.ts tests/crew-builder/ir.test.ts
+Checked 2 files in 33ms. No fixes applied.
+```
+
+### Commit
+
+`139401c` — `fix(crew-builder): reuse CrewProcess enum in IR + CrewTaskIR export + map-step test`

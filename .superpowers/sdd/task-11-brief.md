@@ -1,20 +1,63 @@
-### Task 11: MLX control surface — real `isInstalled`/`listLoaded`/`getModelMax`
+### Task 11: CrewMember.agentRef + crew-engine resolution
 
-**Files:** Modify: `src/runtime/mlx-server.ts`; Test: `tests/runtime/mlx-server.test.ts` (extend, injecting a fake fetch).
+**Files:**
+- Modify: `src/crew/types.ts` (add `agentRef?` to `CrewMember`)
+- Modify: `src/crew/engine.ts` (`crewAgentMap` uses `AGENTS[agentRef]` when present)
+- Test: `tests/crew/agent-ref.test.ts`
 
 **Interfaces:**
-- Produces: `getModelMax(model)` returns a number when the server exposes it (else `undefined`); `listLoaded` returns real sizes when available; `pull` attempts a server-side load and degrades with a clear error.
+- Consumes: `AGENTS`, `AgentFactory` from `agents/index.ts`.
+- Produces: crew members can reuse a registered specialist by `agentRef`.
 
-- [ ] **Step 1: Write the failing test** — inject a fake `${BASE}/models` response exposing a context length / size; assert `getModelMax` returns it and `listLoaded` maps the id.
-  (Refactor `mlx-server.ts` to accept an injectable `fetchImpl`/`baseUrl` via a `createMlxServerRuntime(deps)` factory so it's testable without a live server; export a default `mlxServerRuntime = createMlxServerRuntime()`.)
-- [ ] **Step 2: Run to verify it fails.**
-- [ ] **Step 3: Implement** the factory + fill `getModelMax`/`getModelKvArch` (return `undefined` when the server gives nothing — planner tolerates it), real `listLoaded` sizes when present, and a `pull` that checks `listIds()` then attempts the server's load endpoint if one exists, else throws the existing clear "load it in the server" error (degrade). Keep `embed` throwing `MemoryError` (honestly unsupported).
-- [ ] **Step 4: Run to verify it passes.**
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// tests/crew/agent-ref.test.ts
+import { expect, test } from 'bun:test';
+import { crewAgentMap } from '../../src/crew/engine.ts';
+import { CrewProcess, type CrewDef } from '../../src/crew/types.ts';
+
+test('a member with agentRef resolves to the registered factory', () => {
+  const crew: CrewDef = {
+    id: 'c', process: CrewProcess.Sequential,
+    members: [{ name: 'wf', agentRef: 'web_fetch', role: 'r', goal: 'g', backstory: 'b', requires: [], prefer: 'largest-that-fits' as never }],
+    tasks: [{ id: 't', description: 'd', expectedOutput: 'o', member: 'wf' }],
+  };
+  const map = crewAgentMap(crew, {});
+  expect(map.wf.name).toBe('web_fetch'); // came from the registered agent, not a fresh inline build
+});
+```
+
+- [ ] **Step 2: Run — FAIL.**
+
+- [ ] **Step 3: Implement** — add the optional field + resolution:
+
+```ts
+// src/crew/types.ts — add to CrewMember (additive):
+  /** When set, reuse this registered AGENTS specialist instead of an inline build. */
+  agentRef?: string;
+```
+
+```ts
+// src/crew/engine.ts — in crewAgentMap, replace the buildCrewAgent line:
+import { AGENTS } from '../../agents/index.ts';
+// ...
+  for (const member of crew.members) {
+    const memberTools = { ...(member.tools ?? tools), ...recallTools };
+    const factory = member.agentRef ? AGENTS[member.agentRef] : undefined;
+    map[member.name] = factory ? factory(memberTools) : buildCrewAgent(member, memberTools);
+  }
+```
+
+> NOTE for implementer: confirm `src/crew/engine.ts` doesn't already import from `agents/index.ts` (avoid a cycle — `agents/*.ts` import from `src/`, not vice-versa; `engine.ts` importing the registry is fine as it's a leaf consumer). Run the full crew test suite after: `bun test tests/crew/`.
+
+- [ ] **Step 4: Run — PASS** (`bun test tests/crew/ && bun run typecheck`).
+
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/runtime/mlx-server.ts tests/runtime/mlx-server.test.ts
-git commit -m "feat(runtime): fill MLX control surface (getModelMax, listLoaded, pull best-effort) via injectable factory"
+git add src/crew/types.ts src/crew/engine.ts tests/crew/agent-ref.test.ts
+git commit -m "feat(crew): CrewMember.agentRef reuses a registered specialist"
 ```
 
 ---

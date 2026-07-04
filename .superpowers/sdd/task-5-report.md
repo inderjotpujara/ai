@@ -1,111 +1,123 @@
-# Task 5 report: Add `destDir` to the download contract + supply it from the provisioner (Slice 18, WS2)
+# Task 5 report — think-first `analyze` stage + `BuilderModel.text` seam
 
-> Note: this filename previously held a stale Slice-17 report (agent-builder
-> `writeAgent` review fixes) — it has been overwritten with this Task 5 /
-> Slice 18 report.
+## Status: DONE
 
-## TDD
+Commit: `dad069d` — `feat(crew-builder): think-first analyze stage + BuilderModel.text seam`
 
-**RED** — added a new test to `tests/provisioning/provisioner.test.ts`
-(`'passes a non-empty destDir to the download provider'`), a fake
-`providerFor` that captures `o.destDir` from the opts passed to `download()`,
-mirroring the existing test harness's `deps()` builder. Ran:
+## What was implemented
 
-```
-bun run test:file -- "tests/provisioning/provisioner.test.ts"
-```
+1. **`src/agent-builder/types.ts`** — extended `BuilderModel` (additive) with a
+   required `text: (args: { prompt: string }) => Promise<string>` seam,
+   alongside the existing `object`. Doc comment explains it's for think-first
+   stages that must not be JSON-constrained.
 
-Result: FAIL — `expect(typeof seenDestDir).toBe('string')` got `"undefined"`
-(4 pass / 1 fail), confirming the contract gap exists before any
-implementation change.
+2. **`src/agent-builder/deps.ts`** — `makeBuilderModel` now returns a `text`
+   implementation that mirrors `.object`'s `generateTextImpl` call exactly
+   (same `model`, same conditional `providerOptions` spread) and returns
+   `r.text` directly, with no JSON extraction/parsing/retry — appropriate
+   since this seam is explicitly free-text.
 
-**GREEN** — implemented:
+3. **`src/crew-builder/analyze.ts`** (new) — `analyzeNeed(need, shape, model):
+   Promise<string>`. Builds a prompt instructing the model to think step by
+   step in prose (crew: roles + goals + ordered tasks; workflow: pipeline
+   steps/order/branches/fan-out), explicitly says "Do NOT output JSON," wraps
+   `need` via `delimitNeed` (prompt-injection hardening, consistent with every
+   other agent-builder/crew-builder prompt), calls `model.text(...)`, and
+   returns the trimmed result.
 
-- `src/provisioning/types.ts`: added `destDir: string` to
-  `DownloadProvider.download`'s opts type.
-- `src/provisioning/provisioner.ts` (~line 114): computed
-  `const destDir = process.env.HF_HOME ?? process.env.OLLAMA_MODELS ?? \`${process.cwd()}/model-images\`;`
-  once per provision run and passed it in the `download(...)` call.
-- `src/provisioning/providers/ollama.ts`, `lmstudio.ts`: no signature change
-  needed — destructuring `{ onProgress, signal }` from a wider opts type
-  already type-checks (TS doesn't require destructuring every property);
-  added an explanatory comment noting `destDir` is accepted-and-ignored
-  because the daemon owns its own on-disk store.
-- `src/provisioning/providers/hf-fetch.ts`: same — accepted (ignored for
-  now) with a comment noting Task 6 wires the actual write to `destDir`.
+## TDD RED -> GREEN
 
-Re-ran:
+- **RED**: `tests/crew-builder/analyze.test.ts` written first, importing the
+  not-yet-existing `analyze.ts` -> `bun test tests/crew-builder/analyze.test.ts`
+  failed with `Cannot find module '../../src/crew-builder/analyze.ts'`.
+- **GREEN**: after implementing `analyze.ts`, both tests pass:
+  - "returns the model plaintext decomposition" — asserts the model's text
+    output flows through.
+  - "does not ask for JSON and delimits the need as data" — asserts the
+    prompt contains `Do NOT output JSON`, `<need>`, the injected string, and
+    that the "data, not instructions" guard note precedes the injected text
+    (mirrors the injection-guard test pattern used in `generate.test.ts` /
+    `generate-tool.test.ts`).
 
-```
-bun run test:file -- "tests/provisioning/provisioner.test.ts"
-```
+## Broken fakes fixed (added `text: async () => ''` or equivalent stub)
 
-Result: PASS — 5 pass / 0 fail / 11 expect() calls.
+- `tests/crew-builder/classify.test.ts` — `fakeModel` helper.
+- `tests/agent-builder/generate.test.ts` — `stubModel` helper.
+- `tests/agent-builder/generate-tool.test.ts` — `stubModel` helper.
+- `tests/agent-builder/suggest-tools.test.ts` — `pick` helper.
+- `tests/agent-builder/builder.test.ts` — 5 inline `BuilderModel` literals:
+  `twoStepModel`, `countingDraftModel`, `toolModel`, `countingToolModel`, and
+  the ad-hoc literal in the "injection guard" `buildTool` test.
+- `tests/agent-builder/deps.test.ts` — **not actually broken**: it exercises
+  `makeBuilderModel` itself and never constructs a bare `BuilderModel`
+  literal; its shared `fakeGenerateText` fixtures already return the
+  `{ text: string }` shape both `.object` and `.text` consume, so `.text`
+  worked automatically. Added one new test,
+  `'text() returns the raw generateText output, unparsed'`, to give the new
+  seam explicit direct coverage rather than leaving it implicitly exercised.
 
-## Fallout beyond the brief's file list (kept the build green)
-
-Adding a **required** `destDir` to the opts type broke two call sites the
-brief didn't enumerate, because they pass an object literal directly as the
-argument (TS enforces required-property checks on literal arguments, unlike
-destructured params):
-
-- `src/discovery/discover.ts` (~line 87): `runDiscovery`'s default `pull`
-  fallback calls `providerFor(candidate.provider).download(model, {...})`
-  with a literal opts object. Added the same env-fallback `destDir`
-  computation inline (matching the provisioner's expression) and added it
-  to the literal.
-- `tests/provisioning/hf-fetch.test.ts` and
-  `tests/provisioning/lmstudio.test.ts`: each calls `provider.download(...)`
-  with a literal opts object missing `destDir`. Added
-  `destDir: '/tmp/dest'` to each.
-
-Without these two fixes `bun run typecheck` failed with:
-```
-error TS2345: ... Property 'destDir' is missing in type '{ onProgress...; signal: AbortSignal; }'
-but required in type '{ onProgress...; signal: AbortSignal; destDir: string; }'.
-```
-at `hf-fetch.test.ts:28` and `lmstudio.test.ts:37`.
-
-`tests/provisioning/eval.test.ts`'s fake `providerFor().download`
-implementations (which destructure only `{ onProgress }`) needed no change —
-TS accepts a narrower destructure against a wider parameter type for
-method-shorthand signatures.
-
-## Final verification
+## Test output
 
 ```
-bun run typecheck
+$ bun test tests/agent-builder/ tests/crew-builder/
+bun test v1.3.11 (af24e281)
+
+ 73 pass
+ 0 fail
+ 140 expect() calls
+Ran 73 tests across 14 files. [159.00ms]
 ```
-Result: 0 errors.
+
+## Typecheck / lint
+
+- `bun run typecheck` -> clean (`tsc --noEmit`, no output/errors).
+- `bun run lint:file -- src/agent-builder/types.ts src/agent-builder/deps.ts
+  src/crew-builder/analyze.ts tests/crew-builder/analyze.test.ts
+  tests/crew-builder/classify.test.ts tests/agent-builder/generate.test.ts
+  tests/agent-builder/generate-tool.test.ts
+  tests/agent-builder/suggest-tools.test.ts tests/agent-builder/builder.test.ts
+  tests/agent-builder/deps.test.ts` -> `Checked 10 files. No fixes applied.`
+
+## Files changed (commit `dad069d`)
 
 ```
-bun test
+ src/agent-builder/deps.ts                 |  8 ++++++++
+ src/agent-builder/types.ts                |  2 ++
+ src/crew-builder/analyze.ts               | 24 ++++++++++++++++++++++++ (new)
+ tests/agent-builder/builder.test.ts       |  6 +++++-
+ tests/agent-builder/deps.test.ts          | 11 +++++++++++
+ tests/agent-builder/generate-tool.test.ts |  1 +
+ tests/agent-builder/generate.test.ts      |  1 +
+ tests/agent-builder/suggest-tools.test.ts |  1 +
+ tests/crew-builder/analyze.test.ts        | 31 +++++++++++++++++++++++++++++++ (new)
+ tests/crew-builder/classify.test.ts       |  1 +
+ 10 files changed, 85 insertions(+), 1 deletion(-)
 ```
-Result: **478 pass / 2 skip / 0 fail / 1011 expect() calls** across 139
-files (220.42s) — up from the pre-task baseline of 477 pass by exactly the
-one new `destDir` test added here. Build stayed green throughout. (The 2
-skips are pre-existing Ollama-gated live tests, unrelated to this change.)
 
-## Files touched
+## Self-review
 
-- `src/provisioning/types.ts`
-- `src/provisioning/provisioner.ts`
-- `src/provisioning/providers/ollama.ts`
-- `src/provisioning/providers/lmstudio.ts`
-- `src/provisioning/providers/hf-fetch.ts`
-- `src/discovery/discover.ts` (unplanned but required call-site fix)
-- `tests/provisioning/provisioner.test.ts` (new test)
-- `tests/provisioning/hf-fetch.test.ts` (call-site fix)
-- `tests/provisioning/lmstudio.test.ts` (call-site fix)
+- `.text`'s implementation is a byte-for-byte mirror of `.object`'s
+  `generateTextImpl` call site (same `model`, same conditional
+  `providerOptions` spread) — no drift between the two seams' model-invocation
+  contract.
+- `analyzeNeed` follows the exact prompt-injection pattern used everywhere
+  else in `agent-builder`/`crew-builder` (`delimitNeed` + "data, not
+  instructions" guard note before the delimited block), so the new
+  think-first stage doesn't introduce a weaker injection posture than
+  `generateProposal`/`generateToolProposal`/`classifyNeed`.
+- Every existing inline `BuilderModel` fake across both test directories was
+  grepped for (`grep -n "BuilderModel\|object:"`) and fixed; none left with
+  only `{ object }`. Verified via a full green run of the target test
+  directories after the fixes (73/73 pass), not just the newly-touched files.
+- `analyzeNeed`'s two tests together exercise both the `'crew'` and
+  `'workflow'` shape branches (one test per shape), so branch coverage
+  exists, though neither test asserts the shape-specific bullet-text content
+  verbatim — acceptable since the brief's Step 1 test didn't ask for that
+  granularity and `analyzeNeed`'s output is consumed as opaque prose context
+  by later stages, not parsed.
 
-## Notes for WS2 Tasks 6-10
+## Concerns
 
-- `destDir` is currently sourced from env with a computed fallback
-  (`HF_HOME` → `OLLAMA_MODELS` → `${cwd()}/model-images`) duplicated inline
-  in both `provisioner.ts` and `discover.ts`'s default pull path, per the
-  brief's instruction rather than extracted to a shared helper — worth a
-  small dedup pass in a later task if a third call site needs the same
-  fallback.
-- `hf-fetch.ts` accepts `destDir` but doesn't write to it yet (still
-  streams the response body without persisting bytes to disk) — that's
-  explicitly Task 6's job per the brief.
+- None blocking. `analyzeNeed`'s output isn't consumed by any other stage yet
+  in this slice — per the brief it exists now purely as the think-first
+  infrastructure; wiring it into the pipeline is presumably a later task.

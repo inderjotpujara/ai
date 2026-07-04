@@ -1,102 +1,117 @@
-# Task 11 report: MLX control surface via injectable factory (Slice 18 debt wrap-up)
+# Task 11 report: CrewMember.agentRef + crew-engine resolution (Slice 19)
 
-## Summary
+**Status:** DONE.
 
-Refactored `src/runtime/mlx-server.ts` to export `createMlxServerRuntime(deps?)`
-— an injectable factory taking `{ baseUrl?, fetchImpl? }` — with
-`mlxServerRuntime = createMlxServerRuntime()` kept as the default export for
-existing callers. Filled the control surface as far as the OpenAI-compatible
-`/models` endpoint honestly allows, without fabricating any values.
+*(Note: this path previously held a stale Slice-18 report — "MLX control
+surface via injectable factory" — for a differently-numbered Task 11.
+Overwritten here per the same file-reuse convention that report itself
+documented.)*
 
-## Changes
+## What was implemented
 
-### `src/runtime/mlx-server.ts`
+1. `src/crew/types.ts` — added optional `agentRef?: string` to `CrewMember`
+   (additive, doc comment: "When set, reuse this registered AGENTS specialist
+   instead of an inline build.").
+2. `src/crew/engine.ts` — imported `AGENTS` from `../../agents/index.ts`; in
+   `crewAgentMap`, when `member.agentRef` is set and matches a registered
+   factory, use `AGENTS[member.agentRef](memberTools)`; otherwise fall back
+   to `buildCrewAgent(member, memberTools)` exactly as before.
 
-- **`createMlxServerRuntime(deps?: { baseUrl?: string; fetchImpl?: typeof fetch })`**:
-  new factory. `baseUrl` defaults to `MLX_BASE_URL` (`process.env.MLX_BASE_URL`
-  or `http://localhost:1234/v1`, computed live, not hardcoded). The fetch
-  implementation is resolved **per call** via `getFetch() => deps?.fetchImpl ?? fetch`
-  rather than captured once at factory-construction time — this matters because
-  the existing test swaps `globalThis.fetch` *after* the module's default
-  `mlxServerRuntime` singleton was already constructed at import time; capturing
-  `fetch` once in the closure would have pinned the pre-swap reference and broken
-  that test (caught this exact bug during the RED→GREEN cycle).
-- **`listModels()`**: new shared helper (replaces `listIds`'s inline fetch) that
-  fetches `${baseUrl}/models` and returns the full model entries, not just ids.
-  Degrades to `[]` on fetch failure or non-OK response — never throws.
-- **`listIds()`**: now derived from `listModels()` (`.map(m => m.id)`).
-- **`getModelMax(m)`**: looks up the model's entry from `listModels()` and reads
-  a context-length field via `contextLengthOf()`, which checks
-  `max_context_length ?? context_length ?? max_model_len` (covers LM Studio and
-  vLLM-style extensions to the OpenAI `/models` schema). Returns `undefined` if
-  the entry is missing or exposes none of these fields — no invented numbers.
-- **`listLoaded()`**: now maps real entries via `sizeBytesOf()`, which reads
-  `size_bytes ?? size` and falls back to `0` only when neither is present
-  (honest fallback, not fabricated).
-- **`isInstalled`**: unchanged behavior (`(await listIds()).includes(m)`), now
-  backed by the shared `listModels()`.
-- **`pull(m)`**: unchanged behavior — returns if already in `listIds()`, else
-  throws the existing clear error. Per the brief, investigated whether the
-  OpenAI-compatible surface has a conventional "load a model" endpoint; it does
-  not (LM Studio's load is a GUI/CLI action, not a documented REST call), so
-  there's nothing reliable to attempt — the throw is the correct, honest
-  behavior. Documented this reasoning inline as a comment.
-- **`warm`/`unload`**: kept as safe no-ops (server owns lifecycle).
-- **`getModelKvArch`**: kept `undefined` — MLX servers don't expose
-  llama.cpp-style architecture/attention metadata.
-- **`embed`**: kept throwing `MemoryError` (unsupported).
-- `MlxModelEntry`/`MlxModelsResponse` types added (`type`, not `interface`, per
-  repo style) to model the `/models` payload shape generically across server
-  implementations.
+```ts
+const factory = member.agentRef ? AGENTS[member.agentRef] : undefined;
+map[member.name] = factory
+  ? factory(memberTools)
+  : buildCrewAgent(member, memberTools);
+```
 
-### `tests/runtime/mlx-server.test.ts`
+## Import-cycle check
 
-Kept both pre-existing tests (kind/model-build assertion, and the
-`globalThis.fetch`-based `isInstalled` test) passing unmodified, and added,
-using `createMlxServerRuntime({ fetchImpl })`:
+**No cycle.** Verified by inspecting every import line in `agents/*.ts`
+(`file-qa.ts`, `web-fetch.ts`, `index.ts`, `super.ts`) — all of them import
+from `../models/*`, `../src/core/*`, `../src/providers/*`, or sibling
+`agents/*` files; none imports from `src/crew/*`. `src/crew/engine.ts`
+importing `agents/index.ts` is therefore a leaf-consumer edge
+(`crew -> agents -> core/providers`), not a cycle. Confirmed empirically too:
+`bun run typecheck` is clean and `bun test tests/crew/` runs and passes (a
+real dependency cycle between these two modules would surface as a runtime
+`undefined` export or a TS circular-reference issue).
 
-- `getModelMax returns the exposed context length when present` — asserts
-  `max_context_length`/`context_length` are read correctly, and `undefined` is
-  returned when a model entry has no such field or the model id isn't found.
-- `listLoaded maps ids and reports sizes when present` — asserts `size_bytes`/
-  `size` are surfaced, and the `sizeBytes: 0` fallback for entries with no size
-  field.
-- `isInstalled works against the injected fetch` — sanity check the injectable
-  path works independent of the global-fetch test.
-- `a metadata fetch failure degrades to undefined/[] instead of throwing` — a
-  `fetchImpl` that throws; asserts `getModelMax` → `undefined`, `listLoaded` →
-  `[]`, `isInstalled` → `false`, `isAvailable` → `false` (no method throws).
-- `a non-ok /models response degrades to undefined/[] instead of throwing` —
-  fetch resolves with HTTP 500; same degrade assertions.
+## TDD
 
-TDD: ran the new tests against the pre-refactor stubs first (RED — `getModelMax`
-returned `undefined` unconditionally and `listLoaded` always reported
-`sizeBytes: 0`), then implemented the factory + real field reads (GREEN). Along
-the way, first-draft `getFetch`/closure design broke the pre-existing
-`globalThis.fetch`-swap test (captured `fetch` once at construction) — fixed by
-resolving `deps?.fetchImpl ?? fetch` lazily per call instead.
+**RED** — wrote `tests/crew/agent-ref.test.ts` (brief's test, with one
+required deviation: `map.wf.name` → `map.wf?.name`, since this repo's
+`tsconfig` strictness flags `map.wf` as possibly-undefined on a
+`Record<string, Agent>` index; the assertion's behavior is unchanged).
 
-## Verification (inline only, per instructions — full suite not run)
+```
+$ bun test tests/crew/agent-ref.test.ts
+error: expect(received).toBe(expected)
+Expected: "web_fetch"
+Received: "wf"
+(fail) a member with agentRef resolves to the registered factory
+0 pass / 1 fail
+```
 
-- `bun run typecheck` → 0 errors.
-- `bun run test:file -- "tests/runtime/mlx-server.test.ts"` → **7 pass, 0 fail,
-  17 expect() calls**.
-- `bun run lint:file -- "src/runtime/mlx-server.ts" "tests/runtime/mlx-server.test.ts"`
-  → clean (ran biome's auto-fixer once for two formatting-only wraps; no logic
-  changes).
+**GREEN** — implemented the two changes above.
 
-## Notes / concerns
+```
+$ bun run typecheck
+$ tsc --noEmit   (clean, no output)
 
-- No new dependencies added.
-- No hardcoded model/context-length values — all metadata is read live from the
-  injected/base URL's `/models` response; base URL itself still resolves from
-  `MLX_BASE_URL` env var with a documented default, per existing convention.
-- The full 491/3/0-pass suite was intentionally **not** run per task
-  instructions (caller runs it after commit).
-- This `task-11-report.md` path previously held a stale report from an earlier
-  slice's differently-numbered Task 11 (an in-repo faithfulness eval gate from
-  Slice 13) — it has been overwritten with this task's content, consistent
-  with how that file itself documented the same convention.
+$ bun test tests/crew/
+bun test v1.3.11
+ 21 pass
+ 0 fail
+ 51 expect() calls
+Ran 21 tests across 7 files. [122.00ms]
+```
+
+Full `tests/crew/` suite green — no regressions across the 7 existing crew
+test files.
+
+```
+$ bun run lint:file -- src/crew/types.ts src/crew/engine.ts tests/crew/agent-ref.test.ts
+Checked 3 files in 2ms. No fixes applied.
+```
+(one round of `bunx biome check --write` was needed first, to fix import-sort
++ multiline formatting in the new test file only; the two `src/` files
+needed no fixes.)
+
+## Files touched
+- `src/crew/types.ts` (+2 lines: `agentRef?` field + doc comment)
+- `src/crew/engine.ts` (+5/-1 lines: import + factory resolution)
+- `tests/crew/agent-ref.test.ts` (new, 24 lines)
 
 ## Commit
-`feat(runtime): fill MLX control surface (getModelMax/listLoaded/pull best-effort) via injectable factory` on branch `slice-18-debt-wrapup-mlx`.
+`f20919e` — `feat(crew): CrewMember.agentRef reuses a registered specialist`
+
+## Self-review
+- Additive-only: `agentRef` is optional, existing `CrewDef`/`CrewMember`
+  callers unaffected; the fallback path (`factory ? ... : buildCrewAgent(...)`)
+  preserves today's behavior byte-for-byte when `agentRef` is absent or
+  doesn't match a registered name.
+- No `console.log`; no new string-literal unions introduced (nothing to
+  convert to `enum`).
+- Style matches the brief exactly except the `?.` noted above (typecheck-
+  forced, not a behavior change).
+
+## Concerns
+- **Process note, not a code defect in this task's diff:** the commit
+  `f20919e` also carries an unrelated update to
+  `.superpowers/sdd/task-10-report.md` (content changed from an older
+  Slice-18-era hf-fetch report to the current Slice-19 Task-10
+  "transpiler↔engine round-trip" report, matching commit `6cf2ddc` two
+  commits below mine). That change was apparently staged in the index by a
+  concurrently-running Task-10 agent sharing this working tree (no worktree
+  isolation), and got swept into my commit because I ran a bare
+  `git add <3 files> && git commit` — `git commit` without a pathspec
+  commits the **entire** index, not just the files just `add`ed. The
+  swept-in content is itself correct/legitimate (documents real, already-
+  committed work), so there's no data loss or corruption — just commingled
+  attribution across two tasks' commits. I did not attempt to split or
+  rewrite history, since other task agents may be actively committing
+  concurrently in this same branch and a rewrite risked colliding with
+  their work. Flagging so the controller/ledger-writer is aware `f20919e`'s
+  diff is slightly wider than Task 11's own file list. Suggest future
+  concurrent dispatches use pathspec-scoped `git commit -- <paths>` when
+  multiple task agents share a working tree without worktree isolation.
