@@ -76,10 +76,21 @@ ${steps},
 function transpileCrew(ir: CrewIR): string {
   const members = ir.members
     .map((m) => {
-      const tools =
-        m.tools && m.tools.length > 0 ? `,\n      tools: ${j(m.tools)}` : '';
+      // NOTE (Slice 19 Task 19 live-verify fix): `m.tools` is a list of
+      // PACK/tool-name strings (validated against the palette by
+      // validateIR, mirroring agent-builder's `suggestedServers`) — it is
+      // NOT a `ToolSet`. `CrewMember.tools` (crew/types.ts), by contrast,
+      // expects a real map of AI-SDK Tool objects, and `buildCrewAgent`
+      // assigns it straight to the agent's `tools`. There is no live step
+      // that resolves pack names into a member-scoped ToolSet yet, so
+      // emitting `tools: [...]` here previously corrupted the member's
+      // tool-calling (a string array spread as `{0: "brave-search"}`),
+      // causing the agent to exhaust its step ceiling. Until member-scoped
+      // MCP mounting exists, every member falls back to the crew-level
+      // `tools` merged in `crewAgentMap` — so we deliberately drop the
+      // per-member `tools` field rather than emit it broken.
       const ref = m.agentRef ? `,\n      agentRef: ${j(m.agentRef)}` : '';
-      return `    {\n      name: ${j(m.name)},\n      role: ${j(m.role)},\n      goal: ${j(m.goal)},\n      backstory: ${j(m.backstory)},\n      requires: [Capability.Tools],\n      prefer: PreferPolicy.LargestThatFits${ref}${tools},\n    }`;
+      return `    {\n      name: ${j(m.name)},\n      role: ${j(m.role)},\n      goal: ${j(m.goal)},\n      backstory: ${j(m.backstory)},\n      requires: [Capability.Tools],\n      prefer: PreferPolicy.LargestThatFits${ref},\n    }`;
     })
     .join(',\n');
   const tasks = ir.tasks

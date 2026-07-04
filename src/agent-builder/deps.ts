@@ -26,11 +26,77 @@ function extractJson(raw: string): string {
   return start >= 0 && end > start ? body.slice(start, end + 1) : body;
 }
 
+/** Drop a trailing comma before a closing `}`/`]` — local models frequently
+ *  emit one (e.g. after the last property in an object), which is invalid
+ *  strict JSON that `JSON.parse` rejects outright (found live via the
+ *  crew-builder's IR generation, Slice 19 Task 19). */
+function stripTrailingCommas(json: string): string {
+  return json.replace(/,(\s*[}\]])/g, '$1');
+}
+
+/** Recursively drop `null`-valued object keys. Every optional field in the
+ *  schemas passed through this seam is `z.T().optional()`, not `.nullable()`
+ *  — but local models routinely emit `null` for a field they mean to leave
+ *  unset (e.g. `"agentRef": null`) rather than omitting the key, which zod's
+ *  `.optional()` rejects. Treating `null` as "absent" is safe here because
+ *  none of these schemas assign meaning to a literal `null`. */
+function dropNulls(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(dropNulls);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v !== null) out[k] = dropNulls(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 /** Parse `raw` as JSON and validate it against `schema`; throws on either
  *  failure so the caller can decide whether to retry. */
 function parseAgainst<T>(raw: string, schema: z.ZodType<T>): T {
-  const parsed: unknown = JSON.parse(extractJson(raw));
+  const parsed: unknown = dropNulls(
+    JSON.parse(stripTrailingCommas(extractJson(raw))),
+  );
   return schema.parse(parsed);
+}
+
+function unwrapOptional(schema: z.ZodTypeAny): z.ZodTypeAny {
+  return schema instanceof z.ZodOptional
+    ? (schema.unwrap() as z.ZodTypeAny)
+    : schema;
+}
+
+/** Describe a top-level ZodObject's shape for the structured-JSON prompt.
+ *  A bare key-name list (`"using EXACTLY these keys: members"`) is enough
+ *  for flat schemas (every field agent-builder's `DraftSchema` uses is a
+ *  string), but under-specifies a field typed as an array-of-objects: local
+ *  models (e.g. qwen3.5:9b) resolve the ambiguity by collapsing each element
+ *  to a bare string — `{"members":["Researcher","Writer"]}` — instead of an
+ *  object matching the element schema (found live via the crew-builder's
+ *  `CrewNodes`/`CrewIRSchema`, both `{ members: MemberNode[] }`-shaped; see
+ *  Slice 19 Task 19). So for any field whose type is `array(object)`, spell
+ *  out the inner object's keys as a literal shape example, one level deep —
+ *  sufficient for every schema this seam currently serializes. */
+function describeSchemaShape(schema: z.ZodTypeAny): string {
+  if (!(schema instanceof z.ZodObject)) return '';
+  const shape = schema.shape as Record<string, z.ZodTypeAny>;
+  const fields = Object.entries(shape).map(([key, value]) => {
+    const unwrapped = unwrapOptional(value);
+    if (unwrapped instanceof z.ZodArray) {
+      const element = unwrapOptional(unwrapped.element as z.ZodTypeAny);
+      if (element instanceof z.ZodObject) {
+        const innerKeys = Object.keys(element.shape);
+        return `"${key}": [{${innerKeys.map((k) => `"${k}": ...`).join(', ')}}]`;
+      }
+      // Array of plain values (e.g. strings) — spell out "an array of
+      // strings", not objects, to stop the model wrapping each element in
+      // `{"id": "..."}` (found live via CrewIRSchema's `dependsOn: string[]`).
+      return `"${key}": ["<string>", ...]`;
+    }
+    return `"${key}": ...`;
+  });
+  return `{${fields.join(', ')}}`;
 }
 
 /** Wrap a live model as the structured-generation seam. `generateTextImpl`
@@ -55,14 +121,8 @@ export function makeBuilderModel(
       schema: z.ZodType<T>;
       prompt: string;
     }): Promise<T> => {
-      const keys =
-        args.schema instanceof z.ZodObject
-          ? Object.keys(args.schema.shape)
-          : [];
-      const keyHint =
-        keys.length > 0
-          ? ` using EXACTLY these keys: ${keys.join(', ')}.`
-          : '.';
+      const shape = describeSchemaShape(args.schema as z.ZodTypeAny);
+      const keyHint = shape ? ` using EXACTLY this JSON shape: ${shape}.` : '.';
       const basePrompt = `${args.prompt}\n\nRespond with ONLY a JSON object (no markdown fences, no commentary)${keyHint}`;
 
       const first = await generateTextImpl({
@@ -70,13 +130,23 @@ export function makeBuilderModel(
         prompt: basePrompt,
         ...(providerOptions ? { providerOptions } : {}),
       });
+      let firstErrorMessage = '';
       try {
         return parseAgainst(first.text, args.schema);
-      } catch {
+      } catch (e) {
+        // Feed the SPECIFIC failure back (JSON syntax error or the zod
+        // issue path/message) rather than a generic "not valid JSON" —
+        // mirrors generate.ts's `feedbackBlock` pattern (Slice 18 Task 24)
+        // of showing the model exactly what it got wrong last time, which
+        // is far more correctable than a content-free retry nudge (found
+        // live: schema-shape mismatches like an empty `requires` array or a
+        // wrong field type need the actual issue, not "invalid JSON", to
+        // self-correct — Slice 19 Task 19).
+        firstErrorMessage = e instanceof Error ? e.message : String(e);
         // fall through to the retry below
       }
 
-      const retryPrompt = `${basePrompt}\n\nThe previous response was not valid JSON. Return ONLY the JSON object, nothing else.`;
+      const retryPrompt = `${basePrompt}\n\nThe previous response was invalid: ${firstErrorMessage}\nReturn ONLY the corrected JSON object, nothing else.`;
       const second = await generateTextImpl({
         model,
         prompt: retryPrompt,
@@ -84,9 +154,9 @@ export function makeBuilderModel(
       });
       try {
         return parseAgainst(second.text, args.schema);
-      } catch {
+      } catch (e) {
         throw new Error(
-          'agent-builder: model did not return valid JSON for the proposal',
+          `agent-builder: model did not return valid JSON for the proposal (${e instanceof Error ? e.message : String(e)})`,
         );
       }
     },

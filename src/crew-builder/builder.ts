@@ -111,14 +111,33 @@ export function buildCrewOrWorkflow(
     let issues: ValidationIssue[] = [];
     let planned: string[] = [];
     for (let attempt = 0; attempt <= MAX_REGENERATIONS; attempt++) {
-      const nodes = await planNodes(
-        need,
-        shape,
-        analysis,
-        deps.model,
-        deps.packNames(),
-      );
-      ir = await planEdges(need, shape, analysis, nodes, deps.model);
+      // planNodes/planEdges call the live model's structured-generation seam
+      // directly (not through validateIR), so a malformed response that
+      // survives its own internal retry throws rather than returning an
+      // issue list. Treat that the same as a validation failure — one more
+      // bounded regeneration attempt — instead of letting it crash the
+      // whole build (found live: qwen3.5:9b occasionally still misses the
+      // IR schema on both of model.object's internal attempts; Slice 19
+      // Task 19).
+      try {
+        const nodes = await planNodes(
+          need,
+          shape,
+          analysis,
+          deps.model,
+          deps.packNames(),
+        );
+        ir = await planEdges(need, shape, analysis, nodes, deps.model);
+      } catch (e) {
+        rec.event('generation-failed', { attempt });
+        issues = [
+          {
+            field: 'generation',
+            problem: e instanceof Error ? e.message : String(e),
+          },
+        ];
+        continue;
+      }
       rec.event('generated', { attempt });
 
       const existing = new Set(deps.existingAgents());
