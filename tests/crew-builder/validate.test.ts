@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { BuilderModel } from '../../src/agent-builder/types.ts';
-import type { WorkflowIR } from '../../src/crew-builder/ir.ts';
+import { CrewProcess } from '../../src/crew/types.ts';
+import type { CrewIR, WorkflowIR } from '../../src/crew-builder/ir.ts';
 import { validateIR } from '../../src/crew-builder/validate.ts';
 
 const okJudge: BuilderModel = {
@@ -117,6 +118,63 @@ test('flags a fromTemplate placeholder that names no upstream step', async () =>
   });
   expect(
     issues.some((i) => i.field === 'ref' && i.problem.includes('ghoststep')),
+  ).toBe(true);
+});
+
+test('flags a malformed workflow id (not snake_case)', async () => {
+  const ir: WorkflowIR = {
+    id: 'my__flow',
+    steps: [
+      {
+        kind: 'agent',
+        id: 'a',
+        agent: 'web_fetch',
+        input: { kind: 'fromInput' },
+      },
+    ],
+  };
+  const issues = await validateIR(ir, 'workflow', {
+    existingAgents: ['web_fetch'],
+    packNames: [],
+    toBeBuilt: [],
+    model: okJudge,
+  });
+  expect(
+    issues.some((i) => i.field === 'id' && i.problem.includes('my__flow')),
+  ).toBe(true);
+});
+
+test('flags a malformed crew id (not snake_case)', async () => {
+  const ir: CrewIR = {
+    id: 'Bad Id',
+    process: CrewProcess.Sequential,
+    members: [
+      {
+        name: 'm',
+        agentRef: 'web_fetch',
+        role: 'Researcher',
+        goal: 'research',
+        backstory: 'a researcher',
+        requires: ['tools'],
+      },
+    ],
+    tasks: [
+      {
+        id: 't',
+        description: 'do the thing',
+        expectedOutput: 'the thing done',
+        member: 'm',
+      },
+    ],
+  };
+  const issues = await validateIR(ir, 'crew', {
+    existingAgents: ['web_fetch'],
+    packNames: [],
+    toBeBuilt: [],
+    model: okJudge,
+  });
+  expect(
+    issues.some((i) => i.field === 'id' && i.problem.includes('Bad Id')),
   ).toBe(true);
 });
 

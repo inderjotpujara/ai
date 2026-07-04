@@ -8,6 +8,13 @@ import type { Shape } from './types.ts';
  *  so every `{{ref}}` a template can resolve is also a ref we validate. */
 const TEMPLATE_REF_RE = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
 
+/** Same snake_case pattern write.ts enforces at write time (single
+ *  underscores only, no leading/trailing/repeated `_`). Checking it here
+ *  too means a malformed `ir.id` is caught by the structural tier — and
+ *  surfaced as a retryable validation issue — before consent+write ever
+ *  sees it, instead of throwing deep inside `writeCrewOrWorkflow`. */
+const ID_PATTERN = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
+
 /** Refs named by a single input descriptor: a `fromStep` ref, or every
  *  `{{ref}}` placeholder embedded in a `fromTemplate` template. */
 function refsOfInput(input: InputDescriptor): string[] {
@@ -74,6 +81,13 @@ function structuralWorkflow(
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const known = new Set([...ctx.existingAgents, ...ctx.toBeBuilt]);
+
+  if (!ID_PATTERN.test(ir.id)) {
+    issues.push({
+      field: 'id',
+      problem: `crew/workflow id "${ir.id}" must be snake_case (single underscores)`,
+    });
+  }
 
   const seen = new Set<string>();
   for (const step of ir.steps) {
@@ -149,6 +163,13 @@ function structuralWorkflow(
 function structuralCrew(ir: CrewIR, ctx: ValidateCtx): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const known = new Set([...ctx.existingAgents, ...ctx.toBeBuilt]);
+
+  if (!ID_PATTERN.test(ir.id)) {
+    issues.push({
+      field: 'id',
+      problem: `crew/workflow id "${ir.id}" must be snake_case (single underscores)`,
+    });
+  }
 
   const memberNames = new Set<string>();
   for (const m of ir.members) {

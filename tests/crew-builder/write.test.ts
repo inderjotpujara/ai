@@ -122,3 +122,31 @@ test('rejects invalid names before touching disk', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('rejects repeated-underscore names that would collide on camelCase (index-corruption regression)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cw-'));
+  try {
+    const p = paths(root);
+    // `my__flow` and `my_flow` both camelCase to `myFlow`; registering both
+    // would insert two `import myFlow from ...` lines into the same index,
+    // a duplicate identifier that breaks every registered crew/workflow.
+    expect(() =>
+      writeCrewOrWorkflow('my__flow', 'export default {};\n', 'workflow', p),
+    ).toThrow();
+    expect(existsSync(join(root, 'workflows/my__flow.ts'))).toBe(false);
+    expect(readFileSync(p.workflowsIndexPath, 'utf8')).not.toContain('myFlow');
+
+    // The legitimate single-underscore name must still succeed.
+    const files = writeCrewOrWorkflow(
+      'my_flow',
+      'export default {};\n',
+      'workflow',
+      p,
+    );
+    expect(files).toContain(join(root, 'workflows/my_flow.ts'));
+    const idx = readFileSync(p.workflowsIndexPath, 'utf8');
+    expect(idx).toContain("import myFlow from './my_flow.ts'");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -7,8 +7,13 @@ const IMPORTS_MARKER = '// CREW-BUILDER:IMPORTS';
 const ENTRIES_MARKER = '// CREW-BUILDER:ENTRIES';
 
 /** Snake_case names only — defense-in-depth mirror of agent-builder/write.ts:
- *  write.ts must not trust that every caller already ran validate.ts. */
-const NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
+ *  write.ts must not trust that every caller already ran validate.ts.
+ *  Single underscores only (no leading/trailing/repeated `_`): `camelCase`
+ *  collapses runs of `_` together, so e.g. `my_flow` and `my__flow` would
+ *  otherwise both produce the identifier `myFlow` — two distinct names
+ *  colliding on one `import myFlow from ...` line in the shared index and
+ *  corrupting it with a duplicate identifier. */
+const NAME_PATTERN = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
 
 function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.tmp`;
