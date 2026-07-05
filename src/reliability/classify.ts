@@ -3,9 +3,9 @@ import { ProviderError, ResourceError, ToolError } from '../core/errors.ts';
 
 /** Three lanes drive the retry/degrade/partial-failure wiring. */
 export enum Lane {
-  Transient, // back off + retry (ops we own only)
-  RouteWorthy, // don't backoff — degrade/fallback/skip
-  Terminal, // fail fast — no retry, surface to user
+  Transient = 'Transient', // back off + retry (ops we own only)
+  RouteWorthy = 'RouteWorthy', // don't backoff — degrade/fallback/skip
+  Terminal = 'Terminal', // fail fast — no retry, surface to user
 }
 
 const TRANSIENT_CODES = new Set([

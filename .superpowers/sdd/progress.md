@@ -514,3 +514,6 @@ FIX-1 1d6b8a7 (judge-degrade), FIX-3 d1e6577 (dead-code). FIX-DOCS 04b4cc8 (all 
 
 ### Slice 20 READY TO MERGE (2026-07-05)
 All 4 doc surfaces current: architecture.md §20+Mermaid+§3b (04b4cc8), README, ROADMAP, + Artifact regenerated (same url c760844f, favicon 🧭, "20 slices · 769 tests", new Verified-build node+6 edges+tour+concept). Gates GREEN: full suite 769 pass/7 skip/0 fail (183 files); typecheck clean; lint 0 errors (14 pre-existing warnings); docs:check green. FIX-2 staged-file-discard-of-preexisting = documented KNOWN-MINOR (carry-forward). Live-verified on Ollama (generate→runs, reuse@89
+## Slice 21 — Graceful degradation + retries (Phase A) — IN PROGRESS (2026-07-05)
+Branch slice-21-graceful-degradation-retries off main @ ca06886. Spec 43cbaa1, plan c304ef7 (21 TDD tasks). Design: new src/reliability/ (classify/config/retry/timeout/breaker/degrade/ledger/errors) → telemetry → migrate provisioning+verified-build+probe dupes → wire agent/delegate/orchestrator/workflow/crew/mcp/selector. D5: never re-retry LLM turns. In-run only (resume=S24). Research: memory reference-graceful-degradation-retries-findings.
+Task 1: complete (commit 7cf5c5f, review clean). Minors (→final triage): forward-ref JSDoc; no negative-value env guard.

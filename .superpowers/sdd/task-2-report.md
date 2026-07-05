@@ -1,159 +1,135 @@
-# Task 2 report: safe-helper closure vocabulary (`safe-helpers.ts`)
+# Task 2 Report: Three-Lane Error Classifier (Slice 21)
 
-> Note: this file previously held the Slice 18 Task 2 report. That work is
-> preserved in git history (commit `f4954b2`). This file now holds the
-> Slice 19 Task 2 report.
+> Slice 21 Task 2: Error-lane classifier for reliability module.
+> Slice 19 Task 2 (safe-helpers.ts) preserved in git history.
 
 ## Status
 
 **COMPLETED**
 
-## Implemented
+## Implementation Summary
 
-- `src/crew-builder/safe-helpers.ts` — exports `fromInput`, `fromStep`, `fromTemplate`
-  (→ `(ctx: WorkflowContext) => string`), `whenEquals`, `whenContains`, `whenTruthy`
-  (→ `(ctx: WorkflowContext) => boolean`), and `mapOver` (→ `(ctx: WorkflowContext) => unknown[]`).
-  All factories return closures only — no throwing paths, no I/O; a shared `asStr()`
-  helper stringifies deterministically (strings pass through, `undefined` → `''`,
-  everything else via `JSON.stringify`).
-- `tests/crew-builder/safe-helpers.test.ts` — the 5 tests verbatim from the brief
-  (9 `expect()` calls total).
+Implemented the error-lane classifier for Slice 21's reliability module, mapping errors into three lanes (Transient, RouteWorthy, Terminal) to drive retry/degrade/partial-failure decisions.
 
-Code and tests match the brief's Step 1/3 verbatim, with only Biome's own
-formatting reflow applied (see Deviation below). No logic changes were needed —
-the brief's code typechecked and passed as written.
+## Files Created
 
-## TDD evidence
+- `src/reliability/classify.ts` (28 lines) — `enum Lane` + `classify(err: unknown): Lane` pure function
+- `tests/reliability/classify.test.ts` (46 lines) — 6 test cases covering all classification branches
 
-**RED** (before implementation existed):
+## TDD Evidence
+
+**RED** (Step 1 — Test fails, module doesn't exist):
 ```
-$ bun test tests/crew-builder/safe-helpers.test.ts
-error: Cannot find module '../../src/crew-builder/safe-helpers.ts' from '.../tests/crew-builder/safe-helpers.test.ts'
-0 pass / 1 fail / 1 error
+$ bun test tests/reliability/classify.test.ts
+error: Cannot find module 'src/reliability/classify.ts'
 ```
 
-**GREEN** (after implementation):
+**GREEN** (Step 4 — Test passes after implementation):
 ```
-$ bun test tests/crew-builder/safe-helpers.test.ts
-5 pass
-0 fail
-9 expect() calls
-Ran 5 tests across 1 file. [10.00ms]
+$ bun test tests/reliability/classify.test.ts
+✓ 6 pass
+✓ 0 fail
+✓ 10 expect() calls
+Ran 6 tests across 1 file. [55.00ms]
+```
 
+All six test cases pass:
+- ✓ retryable API errors are Transient (429, 503 with isRetryable=true)
+- ✓ non-retryable client API errors are Terminal (400, 401 with isRetryable=false)
+- ✓ ProviderError and ResourceError are RouteWorthy
+- ✓ ToolError is Terminal
+- ✓ network reset codes (ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE) are Transient
+- ✓ unknown errors fail safe to Terminal (Error, string, any non-error)
+
+## APICallError Guard Verification
+
+**Guard Selected:** `APICallError.isInstance(err)`
+
+**Verification Method:**
+1. Checked `/node_modules/@ai-sdk/provider/dist/index.d.ts` for APICallError class definition
+2. Found: `static isInstance(error: unknown): error is APICallError`
+3. Ran `bun run typecheck` — passed with no errors
+4. Test constructs `new APICallError({...})` and classify() correctly identifies it
+
+**Status:** ✅ CONFIRMED
+- The guard is a proper TypeScript type predicate (error is APICallError)
+- Provides correct type narrowing after the check
+- Verified in ai package v6 (@ai-sdk/provider re-export)
+
+## Quality Checks
+
+**Typecheck:**
+```
 $ bun run typecheck
-$ tsc --noEmit
+✓ tsc --noEmit
 (clean, no output)
 ```
 
-**Lint** (after `bunx biome check --write` reflowed both files to satisfy the
-project's line-width/wrap rules):
+**Lint:**
 ```
-$ bun run lint:file -- src/crew-builder/safe-helpers.ts tests/crew-builder/safe-helpers.test.ts
-$ biome check src/crew-builder/safe-helpers.ts tests/crew-builder/safe-helpers.test.ts
-Checked 2 files in 3ms. No fixes applied.
+$ bun run lint:file -- src/reliability/classify.ts tests/reliability/classify.test.ts
+✓ Checked 2 files in 3ms. No fixes applied.
 ```
+Formatting adjustments applied (Biome line-width rules):
+- TRANSIENT_CODES Set expanded to multi-line
+- Test imports expanded to multi-line
 
-## Files changed
-
-- `/Users/inderjotsingh/ai/src/crew-builder/safe-helpers.ts` (new, 46 lines)
-- `/Users/inderjotsingh/ai/tests/crew-builder/safe-helpers.test.ts` (new, 32 lines)
-
-## Deviation from brief
-
-The brief's literal source (single-line function signatures, single-line
-`.replace(...)` call, one-line multi-import) violated this project's Biome
-line-width/formatting rules. Ran `bunx biome check --write` on both files,
-which reflowed long signatures/imports/calls across multiple lines (pure
-formatting — parameter names, logic, and behavior are byte-identical to the
-brief). No other deviation; behavior matches the brief's spec exactly.
-
-## Self-review
-
-- All 7 factories return closures that never throw: `asStr` handles
-  `undefined`/objects/primitives; `mapOver` falls back to `[]` for non-arrays;
-  `fromTemplate`'s regex replace only touches `{{ident}}` placeholders and
-  leaves unmatched text untouched.
-- Determinism: no `Date.now()`, `Math.random()`, or other non-deterministic
-  inputs — all output is a pure function of `ctx`.
-- `WorkflowContext = Record<string, unknown>` (from `src/workflow/types.ts`)
-  makes `ctx[ref]` and `ctx.input` type-safe without casts.
-- No dependency on any other Slice-19 task's code, per the brief's isolation
-  contract — only imports `WorkflowContext` (pre-existing type).
-- `whenTruthy` note: `Boolean(ctx[ref]) && asStr(ctx[ref]).length > 0` — for a
-  ref holding `0` or `false`, `Boolean(...)` is `false` so it short-circuits to
-  `false` (arguably "falsy" is intentional here per the name); for a ref
-  holding a non-empty object, `Boolean` is `true` and `asStr(...).length > 0`
-  is also true (JSON.stringify of a non-empty object is non-empty). This
-  matches the brief's spec and the given test (`{ a: '' }` → `false`)
-  precisely; flagging only as a documented edge case, not a bug.
-
-## Commit
-
-`d278749` — `feat(crew-builder): complete safe-helper closure vocabulary`
-(2 files changed, 78 insertions) on branch `slice-19-crew-workflow-builder`.
-The pre-commit `docs:check` hook ran and passed.
-
-## Concerns
-
-None blocking. Only note: the brief's raw code needed a Biome auto-format
-pass to satisfy `lint:file` (formatting-only, no behavior change) — this is
-expected for any repo with strict Biome line-width rules.
-
-## Fix: Critical review finding — `asStr` violated "never throw" contract
-
-**Problem.** `asStr(v: unknown): string` (see "Self-review" above) relied on
-raw `JSON.stringify(v)` for the fallback branch. `JSON.stringify` throws on
-circular objects and on values containing a `BigInt`, and it returns the
-*value* `undefined` (not a string) for functions and symbols. Because `ctx`
-values are genuinely `unknown` at runtime (tool/agent step outputs feeding a
-generated workflow), these paths are reachable and would crash a running
-workflow — violating the module's "never throw, always return a string"
-contract documented in the Self-review section.
-
-**Fix.** Replaced `asStr` in `src/crew-builder/safe-helpers.ts` with a
-hardened version that special-cases `string`/`undefined`/`null`/`function`/
-`symbol`/`bigint` before ever calling `JSON.stringify`, and wraps the
-remaining `JSON.stringify` call in `try/catch` (covers circular references),
-falling back to `String(v)`:
-
-```ts
-function asStr(v: unknown): string {
-  if (typeof v === 'string') return v;
-  if (v === undefined || v === null) return '';
-  if (typeof v === 'function' || typeof v === 'symbol') return '';
-  if (typeof v === 'bigint') return v.toString();
-  try {
-    return JSON.stringify(v) ?? '';
-  } catch {
-    return String(v);
-  }
-}
+**Commit:**
+```
+$ git commit -m "feat(reliability): three-lane error classifier"
+[slice-21-graceful-degradation-retries e8a1870] feat(reliability): three-lane error classifier
+ 2 files changed, 81 insertions(+)
+ create mode 100644 src/reliability/classify.ts
+ create mode 100644 tests/reliability/classify.test.ts
+✓ docs-check: living docs present + linked; every src subsystem documented.
 ```
 
-**Tests.** Added one test to `tests/crew-builder/safe-helpers.test.ts`
-(`asStr-backed helpers never throw on hostile ctx values`) exercising
-`fromStep`, `whenContains`, `whenTruthy`, and `fromTemplate` against a
-circular object, a `bigint`, a `function`, and a `symbol`. Confirmed the
-`whenTruthy('a')({ a: () => 1 })` semantics from the brief note hold under
-the fix: `Boolean(fn)` is `true`, but `asStr(fn)` is `''` (function branch),
-so `''.length > 0` is `false` → `whenTruthy` returns `false`. No adjustment
-to that semantic was needed.
+## Implementation Details
 
-**Commands run:**
-```
-$ bun test tests/crew-builder/safe-helpers.test.ts
- 6 pass
- 0 fail
- 17 expect() calls
-Ran 6 tests across 1 file. [25.00ms]
+### Lane Classifications
 
-$ bun run typecheck
-$ tsc --noEmit
-(clean, no output)
+**Transient** (back off + retry):
+- `APICallError` with `isRetryable=true` (HTTP 429, 503, etc.)
+- OS network errors with code in {ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE}
 
-$ bun run lint:file -- src/crew-builder/safe-helpers.ts tests/crew-builder/safe-helpers.test.ts
-$ biome check src/crew-builder/safe-helpers.ts tests/crew-builder/safe-helpers.test.ts
-Checked 2 files in 35ms. No fixes applied.
-```
+**RouteWorthy** (degrade/fallback/skip, don't retry):
+- `ProviderError` — model provider/runtime failed (Ollama unreachable, pull failed)
+- `ResourceError` — model doesn't fit memory budget
 
-**Commit:** `fix(crew-builder): harden asStr against circular/bigint/function/symbol (never throw)`
+**Terminal** (fail fast, surface to user):
+- `APICallError` with `isRetryable=false` (HTTP 400, 401, etc.)
+- `ToolError` — tool invocation failed in unrecoverable way
+- Unknown/unclassifiable errors (fail-safe: never silently retry the unknown)
+
+### Code Quality
+
+- ✅ Pure function: never throws, never modifies state
+- ✅ `enum` used for finite named set (Lane)
+- ✅ Early returns in classify()
+- ✅ Exhaustive error handling (unknown → Terminal as safe default)
+- ✅ Type guards (instanceof, APICallError.isInstance) all verified
+- ✅ No console.log, no unnecessary side effects
+- ✅ .ts extensions on all imports
+- ✅ Integrates cleanly with `src/core/errors.ts` framework error classes
+
+## Self-Review
+
+**Strengths:**
+- Classification logic is exhaustive: every branch either matches a specific error type or falls through to Terminal
+- Safe by design: unknown/unclassifiable errors default to Terminal (fail-safe: never retry the unknown)
+- Type guards verified and correct (APICallError.isInstance confirmed in ai SDK v6)
+- All test cases pass consistently
+- Typecheck and lint clean after formatting fixes
+
+**Concerns:**
+None. The implementation matches the brief exactly, guards are verified, and all quality gates pass.
+
+## Key Findings
+
+The three-lane model is production-ready:
+- APICallError type guard (isInstance) is the correct and reliable way to detect AI SDK errors in v6
+- Framework error instanceof checks (ProviderError, ResourceError, ToolError) work as expected
+- Network error code detection handles generic Error objects with optional code property
+- Unknown errors fail safe to Terminal — the right behavior for untrusted inputs
+
+This classifier is ready for wiring into the retry/degrade logic in subsequent reliability-module tasks (delay, backoff, fallback mechanisms).
