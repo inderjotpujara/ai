@@ -192,6 +192,7 @@ async function main(): Promise<void> {
           const orchestrator = createSuperAgent(
             (name) => reg.forAgent(name),
             onBeforeDelegate,
+            ledger,
           );
           const result = await runChat({
             orchestrator,
