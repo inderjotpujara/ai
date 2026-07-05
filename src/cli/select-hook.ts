@@ -3,6 +3,7 @@ import type { BeforeDelegate } from '../core/delegate.ts';
 import { ResourceError } from '../core/errors.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import { type ModelDeclaration, RuntimeKind } from '../core/types.ts';
+import { type DegradationLedger, DegradeKind } from '../reliability/ledger.ts';
 import type { EnsureOpts } from '../resource/model-manager.ts';
 import type { LoadedModel } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
@@ -22,6 +23,8 @@ export type SelectHookDeps = {
   runtimeFor?: (kind: RuntimeKind) => Runtime;
   /** Fired when a declared non-Ollama runtime is unreachable and selection degrades to Ollama. */
   log?: (message: string) => void;
+  /** Optional degradation ledger; records a ModelDegraded event on the runtime-degrade path. */
+  ledger?: DegradationLedger;
 };
 
 /**
@@ -56,6 +59,12 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
         );
         rt = resolveRuntime(RuntimeKind.Ollama);
         degraded = true;
+        deps.ledger?.record({
+          kind: DegradeKind.ModelDegraded,
+          subject: decl.model,
+          reason: `runtime "${decl.runtime}" unreachable`,
+          detail: `${decl.runtime}→ollama`,
+        });
         // The declared model id belongs to the original runtime (e.g. an MLX/HF
         // repo id) and is not resolvable by Ollama. Use the declared Ollama
         // fallback tag when the decl names one; otherwise the honest fallback

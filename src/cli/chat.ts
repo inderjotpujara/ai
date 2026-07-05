@@ -172,20 +172,21 @@ async function main(): Promise<void> {
   };
 
   const registry = await buildRegistry();
-  const onBeforeDelegate = createSelectHook({
-    registry,
-    ensureReady: (decl, opts) => manager.ensureReady(decl, opts),
-    listLoaded: () => listLoadedModels(),
-    pinned: [qwenRouter.model],
-    capture,
-    notify,
-    log: (message) => console.error(message),
-  });
 
   try {
     await withMcpRun(
       { runsRoot: 'runs', runId: `run-${process.pid}` },
       async ({ run, reg, config, ledger }) => {
+        const onBeforeDelegate = createSelectHook({
+          registry,
+          ensureReady: (decl, opts) => manager.ensureReady(decl, opts),
+          listLoaded: () => listLoadedModels(),
+          pinned: [qwenRouter.model],
+          capture,
+          notify,
+          log: (message) => console.error(message),
+          ledger,
+        });
         try {
           warnUnknownChatAgents(config);
           const orchestrator = createSuperAgent(

@@ -5,6 +5,7 @@ import {
   type ModelDeclaration,
   type ModelRequirement,
 } from '../core/types.ts';
+import { degradeChain } from '../reliability/degrade.ts';
 import { weightsBytes } from './footprint.ts';
 import type { EnsureOpts } from './model-manager.ts';
 import type { LoadedModel } from './ollama-control.ts';
@@ -72,7 +73,7 @@ export async function resolveModel(
   const loaded = deps.listLoaded
     ? new Set((await deps.listLoaded()).map((mm) => mm.name))
     : undefined;
-  const candidates = selectCandidates(req, registry, loaded);
+  const candidates = degradeChain(selectCandidates(req, registry, loaded));
   if (candidates.length === 0) {
     throw new ResourceError(
       `No model in the registry satisfies requirements: ${req.requires.join(', ')}.`,

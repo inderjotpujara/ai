@@ -80,8 +80,8 @@ async function main(): Promise<void> {
 
   await withMcpRun(
     { runsRoot: 'runs', runId: `crew-${process.pid}` },
-    async ({ run, reg }) => {
-      const selection = await createSelectionRuntime();
+    async ({ run, reg, ledger }) => {
+      const selection = await createSelectionRuntime({ ledger });
       try {
         const tools: ToolSet = reg.merged;
         const verifyRuntime = verify ? makeRealVerifyDeps() : undefined;

@@ -123,8 +123,8 @@ async function main(): Promise<void> {
 
   await withMcpRun(
     { runsRoot: 'runs', runId: `flow-${process.pid}` },
-    async ({ run, reg, config }) => {
-      const selection = await createSelectionRuntime();
+    async ({ run, reg, config, ledger }) => {
+      const selection = await createSelectionRuntime({ ledger });
       try {
         const tools: ToolSet = reg.merged;
         const agents: Record<string, Agent> = {};
