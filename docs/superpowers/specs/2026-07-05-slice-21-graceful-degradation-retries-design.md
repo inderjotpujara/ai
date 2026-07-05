@@ -130,3 +130,33 @@ New `ATTR.RELIABILITY_*` keys (serialize automatically via the JSONL exporter �
 - Token-budgeted retries → revisit at **Slice 22** (Codex cloud tier; local = free compute).
 - Bulkhead / concurrency isolation (cockatiel) → not needed single-user-local.
 - Reworking `verification/expand.ts` graph-unrolling → different paradigm, left intact.
+
+## 11. Flagged consideration — decision recorded (2026-07-05)
+
+Web-validated against OWASP's 2026 Agentic AI Top 10, which names **"ASI08:
+Cascading Agent Failure"** as its own risk category, distinct from the
+per-call retry/circuit-breaking this spec already covers: one agent's
+degraded or wrong output silently corrupting *downstream* agents in a
+crew/DAG. §5's ledger + orchestrator degradation-summary already makes a
+**dropped** agent visible (item 101 above). The open question was: when a
+specialist **degrades but still produces output** (e.g. falls back to a
+smaller/different model per `degradeChain`, or a Tool/MCP step succeeds only
+after `withRetry`), does that output carry any signal to downstream steps
+that it came from a degraded path, or does it flow on identically to a
+full-confidence result?
+
+**Decision:** Slice 21 ships **observability-complete** — every degrade,
+drop, and retry is recorded in the `DegradationLedger` and surfaced to the
+**user** (printed run summary + `run.dir/degradation.jsonl`) and to
+**telemetry** (`recordDegrade`/`ATTR.RELIABILITY_*`), including the
+previously-unemitted `DegradeKind.Retried` (now emitted from
+`workflow/run-step.ts`'s Tool-step `onRetry`, closing the one gap the ledger
+had at spec time). What this slice does **not** build: a `degraded: true`
+taint marker threaded through `StepResult`/delegation returns that a
+**downstream step or agent within the same run** could branch on. That is
+deferred to its **own future slice** — it needs a defined consumer reaction
+(a grounding/verification-layer concern: what should a downstream step *do*
+differently when it knows its input is degraded?), not a mechanical field
+add. Tracked as candidate **Slice 37** in
+[`docs/ROADMAP.md`](../../ROADMAP.md)'s backlog table, not silently
+dropped.
