@@ -23,6 +23,19 @@ export async function resolveAttachments(
     const item = store.get(handle);
     if (!item) continue;
     if (!RESOLVABLE_KINDS.has(item.kind)) continue;
+    if (
+      item.kind === MediaKind.Video &&
+      item.frames &&
+      item.frames.length > 0
+    ) {
+      for (const frameHandle of item.frames) {
+        const frameItem = store.get(frameHandle);
+        if (!frameItem) continue;
+        const data = await store.resolveBytes(frameHandle);
+        parts.push({ type: 'file', mediaType: frameItem.mediaType, data });
+      }
+      continue;
+    }
     const data = await store.resolveBytes(handle);
     parts.push({ type: 'file', mediaType: item.mediaType, data });
   }

@@ -11,6 +11,8 @@ export type MediaItem = {
   kind: MediaKind;
   path: string;
   mediaType: string;
+  /** Child image handles of a video frame-group (set only on group items). */
+  frames?: MediaHandle[];
 };
 
 export type MediaFilePart = {

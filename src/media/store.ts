@@ -22,6 +22,7 @@ export type MediaStore = {
   get(handle: MediaHandle): MediaItem | undefined;
   resolveBytes(handle: MediaHandle): Promise<Uint8Array>;
   toFileHandle(item: MediaItem): FileHandle;
+  registerGroup(childHandles: MediaHandle[], dir: string): MediaItem;
 };
 
 const KIND_PREFIX: Record<MediaKind, string> = {
@@ -108,5 +109,19 @@ export function createMediaStore(
     };
   }
 
-  return { put, putFile, get, resolveBytes, toFileHandle };
+  function registerGroup(childHandles: MediaHandle[], dir: string): MediaItem {
+    counters[MediaKind.Video] += 1;
+    const handle = idFor(MediaKind.Video, counters[MediaKind.Video]);
+    const item: MediaItem = {
+      handle,
+      kind: MediaKind.Video,
+      path: dir,
+      mediaType: 'video/x-frames',
+      frames: childHandles,
+    };
+    items.set(handle, item);
+    return item;
+  }
+
+  return { put, putFile, get, resolveBytes, toFileHandle, registerGroup };
 }
