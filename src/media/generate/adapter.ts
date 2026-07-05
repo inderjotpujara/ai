@@ -18,6 +18,7 @@ export type GenOpts = {
   height?: number;
   seconds?: number;
   image?: string;
+  voice?: string;
   disableSafetyChecker?: boolean;
 };
 
