@@ -5,9 +5,14 @@ import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import type { Writable } from 'node:stream';
 import { ProviderError } from '../../core/errors.ts';
 import type { ProviderKind } from '../../core/types.ts';
+import {
+  defaultDownloadRetry,
+  downloadStallMs,
+} from '../../reliability/download-retry.ts';
+import { withRetry } from '../../reliability/retry.ts';
+import { IdleWatchdog } from '../../reliability/timeout.ts';
 import { hfTreeFiles } from '../catalog/hf-catalog.ts';
 import { ProgressTracker } from '../progress-tracker.ts';
-import { StallWatchdog, withRetry } from '../supervisor.ts';
 import {
   DownloadPhase,
   type DownloadProgress,
@@ -15,23 +20,12 @@ import {
 } from '../types.ts';
 
 const HF_RESOLVE = 'https://huggingface.co';
-const STALL_MS = 90_000; // same stall timeout as ollama.ts
 
 type RetryConfig = {
   attempts: number;
   baseMs: number;
   capMs: number;
   jitter: () => number;
-};
-
-// Per-file retry: gentler attempt count than Ollama's whole-pull retry (a
-// snapshot has many files, so one flaky file shouldn't cost as many attempts
-// as re-pulling everything), but the same backoff shape/jitter as ollama.ts.
-const DEFAULT_RETRY: RetryConfig = {
-  attempts: 4,
-  baseMs: 1_000,
-  capMs: 45_000,
-  jitter: () => 0.5 + Math.random() / 2, // same full-ish jitter as ollama.ts
 };
 
 /**
@@ -119,7 +113,7 @@ export function createHfFetchProvider(
   const sha256 = deps.sha256 ?? sha256File;
   const openWriteStream = deps.openWriteStream ?? createWriteStream;
   const treeFiles = deps.treeFiles ?? hfTreeFiles;
-  const retry = deps.retry ?? DEFAULT_RETRY;
+  const retry = deps.retry ?? defaultDownloadRetry();
 
   /**
    * Streams a single HF file to `<destPath>.part`, verifies its sha256, then
@@ -205,7 +199,9 @@ export function createHfFetchProvider(
         const ctrl = new AbortController();
         const onAbort = () => ctrl.abort();
         outer.addEventListener('abort', onAbort);
-        const watchdog = new StallWatchdog(STALL_MS, () => ctrl.abort());
+        const watchdog = new IdleWatchdog(downloadStallMs(), () =>
+          ctrl.abort(),
+        );
         watchdog.start(5_000);
         try {
           await downloadFileOnce(url, destPath, {
@@ -227,6 +223,10 @@ export function createHfFetchProvider(
         baseMs: retry.baseMs,
         capMs: retry.capMs,
         jitter: retry.jitter,
+        // Per-file download retry, same as ollama.ts: retry on ANY failure
+        // (network blip, stream error, stall abort), not just the Transient
+        // lane — mirroring the pre-migration local withRetry.
+        retryable: () => true,
         signal: outer,
         onRetry: (n) =>
           onProgress({ ...tracker.snapshot(), error: `retry ${n}` }),

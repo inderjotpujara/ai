@@ -26,6 +26,14 @@ describe('checkDiskSpace', () => {
   });
 });
 
+// withRetry is now `reliability/retry.ts`'s shared primitive, re-exported
+// here for back-compat. Its default `retryable` only retries the Transient
+// lane (see reliability/classify.ts); these fixtures throw plain `Error`s
+// that classify as Terminal, so each opts in with `retryable: () => true`
+// to exercise the "retry on any failure" policy that provisioning's
+// download call sites (ollama.ts, hf-fetch.ts) now request explicitly —
+// matching this file's pre-migration local withRetry, which had no
+// classification at all.
 describe('withRetry', () => {
   it('retries a failing fn then succeeds, calling onRetry each time', async () => {
     let calls = 0;
@@ -41,6 +49,7 @@ describe('withRetry', () => {
         baseMs: 0,
         capMs: 0,
         jitter: () => 0,
+        retryable: () => true,
         onRetry: (n) => retries.push(n),
       },
     );
@@ -49,14 +58,23 @@ describe('withRetry', () => {
     expect(retries).toEqual([1, 2]);
   });
   it('rethrows after exhausting attempts', async () => {
+    let calls = 0;
     await expect(
       withRetry(
         async () => {
+          calls++;
           throw new Error('always');
         },
-        { attempts: 2, baseMs: 0, capMs: 0, jitter: () => 0 },
+        {
+          attempts: 2,
+          baseMs: 0,
+          capMs: 0,
+          jitter: () => 0,
+          retryable: () => true,
+        },
       ),
     ).rejects.toThrow('always');
+    expect(calls).toBe(2); // exhausted both attempts, not a single-shot Terminal bail
   });
   it('resolves the backoff delay promptly when the signal is already aborted', async () => {
     const ctrl = new AbortController();
@@ -74,6 +92,7 @@ describe('withRetry', () => {
           baseMs: 5_000,
           capMs: 5_000,
           jitter: () => 1,
+          retryable: () => true,
           signal: ctrl.signal,
         },
       ),

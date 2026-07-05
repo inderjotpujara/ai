@@ -2,6 +2,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { MemoryError } from '../core/errors.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { RuntimeKind } from '../core/types.ts';
+import { probeTimeoutMs } from '../reliability/config.ts';
 import type { LoadedModel, Runtime } from './runtime.ts';
 
 const MLX_BASE_URL = process.env.MLX_BASE_URL ?? 'http://localhost:1234/v1';
@@ -58,7 +59,7 @@ export function createMlxServerRuntime(deps?: MlxServerDeps): Runtime {
   async function listModels(): Promise<MlxModelEntry[]> {
     try {
       const res = await getFetch()(`${baseUrl}/models`, {
-        signal: AbortSignal.timeout(1500),
+        signal: AbortSignal.timeout(probeTimeoutMs()),
       });
       if (!res.ok) return [];
       const data = (await res.json()) as MlxModelsResponse;
@@ -77,7 +78,7 @@ export function createMlxServerRuntime(deps?: MlxServerDeps): Runtime {
     async isAvailable() {
       try {
         const res = await getFetch()(`${baseUrl}/models`, {
-          signal: AbortSignal.timeout(1500),
+          signal: AbortSignal.timeout(probeTimeoutMs()),
         });
         return res.ok;
       } catch {

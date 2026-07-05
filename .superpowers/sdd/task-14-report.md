@@ -1,44 +1,63 @@
-### Task 14: telemetry — `withCrewBuildSpan` + ATTR keys — Report
+### Task 14 (Slice 21): Agent turn wall-clock timeout — Report
 
 **Status:** Implemented, GREEN.
 
+**What changed:**
+- `src/core/agent.ts`: wrapped the existing single `generateText({...})` call in
+  `withWallClock(runTimeoutMs(), () => generateText({...}))`. Imported
+  `withWallClock` from `../reliability/timeout.ts` and `runTimeoutMs` from
+  `../reliability/config.ts`. All existing generateText options (system, prompt,
+  tools, temperature, providerOptions, `abortSignal: input.abortSignal`,
+  `stopWhen`, `experimental_telemetry`) are unchanged — only the call itself is
+  now wrapped. No retry/backoff added (D5 respected): `withWallClock` races the
+  generateText promise against a `setTimeout` that rejects `Error('timeout')`,
+  clearing the timer either way.
+- `tests/core/agent-timeout.test.ts` (new): builds a `MockLanguageModelV3`
+  whose `doGenerate` awaits a 1000ms `setTimeout` before resolving (i.e. hangs
+  well past the timeout). Sets `process.env.AGENT_RUN_TIMEOUT_MS = '20'` before
+  the call and clears it in an `afterEach`. Asserts `runAgent({...})` rejects
+  with `/timeout/`.
+
 **TDD cycle:**
-- RED: wrote `tests/telemetry/crew-build-span.test.ts` (exact test from brief) and ran
-  `bun test tests/telemetry/crew-build-span.test.ts` → failed with
-  `SyntaxError: Export named 'withCrewBuildSpan' not found in module '.../src/telemetry/spans.ts'`.
-- GREEN: added 7 `ATTR` keys (`CREW_BUILD_NEED`, `CREW_BUILD_SHAPE`, `CREW_BUILD_ID`,
-  `CREW_BUILD_MEMBERS`, `CREW_BUILD_STEPS`, `CREW_BUILD_MEMBERS_BUILT`, `CREW_BUILD_OUTCOME`)
-  and `withCrewBuildSpan<T>(need, fn)` to `src/telemetry/spans.ts`, mirroring
-  `withAgentBuildSpan` verbatim (same `inSpan('crew.build', ...)` wrapper, same
-  `{ event, outcome }` recorder shape, same shape-based count routing pattern from the brief).
-  Ran `bun test tests/telemetry/crew-build-span.test.ts` → `1 pass, 0 fail`.
+- RED: wrote the test first, ran `bun test tests/core/agent-timeout.test.ts` →
+  failed with "Expected promise that rejects / Received promise that resolved"
+  (no timeout enforced yet).
+- GREEN: added the `withWallClock` wrap in `src/core/agent.ts`. Re-ran the test
+  → PASS.
+- `bun test tests/core/agent-timeout.test.ts tests/core/agent.test.ts tests/core/agent-abort.test.ts`
+  → `5 pass, 0 fail`, 8 expect() calls (new + existing agent tests, no regression).
 - `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
-- `bun test tests/telemetry/` (full dir, regression check) → `13 pass, 0 fail` across 6 files.
-- `bun run lint:file -- src/telemetry/spans.ts tests/telemetry/crew-build-span.test.ts` →
-  `biome check`, "Checked 2 files in 5ms. No fixes applied."
+- `bun run lint:file -- "src/core/agent.ts" "tests/core/agent-timeout.test.ts"` →
+  `biome check`, "Checked 2 files in 3ms. No fixes applied."
 
 **Files:**
-- Modified: `/Users/inderjotsingh/ai/src/telemetry/spans.ts` (+ATTR keys, +`withCrewBuildSpan`)
-- Added: `/Users/inderjotsingh/ai/tests/telemetry/crew-build-span.test.ts`
+- Modified: `/Users/inderjotsingh/ai/src/core/agent.ts`
+- Added: `/Users/inderjotsingh/ai/tests/core/agent-timeout.test.ts`
 
-**Commit:** `6dd1402` — `feat(telemetry): withCrewBuildSpan + crew.build ATTR keys` (2 files changed, 58
-insertions). Staged only these 2 files explicitly (`git add src/telemetry/spans.ts
-tests/telemetry/crew-build-span.test.ts`); did not touch the many other repo-wide modified
-files present from parallel in-flight task work (`.superpowers/sdd/*`, `.remember/*`).
+**Commit:** `56d712c` — `feat(core): wall-clock run_timeout on the agent turn (no LLM re-retry, D5)`
+(branch `slice-21-graceful-degradation-retries`, 2 files changed, 60 insertions,
+16 deletions). Staged only these 2 files explicitly (`git add src/core/agent.ts
+tests/core/agent-timeout.test.ts`); verified via `git status --short` before
+committing that no other repo-wide modified files (`.remember/*`,
+`.superpowers/sdd/task-*-brief.md`/`task-*-report.md`, `docs/ROADMAP.md`) were
+swept in. Pre-commit `docs-check` hook ran and passed (no `src/<subsystem>` doc
+drift — this task only wraps an existing call inside an already-documented
+module, no new subsystem).
 
 **Self-review:**
-- Helper matches brief's interface exactly, including the `shape === 'crew' ? MEMBERS :
-  STEPS` count-routing logic and optional-arg guards (`!== undefined` / truthy checks) copied
-  from `withAgentBuildSpan`'s pattern.
-- Did not touch the OTel transport/exporter — only added attribute keys and a new span-wrapper
-  function, per the standing rule.
-- `as const` on `ATTR` preserved; no new types/enums needed since the brief's interface uses
-  plain `string`/`number` params (matching the existing `withAgentBuildSpan` signature style,
-  not introducing enums where the sibling helper doesn't use them either).
+- Followed the brief's exact pattern: reused the `MockLanguageModelV3` mock
+  shape from `tests/core/agent.test.ts` / `tests/core/agent-abort.test.ts`
+  (same `content`/`finishReason`/`usage`/`warnings` field shapes).
+- No retry/backoff introduced — `withWallClock` is a pure additive backstop
+  race around the single existing `generateText` call; the caller's
+  `abortSignal` remains the primary cancel path and is passed through
+  unchanged.
+- All other `RunAgentInput` options (tools, temperature, providerOptions,
+  maxSteps/stopWhen, functionId/telemetry) preserved verbatim inside the
+  wrapped closure — no options were dropped or altered.
 
-**Concerns:** None. This is an additive, isolated change with no consumers yet (Task 16's
-builder will call it). No regressions in the telemetry suite.
+**Concerns:** None. No deviation from the prescribed design.
 
-**Note:** This file previously held a report for a different Task 14 from an earlier slice
-(provisioning telemetry attrs). That content is superseded — see git history for the prior
-report if needed.
+**Note:** This file previously held a report for a different, unrelated
+"Task 14" from an earlier slice (crew-build-span telemetry). That content is
+superseded by this report — see git history for the prior report if needed.

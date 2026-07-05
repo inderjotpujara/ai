@@ -1,49 +1,41 @@
-### Task 18: chat multi-step gap trigger — report
+### Task 18 (Slice 21): thread degradation ledger through orchestrator delegation — report
 
-> Note: this report path previously held an unrelated Task-18 report from an
-> earlier slice's numbering ("MCP `MCP_TRANSPORT` attr emission"). Replaced
-> here with the correct Slice-19 Task-18 report per the brief's instructions.
+> Note: this report path previously held Slice-19's Task-18 report ("chat
+> multi-step gap trigger — route to crew/workflow builder", commit
+> `190afc9`). That work is still landed on `main`/this branch; only this
+> file is being overwritten to match the current slice's task numbering
+> (Slice 21, Task 18: degradation ledger threading), per the same
+> convention the prior note used for its own collision.
 
 **Status:** Done.
 
-**Commit:** `190afc9` — `feat(cli): route multi-step chat gaps to the crew/workflow builder`
+**Commit:** `c10c995` — `feat(core): thread degradation ledger through orchestrator delegation`
 
 **Files:**
-- Added `src/cli/offer-crew.ts` — exports `shouldOfferCrew(text: string): boolean`, a pure regex heuristic (`/\b(then|after that|steps?|workflow|team|crew|pipeline)\b/i`). No console output; pure function per the constraint.
-- Added `tests/cli/offer-crew.test.ts` — 6 tests: multi-step phrasing → true, single capability → false, plus extra phrasings ("steps"/"workflow", "team"/"crew", "pipeline"/"after that", case-insensitivity).
-- Modified `src/cli/chat.ts` — 3 new imports (`buildCrewOrWorkflow` from `../crew-builder/builder.ts`, `makeRealCrewBuilderDeps` from `../crew-builder/deps.ts`, `shouldOfferCrew` from `./offer-crew.ts`) and a new branch inserted inside the existing `else if (result.kind === 'gap')` block, before the pre-existing single-agent offer.
+- Modified `src/core/orchestrator.ts` — `createOrchestrator(opts)` options type gained `ledger?: DegradationLedger` (imported `type DegradationLedger` from `../reliability/ledger.ts`). In the tool-building loop, `asDelegateTool(agent, opts.onBeforeDelegate)` became `asDelegateTool(agent, opts.onBeforeDelegate, opts.ledger)`. Return type (`Agent`) unchanged.
+- Modified `agents/super.ts` — `createSuperAgent(toolsFor, onBeforeDelegate?, ledger?)` gained a third optional param `ledger?: DegradationLedger`, forwarded into its `createOrchestrator({ ..., ledger })` call. This is the seam between the CLI and the orchestrator (`createSuperAgent` wraps `createOrchestrator` directly), so it's the natural place to thread the ledger down from the CLI.
+- Modified `src/cli/chat.ts` — the `createSuperAgent(...)` call site (inside the `withMcpRun` callback, which already destructures `ledger` from its ctx per Task 12's restructure) now passes `ledger` as the third argument.
+- Added `tests/core/orchestrator-degrade.test.ts` — builds a real sub-`Agent` and asserts `createOrchestrator({ model, systemPrompt, agents: [agent], ledger })` (with a `createLedger()` instance) returns a defined orchestrator exposing a `delegate_to_<name>` tool. Mirrors the construction pattern in `tests/core/orchestrator.test.ts`.
 
-**How chat.ts's gap branch actually looked (vs. the brief):**
-The brief's snippet matched the real code closely. The actual gap branch is:
-```ts
-} else if (result.kind === 'gap') {
-  console.log(result.message);
-  if (interactiveTTY()) {
-    const wants = await askYesNo(`Propose a new agent for "${result.missingCapability}"?`, ...);
-    if (wants) { ... buildAgent ... }
-  }
-}
-```
-No pre-existing `multiStep` field on the gap result — went with the heuristic fallback as the brief allowed ("gate on a heuristic in chat.ts ... fall back to the heuristic only if the core change balloons"). Did not touch `src/core`'s gap-result shape at all — purely additive in `chat.ts`.
-
-**Integration:** Inserted the crew-offer branch first, gated on `interactiveTTY() && shouldOfferCrew(\`${result.missingCapability} ${task}\`)`. On yes: `makeRealCrewBuilderDeps()` → `buildCrewOrWorkflow(...)` inside try/finally (cleanup in finally) → on `built.kind === 'written'` print `Created ${built.shape} "${built.name}" — re-run to use it.` → unconditional `return` inside the `if (wantsCrew)` block (so declining the crew *offer* falls through to the existing single-agent offer, but accepting it — written or not — returns and skips the single-agent offer, matching the brief's "handled; skip the single-agent offer" comment). The pre-existing `if (interactiveTTY()) { ... Propose a new agent ... }` block is untouched and still runs verbatim when `shouldOfferCrew` is false or the user declines the crew offer.
+**Scope decision — crew.ts / flow.ts left untouched:**
+Per the brief's conditional ("crew.ts/flow.ts IF they build orchestrators directly with delegate tools"), I read both:
+- `src/cli/flow.ts` runs workflows through `runWorkflow`/`defaultRunAgentStep` — agent steps, not `asDelegateTool`/`createOrchestrator`. Not in scope.
+- `src/cli/crew.ts` → `runCrewCli` → `runCrew` (`src/crew/engine.ts`). The **sequential** crew path also goes through the workflow engine (no delegate tools). Only the **hierarchical** crew path calls `buildHierarchicalOrchestrator` (`src/crew/compile.ts`), which does call `createOrchestrator` with delegate tools — but reaching it from `crew.ts` would require threading `ledger` through `CrewCliDeps` → `CrewDeps` → `runCrew` → `buildHierarchicalOrchestrator`, none of which appear in this task's declared file list or its commit-hygiene note (which enumerates only `orchestrator.ts`, `chat.ts`, "any createSuperAgent seam file", and the test). Left this thread un-wired rather than expand scope past what was briefed — flagging as a gap below.
 
 **TDD:**
-- RED: `bun test tests/cli/offer-crew.test.ts` failed with `Cannot find module '../../src/cli/offer-crew.ts'` before the source file existed.
-- GREEN: after writing `src/cli/offer-crew.ts`, all 6 tests pass.
+- Wrote `tests/core/orchestrator-degrade.test.ts` first. `bun test tests/core/orchestrator-degrade.test.ts` **passed** even pre-implementation — Bun strips types at runtime (no type checking), so an extra object-literal property (`ledger`) on the pre-change `createOrchestrator` options isn't caught by the test runner itself.
+- The real RED signal was `bun run typecheck`, which reported `TS2353: Object literal may only specify known properties, and 'ledger' does not exist in type '{ name?: ...; model: LanguageModel; systemPrompt: string; agents: Agent[]; onBeforeDelegate?: BeforeDelegate | undefined; }'.` against the pre-change type — confirmed the test was meaningfully failing before implementing.
+- GREEN: after adding `ledger?: DegradationLedger` to the options type and threading it through, typecheck went clean and the test still passes.
 
 **Verification:**
-- `bun run typecheck` — clean.
-- `bun test tests/cli/ tests/crew-builder/` — 102 pass, 0 fail, 207 expect() calls across 26 files (no regressions; `tests/cli/chat.test.ts` doesn't exercise the gap branch at all — it only covers `maybeAutoProvision`/`warnUnknownChatAgents` — so risk of breaking it was low, and it stayed green).
-- `bun run lint:file -- src/cli/offer-crew.ts src/cli/chat.ts tests/cli/offer-crew.test.ts` — clean (biome, no fixes needed).
-- `git commit` ran the pre-commit `docs-check` hook, which passed (this task didn't touch `docs/architecture.md` since it's a purely additive CLI wiring change to an already-documented subsystem, not a new one).
+- `bun test tests/core/orchestrator-degrade.test.ts tests/core/orchestrator.test.ts tests/core/` → 43 pass, 0 fail, 77 expect() calls across 14 files. No regressions.
+- `bun run typecheck` → clean.
+- `bun run lint:file -- "src/core/orchestrator.ts" "src/cli/chat.ts" "agents/super.ts" "tests/core/orchestrator-degrade.test.ts"` → clean (one import-order fix applied by hand in `orchestrator.ts`: moved the new `../reliability/ledger.ts` type-only import above the same-level `./`-relative imports to satisfy Biome's `organizeImports`).
+- `git commit` ran the pre-commit `docs-check` hook, which passed — this task threads an existing type through an already-documented subsystem (`src/core/orchestrator.ts`), it doesn't add a new one.
 
-**Self-review:**
-- Import ordering: initially misplaced the `./offer-crew.ts` import mid-way through the `../resource/*` group; caught it before running lint and moved it to sort correctly among the same-directory (`./`) imports at the end of the import block. Lint confirmed clean after the fix.
-- Confirmed only my three files were staged before committing (`git status --short` showed a long list of unrelated `M` files from other in-flight SDD tasks in this slice — none were `git add`ed).
-- `return` inside the `if (wantsCrew)` block returns from the async callback passed to `withMcpRun`, not from `main()` directly — same pattern the brief's snippet used; verified this is a normal function-scope return, not a loop/switch fall-through issue.
+**Commit hygiene:** Staged only `src/core/orchestrator.ts`, `src/cli/chat.ts`, `agents/super.ts`, `tests/core/orchestrator-degrade.test.ts` by explicit path. `git status --short` showed a long list of unrelated `M` files from other in-flight SDD tasks in this slice (other `.superpowers/sdd/task-*.md` briefs/reports, `docs/ROADMAP.md`, `.remember/*`) — none were staged or touched.
 
 **Concerns:**
-- None blocking. One judgment call worth flagging: per the brief, `return` fires whenever the user says yes to the crew offer, even if `buildCrewOrWorkflow` returns `declined`/`invalid`/`abandoned` (not just `written`) — the single-agent offer is skipped either way once the user has engaged with the crew flow. This matches the brief's explicit snippet and comment, but means a user who says "yes, propose a crew" and then rejects the *proposed* crew IR won't be re-offered the single-agent path in the same run (they'd need to re-run `chat`). Flagging for awareness, not changing without direction since it matches the brief exactly.
+- Hierarchical-crew delegate path (`buildHierarchicalOrchestrator` in `src/crew/compile.ts`, reached via `src/crew/engine.ts`/`src/cli/crew.ts`) still does not receive a `ledger`, so agent drops during a *hierarchical* crew run are not recorded in the degradation ledger. This was a deliberate scope call matching the brief's declared file list + commit-hygiene note, not an oversight. Flagging in case the slice's live-verify gate (Task 21) or a follow-up task expects crew-hierarchical coverage too — threading it would touch `src/crew/compile.ts`, `src/crew/engine.ts`, and `src/cli/crew.ts` (all currently untouched).
 
 **Report path:** `/Users/inderjotsingh/ai/.superpowers/sdd/task-18-report.md`

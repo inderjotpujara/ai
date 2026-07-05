@@ -1,59 +1,27 @@
-# Task 9 report — deterministic IR→TypeScript transpiler (`transpile.ts`)
+# Task 9 report: reliability telemetry (ATTR keys + recordDegrade)
 
-## Status
-COMPLETE. Commit `bfa2619` — `feat(crew-builder): deterministic IR->TS transpiler`.
+Note: this filename was reused from an earlier, unrelated Task 9 (crew-builder
+transpiler, Slice 19/20). That report has been superseded here — this is the
+Slice 21 reliability-telemetry task.
 
-## Implemented
-- `src/crew-builder/transpile.ts` — `transpile(ir, shape): string`, deterministic (no model).
-  - `transpileWorkflow` renders `defineWorkflow({ id, description?, steps: [...] })`
-    with imports `z`, `defineWorkflow` (`../src/workflow/define.ts`), `StepKind`
-    (`../src/workflow/types.ts`), and the seven safe helpers from
-    `../src/crew-builder/safe-helpers.ts`.
-  - `transpileCrew` renders `defineCrew({ id, description?, process, members, tasks })`
-    with imports `z`, `Capability`/`PreferPolicy` (`../src/core/types.ts`),
-    `defineCrew` (`../src/crew/define.ts`), `CrewProcess` (`../src/crew/types.ts`).
-  - Every string value goes through `JSON.stringify` (`j()` helper) — no raw
-    interpolation (injection/escaping safe).
-  - `StepKind`/`CrewProcess` emitted as member forms (`StepKind.Tool`,
-    `CrewProcess.Sequential`, etc.).
-  - Input descriptors → `fromInput()`/`fromStep(...)`/`fromTemplate(...)`;
-    predicates → `whenEquals/whenContains/whenTruthy(...)`; map source → `mapOver(...)`.
-  - Generated modules target repo-root `crews/`/`workflows/`, hence the `../src/...`
-    relative imports (matches the existing `crews/research-crew.ts` +
-    `workflows/fetch-then-summarize.ts` hand-written files).
-- `tests/crew-builder/transpile.test.ts` — the brief's two golden tests
-  (workflow: defineWorkflow + StepKind.Tool + `fromInput()` + `fromStep("fetch")`
-  + `"fetch_then_sum"`; crew: defineCrew + CrewProcess.Sequential + `"researcher"`).
+## Status: DONE
 
-## Enum-comparison deviation (as directed by the interface note)
-`CrewIR.process` is a `CrewProcess` ENUM value (Task 1 `ir.ts` uses
-`z.nativeEnum(CrewProcess)`), NOT a string. The brief's draft compared
-`ir.process === 'hierarchical'`, which fails typecheck ("no overlap" — enum vs
-string literal). Fixed by importing `CrewProcess` from `../crew/types.ts` and
-comparing `ir.process === CrewProcess.Hierarchical`. The test also constructs the
-IR with `process: CrewProcess.Sequential` rather than the string `'sequential'`,
-for the same type-correctness reason. A `// NOTE (deviation)` comment records this
-in `transpile.ts`.
+## What was done
+1. Wrote failing test `tests/telemetry/reliability-spans.test.ts` per brief Step 1, ran it, confirmed failure (`Export named 'recordDegrade' not found`).
+2. Edited `src/telemetry/spans.ts`:
+   - Added `import type { DegradeEvent } from '../reliability/ledger.ts';` near the top, alongside the existing `currentDelegationContext` and `ArtifactKind`/`VerifiedLevel` type imports. No duplicate `trace` import was added — reused the existing one from `@opentelemetry/api`.
+   - Added the 8 new reliability ATTR keys (`RELIABILITY_RETRY_ATTEMPTS`, `RELIABILITY_RETRY_LANE`, `RELIABILITY_BREAKER_STATE`, `RELIABILITY_DEGRADE_FROM`, `RELIABILITY_DEGRADE_TO`, `RELIABILITY_DEGRADE_REASON`, `RELIABILITY_DROPPED_AGENT`, `ERROR_TYPE`) inside the `ATTR` object literal, immediately before the closing `} as const;`.
+   - Added `export function recordDegrade(event: DegradeEvent): void` right before `withWorkflowSpan`, mirroring `recordGuardrailViolation`'s style (get active span via `trace.getActiveSpan()`, return early if none, `span.addEvent('reliability.degrade', {...})` with `ATTR.ERROR_TYPE`, `'degrade.subject'`, `ATTR.RELIABILITY_DEGRADE_REASON`, and conditional `'degrade.detail'`).
+3. Ran the focused test — passed (2 tests, 4 expect calls).
+4. Ran `bun run typecheck` — clean.
+5. Ran `bun run lint:file -- "src/telemetry/spans.ts" "tests/telemetry/reliability-spans.test.ts"` — initially failed on formatting (import order + line width in the new test file); ran `bunx biome check --write` to auto-fix (only touched the test file — reordered imports alphabetically and wrapped two long lines), then re-ran lint clean.
+6. Committed with message `feat(telemetry): reliability attrs + recordDegrade` (commit `abe649b` on branch `slice-21-graceful-degradation-retries`). The pre-commit hook's `docs:check` passed (no `architecture.md` update needed — this extends an already-documented subsystem's existing file, not a new subsystem).
 
-## Golden-string reconciliation
-None needed — every expected substring matched the renderer output verbatim
-(the brief's test uses `"input: fromStep(\"fetch\")"`; my test writes the same
-string unescaped as `'input: fromStep("fetch")'`). No renderer change was made to
-satisfy the tests.
+## Deviation
+None beyond letting Biome auto-format the test file (cosmetic only — import order + line wrapping); no logic changes. Existing imports were reused as instructed; no duplicate `trace` import added.
 
-## TDD RED → GREEN
-- RED: `bun test tests/crew-builder/transpile.test.ts` →
-  `Cannot find module '../../src/crew-builder/transpile.ts'` (0 pass, 1 fail).
-- GREEN (after implementing): `2 pass, 0 fail, 8 expect() calls`.
+## Commits
+- `abe649b` — `feat(telemetry): reliability attrs + recordDegrade` (2 files changed, 44 insertions)
 
-## Gates (focused, per coordinator directive — did NOT run full `bun test`)
-- `bun test tests/crew-builder/` → **30 pass / 0 fail** across 8 files (no regressions).
-- `bun run typecheck` → clean (`tsc --noEmit`, no output).
-- `bun run lint:file -- src/crew-builder/transpile.ts tests/crew-builder/transpile.test.ts`
-  → clean (biome; import-ordering + object-formatting auto-fixes applied before commit).
-
-## Self-review / concerns
-- Generated TS is syntactically valid (matches the hand-written `crews/`/`workflows/`
-  siblings' import shape + closing `});`); Task 10 will dynamic-import to prove re-parse.
-- Verify/dependsOn/tools/agentRef are all rendered conditionally and JSON-safely.
-- No concerns blocking Task 10.
+## Test summary
+`bun test tests/telemetry/reliability-spans.test.ts` → 2 pass, 0 fail, 4 expect() calls.

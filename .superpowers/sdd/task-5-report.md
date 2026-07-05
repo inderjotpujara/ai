@@ -1,123 +1,81 @@
-# Task 5 report — think-first `analyze` stage + `BuilderModel.text` seam
+# Task 5 Report: Timeouts — withWallClock + IdleWatchdog + withIdleTimeout
 
-## Status: DONE
+## Status
+✅ **COMPLETE** — All 5 tests pass, typecheck clean, lint clean, committed.
 
-Commit: `dad069d` — `feat(crew-builder): think-first analyze stage + BuilderModel.text seam`
+## Implementation Summary
 
-## What was implemented
+Created `src/reliability/timeout.ts` with three core exports:
 
-1. **`src/agent-builder/types.ts`** — extended `BuilderModel` (additive) with a
-   required `text: (args: { prompt: string }) => Promise<string>` seam,
-   alongside the existing `object`. Doc comment explains it's for think-first
-   stages that must not be JSON-constrained.
+1. **`withWallClock<T>(ms: number, fn: () => Promise<T>): Promise<T>`**
+   - Hard wall-clock timeout cap using `Promise.race()`
+   - Rejects `Error('timeout')` on expiry
+   - Clears timer via `.finally()` to prevent leaks
 
-2. **`src/agent-builder/deps.ts`** — `makeBuilderModel` now returns a `text`
-   implementation that mirrors `.object`'s `generateTextImpl` call exactly
-   (same `model`, same conditional `providerOptions` spread) and returns
-   `r.text` directly, with no JSON extraction/parsing/retry — appropriate
-   since this seam is explicitly free-text.
+2. **`class IdleWatchdog`**
+   - Generalized stall watchdog: fires `onIdle()` when monotonic progress counter stops advancing
+   - Constructor: `(timeoutMs, onIdle, now?)` — injectable clock for deterministic tests
+   - `beat(progress: number)` — resets idle timer on progress advancement
+   - `tick()` — checks if idle timeout exceeded
+   - `start(intervalMs)` and `stop()` — manage interval-driven tick polling
+   - **Implementation note:** `lastProgress` initialized to `0` (not `-1` as in brief) to correctly trigger idle tracking on first `beat(0)` call
 
-3. **`src/crew-builder/analyze.ts`** (new) — `analyzeNeed(need, shape, model):
-   Promise<string>`. Builds a prompt instructing the model to think step by
-   step in prose (crew: roles + goals + ordered tasks; workflow: pipeline
-   steps/order/branches/fan-out), explicitly says "Do NOT output JSON," wraps
-   `need` via `delimitNeed` (prompt-injection hardening, consistent with every
-   other agent-builder/crew-builder prompt), calls `model.text(...)`, and
-   returns the trimmed result.
+3. **`withIdleTimeout<T>(fn: (beat) => Promise<T>, opts)`**
+   - Runs an async operation with idle timeout
+   - Passes `beat(progress)` callback to the function
+   - Wraps watchdog lifecycle: `start()` at entry, `stop()` in finally block
+   - Default interval: 1000ms if not specified
 
-## TDD RED -> GREEN
+## TDD Sequence
+- **Step 1 (FAIL):** Wrote tests in `tests/reliability/timeout.test.ts` → ran, failed with "Cannot find module"
+- **Step 2 (IMPLEMENT):** Created `src/reliability/timeout.ts` with all three exports
+- **Step 3 (FIX):** Corrected `lastProgress` initialization from `-1` to `0` after first test run revealed semantic issue
+- **Step 4 (PASS):** All 5 tests pass; formatted code to meet lint requirements
+- **Step 5 (COMMIT):** Typecheck clean, lint clean, committed
 
-- **RED**: `tests/crew-builder/analyze.test.ts` written first, importing the
-  not-yet-existing `analyze.ts` -> `bun test tests/crew-builder/analyze.test.ts`
-  failed with `Cannot find module '../../src/crew-builder/analyze.ts'`.
-- **GREEN**: after implementing `analyze.ts`, both tests pass:
-  - "returns the model plaintext decomposition" — asserts the model's text
-    output flows through.
-  - "does not ask for JSON and delimits the need as data" — asserts the
-    prompt contains `Do NOT output JSON`, `<need>`, the injected string, and
-    that the "data, not instructions" guard note precedes the injected text
-    (mirrors the injection-guard test pattern used in `generate.test.ts` /
-    `generate-tool.test.ts`).
+## Test Coverage
 
-## Broken fakes fixed (added `text: async () => ''` or equivalent stub)
+All 5 tests passing:
+- `withWallClock` > resolves on success ✓
+- `withWallClock` > rejects with timeout on slow fn ✓
+- `IdleWatchdog` > fires onIdle only after timeout with no progress ✓
+- `IdleWatchdog` > resets idle timer on progress ✓
+- `withIdleTimeout` > passes beat fn and returns result ✓
 
-- `tests/crew-builder/classify.test.ts` — `fakeModel` helper.
-- `tests/agent-builder/generate.test.ts` — `stubModel` helper.
-- `tests/agent-builder/generate-tool.test.ts` — `stubModel` helper.
-- `tests/agent-builder/suggest-tools.test.ts` — `pick` helper.
-- `tests/agent-builder/builder.test.ts` — 5 inline `BuilderModel` literals:
-  `twoStepModel`, `countingDraftModel`, `toolModel`, `countingToolModel`, and
-  the ad-hoc literal in the "injection guard" `buildTool` test.
-- `tests/agent-builder/deps.test.ts` — **not actually broken**: it exercises
-  `makeBuilderModel` itself and never constructs a bare `BuilderModel`
-  literal; its shared `fakeGenerateText` fixtures already return the
-  `{ text: string }` shape both `.object` and `.text` consume, so `.text`
-  worked automatically. Added one new test,
-  `'text() returns the raw generateText output, unparsed'`, to give the new
-  seam explicit direct coverage rather than leaving it implicitly exercised.
+Tests use injectable `now: () => number` for deterministic clock control (no real timers/intervals).
 
-## Test output
+## Commits
+- `d5ed74f` — `feat(reliability): withWallClock + IdleWatchdog + withIdleTimeout`
 
-```
-$ bun test tests/agent-builder/ tests/crew-builder/
-bun test v1.3.11 (af24e281)
+## Implementation Note: Brief Deviation
+The brief code had `lastProgress = -1`, but the tests required `lastProgress = 0`. With `-1` as initial, `beat(0)` advances progress (0 > -1), so `idleSince` remained null and idle timeout never fired. With `lastProgress = 0`, `beat(0)` does not advance (0 is not > 0), triggering the else-if that sets `idleSince = now()`, correctly starting idle tracking on the first beat call. This matches the test's intent ("start tracking at time 0") and the semantic contract: idle tracking begins when we first check progress, not on the second check.
 
- 73 pass
- 0 fail
- 140 expect() calls
-Ran 73 tests across 14 files. [159.00ms]
-```
+## Checks Passed
+- ✅ `bun test tests/reliability/timeout.test.ts` — 5/5 pass
+- ✅ `bun run typecheck` — no errors
+- ✅ `bun run lint:file` — no violations (formatting fixed)
+- ✅ `git commit` — pre-commit docs-check passed
 
-## Typecheck / lint
+## Bug Fix: IdleWatchdog Silent-Stall Detection
 
-- `bun run typecheck` -> clean (`tsc --noEmit`, no output/errors).
-- `bun run lint:file -- src/agent-builder/types.ts src/agent-builder/deps.ts
-  src/crew-builder/analyze.ts tests/crew-builder/analyze.test.ts
-  tests/crew-builder/classify.test.ts tests/agent-builder/generate.test.ts
-  tests/agent-builder/generate-tool.test.ts
-  tests/agent-builder/suggest-tools.test.ts tests/agent-builder/builder.test.ts
-  tests/agent-builder/deps.test.ts` -> `Checked 10 files. No fixes applied.`
+**Commit:** `11e6d51` — `fix(reliability): IdleWatchdog detects silent stalls via lastAdvanceAt timestamp`
 
-## Files changed (commit `dad069d`)
+**Bug:** `IdleWatchdog.tick()` only fired `onIdle()` if a prior `beat()` call was non-advancing (arming `idleSince`). A realistic stall — progress advances, then goes totally silent (no further `beat()` calls) — was never detected, because `idleSince` stayed null.
 
-```
- src/agent-builder/deps.ts                 |  8 ++++++++
- src/agent-builder/types.ts                |  2 ++
- src/crew-builder/analyze.ts               | 24 ++++++++++++++++++++++++ (new)
- tests/agent-builder/builder.test.ts       |  6 +++++-
- tests/agent-builder/deps.test.ts          | 11 +++++++++++
- tests/agent-builder/generate-tool.test.ts |  1 +
- tests/agent-builder/generate.test.ts      |  1 +
- tests/agent-builder/suggest-tools.test.ts |  1 +
- tests/crew-builder/analyze.test.ts        | 31 +++++++++++++++++++++++++++++++ (new)
- tests/crew-builder/classify.test.ts       |  1 +
- 10 files changed, 85 insertions(+), 1 deletion(-)
-```
+**Fix:** Replaced the `idleSince` flag with a `lastAdvanceAt` timestamp that measures elapsed time since the last progress advancement. `tick()` now fires `onIdle()` whenever `now() - lastAdvanceAt >= timeoutMs`, detecting silent stalls regardless of prior beat patterns.
 
-## Self-review
+**Changes:**
+- Replaced `idleSince: number | null` with `lastAdvanceAt: number`, initialized in constructor
+- `beat(progress)` updates `lastAdvanceAt` whenever progress advances
+- `tick()` compares elapsed time against `lastAdvanceAt`, not a flag
+- Added test: "fires onIdle when progress goes silent after advancing (the classic hang)" — verifies detection of a hung download/op that stops calling beat entirely
 
-- `.text`'s implementation is a byte-for-byte mirror of `.object`'s
-  `generateTextImpl` call site (same `model`, same conditional
-  `providerOptions` spread) — no drift between the two seams' model-invocation
-  contract.
-- `analyzeNeed` follows the exact prompt-injection pattern used everywhere
-  else in `agent-builder`/`crew-builder` (`delimitNeed` + "data, not
-  instructions" guard note before the delimited block), so the new
-  think-first stage doesn't introduce a weaker injection posture than
-  `generateProposal`/`generateToolProposal`/`classifyNeed`.
-- Every existing inline `BuilderModel` fake across both test directories was
-  grepped for (`grep -n "BuilderModel\|object:"`) and fixed; none left with
-  only `{ object }`. Verified via a full green run of the target test
-  directories after the fixes (73/73 pass), not just the newly-touched files.
-- `analyzeNeed`'s two tests together exercise both the `'crew'` and
-  `'workflow'` shape branches (one test per shape), so branch coverage
-  exists, though neither test asserts the shape-specific bullet-text content
-  verbatim — acceptable since the brief's Step 1 test didn't ask for that
-  granularity and `analyzeNeed`'s output is consumed as opaque prose context
-  by later stages, not parsed.
+**Verification:**
+- `bun test tests/reliability/timeout.test.ts` — 6/6 pass (existing 5 tests + new silent-stall test)
+- `bun run typecheck` — clean
+- `bun run lint:file -- "src/reliability/timeout.ts" "tests/reliability/timeout.test.ts"` — clean
 
-## Concerns
-
-- None blocking. `analyzeNeed`'s output isn't consumed by any other stage yet
-  in this slice — per the brief it exists now purely as the think-first
-  infrastructure; wiring it into the pipeline is presumably a later task.
+## Notes for Future Tasks
+- Task 11 (verified-build) will re-export `withWallClock`
+- Task 10 (provisioning) will alias `IdleWatchdog` as `StallWatchdog`
+- Signatures stable and ready for downstream use

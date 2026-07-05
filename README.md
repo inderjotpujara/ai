@@ -22,11 +22,40 @@ Mini.
 > agents into a reviewed crew or workflow — and the **verified "works out of
 > the box"** pass (Slice 20) — every generated artifact is reuse-checked,
 > staged, execution-dry-run, and golden-evaled before it may commit — have
-> landed, **completing Phase D (self-extension)**. Next: Phase-A reliability —
-> graceful degradation + retries (Slice 21). See
+> landed, **completing Phase D (self-extension)**, and **graceful degradation
+> + retries** (Slice 21) fills Phase A's last **reliability** gap — a dead
+> MCP server, model, or tool no longer sinks a run; it degrades and tells the
+> user. (Phase A's one remaining open item is the routing-accuracy eval
+> harness.) Next: **Slice 22** (Codex heavy-lifting backup, Phase C). See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 20 complete — **Verified "works out of the box"** (Phase D
+> **Status:** Slice 21 complete — **Graceful degradation + retries** (fills
+> Phase A's last reliability gap; the routing-accuracy eval harness remains
+> open). One canonical `src/reliability/` layer — a three-lane
+> error taxonomy (`Lane.Transient/RouteWorthy/Terminal`), retry with
+> full-jitter backoff + `Retry-After` respect, run/idle timeouts, a
+> hand-rolled circuit breaker (shared registry keyed by dependency id), a
+> failure-domain-aware model-degradation chain, and a user-facing
+> `DegradationLedger` — is now wired into delegation, the workflow engine,
+> crews, MCP tool calls, and the model selector: a dead dependency **drops
+> that agent/step and tells the user** (printed summary + persisted
+> `run.dir/degradation.jsonl` + `reliability.*` telemetry) instead of
+> silently failing or sinking the run. The pre-existing provisioning
+> stall/retry guards and the verified-build wall-clock primitive were
+> migrated onto the same layer, closing 8 places that used to duplicate
+> retry/timeout logic. Per D5 (AI SDK v6 already retries LLM-call transport
+> errors), the LLM turn itself is never double-retried — only cross-boundary
+> operations the framework owns (MCP calls, downloads, runtime probes) get
+> `withRetry`. **Live-verified on real Ollama** (4 scenarios,
+> `tests/integration/reliability-live.test.ts`, `RELIABILITY_LIVE=1`): an
+> unreachable MLX runtime degrades to a real Ollama fallback model that
+> actually generates, a Tool step that fails once then succeeds is retried to
+> completion, a delegated agent whose model call fails returns a structured
+> error without crashing the run, and a real `withMcpRun` persists
+> `degradation.jsonl` + a `reliability.degrade` span event. See
+> [`docs/architecture.md`](docs/architecture.md) §21.
+
+> **Previously:** Slice 20 — **Verified "works out of the box"** (Phase D
 > — closes the phase). Agent/crew/workflow generation now ends in
 > **stage → verify → commit** instead of write-then-return: `src/verified-build/`
 > gates every agent-builder and crew-builder write behind one shared,
@@ -297,7 +326,8 @@ interface — no agent code changes. See
 | **18** | **Debt wrap-up + MLX completion** — split the overloaded enum into download `ProviderKind` + inference `RuntimeKind` (+ `kind-map.ts`); `hf-fetch` now persists weights to disk (atomic `.part`→rename, HF-LFS-oid verify, single-file GGUF + MLX snapshot, traversal-guarded, retry/stall parity); MLX runtime raised to Ollama's bar (`createMlxServerRuntime`, opt-in + degrade-to-Ollama via `fallbackModel`); provisioning polish (bounded-parallel downloads + `MultiProgressBar`, truthful telemetry, Metal reader, `refresh-snapshot.ts`); MCP/agent-builder debt (engine-enforced read-only sqlite via `PRAGMA query_only`, MCP OAuth `authProvider`, `mcp.transport`, atomic `addPackEntry`, agent-builder retry + inert-`.proposal.ts` tool-code path). LM Studio download wired (contract-tested); MLX **live-verified both ways** | ✅ Done |
 | **19** | **Crew/workflow builder** (Phase D) — compose, not just generate: `src/crew-builder/` turns a multi-step need into a **crew** or **workflow** via a staged, validated IR-then-transpile pipeline (`classify`→`analyze` think-first→`plan-nodes`→`plan-edges`→two-tier `validate`→consent→`resolve-members` auto-build via the agent-builder→deterministic `transpile`→atomic `write`); a small safe-helper vocabulary (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/`whenTruthy`/`mapOver`) is the only closures a model can pick from; shared `assertAcyclic` (`workflow/define.ts`) gates both shapes' graphs; `CrewMember.agentRef` lets a crew member reuse a registered (or freshly-built) agent; triggers via `bun run crew-builder "<need>"` and a TTY-gated `chat.ts` multi-step gap-offer; `crew.build` telemetry span. **Live-verified end to end on Ollama** — a generated crew executed to a correct result, surfacing + fixing 4 live-only defects | ✅ Done |
 | **20** | **Verified "works out of the box"** (Phase D — closes the phase) — `src/verified-build/`: builder writes become **stage → verify → commit** via a shared cheapest-first gate — pre-generation **reuse check** (capability-signature embedding vs a per-registry `.generated.json` manifest; ≥0.85 confirm-gated reuse · 0.75–0.85 offer, ask reuse-or-build · <0.75 generate; `--yes` auto-reuses Reuse, declines Offer) → stage (never the index) → structural → **execution dry-run** (`withWallClock`-raced; the agent path additionally aborts in flight via a new `runAgent` `abortSignal` seam — crew/workflow are wall-clock-raced only; ≤2 self-repair attempts feeding the runtime error back into a regeneration) → **golden-eval** (3–7 auto-generated binary cases, largest-installed judge preferring cross-family, unanimous over 3 runs; no judge ≥ ~24B ⇒ skip + commit `verified: runs` — degrade, never block) → commit (index + `<name>.golden.json` + manifest) at the earned `VerifiedLevel`; failed gate registers nothing and the staged file is discarded (`--force`/`verify.force` ⇒ `unverified` + WARNING). Plus usage aggregation from `spans.jsonl` + reversible archive (`bun run archive [--prune]`, live-reference-protected cross-registry) + a chat reuse hint; `build.verify`/`build.archive` telemetry. **Live-verified on Ollama** — a real build committed at `verified: runs` (judge-degrade path) and a re-run of the same need hit reuse at 89% | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **A** reliability — graceful degradation + retries (**Slice 21**) → **C** Codex heavy-lifting backup (22) → dependency major-upgrade (23) → **E** automate (daemon + triggers, 24–25) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **21** | **Graceful degradation + retries** (Phase A — fills the last reliability gap; the routing-accuracy eval harness remains the one open Phase-A item) — `src/reliability/`: a three-lane error taxonomy (`classify.ts` — `Lane.Transient/RouteWorthy/Terminal`, pure, unknown→Terminal); retry with full-jitter backoff + attempt-cap + `Retry-After` respect, Transient-only (`retry.ts`); run wall-clock + idle-stall timeouts (`timeout.ts`); a hand-rolled circuit breaker with a shared per-dependency registry (`breaker.ts`); a failure-domain-aware model-degradation chain (`degrade.ts`); a user-facing `DegradationLedger` (`ledger.ts`) persisted to `run.dir/degradation.jsonl` and printed as a run summary. Wired into delegation (drop/degrade + record), the workflow engine + crews (per-step retry/timeout, breaker-wrapped Tool/MCP steps), MCP tool calls (`wrapToolsWithBreaker`), and the model selector (`degradeChain`). Per **D5**, the LLM turn itself is never double-retried (AI SDK v6 already retries transport errors) — only cross-boundary ops the framework owns get `withRetry`. Migrated the pre-existing provisioning stall/retry guards and the verified-build wall-clock primitive onto the same layer. **Live-verified on real Ollama** (4 scenarios, `tests/integration/reliability-live.test.ts`, `RELIABILITY_LIVE=1`) — MLX-unreachable degrades to a real Ollama fallback that generates, a failing-then-succeeding Tool step retries to completion, a delegated agent whose model call fails returns a structured error without crashing, and a real `withMcpRun` persists `degradation.jsonl` + a `reliability.degrade` span event. See [`docs/architecture.md`](docs/architecture.md) §21 | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **C** Codex heavy-lifting backup (**Slice 22**) → dependency major-upgrade (23) → **E** automate (daemon + triggers, 24–25) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

@@ -1,4 +1,5 @@
 import type { LanguageModel, ToolSet } from 'ai';
+import type { DegradationLedger } from '../reliability/ledger.ts';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
 import {
   CAPABILITY_GAP_TOOL,
@@ -46,12 +47,16 @@ export function createOrchestrator(opts: {
   systemPrompt: string;
   agents: Agent[];
   onBeforeDelegate?: BeforeDelegate;
+  /** Optional degradation ledger; forwarded to each delegate tool so a
+   *  dropped sub-agent (or a tripped circuit) is recorded. */
+  ledger?: DegradationLedger;
 }): Agent {
   const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
   for (const agent of opts.agents) {
     tools[delegateToolName(agent)] = asDelegateTool(
       agent,
       opts.onBeforeDelegate,
+      opts.ledger,
     );
   }
   return {

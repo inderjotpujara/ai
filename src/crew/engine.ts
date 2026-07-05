@@ -6,6 +6,7 @@ import { runOrchestrator } from '../core/orchestrator.ts';
 import { makeRecallTool } from '../memory/recall-tool.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import type { RetrievalResult } from '../memory/types.ts';
+import type { DegradationLedger } from '../reliability/ledger.ts';
 import { withCrewSpan } from '../telemetry/spans.ts';
 import {
   isUnverifiedMarker,
@@ -47,6 +48,10 @@ export type CrewDeps = {
   verifyMaxRetries?: number;
   /** Faithfulness threshold override forwarded to verify. */
   verifyThreshold?: number;
+  /** Optional degradation ledger; forwarded to the crew's delegation path
+   *  (sequential agent steps and the hierarchical orchestrator's delegate
+   *  tools) so a dropped member is recorded. */
+  ledger?: DegradationLedger;
 };
 
 /** Scan a finished workflow context for an abstain marker (a verified task whose
@@ -110,6 +115,7 @@ export function runCrew(
         defaultRunAgentStep(
           crewAgentMap(def, deps.tools, deps.memory),
           deps.onBeforeDelegate,
+          deps.ledger,
         );
       const outcome = await runWorkflow(wf, input, {
         runAgentStep,
@@ -118,6 +124,7 @@ export function runCrew(
         memory: deps.memory,
         persistMemory: deps.persistMemory ?? def.persistMemory,
         recall: deps.recall,
+        ledger: deps.ledger,
       });
       if (outcome.kind === 'done') {
         const unverified = findUnverified(
@@ -155,7 +162,11 @@ export function runCrew(
     }
 
     // Hierarchical: the orchestrator is the manager.
-    const orch = buildHierarchicalOrchestrator(def, deps.onBeforeDelegate);
+    const orch = buildHierarchicalOrchestrator(
+      def,
+      deps.onBeforeDelegate,
+      deps.ledger,
+    );
     const task = `${String(input)}\n\nComplete the crew's tasks by delegating to your members.`;
     const result = await runOrchestrator(orch, task);
     if (result.kind === 'answer') return { kind: 'done', output: result.text };

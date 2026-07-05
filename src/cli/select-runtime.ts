@@ -2,6 +2,7 @@ import type { BeforeDelegate } from '../core/delegate.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
+import type { DegradationLedger } from '../reliability/ledger.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
 import {
   effectiveKvBytesPerToken,
@@ -22,6 +23,7 @@ import { formatSelectionNotice } from './selection-notice.ts';
  *  inline setup in chat.ts (kept as-is; deduping chat.ts is a follow-up). */
 export async function createSelectionRuntime(opts?: {
   pinned?: string[];
+  ledger?: DegradationLedger;
 }): Promise<{
   onBeforeDelegate: BeforeDelegate;
   capture: ResourceCapture;
@@ -66,6 +68,7 @@ export async function createSelectionRuntime(opts?: {
     capture,
     notify,
     log: (message) => console.error(message),
+    ledger: opts?.ledger,
   });
 
   return { onBeforeDelegate, capture, close: () => manager.unloadAll() };

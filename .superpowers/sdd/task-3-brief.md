@@ -1,61 +1,84 @@
-### Task 3: builder types (`types.ts`)
+### Task 3: CircuitOpenError
 
 **Files:**
-- Create: `src/crew-builder/types.ts`
-- Test: none (type-only; covered by consumers).
+- Create: `src/reliability/errors.ts`
+- Modify: `tests/reliability/classify.test.ts` (add a case)
+- Test: `tests/reliability/errors.test.ts`
 
 **Interfaces:**
-- Consumes: `BuilderModel` from `src/agent-builder/types.ts`, `CrewIR`/`WorkflowIR` from `ir.ts`, `ValidationIssue` from `src/agent-builder/types.ts`, `WritePaths` from `src/agent-builder/write.ts`, `BuilderDeps` from `src/agent-builder/types.ts`.
-- Produces: `Shape`, `CrewBuildResult`, `CrewBuilderDeps`.
+- Consumes: `FrameworkError` (re-declared? No — import indirectly). `CircuitOpenError` must extend the same base as other framework errors. Since `FrameworkError` is not exported from `core/errors.ts`, `CircuitOpenError` extends `Error` directly and sets `this.name` (matching the pattern used by `JudgeUnavailableError`/`LiveReferenceError` in `verified-build`).
+- Produces: `class CircuitOpenError extends Error` with `readonly dependencyId: string`.
+- Also: `classify()` maps `CircuitOpenError` → `Lane.RouteWorthy` (open breaker = try elsewhere).
 
-- [ ] **Step 1: Write the file** (type-only — no separate test; typecheck is the gate)
+- [ ] **Step 1: Write the failing test**
 
 ```ts
-// src/crew-builder/types.ts
-import type { BuilderDeps, BuilderModel, ValidationIssue } from '../agent-builder/types.ts';
-import type { WritePaths } from '../agent-builder/write.ts';
-import type { CrewIR, WorkflowIR } from './ir.ts';
+// tests/reliability/errors.test.ts
+import { describe, expect, it } from 'bun:test';
+import { CircuitOpenError } from '../../src/reliability/errors.ts';
 
-export type Shape = 'crew' | 'workflow';
-
-export type CrewBuildResult =
-  | { kind: 'written'; shape: Shape; name: string; files: string[]; builtAgents: string[] }
-  | { kind: 'declined' }
-  | { kind: 'invalid'; issues: ValidationIssue[] }
-  | { kind: 'abandoned'; reason: string };
-
-/** Where generated crews/workflows are written + how their registries are found. */
-export type CrewWritePaths = {
-  crewsDir: string; crewsIndexPath: string;
-  workflowsDir: string; workflowsIndexPath: string;
-};
-
-export type CrewBuilderDeps = {
-  model: BuilderModel;
-  existingAgents: () => string[];       // agentNames()
-  packNames: () => string[];            // STARTER_PACK names
-  existingCrews: () => string[];        // Object.keys(CREWS)
-  existingWorkflows: () => string[];    // Object.keys(WORKFLOWS)
-  confirm: (proposalText: string) => Promise<boolean>;
-  /** Auto-build a missing agent for a needed capability; returns built agent name or null on decline/failure. */
-  buildMissingAgent: (need: string) => Promise<string | null>;
-  paths: CrewWritePaths;
-  agentPaths: WritePaths;               // passed through to buildMissingAgent's deps
-  log?: (m: string) => void;
-};
-
-export type { BuilderDeps, ValidationIssue, CrewIR, WorkflowIR };
+describe('CircuitOpenError', () => {
+  it('carries the dependency id and a stable name', () => {
+    const e = new CircuitOpenError('mcp:github');
+    expect(e.dependencyId).toBe('mcp:github');
+    expect(e.name).toBe('CircuitOpenError');
+    expect(e.message).toContain('mcp:github');
+    expect(e instanceof Error).toBe(true);
+  });
+});
 ```
 
-- [ ] **Step 2: Typecheck**
+Also append to `tests/reliability/classify.test.ts`:
 
-Run: `bun run typecheck` — clean.
+```ts
+// add import at top:
+// import { CircuitOpenError } from '../../src/reliability/errors.ts';
+// add inside describe('classify', ...):
+  it('CircuitOpenError is RouteWorthy', () => {
+    expect(classify(new CircuitOpenError('mcp:x'))).toBe(Lane.RouteWorthy);
+  });
+```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `bun test tests/reliability/errors.test.ts`
+Expected: FAIL — cannot resolve `errors.ts`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+```ts
+// src/reliability/errors.ts
+/** Thrown by an open circuit breaker: the dependency is being given a rest. */
+export class CircuitOpenError extends Error {
+  constructor(readonly dependencyId: string) {
+    super(`circuit open for dependency "${dependencyId}"`);
+    this.name = 'CircuitOpenError';
+  }
+}
+```
+
+Then update `src/reliability/classify.ts`:
+
+```ts
+// add import:
+import { CircuitOpenError } from './errors.ts';
+// in classify(), before the ProviderError check:
+  if (err instanceof CircuitOpenError) {
+    return Lane.RouteWorthy;
+  }
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bun test tests/reliability/errors.test.ts tests/reliability/classify.test.ts`
+Expected: PASS (all).
+
+- [ ] **Step 5: Typecheck, lint, commit**
 
 ```bash
-git add src/crew-builder/types.ts
-git commit -m "feat(crew-builder): result + deps types"
+bun run typecheck && bun run lint:file -- "src/reliability/errors.ts" "src/reliability/classify.ts" "tests/reliability/errors.test.ts"
+git add src/reliability/errors.ts src/reliability/classify.ts tests/reliability/errors.test.ts tests/reliability/classify.test.ts
+git commit -m "feat(reliability): CircuitOpenError (route-worthy)"
 ```
 
 ---

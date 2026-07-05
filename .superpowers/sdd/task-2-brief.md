@@ -1,95 +1,115 @@
-### Task 2: Safe-helper vocabulary (`safe-helpers.ts`)
+### Task 2: Error-lane classifier
 
 **Files:**
-- Create: `src/crew-builder/safe-helpers.ts`
-- Test: `tests/crew-builder/safe-helpers.test.ts`
+- Create: `src/reliability/classify.ts`
+- Test: `tests/reliability/classify.test.ts`
 
 **Interfaces:**
-- Consumes: `WorkflowContext` from `src/workflow/types.ts`.
-- Produces: `fromInput()`, `fromStep(ref)`, `fromTemplate(tpl)` → `(ctx)=>string`; `whenEquals(ref,value)`, `whenContains(ref,substr)`, `whenTruthy(ref)` → `(ctx)=>boolean`; `mapOver(ref)` → `(ctx)=>unknown[]`. These are imported by generated TS AND used by the transpiler's rendered calls.
+- Consumes: `FrameworkError` subclasses from `src/core/errors.ts` (`ProviderError`, `ResourceError`, `ToolError`, `MaxStepsError`); `APICallError` from `ai`.
+- Produces: `enum Lane { Transient, RouteWorthy, Terminal }`; `classify(err: unknown): Lane`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/crew-builder/safe-helpers.test.ts
-import { expect, test } from 'bun:test';
-import { fromInput, fromStep, fromTemplate, mapOver, whenContains, whenEquals, whenTruthy } from '../../src/crew-builder/safe-helpers.ts';
+// tests/reliability/classify.test.ts
+import { describe, expect, it } from 'bun:test';
+import { APICallError } from 'ai';
+import { ProviderError, ResourceError, ToolError } from '../../src/core/errors.ts';
+import { classify, Lane } from '../../src/reliability/classify.ts';
 
-test('fromInput returns the ctx.input as string', () => {
-  expect(fromInput()({ input: 42 })).toBe('42');
-});
-test('fromStep stringifies a prior step output', () => {
-  expect(fromStep('a')({ a: 'hello' })).toBe('hello');
-  expect(fromStep('a')({ a: { x: 1 } })).toBe('{"x":1}');
-});
-test('fromTemplate interpolates {{ref}} placeholders', () => {
-  expect(fromTemplate('sum: {{a}} / in: {{input}}')({ input: 'q', a: 'A' })).toBe('sum: A / in: q');
-});
-test('predicates read refs from ctx', () => {
-  expect(whenEquals('a', 'yes')({ a: 'yes' })).toBe(true);
-  expect(whenContains('a', 'err')({ a: 'an error' })).toBe(true);
-  expect(whenTruthy('a')({ a: '' })).toBe(false);
-});
-test('mapOver returns an array (empty when not array)', () => {
-  expect(mapOver('a')({ a: [1, 2] })).toEqual([1, 2]);
-  expect(mapOver('a')({ a: 'x' })).toEqual([]);
+function apiError(statusCode: number, isRetryable: boolean): APICallError {
+  return new APICallError({
+    message: `HTTP ${statusCode}`,
+    url: 'http://x',
+    requestBodyValues: {},
+    statusCode,
+    isRetryable,
+  });
+}
+
+describe('classify', () => {
+  it('retryable API errors are Transient', () => {
+    expect(classify(apiError(429, true))).toBe(Lane.Transient);
+    expect(classify(apiError(503, true))).toBe(Lane.Transient);
+  });
+  it('non-retryable client API errors are Terminal', () => {
+    expect(classify(apiError(400, false))).toBe(Lane.Terminal);
+    expect(classify(apiError(401, false))).toBe(Lane.Terminal);
+  });
+  it('ProviderError and ResourceError are RouteWorthy', () => {
+    expect(classify(new ProviderError('pull failed'))).toBe(Lane.RouteWorthy);
+    expect(classify(new ResourceError('no fit'))).toBe(Lane.RouteWorthy);
+  });
+  it('ToolError is Terminal', () => {
+    expect(classify(new ToolError('bad args'))).toBe(Lane.Terminal);
+  });
+  it('network reset codes are Transient', () => {
+    const e = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+    expect(classify(e)).toBe(Lane.Transient);
+  });
+  it('unknown errors fail safe to Terminal', () => {
+    expect(classify(new Error('mystery'))).toBe(Lane.Terminal);
+    expect(classify('a string')).toBe(Lane.Terminal);
+  });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/crew-builder/safe-helpers.test.ts` — FAIL (module missing).
+Run: `bun test tests/reliability/classify.test.ts`
+Expected: FAIL — cannot resolve `classify.ts`.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/crew-builder/safe-helpers.ts
-import type { WorkflowContext } from '../workflow/types.ts';
+// src/reliability/classify.ts
+import { APICallError } from 'ai';
+import { ProviderError, ResourceError, ToolError } from '../core/errors.ts';
 
-/** Stringify any ctx value deterministically (strings pass through). */
-function asStr(v: unknown): string {
-  return typeof v === 'string' ? v : v === undefined ? '' : JSON.stringify(v);
+/** Three lanes drive the retry/degrade/partial-failure wiring. */
+export enum Lane {
+  Transient, // back off + retry (ops we own only)
+  RouteWorthy, // don't backoff — degrade/fallback/skip
+  Terminal, // fail fast — no retry, surface to user
 }
 
-/** input closure: the workflow's initial input. */
-export function fromInput(): (ctx: WorkflowContext) => string {
-  return (ctx) => asStr(ctx.input);
-}
-/** input closure: a prior step's output by id. */
-export function fromStep(ref: string): (ctx: WorkflowContext) => string {
-  return (ctx) => asStr(ctx[ref]);
-}
-/** input closure: a template with {{ref}} placeholders resolved from ctx. */
-export function fromTemplate(template: string): (ctx: WorkflowContext) => string {
-  return (ctx) => template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, k: string) => asStr(ctx[k]));
-}
-/** branch predicate: ref value === value. */
-export function whenEquals(ref: string, value: string): (ctx: WorkflowContext) => boolean {
-  return (ctx) => asStr(ctx[ref]) === value;
-}
-/** branch predicate: ref value contains substr. */
-export function whenContains(ref: string, substr: string): (ctx: WorkflowContext) => boolean {
-  return (ctx) => asStr(ctx[ref]).includes(substr);
-}
-/** branch predicate: ref value is truthy (non-empty string / truthy value). */
-export function whenTruthy(ref: string): (ctx: WorkflowContext) => boolean {
-  return (ctx) => Boolean(ctx[ref]) && asStr(ctx[ref]).length > 0;
-}
-/** map source: a prior step's output as an array (empty when not an array). */
-export function mapOver(ref: string): (ctx: WorkflowContext) => unknown[] {
-  return (ctx) => (Array.isArray(ctx[ref]) ? (ctx[ref] as unknown[]) : []);
+const TRANSIENT_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE']);
+
+/**
+ * Classify an error into a reliability lane. Pure; never throws.
+ * Unknown/unclassifiable → Terminal (fail safe: never silently retry the unknown).
+ */
+export function classify(err: unknown): Lane {
+  if (APICallError.isInstance(err)) {
+    return err.isRetryable ? Lane.Transient : Lane.Terminal;
+  }
+  if (err instanceof ProviderError || err instanceof ResourceError) {
+    return Lane.RouteWorthy;
+  }
+  if (err instanceof ToolError) {
+    return Lane.Terminal;
+  }
+  const code = (err as { code?: unknown })?.code;
+  if (typeof code === 'string' && TRANSIENT_CODES.has(code)) {
+    return Lane.Transient;
+  }
+  return Lane.Terminal;
 }
 ```
 
+Note: `APICallError.isInstance` is the AI SDK v6 guard. If typecheck reports it missing, use `APICallError.isAPICallError` — verify against the installed `ai` types before finalizing.
+
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `bun test tests/crew-builder/safe-helpers.test.ts && bun run typecheck` — PASS.
+Run: `bun test tests/reliability/classify.test.ts`
+Expected: PASS (6 tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Typecheck, lint, commit**
 
 ```bash
-git add src/crew-builder/safe-helpers.ts tests/crew-builder/safe-helpers.test.ts
-git commit -m "feat(crew-builder): complete safe-helper closure vocabulary"
+bun run typecheck && bun run lint:file -- "src/reliability/classify.ts" "tests/reliability/classify.test.ts"
+git add src/reliability/classify.ts tests/reliability/classify.test.ts
+git commit -m "feat(reliability): three-lane error classifier"
 ```
 
 ---

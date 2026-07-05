@@ -5,7 +5,12 @@ import {
   mountAll,
 } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
-import { createRun, type RunHandle } from '../run/run-store.ts';
+import {
+  createLedger,
+  type DegradationLedger,
+  serializeLedger,
+} from '../reliability/ledger.ts';
+import { createRun, type RunHandle, writeArtifact } from '../run/run-store.ts';
 import { initRunTelemetry } from '../telemetry/provider.ts';
 import { withMcpMountSpan } from '../telemetry/spans.ts';
 
@@ -13,6 +18,7 @@ export type McpRunContext = {
   run: RunHandle;
   reg: MountedRegistry;
   config: McpConfig;
+  ledger: DegradationLedger;
 };
 
 /** Owns the per-run CLI scope so the ordering invariant lives in ONE place:
@@ -31,6 +37,7 @@ export async function withMcpRun<T>(
   const run = await createRun(opts.runsRoot, opts.runId);
   const tel = initRunTelemetry(run.dir);
   const config = opts.config ?? loadMcpConfig();
+  const ledger = createLedger();
   const reg = await withMcpMountSpan(async (record) => {
     const r = await mountAll(config, opts.mountDeps);
     for (const m of r.mounted) record(m.name, 'mounted', m.toolCount, m.kind);
@@ -39,8 +46,17 @@ export async function withMcpRun<T>(
     return r;
   });
   try {
-    return await body({ run, reg, config });
+    return await body({ run, reg, config, ledger });
   } finally {
+    if (ledger.events.length > 0) {
+      try {
+        await writeArtifact(run, 'degradation.jsonl', serializeLedger(ledger));
+      } catch (err) {
+        console.error(
+          `failed to persist degradation ledger: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     await reg.close();
     await tel.shutdown();
   }

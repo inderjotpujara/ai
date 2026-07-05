@@ -14,10 +14,10 @@ const sig: CapabilitySignature = {
 };
 
 describe('withWallClock', () => {
-  test('rejects with dry-run timeout when fn never settles', async () => {
+  test('rejects with timeout when fn never settles', async () => {
     await expect(
       withWallClock(10, () => new Promise<never>(() => {})),
-    ).rejects.toThrow('dry-run timeout');
+    ).rejects.toThrow('timeout');
   });
 
   test('resolves with the fn value when it finishes in time', async () => {

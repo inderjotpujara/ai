@@ -1,3 +1,5 @@
+import { runTimeoutMs } from '../reliability/config.ts';
+import { withWallClock } from '../reliability/timeout.ts';
 import { withStepSpan } from '../telemetry/spans.ts';
 import {
   isUnverifiedMarker,
@@ -65,7 +67,9 @@ export async function runWorkflow(
       batch.map(async (step): Promise<StepResult> => {
         try {
           const raw = await withStepSpan(step.id, step.kind, () =>
-            runStepByKind(step, ctx, deps),
+            withWallClock(step.timeout ?? runTimeoutMs(), () =>
+              runStepByKind(step, ctx, deps),
+            ),
           );
           const parsed = step.output.safeParse(raw);
           if (!parsed.success) {

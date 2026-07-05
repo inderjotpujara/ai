@@ -2,6 +2,7 @@ import { embedMany } from 'ai';
 import { createOllama } from 'ollama-ai-provider-v2';
 import { RuntimeKind } from '../core/types.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
+import { probeTimeoutMs } from '../reliability/config.ts';
 import {
   getModelKvArch,
   getModelMaxContext,
@@ -35,7 +36,7 @@ export const ollamaRuntime: Runtime = {
   async isAvailable() {
     try {
       const res = await fetch(`${BASE}/api/version`, {
-        signal: AbortSignal.timeout(1500),
+        signal: AbortSignal.timeout(probeTimeoutMs()),
       });
       return res.ok;
     } catch {

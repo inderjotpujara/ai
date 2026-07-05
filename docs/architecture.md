@@ -56,6 +56,17 @@ graph TD
         types["types.ts · 4-axis taxonomy · ProviderKind(download)+RuntimeKind(inference)"]
         kindmap["kind-map.ts · downloadKindFor/runtimeKindFor"]
     end
+    subgraph REL["Reliability · src/reliability (Slice 21)"]
+        relclassify["classify.ts · Lane enum + classify(err)"]
+        relconf["config.ts · computed env-fallback knobs"]
+        relretry["retry.ts · withRetry + abortableSleep"]
+        reltimeout["timeout.ts · withWallClock + IdleWatchdog"]
+        relbreaker["breaker.ts · CircuitBreaker + breakerFor(id)"]
+        reldegrade["degrade.ts · degradeChain + failureDomain"]
+        relledger["ledger.ts · DegradationLedger + DegradeKind"]
+        relerrors["errors.ts · CircuitOpenError"]
+        reldl["download-retry.ts · defaultDownloadRetry + downloadStallMs"]
+    end
     subgraph RES["Resource · src/resource"]
         mgr["model-manager.ts"]
         sel["selector.ts"]
@@ -131,7 +142,7 @@ graph TD
         provisioner["provisioner.ts · runProvision"]
         provfit["fit.ts · fitAndRank"]
         provreg["registry.ts · providerFor/catalogSourcesFor/enrichSize"]
-        provsup["supervisor.ts · checkDiskSpace/withRetry/StallWatchdog"]
+        provsup["supervisor.ts · checkDiskSpace + re-exports reliability withRetry/StallWatchdog"]
         provollama["providers/ollama.ts · live-verified"]
         provhf["providers/hf-fetch.ts · GGUF+snapshot, atomic disk-write + oid-verify"]
         provlmstudio["providers/lmstudio.ts · download, wired into providerFor"]
@@ -172,7 +183,7 @@ graph TD
         vbgate["gate.ts · verifyAndCommit (stage→verify→commit)"]
         vbreuse["reuse.ts · reuseDecision (cosine bands ≥0.85/0.75)"]
         vbsig["signature.ts · signatureFromNeed/Proposal/IR"]
-        vbdry["dry-run.ts · withWallClock + representativeTask"]
+        vbdry["dry-run.ts · re-exports reliability withWallClock + representativeTask"]
         vbrepair["repair.ts · repairLoop (≤maxRepairs)"]
         vbjudge["judge.ts · selectJudge (≥judgeMinParams, prefers cross-family)"]
         vbgolden["golden.ts · generateGolden (3–7 binary cases)"]
@@ -194,6 +205,42 @@ graph TD
         mcpjson["mcp.json · registry"]
         manifests["&lt;registry&gt;/.generated.json + &lt;name&gt;.golden.json + archive/ (Slice 20 sidecars)"]
     end
+
+    %% Reliability data flow (Slice 21): classify feeds retry/breaker/degrade;
+    %% delegation/workflow/crew/mcp/selector wrap cross-boundary ops through it;
+    %% the ledger records every degrade/drop/retry and flows to the user summary + telemetry
+    reldl --> relconf
+    relclassify --> relretry
+    relclassify --> relbreaker
+    relclassify --> reldegrade
+    delegate --> relclassify
+    delegate --> relerrors
+    delegate --> relledger
+    agent --> reltimeout
+    agent --> relconf
+    wfengine --> reltimeout
+    wfengine --> relconf
+    wfrunstep --> relretry
+    wfrunstep --> relbreaker
+    wfrunstep --> relledger
+    crewengine --> relledger
+    crewcompile --> relledger
+    mcpclient --> relbreaker
+    sel --> reldegrade
+    selhook --> relledger
+    chat --> relledger
+    provollama --> relretry
+    provollama --> reltimeout
+    provollama --> reldl
+    provhf --> relretry
+    provhf --> reltimeout
+    provhf --> reldl
+    provsup --> relretry
+    provsup --> reltimeout
+    vbdry --> reltimeout
+    ortime --> relconf
+    mlx --> relconf
+    relledger --> spans
 
     chat --> runchat
     chat --> selhook
@@ -385,6 +432,7 @@ graph TD
 |---|---|---|---|
 | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14); agent-builder entry (`agent-builder.ts`, `bun run agent-builder "<need>" [--yes] [--force]`, Slice 17; `--force` commits a failed verify gate at `unverified` and prints a WARNING, §20) plus a TTY-gated capability-gap offer wired into `chat.ts`'s `{kind:'gap'}` branch (§18); crew-builder entry (`crew-builder.ts`, `bun run crew-builder "<need>" [--yes] [--force]`, Slice 19; same `--force` semantics) plus the `offer-crew.ts` multi-step gap-offer heuristic (§19); archive entry (`archive.ts`, `bun run archive [--prune]`, Slice 20 — reports idle near-duplicate generated artifacts per registry, `--prune` archives each behind a per-candidate consent prompt); a per-run telemetry scope for CLIs that mount no MCP servers (`with-run.ts`, Slice 20) — `withRunTelemetry(opts, body)` owns `createRun` → `initRunTelemetry` → `body` → `finally{tel.shutdown()}` for the builder + archive CLIs, so their `agent.build`/`crew.build`/`build.verify`/`build.archive` spans land in `runs/<id>/spans.jsonl` instead of hitting the no-op provider; and `chat.ts`'s informational reuse hint (`reuseHintText`, shown on a gap before any build offer, §20) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
+| **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
 | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters (keyed by `RuntimeKind`); `registry.ts` `runtimeFor(RuntimeKind)`; `mlx-server.ts` `createMlxServerRuntime(deps)` factory with a filled control surface (`getModelMax`/`listLoaded`/best-effort `pull`); `createModel` per declaration | AI SDK + provider HTTP |
 | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
@@ -397,10 +445,10 @@ graph TD
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — both `main()`s now run their whole scope inside `withMcpRun` (`with-mcp-run.ts`, Slice 16, §14), which owns `createRun` → `initRunTelemetry` → mount before handing the run body a `run: RunHandle`: `runCrewCli` → `writeArtifact('result.txt'\|'failed.txt')`, with `shutdown()` happening in `withMcpRun`'s `finally`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
 | **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
-| **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`) → **bounded-parallel** downloads (`DOWNLOAD_CONCURRENCY=2` on a TTY, sequential otherwise) through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`, keyed by the download `ProviderKind`) with a unified progress protocol; adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF single-file + MLX whole-snapshot) now persists bytes to disk atomically and was real-snapshot live-verified in Slice 18**, **LM Studio download wired into `providerFor` but contract-tested only** (not installed on the dev machine); dest-dir resolution (`dest-dir.ts`); dependency-free UI (`ui/`, incl. `MultiProgressBar`); a manual `scripts/refresh-snapshot.ts`; CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (download `ProviderKind` + inference `RuntimeKind`) + `core/kind-map.ts`, `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
+| **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`, now re-exporting `src/reliability`'s `withRetry`/`IdleWatchdog`, Slice 21) → **bounded-parallel** downloads (`DOWNLOAD_CONCURRENCY=2` on a TTY, sequential otherwise) through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`, keyed by the download `ProviderKind`) with a unified progress protocol; adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF single-file + MLX whole-snapshot) now persists bytes to disk atomically and was real-snapshot live-verified in Slice 18**, **LM Studio download wired into `providerFor` but contract-tested only** (not installed on the dev machine); dest-dir resolution (`dest-dir.ts`); dependency-free UI (`ui/`, incl. `MultiProgressBar`); a manual `scripts/refresh-snapshot.ts`; CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (download `ProviderKind` + inference `RuntimeKind`) + `core/kind-map.ts`, `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
 | **Agent-builder** | `src/agent-builder/` | Specialist agent generation (Slice 17, Phase D): draft a proposal from a plain-language need (`generate.ts`), pick a minimal palette-only MCP-server subset (`suggest-tools.ts`), gate it structurally (`validate.ts`), get explicit consent, then write the agent file + registry entry + scoped `mcp.json` atomically (`write.ts`); `builder.ts`'s `buildAgent` sequences generate→suggest→validate→(bounded same-run retry)→consent→write under an `agent.build` span; `deps.ts` assembles the live tools-capable largest-that-fits model + fs paths + TTY consent prompt. Slice 18 (Task 24) adds the consent-gated **tool-code** path (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts`, `builder.ts`'s `buildTool`): it writes an **inert `<name>.proposal.ts`** for review only — never wired into any registry/index/`mcp.json`, so nothing in the run can import or activate it. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on a `{kind:'gap'}` chat outcome. Since Slice 20, when `BuilderDeps.verify` is wired (as `makeRealBuilderDeps` does), `buildAgent` runs **reuse-check → generate → … → consent → stage → verify → commit** through the verified-build gate instead of writing straight through — `write.ts` split into `writeAgentFile` (stage, disk only) + `registerAgent` (commit: index + `mcp.json` splice), and `BuildResult` gained `reused` / `failed-verification` variants + `level?` on `written` (§20). See §18 | `core/types.ts` (`ModelRequirement`, `Capability`, `PreferPolicy`), `mcp/pack.ts` (`STARTER_PACK`, `getPackEntry`), `agents/index.ts` (`agentNames`, the write target), `resource/selector.ts` + `resource/model-manager.ts` + `runtime/registry.ts` (live model), `verified-build/` (the Slice-20 gate), `core/delegate.ts` (`runGuardedAgent` for dry-run/golden-eval), `memory/embed.ts`+`embed-one.ts` (signature embedding), `telemetry/spans.ts` (`withAgentBuildSpan`) |
 | **Crew-builder** | `src/crew-builder/` | Crew/workflow generation from a plain-language need (Slice 19, Phase D follow-on to the agent-builder — see §19 for the full narrative). Declarative IR (`ir.ts`): Zod-validated `WorkflowIR`/`CrewIR` graphs — JSON-safe `InputDescriptor`/`PredicateDescriptor` closures (`fromInput`/`fromStep`/`fromTemplate`, `whenEquals`/`whenContains`/`whenTruthy`, `mapOver`; rendered by the matching `safe-helpers.ts` factories) so step inputs/branch predicates/map sources stay declarative data rather than compiled closures; step kinds `agent`/`tool`/`branch`/`map` (`WorkflowStepIRSchema`, discriminated union); crew members support inline definitions or `agentRef` reuse of a registered agent (`CrewMemberIRSchema`), with `CrewTaskIRSchema` binding a task to a member. `buildCrewOrWorkflow` (`builder.ts`) sequences **classify → analyze → (bounded regenerate: planNodes → planEdges → validate) → consent → resolveMissingAgents → transpile → write** under a `crew.build` span: `classify.ts` picks crew-vs-workflow, `analyze.ts` think-first prose-plans the decomposition (`.text`, no JSON), `plan-nodes.ts`/`plan-edges.ts` generate the node list then the fully-wired IR via the model, `validate.ts` structurally gates it (palette-only tools, known/to-be-built agent refs, snake_case id, member/task-id integrity, acyclicity via the **shared** `assertAcyclic` now extracted to `workflow/define.ts`) then semantically (an LLM-judge goal-alignment check, reached only when structural is clean), `resolve-members.ts` auto-builds genuinely-missing agents (delegating to the agent-builder's `buildAgent`) **once, after consent**, reconciling any renamed refs, `transpile.ts` deterministically renders the IR to a `crews/<id>.ts`/`workflows/<id>.ts` module (every value `JSON.stringify`'d, never raw-interpolated), and `write.ts` inserts it + a registry-index entry atomically. Two triggers: `bun run crew-builder "<need>" [--yes]` (`src/cli/crew-builder.ts`) and a TTY-gated `chat.ts` gap-offer (`offer-crew.ts`'s `shouldOfferCrew` multi-step heuristic, tried **before** falling through to the single-agent agent-builder offer). `deps.ts`'s `makeRealCrewBuilderDeps` reuses the agent-builder's live model/consent and wires the crew/workflow/agent/pack registries. **Live-verified** end to end on Ollama (§19). Since Slice 20, when `CrewBuilderDeps.verify` is wired, the tail of the pipeline runs through the verified-build gate — a post-classify **reuse check** against the matching registry's manifest, then (after consent + member resolution) **stage → verify → commit**: `write.ts` split into `writeCrewFile` (stage, disk only; the staged file is dynamic-imported, cache-busted, to obtain the runnable def) + `registerCrewOrWorkflow` (commit: index splice), and `CrewBuildResult` gained `reused` / `failed-verification` variants + `level?` on `written` (§20) | `agent-builder/` (model/consent reuse, `buildAgent` delegation), `crew/` + `workflow/` (`defineCrew`/`defineWorkflow` + `assertAcyclic` reuse; `crewAgentMap`/`buildCrewAgent`'s `agentRef`-miss-falls-back-to-inline-build behavior is what lets a freshly-built agent run in-process pre-restart), `agents/`, `mcp/pack.ts`, `verified-build/` (the Slice-20 gate), `telemetry/spans.ts` (`withCrewBuildSpan`) |
-| **Verified-build** | `src/verified-build/` | Behavioral verification of builder-generated artifacts (Slice 20, closes Phase D — see §20 for the full narrative): every agent-builder/crew-builder write becomes **stage → verify → commit**, so nothing lands in a registry index until it has actually run. One shared, cheapest-first gate (`gate.ts`, `verifyAndCommit`) serves all three `ArtifactKind`s: **(0) reuse check** *before any generation* — `signature.ts` distills the need into a `CapabilitySignature`, `memory/embed-one.ts` embeds its canonical text, and `reuse.ts` cosine-compares against the per-registry manifest sidecar (`manifest.ts`, `<registry>/.generated.json`) under `config.ts` `reuseBands()` (**≥0.85 Reuse — confirm-gated: ask, reuse on yes, generate on decline · 0.75–0.85 Offer — inform a close match exists, ask reuse-or-build · <0.75 generate**; non-interactive `--yes` auto-reuses a Reuse hit but declines an Offer hit → builds new); **(1) stage** to a staged def file only (the builders' split `writeAgentFile`/`writeCrewFile`), never the registry index; **(2) structural** via the existing validators (`validateProposal`/`validateStructural`); **(3) dry-run** — bounded REAL execution against a benign representative task (`dry-run.ts`, `withWallClock(dryRunMs())` wall-clock race for all kinds; the **agent path additionally aborts in flight** via `AbortSignal.timeout(dryRunMs())` threaded down to `generateText` — crew/workflow runs are wall-clock-raced only, `runCrew`/`runWorkflow` take no signal yet), with a bounded **self-repair loop** on failure (`repair.ts`, ≤`maxRepairs()`=2, feeding the real runtime error back into a fresh regeneration that keeps the consented name/id); **(4) golden-eval** — auto-decompose the need into 3–7 binary cases (`golden.ts`), judged by the largest installed model clearing `judgeMinParams()`≈24e9, **preferring** a different family from the generator, falling back to same-family/largest (`judge.ts`, degrades to a skipped eval — never blocks); a case passes only on a unanimous yes over `evalRuns()`=3 judge runs, `GoldenKind.Grounded` cases judged through the verification layer's `checkClaim` (`eval.ts`); **(5) commit** — index splice + `<name>.golden.json` + manifest upsert at the earned `VerifiedLevel` (behaves/runs/unverified). A failed gate registers **nothing** and the staged file is **discarded** (the gate's `discard` deletes it on any non-committed outcome — failure or throw — so a rejected build never leaves an orphan file); `verify.force` (CLI `--force`) downgrades a failure to an `unverified` commit instead. Also: usage aggregation from every run's `spans.jsonl` (`usage.ts`) and reversible **archive** of idle near-duplicates (`archive.ts`, `bun run archive [--prune]`). `types.ts`/`config.ts` carry the shared vocabulary (`VerifiedLevel`, `ReuseKind`, `GoldenKind`, `ArtifactKind`, `CapabilitySignature`, `Manifest*`, `VerificationResult`) + env-fallback-only live thresholds | `agent-builder/` + `crew-builder/` (the two callers, which inject stage/dry-run/eval/commit closures), `memory/embed-one.ts` (embedOne/cosine), `telemetry/spans.ts` (`withBuildVerifySpan`/`withBuildArchiveSpan`), the `agents/`/`crews/`/`workflows/` registries + their `.generated.json` sidecars, `runs/<id>/spans.jsonl` (usage) |
+| **Verified-build** | `src/verified-build/` | Behavioral verification of builder-generated artifacts (Slice 20, closes Phase D — see §20 for the full narrative): every agent-builder/crew-builder write becomes **stage → verify → commit**, so nothing lands in a registry index until it has actually run. One shared, cheapest-first gate (`gate.ts`, `verifyAndCommit`) serves all three `ArtifactKind`s: **(0) reuse check** *before any generation* — `signature.ts` distills the need into a `CapabilitySignature`, `memory/embed-one.ts` embeds its canonical text, and `reuse.ts` cosine-compares against the per-registry manifest sidecar (`manifest.ts`, `<registry>/.generated.json`) under `config.ts` `reuseBands()` (**≥0.85 Reuse — confirm-gated: ask, reuse on yes, generate on decline · 0.75–0.85 Offer — inform a close match exists, ask reuse-or-build · <0.75 generate**; non-interactive `--yes` auto-reuses a Reuse hit but declines an Offer hit → builds new); **(1) stage** to a staged def file only (the builders' split `writeAgentFile`/`writeCrewFile`), never the registry index; **(2) structural** via the existing validators (`validateProposal`/`validateStructural`); **(3) dry-run** — bounded REAL execution against a benign representative task (`dry-run.ts`, `withWallClock(dryRunMs())` — `withWallClock` re-exported from `src/reliability/timeout.ts` since Slice 21 — wall-clock race for all kinds; the **agent path additionally aborts in flight** via `AbortSignal.timeout(dryRunMs())` threaded down to `generateText` — crew/workflow runs are wall-clock-raced only, `runCrew`/`runWorkflow` take no signal yet), with a bounded **self-repair loop** on failure (`repair.ts`, ≤`maxRepairs()`=2, feeding the real runtime error back into a fresh regeneration that keeps the consented name/id); **(4) golden-eval** — auto-decompose the need into 3–7 binary cases (`golden.ts`), judged by the largest installed model clearing `judgeMinParams()`≈24e9, **preferring** a different family from the generator, falling back to same-family/largest (`judge.ts`, degrades to a skipped eval — never blocks); a case passes only on a unanimous yes over `evalRuns()`=3 judge runs, `GoldenKind.Grounded` cases judged through the verification layer's `checkClaim` (`eval.ts`); **(5) commit** — index splice + `<name>.golden.json` + manifest upsert at the earned `VerifiedLevel` (behaves/runs/unverified). A failed gate registers **nothing** and the staged file is **discarded** (the gate's `discard` deletes it on any non-committed outcome — failure or throw — so a rejected build never leaves an orphan file); `verify.force` (CLI `--force`) downgrades a failure to an `unverified` commit instead. Also: usage aggregation from every run's `spans.jsonl` (`usage.ts`) and reversible **archive** of idle near-duplicates (`archive.ts`, `bun run archive [--prune]`). `types.ts`/`config.ts` carry the shared vocabulary (`VerifiedLevel`, `ReuseKind`, `GoldenKind`, `ArtifactKind`, `CapabilitySignature`, `Manifest*`, `VerificationResult`) + env-fallback-only live thresholds | `agent-builder/` + `crew-builder/` (the two callers, which inject stage/dry-run/eval/commit closures), `memory/embed-one.ts` (embedOne/cosine), `telemetry/spans.ts` (`withBuildVerifySpan`/`withBuildArchiveSpan`), the `agents/`/`crews/`/`workflows/` registries + their `.generated.json` sidecars, `runs/<id>/spans.jsonl` (usage) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -1213,9 +1261,17 @@ phantom, never-sized catalog entry is never auto-preselected.
 ### Supervisor guards (`supervisor.ts`)
 
 `checkDiskSpace` (shortfall/headroom preflight — Ollama itself doesn't
-preflight disk and fails mid-download), `withRetry` (full-jitter exponential
-backoff, abortable via `AbortSignal`), `StallWatchdog` (aborts a download
-whose byte count hasn't advanced within a timeout).
+preflight disk and fails mid-download) is the one guard that still lives
+here. **Since Slice 21**, `withRetry` (full-jitter exponential backoff,
+abortable via `AbortSignal`) and `StallWatchdog` (aborts a download whose
+byte count hasn't advanced within a timeout) are no longer implemented in
+this file — `supervisor.ts` re-exports them from the shared
+`src/reliability/` layer (`withRetry`/`abortableSleep` from `retry.ts`,
+`IdleWatchdog` aliased as `StallWatchdog` from `timeout.ts`), and the
+provisioning adapters (`ollama.ts`, `hf-fetch.ts`) additionally pull their
+retry/stall *configuration* from `download-retry.ts`'s
+`defaultDownloadRetry()`/`downloadStallMs()` instead of duplicating it. See
+§21.
 
 ### Orchestration (`provisioner.ts`, `runProvision`)
 
@@ -2115,3 +2171,211 @@ with the `verify.level` / `verify.dry_run.*` / `verify.judge.below_bar` /
 `verify.reuse.*` attributes populated. Re-running the *same need* then hit
 the reuse path at **89% similarity** and generated nothing — the
 confirm-gated reuse band exercised live.
+
+---
+
+## 21. Reliability — graceful degradation + retries (Slice 21, Phase A — fills the last reliability gap)
+
+Before this slice, retry/timeout logic was duplicated 8 ways with no shared
+contract, degradation was siloed and invisible to the user (a specialist
+dropped mid-run only produced a structured `{ error }` string the *model*
+saw, never the user), and there was no circuit breaker — a persistently-flaky
+MCP server could be retried/hammered on every invocation and stall a whole
+crew. `src/reliability/` is one canonical layer — error-lane classification,
+retry with backoff + `Retry-After`, run/idle timeouts, a hand-rolled circuit
+breaker, a failure-domain-aware model-degradation chain, and a user-facing
+degradation ledger — wired into delegation/workflow/crew/MCP/selector, with
+the pre-existing provisioning/verified-build/probe retry-and-timeout
+duplicates migrated onto it. **Scope is in-run reliability only** —
+persistence/checkpointing/resume-after-crash is Slice 24; token-budgeted
+retries revisit once the Slice 22 Codex cloud tier lands (local compute is
+free, so today's budget is attempt-cap + wall-clock, not tokens).
+
+### 21.1 The three-lane taxonomy (`classify.ts`)
+
+A pure, never-throws classifier — no new fields on error classes:
+
+```ts
+export enum Lane {
+  Transient,   // back off + retry
+  RouteWorthy, // don't backoff — degrade/fallback/skip
+  Terminal,    // fail fast — no retry, surface to user
+}
+export function classify(err: unknown): Lane
+```
+
+`Transient` (for ops we own — MCP/download/probe/direct-HTTP): AI SDK
+`APICallError` with `isRetryable === true`, or a network error code
+(`ECONNRESET`/`ETIMEDOUT`/`ECONNREFUSED`/`EPIPE`). `RouteWorthy`:
+`ProviderError`, `ResourceError`, the new `CircuitOpenError`. `Terminal`:
+a non-retryable `APICallError` (4xx/validation), `ToolError`, and
+everything unclassifiable. **Unknown → Terminal** (fail safe, never
+silently retry the unclassifiable). Classification is advisory data the
+retry/degrade/partial-failure wiring consumes; `classify` itself never
+throws. Three triggers that sound like classifier work are handled
+**elsewhere, not by `classify`**: an idle-stall abort is detected by
+`IdleWatchdog` (`timeout.ts`, §21.2) directly, a content-filter
+`finishReason` has no dedicated classify branch today, and a runtime
+`isAvailable()` false is handled inline at the selector hook
+(`cli/select-hook.ts`), not routed through this taxonomy.
+
+**D5 — the LLM turn is never double-retried.** AI SDK v6 already retries a
+`generateText` call's transport errors internally (`maxRetries: 2`). A
+Transient error that *escapes* the SDK means transport retry is already
+exhausted, so the delegation/workflow wiring treats it as **RouteWorthy**
+(try a different model/runtime, or drop) rather than re-backing-off — a
+second backoff loop around an LLM call would be a multiplicative
+replay-storm anti-pattern. `reliability/withRetry` is reserved for
+cross-boundary operations the framework owns and that sit outside the SDK:
+MCP tool calls, provisioning downloads, runtime `isAvailable()` probes, and
+direct HTTP.
+
+### 21.2 The modules (`src/reliability/`)
+
+| File | Responsibility |
+|---|---|
+| `classify.ts` | `Lane` enum + `classify(err)` — the taxonomy above. |
+| `config.ts` | Computed, env-fallback-only knobs: `maxAttempts()`, `runTimeoutMs()`, `idleTimeoutMs()`, `breakerThreshold()`, `breakerCooldownMs()`, `breakerHalfOpenProbes()`, `retryBaseMs()`, `retryCapMs()`, `probeTimeoutMs()`. |
+| `retry.ts` | `withRetry<T>(fn, opts)` — full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, `onRetry` hook, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter()`; `abortableSleep`. |
+| `timeout.ts` | `withWallClock(ms, fn)` — hard run-timeout (`Promise.race`); `IdleWatchdog` — fires on `now() - lastAdvanceAt`, so it detects a **silent** stall (not just a slow-but-quiet stream) as well as a stalled-progress one; `withIdleTimeout(fn, {idleMs, onProgress})`. |
+| `breaker.ts` | `CircuitBreaker` — Closed → (≥`breakerThreshold()` consecutive failures) → Open → (after `breakerCooldownMs()`) → HalfOpen → (`breakerHalfOpenProbes()` successes) → Closed, any HalfOpen failure → Open; `run(fn)` short-circuits with `CircuitOpenError` while Open. `breakerFor(id)` is a **module-level registry** keyed by dependency id (MCP-server name, tool name, runtime kind) so correlated failures across many agent invocations trip *one* shared breaker — what stops a dead MCP server from stalling a whole crew. `resetBreakers()` clears the registry (tests). No timers — cooldown is checked lazily on `run`. |
+| `degrade.ts` | `degradeChain(candidates)` — failure-domain-aware ordered fallback list; `failureDomain(decl)` groups candidates so a retry doesn't re-hit the same dead daemon. Generalizes the pre-existing selector candidate-walk + `select-hook`'s MLX→Ollama fallback. |
+| `ledger.ts` | `DegradationLedger` (`{events, record(e)}`, `createLedger()`) — an in-run record of degrade/drop/retry events; `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`; `formatLedger()` renders a concise user-facing summary (`"⚠ dropped agent X — reason"`); `serializeLedger()` renders JSONL for persistence. |
+| `errors.ts` | `CircuitOpenError extends Error` (RouteWorthy). |
+| `download-retry.ts` | `defaultDownloadRetry()` (shared retry shape for downloads, built from `retryBaseMs()`/`retryCapMs()`) + `downloadStallMs()` — kills the two duplicated retry-config blocks in `provisioning/providers/{ollama,hf-fetch}.ts`. |
+
+### 21.3 The degradation ledger — how the user finds out
+
+`createLedger()` produces a per-run `DegradationLedger`; it is threaded
+alongside the pre-existing `ResourceCapture` pattern through
+`McpRunContext` (`with-mcp-run.ts`), the orchestrator, delegate tools, the
+workflow engine's Tool steps, and both crew execution paths (sequential +
+hierarchical). Whenever `core/delegate.ts` drops a specialist or degrades
+its model, or a workflow/crew Tool step retries or trips a breaker, it calls
+`ledger.record({kind, subject, reason, detail?})`. At the end of a run:
+`with-mcp-run.ts` persists non-empty ledgers to `run.dir/degradation.jsonl`
+(mirroring `spans.jsonl`) via `serializeLedger`, and all three entry
+points — `cli/chat.ts`, `cli/crew.ts`, `cli/flow.ts` — print
+`formatLedger(ledger)` on completion — a concise `"Degraded during this
+run: ⚠ dropped agent X — reason"` block — so a partial failure that used
+to be visible only to the *model* (as a structured `{error}` tool result)
+is now visible to the **user** too, regardless of which entry point ran.
+This is the single mechanism that satisfies both "tell the user" and
+future silent-quality-regression detection.
+
+### 21.4 Wiring — where the layer is consumed
+
+- **`core/agent.ts` (`runAgent`)** — the single `generateText` call is
+  wrapped in `withWallClock(runTimeoutMs())` (belt to the AI SDK's own
+  `abortSignal` timeout). No second backoff retry, per D5.
+- **`core/delegate.ts` (`runGuardedAgent`)** — on a caught cause,
+  `classify(err)` is **advisory only**: the lane is recorded on the
+  ledger event as `detail` (`lane=...`) but does not branch the recovery
+  path — every lane drops-and-records uniformly (the specialist fails,
+  `ledger.record(...)` fires, and the structured `{error}` is returned,
+  never thrown up the call stack). Model degrade/fallback is a *separate*
+  mechanism that runs upstream, at model selection — see
+  `resource/selector.ts`'s `resolveModel` below — not inside this catch.
+  `asDelegateTool` forwards `abortSignal` through (previously dropped).
+- **`core/orchestrator.ts` + `agents/super.ts`** — thread the ledger to
+  every `asDelegateTool`-wrapped specialist so a mid-run drop is recorded
+  regardless of delegation depth.
+- **`workflow/{types,run-step,engine}.ts`** — `StepBase` gained optional
+  `retry?`/`timeout?` fields (default to config). `engine.ts` wraps every
+  step in `withWallClock(runTimeoutMs())`. Tool/MCP steps (cross-boundary,
+  ops the framework owns) additionally run through `breakerFor(...)` and an
+  optional `withRetry` on Transient failures, emitting `DegradeKind.Retried`
+  on each retry via `onRetry`. Agent steps are **not** re-backoff-retried
+  (D5) — a RouteWorthy failure falls through to the pre-existing `onError`
+  policy (`continue`/`fallback`).
+- **`crew/{engine,compile}.ts`** — sequential crews compile to a workflow
+  and inherit the above for free; hierarchical crews inherit the
+  orchestrator path. `CrewDeps` carries an optional `ledger`, threaded
+  through both `runCrew` dispatch paths.
+- **`mcp/client.ts` (`mountMcpServer`) + `mcp/mount.ts`** —
+  `wrapToolsWithBreaker(serverName, tools)` wraps every tool's `execute`
+  from `client.tools()` in `breakerFor('mcp:<name>').run(...)`; a
+  `CircuitOpenError` (or mount-time down) drops the agent using it with a
+  ledger note — extends the existing per-entry mount-time degrade to
+  *runtime call* degrade.
+- **`resource/selector.ts` + `cli/select-hook.ts` + `runtime/{ollama,mlx-server}.ts`**
+  — `resolveModel`'s candidate walk and the MLX→Ollama fallback route
+  through `degradeChain`/record a `ModelDegraded` ledger event; the runtime
+  probes' `AbortSignal.timeout(1500)` literals became `probeTimeoutMs()`.
+- **`cli/{chat,crew,flow}.ts` + `with-mcp-run.ts`** — the ledger lives on
+  `McpRunContext`, is persisted to `run.dir/degradation.jsonl`, and is
+  printed via `formatLedger` (§21.3).
+
+### 21.5 Migrations (consolidating the pre-existing duplicates)
+
+`provisioning/supervisor.ts` no longer implements retry/stall itself — it
+re-exports `withRetry`/`abortableSleep` from `reliability/retry.ts` and
+`IdleWatchdog` (aliased `StallWatchdog`) from `reliability/timeout.ts`.
+`provisioning/providers/{ollama,hf-fetch}.ts` pull their retry
+*configuration* from `download-retry.ts`'s `defaultDownloadRetry()` +
+`downloadStallMs()` instead of duplicating the attempt/backoff constants.
+`verified-build/dry-run.ts` re-exports `withWallClock` from
+`reliability/timeout.ts` rather than implementing its own `Promise.race`.
+Runtime probe `AbortSignal.timeout(1500)` literals in `runtime/ollama.ts` +
+`runtime/mlx-server.ts` became `probeTimeoutMs()`. **Left alone**
+(deliberately, per D4): `verification/expand.ts`'s graph-unrolling
+(a different paradigm) and the builders' regenerate-with-feedback repair
+loops (repair, not transport retry).
+
+### 21.6 Telemetry
+
+New `ATTR.RELIABILITY_*` keys in `src/telemetry/spans.ts`. `recordDegrade(event)`
+(commit `a87b742`) adds a `reliability.degrade` event to the active span,
+mirroring the existing `recordGuardrailViolation` pattern. It always sets
+`error.type` (`ATTR.ERROR_TYPE`, the `DegradeKind`), `degrade.subject`, and
+`degrade.reason`, plus `degrade.detail` when the event carries one; it then
+adds the field(s) specific to that degrade, when present on the event:
+`degrade.from`/`degrade.to` (model degrade), `retry.attempts` (retry),
+`retry.lane` (drop), `partial_failure.dropped_agent` (`DegradeKind.AgentDropped`),
+and `breaker.state='Open'` (`DegradeKind.CircuitOpen`) — so every ledger
+entry is visible both in the printed user summary (§21.3) and in
+`runs/<id>/spans.jsonl`.
+
+### 21.7 Flagged consideration — recorded decision (spec §11)
+
+Web-validated against OWASP's 2026 Agentic AI Top 10's **"ASI08: Cascading
+Agent Failure"** category: does a specialist that *degrades but still
+produces output* (e.g. falls back to a smaller model via `degradeChain`, or
+a Tool/MCP step that only succeeds after `withRetry`) carry any signal to
+*downstream* consumers within the same run, or does it flow on identically
+to a full-confidence result? **Decision (recorded 2026-07-05):** Slice 21
+ships **observability-complete** — every degrade/drop/retry is recorded in
+the `DegradationLedger` (including the previously-unemitted
+`DegradeKind.Retried`, closed by wiring the ledger into
+`workflow/run-step.ts`'s Tool-step `onRetry`) and surfaced to the **user** +
+telemetry. The downstream **`degraded: true`** taint marker that a
+`StepResult`/delegation return could carry — so a downstream step could
+*branch* on "my input came from a degraded path" — is explicitly **out of
+scope for this slice**: it needs a defined consumer reaction (a
+grounding/verification concern, not a reliability-layer one) before it's
+worth building. Tracked as a future candidate slice in
+[`docs/ROADMAP.md`](ROADMAP.md)'s backlog table, not silently dropped.
+
+### 21.8 Testing + live-verify
+
+**Unit:** `classify` lane mapping per trigger; `withRetry` backoff/jitter/
+`Retry-After`/abort/attempt-cap + Transient-only gating; `withWallClock` +
+`withIdleTimeout` reset-on-progress (including the silent-stall fix — the
+first implementation only detected a non-advancing *heartbeat*, not a
+heartbeat that stopped firing entirely; `IdleWatchdog` now measures
+`now() - lastAdvanceAt`, armed at construction and on every advance);
+breaker Closed→Open→HalfOpen→Closed transitions, cooldown, shared-registry
+behavior; `degradeChain` ordering + failure-domain avoidance; ledger
+recording + persistence. **Integration:** a workflow Tool step retries
+Transient failures and emits `DegradeKind.Retried`; an MCP server going down
+opens its breaker and drops the dependent agent with a ledger note; a
+delegation RouteWorthy failure degrades to a fallback model/runtime with no
+LLM re-backoff (D5). **Live-verify:** `tests/integration/reliability-live.test.ts`
+(`RELIABILITY_LIVE=1`, real Ollama) runs 4 scenarios: (1) an unreachable MLX
+runtime degrades to a real Ollama fallback model that actually generates a
+response, recording `ModelDegraded`; (2) a Tool step that fails once then
+succeeds is retried and the workflow completes, recording `Retried`; (3) a
+delegated agent whose model call fails returns a structured error instead of
+crashing the run, recording `AgentDropped`; (4) a real `withMcpRun` writes
+`runs/<id>/degradation.jsonl` and a `reliability.degrade` span event to
+`spans.jsonl`. Full suite: **827 pass / 10 skip / 0 fail**.

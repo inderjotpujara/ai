@@ -1,53 +1,87 @@
-### Task 12: registry markers in `crews/index.ts` + `workflows/index.ts`
+### Task 12: Wire the ledger into the run context + CLI surface
 
 **Files:**
-- Modify: `crews/index.ts`, `workflows/index.ts` (add `// CREW-BUILDER:IMPORTS` / `// CREW-BUILDER:ENTRIES` markers)
-- Test: `tests/crew-builder/markers.test.ts`
+- Modify: `src/cli/with-mcp-run.ts` (add `ledger` to `McpRunContext`; persist on exit)
+- Modify: `src/cli/with-run.ts` (expose a ledger for the non-MCP path if it runs agents) — only if it invokes agent execution; otherwise skip.
+- Modify: `src/cli/chat.ts` (print `formatLedger` after the run)
+- Test: `tests/cli/degradation-ledger.test.ts`
+
+**Interfaces:**
+- Consumes: `createLedger`, `formatLedger`, `serializeLedger`, `DegradationLedger` (ledger.ts); `writeArtifact` (`src/run/run-store.ts`).
+- Produces: `McpRunContext` gains `ledger: DegradationLedger`. On body completion, if `ledger.events.length > 0`, write `degradation.jsonl` via `writeArtifact(ctx.run, 'degradation.jsonl', serializeLedger(ledger))`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/crew-builder/markers.test.ts
-import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+// tests/cli/degradation-ledger.test.ts
+import { describe, expect, it } from 'bun:test';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { withMcpRun } from '../../src/cli/with-mcp-run.ts';
+import { DegradeKind } from '../../src/reliability/ledger.ts';
 
-for (const p of ['crews/index.ts', 'workflows/index.ts']) {
-  test(`${p} has CREW-BUILDER markers`, () => {
-    const src = readFileSync(p, 'utf8');
-    expect(src).toContain('// CREW-BUILDER:IMPORTS');
-    expect(src).toContain('// CREW-BUILDER:ENTRIES');
+describe('withMcpRun degradation ledger', () => {
+  it('exposes a ledger and persists it when events were recorded', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'runs-'));
+    let runDir = '';
+    await withMcpRun({ runsRoot: root, runId: 'r1', config: { entries: [], dormant: [], warnings: [] } }, async (ctx) => {
+      runDir = ctx.run.dir;
+      ctx.ledger.record({ kind: DegradeKind.AgentDropped, subject: 'a', reason: 'down' });
+    });
+    const text = await readFile(join(runDir, 'degradation.jsonl'), 'utf8');
+    expect(JSON.parse(text.trim()).subject).toBe('a');
   });
-}
+});
 ```
 
-- [ ] **Step 2: Run — FAIL.**
+- [ ] **Step 2: Run test to verify it fails**
 
-- [ ] **Step 3: Edit both index files** — add the marker after the last import and before the closing `}` of the record. Example for `crews/index.ts`:
+Run: `bun test tests/cli/degradation-ledger.test.ts`
+Expected: FAIL — `ctx.ledger` undefined.
+
+- [ ] **Step 3: Implement**
+
+In `src/cli/with-mcp-run.ts`:
+- Import: `import { createLedger, serializeLedger, type DegradationLedger } from '../reliability/ledger.ts';` and `writeArtifact` from `../run/run-store.ts` (add to existing import).
+- Extend the type: `export type McpRunContext = { run: RunHandle; reg: MountedRegistry; config: McpConfig; ledger: DegradationLedger };`
+- In `withMcpRun`, after `createRun`, create `const ledger = createLedger();`, pass it in the `ctx` object, and in the `finally`/after-body block write it out:
 
 ```ts
-import type { CrewDef } from '../src/crew/types.ts';
-import researchCrew from './research-crew.ts';
-// CREW-BUILDER:IMPORTS (generated crew imports are inserted above this line — do not remove)
-
-export const CREWS: Record<string, CrewDef> = {
-  [researchCrew.id]: researchCrew,
-  // CREW-BUILDER:ENTRIES (generated crew entries are inserted above this line — do not remove)
-};
-
-export function getCrew(name: string): CrewDef | undefined {
-  return CREWS[name];
+try {
+  const result = await body({ run, reg, config, ledger });
+  if (ledger.events.length > 0) {
+    await writeArtifact(run, 'degradation.jsonl', serializeLedger(ledger));
+  }
+  return result;
+} finally {
+  await reg.close();
+  await tel.shutdown();
 }
 ```
 
-Do the analogous edit for `workflows/index.ts` (import `fetchThenSummarize`, entry `[fetchThenSummarize.id]: fetchThenSummarize`).
+(Adapt to the file's existing control flow — the point is: ledger created, threaded into `ctx`, persisted when non-empty.)
 
-- [ ] **Step 4: Run — PASS** (`bun test tests/crew-builder/markers.test.ts`).
+In `src/cli/chat.ts`: after the run completes, print the summary:
 
-- [ ] **Step 5: Commit**
+```ts
+import { formatLedger } from '../reliability/ledger.ts';
+// after obtaining the result, before returning:
+const summary = formatLedger(ctx.ledger);
+if (summary) console.error(summary);
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bun test tests/cli/degradation-ledger.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Typecheck, lint, commit**
 
 ```bash
-git add crews/index.ts workflows/index.ts tests/crew-builder/markers.test.ts
-git commit -m "feat(crew-builder): registry markers in crews/ + workflows/ index"
+bun run typecheck && bun run lint:file -- "src/cli/with-mcp-run.ts" "src/cli/chat.ts" "tests/cli/degradation-ledger.test.ts"
+git add src/cli/with-mcp-run.ts src/cli/chat.ts tests/cli/degradation-ledger.test.ts
+git commit -m "feat(cli): thread degradation ledger through the run + surface it"
 ```
 
 ---

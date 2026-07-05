@@ -4,6 +4,7 @@ import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { createOrchestrator } from '../core/orchestrator.ts';
 import { createOllamaModel } from '../providers/ollama.ts';
+import type { DegradationLedger } from '../reliability/ledger.ts';
 import { ATTR, annotateStep } from '../telemetry/spans.ts';
 import { expandVerification } from '../verification/expand.ts';
 import type { VerifyDeps } from '../verification/types.ts';
@@ -93,6 +94,7 @@ export function compileToWorkflow(
 export function buildHierarchicalOrchestrator(
   crew: CrewDef,
   onBeforeDelegate?: BeforeDelegate,
+  ledger?: DegradationLedger,
 ): Agent {
   const agents = crew.members.map((m) => buildCrewAgent(m, m.tools));
   const taskList = crew.tasks
@@ -112,5 +114,6 @@ export function buildHierarchicalOrchestrator(
     systemPrompt,
     agents,
     onBeforeDelegate,
+    ledger,
   });
 }

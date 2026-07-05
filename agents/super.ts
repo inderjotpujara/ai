@@ -4,16 +4,20 @@ import type { Agent } from '../src/core/agent-def.ts';
 import type { BeforeDelegate } from '../src/core/delegate.ts';
 import { createOrchestrator } from '../src/core/orchestrator.ts';
 import { createOllamaModel } from '../src/providers/ollama.ts';
+import type { DegradationLedger } from '../src/reliability/ledger.ts';
 import { AGENTS, agentNames } from './index.ts';
 
 const BASE_PROMPT =
   'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
 
 /** Build the super-agent (orchestrator) with every registered specialist.
- *  `toolsFor(name)` supplies each agent's MCP-scoped tool set (reg.forAgent). */
+ *  `toolsFor(name)` supplies each agent's MCP-scoped tool set (reg.forAgent).
+ *  `ledger`, when supplied, is forwarded to the orchestrator so a dropped
+ *  sub-agent (or a tripped circuit) during delegation is recorded. */
 export function createSuperAgent(
   toolsFor: (name: string) => ToolSet,
   onBeforeDelegate?: BeforeDelegate,
+  ledger?: DegradationLedger,
 ): Agent {
   const agents: Agent[] = agentNames().map((name) => {
     const factory = AGENTS[name];
@@ -26,5 +30,6 @@ export function createSuperAgent(
     systemPrompt: BASE_PROMPT,
     agents,
     onBeforeDelegate,
+    ledger,
   });
 }
