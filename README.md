@@ -22,14 +22,69 @@ Mini.
 > agents into a reviewed crew or workflow — and the **verified "works out of
 > the box"** pass (Slice 20) — every generated artifact is reuse-checked,
 > staged, execution-dry-run, and golden-evaled before it may commit — have
-> landed, **completing Phase D (self-extension)**, and **graceful degradation
+> landed, **completing Phase D (self-extension)**, **graceful degradation
 > + retries** (Slice 21) fills Phase A's last **reliability** gap — a dead
 > MCP server, model, or tool no longer sinks a run; it degrades and tells the
-> user. (Phase A's one remaining open item is the routing-accuracy eval
-> harness.) Next: **Slice 22** (Codex heavy-lifting backup, Phase C). See
-> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> user — and **alternate runtimes + remote-auth completion** (Slice 26)
+> raises **LM Studio and llama.cpp to full inference runtimes** alongside
+> Ollama and MLX (a shared managed-runtime base with per-runtime
+> relaunch/reload/fixed context handling) and completes **live remote MCP
+> OAuth** (DCR, browser handshake, on-disk token persistence) plus a
+> verified **GitHub-PAT** remote server. (Phase A's one remaining open item
+> is the routing-accuracy eval harness.) Next: **Slice 24** (always-on
+> daemon + secure remote access, Phase E — Slices 22/23 are deferred/held).
+> See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 21 complete — **Graceful degradation + retries** (fills
+> **Status:** Slice 26 complete — **Alternate runtimes + remote-auth
+> completion** (debt slice, gated on installing those runtimes / having
+> creds — landed out of sequence per that gate). **Phase A — full inference
+> runtimes:** `src/runtime/managed-openai-compatible.ts`'s
+> `createManagedRuntime(strategy)` is now the one control-surface
+> implementation shared by **llama.cpp**, **LM Studio**, and (rewritten
+> onto it) **MLX** — spawn/health-poll/kill-on-timeout via
+> `process-supervisor.ts` (fresh free port per relaunch, a
+> `breakerFor('runtime:'+kind)` circuit breaker), reading the runtime's own
+> `GET /v1/models` for `listLoaded`/`getModelMax` (degrade-safe: never
+> throws). Each runtime's `contextCapability` says how its context window is
+> (re)configured: llama.cpp **relaunches** `llama-server -c <numCtx>`, LM
+> Studio (new dep `@lmstudio/sdk`) **reloads** via
+> `client.llm.load(model,{config:{contextLength}})`, and MLX's window is
+> **fixed** — `mlx_lm.server` has no context flag, so a requested context is
+> honestly never applied (observable via telemetry, not silently dropped).
+> `select-hook.ts` now calls `rt.control.warm(model, numCtx)` for every
+> non-Ollama runtime so this actually takes effect at load time. New
+> `RUNTIME_KIND`/`RUNTIME_CONTEXT_CAPABILITY`/`RUNTIME_CONTEXT_REQUESTED`/
+> `RUNTIME_CONTEXT_APPLIED`/`RUNTIME_WARM_OUTCOME` telemetry. The LM Studio
+> download adapter's job-status poll URL was also fixed (wrong since
+> Slice 18, caught by live-verify). **Phase B — live remote MCP OAuth:**
+> `src/mcp/oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp`
+> `OAuthClientProvider` — Dynamic Client Registration (no preconfigured
+> client id), PKCE + CSRF `state`, a browser-loopback redirect capture
+> (`loopback.ts`), and authorization-server metadata persistence (needed so
+> the code-exchange call doesn't throw on a fresh process). Tokens/client
+> registration/AS metadata persist to `src/mcp/token-store.ts` — an atomic,
+> **0600** `~/.config/ai/mcp-tokens.json` (encryption-at-rest deferred to
+> Slice 35). `with-mcp-run.ts` now actually builds an `authProvider` per
+> `auth.kind: oauth` config entry (previously it was **never populated**, so
+> OAuth always silently degraded to unauthenticated); `mcp/client.ts`'s
+> `mountMcpServer` completes the first-time handshake on the SDK's
+> `UnauthorizedError`. New `mcp.auth.*` telemetry (`MCP_AUTH_OUTCOME`/
+> `MCP_AUTH_KIND`, never a secret value). **Live-verified on this Mac:** all
+> three managed runtimes end to end (llama.cpp `/props` reports
+> `n_ctx=8192`, LM Studio loads at `ctx=4096`, MLX confirmed fixed), both
+> download adapters, a **GitHub-PAT** remote-HTTP server, and a full
+> **Linear OAuth** handshake (DCR → browser → code exchange → 47 tools),
+> with token-store reuse on a second run producing **no browser prompt**.
+> That live pass caught 3 real defects (the LM Studio poll URL; the OAuth
+> handshake never actually completing; AS metadata not persisted across the
+> exchange) — all fixed in-slice. Deterministic OAuth coverage:
+> `tests/mcp/oauth-flow.test.ts` (mock AS); gated live suites:
+> `tests/integration/altruntime*.live.test.ts` (`ALTRUNTIME_LIVE`),
+> `tests/integration/linear-oauth.live.test.ts` (`MCP_OAUTH_LIVE`),
+> `tests/integration/github-mcp.live.test.ts` (`GITHUB_PAT`). See
+> [`docs/architecture.md`](docs/architecture.md) §5 / §14.
+
+> **Previously:** Slice 21 — **Graceful degradation + retries** (fills
 > Phase A's last reliability gap; the routing-accuracy eval harness remains
 > open). One canonical `src/reliability/` layer — a three-lane
 > error taxonomy (`Lane.Transient/RouteWorthy/Terminal`), retry with
@@ -53,43 +108,14 @@ Mini.
 > completion, a delegated agent whose model call fails returns a structured
 > error without crashing the run, and a real `withMcpRun` persists
 > `degradation.jsonl` + a `reliability.degrade` span event. See
-> [`docs/architecture.md`](docs/architecture.md) §21.
-
-> **Previously:** Slice 20 — **Verified "works out of the box"** (Phase D
-> — closes the phase). Agent/crew/workflow generation now ends in
-> **stage → verify → commit** instead of write-then-return: `src/verified-build/`
-> gates every agent-builder and crew-builder write behind one shared,
-> cheapest-first pipeline. **(0) Reuse check** before any generation — a
-> capability signature of the need is embedded and cosine-compared against a
-> per-registry manifest sidecar (`<registry>/.generated.json`): **≥0.85 → ask
-> to reuse the existing artifact (decline → generate) · 0.75–0.85 → offer the
-> close match, ask reuse-or-build · <0.75 generate**; non-interactive `--yes`
-> auto-reuses a Reuse hit but declines an Offer hit → builds new. **(1) Stage**
-> to a staged file, never the registry index. **(2) Structural** via the
-> existing validators. **(3) Execution dry-run** — the staged artifact is
-> *really run* against a benign representative task, wall-clock-bounded via
-> `withWallClock` for all kinds (the agent path additionally aborts the model
-> call in flight via a new `runAgent` `abortSignal` seam; crew/workflow runs
-> are wall-clock-raced only — `runCrew`/`runWorkflow` take no signal yet),
-> with a bounded **self-repair loop** (≤2, feeding the real runtime error back
-> into a fresh regeneration that keeps the consented name). **(4) Golden-eval**
-> — the need is auto-decomposed into 3–7 binary cases, judged by the **largest
-> installed model (~26–30b), preferring a different family than the
-> generator** (falling back to same-family/largest), each case requiring a
-> unanimous yes over 3 judge runs. **(5) Commit** — index splice +
-> `<name>.golden.json` + manifest entry at the earned level
-> (`behaves`/`runs`/`unverified`). **Degrades, never blocks:** no judge
-> clearing the ~24B bar ⇒ behavioral eval is skipped and the commit is marked
-> `verified: runs`; a failed gate registers *nothing* and the staged file is
-> discarded (a `verify.force`/`--force` escape hatch commits marked
-> `unverified`, with a WARNING). Also shipped: **usage
-> aggregation** from every run's `spans.jsonl` plus a reversible **archive**
-> flow (`bun run archive [--prune]`) for idle artifacts with a more-used
-> near-duplicate, an informational reuse hint in chat, and `build.verify`/
-> `build.archive` telemetry. The manifest closes two long-standing gaps —
-> a generated artifact's original need was never persisted, and no usage
-> tracking existed. **Phase D (self-extension) is complete.** Also shipped:
-> Slice 19 (**Crew/workflow builder**, Phase D — a multi-step need becomes a
+> [`docs/architecture.md`](docs/architecture.md) §21. Also shipped: Slice 20
+> (**Verified "works out of the box"**, Phase D — closes the phase — every
+> agent-builder/crew-builder write becomes stage→verify→commit: a
+> pre-generation reuse check against a per-registry manifest, an execution
+> dry-run against a benign representative task with a bounded self-repair
+> loop, a golden-eval judged by the largest installed model, and usage
+> aggregation + a reversible archive flow), Slice 19 (**Crew/workflow
+> builder**, Phase D — a multi-step need becomes a
 > reviewed crew or workflow via a staged declarative-IR pipeline, a two-tier
 > structural+semantic gate, consent-gated auto-build of missing member
 > agents, and a deterministic transpiler; live-verified end to end — a
@@ -105,7 +131,8 @@ Mini.
 > registry + starter pack, `src/mcp/`, 12-entry curated pack, consent-gated +
 > tool-definition-pinned mounting), Slice 14 (first-boot provisioning +
 > runtime-agnostic downloader, Ollama live-verified; LM Studio/llama.cpp/MLX
-> contract-tested, live-verify deferred), Slice 8 (OTel run-viewer, `bun run
+> contract-tested at the time, live-verify completed in Slice 26), Slice 8
+> (OTel run-viewer, `bun run
 > runs`), Slice 9 (composition guardrails — delegation depth limit +
 > return-size cap), Slice 10 (workflow/DAG engine, `bun run flow <name>`),
 > Slice 11 (crews & roles, `bun run crew <name>`), Slice 12 (memory/RAG,
@@ -168,6 +195,8 @@ No manual steps. No API keys. Everything runs locally.
 **Crew/workflow builder (Slice 19, Phase D).** Self-extension one level up from Slice 17: `src/crew-builder/` turns a plain-language **multi-step** need into a working **crew** (CrewAI-style role/goal/task team, `sequential` or `hierarchical`) or **workflow** (a raw DAG covering all 4 directly-planned `StepKind`s — agent/tool/branch/map; `Verify` is reachable only via a step's `verify` flag), composing **existing and freshly-built** agents. Generation is staged, not one-shot: `classify` (crew vs workflow) → `analyze` (**think-first**, prose-only) → `plan-nodes` → `plan-edges` assemble a declarative, JSON-safe **IR** (`CrewIR`/`WorkflowIR`, Zod-validated) — never a `CrewDef`/`WorkflowDef` directly, since those carry live closures and aren't serializable. Step inputs, branch predicates, and map sources are expressed as a small **safe-helper vocabulary** (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/`whenTruthy`/`mapOver`) — the only closures a model can pick from, never invent. A **two-tier validation gate** (`validate.ts`) checks structure first (refs resolve, tools are palette-only, the graph is acyclic via a shared `assertAcyclic` now extracted into `workflow/define.ts`) and only then asks an LLM judge whether the graph actually accomplishes the need. After consent, `resolve-members.ts` **auto-builds any genuinely-missing member agents** by delegating to the Slice-17 agent-builder (its own per-agent consent), reconciling any renamed refs; a deterministic, model-free `transpile.ts` then renders the IR to real `crews/<id>.ts`/`workflows/<id>.ts` TS (every string `JSON.stringify`'d), and `write.ts` writes it + a registry entry atomically. `CrewMember` gained an optional `agentRef` (`src/crew/types.ts`) so a crew member can reuse a registered — or just-built — agent, resolved by `crewAgentMap` (`src/crew/engine.ts`). Two triggers: `bun run crew-builder "<need>" [--yes]`, and a TTY-gated `chat.ts` offer (`shouldOfferCrew`'s multi-step heuristic, tried before the existing single-agent offer). Safety model mirrors the agent-builder: review-before-activate, palette-only tools, per-agent auto-build consent, no same-run activation. **Live-verified end to end on Ollama** — a generated crew was written and then actually **executed** (`runCrew`) to a correct result, the first live run of this pipeline, which surfaced and fixed 4 real defects (a nested-schema key-hint gap in the shared `BuilderModel` seam, under-specified IR prompt constraints, a regeneration loop that didn't catch a throw, and a tool-name/`ToolSet` type mismatch). `crew.build` telemetry span. See [`docs/architecture.md`](docs/architecture.md) §19.
 
 **Verified "works out of the box" (Slice 20, Phase D — closes the phase).** Generation used to be write-then-return: a proposal/IR passed structural (and, since Slice 19, semantic-judge) validation and landed in the registry without ever being run. `src/verified-build/` turns every agent-builder/crew-builder write into **stage → verify → commit** through one shared, cheapest-first gate (`verifyAndCommit`). Before anything is generated, a **reuse check** distills the need into a capability signature, embeds it, and cosine-compares it against a per-registry **manifest sidecar** (`<registry>/.generated.json` — which now persists each generated artifact's original need, signature+vector, verified level, golden path, and usage counters): **≥0.85 → ask to reuse** the existing artifact (accept → nothing is generated; decline → generate), **0.75–0.85 → offer** the close match and ask reuse-or-build, **<0.75 → generate**; the non-interactive `--yes` policy auto-reuses a Reuse hit but declines an Offer hit. After consent, the artifact is **staged** (a def file on disk, never the registry index), re-checked structurally, then **actually executed** against a benign read-only representative task (`dry-run.ts` — every run is `withWallClock`-raced; the agent path additionally aborts in flight via a new `runAgent` `abortSignal` seam, while crew/workflow runs are wall-clock-raced only since `runCrew`/`runWorkflow` take no signal yet), with a bounded **self-repair loop** (≤2 attempts, the real runtime error fed back into a fresh regeneration — the agent-builder re-drafts with the error as retry feedback, the crew-builder re-plans with it appended — keeping the consented name/id). A **golden-eval** then auto-decomposes the need into 3–7 binary cases and judges each artifact output with the **largest installed model (~26–30b), preferring a different family than the generator** (falling back to same-family/largest); each case requires a unanimous yes over 3 judge runs, with grounded-kind cases routed through the verification layer's `checkClaim`; if no installed model clears the ~24B-parameter judge bar, the behavioral eval is **skipped and the commit is marked `verified: runs`** — degrade, never block, never an unconsented pull. Only a passing (or explicitly `--force`d/`verify.force`d, marked `unverified` with a WARNING) gate reaches **commit**: the registry-index splice, a `<name>.golden.json`, and the manifest upsert; a failed gate registers nothing and the staged file is discarded. On top of the manifest: **usage aggregation** derived from every run's `spans.jsonl` (no new bookkeeping) and a **reversible archive** flow — `bun run archive [--prune]` reports (and, per-candidate consent, archives to `<registry>/archive/`) artifacts that are idle *and* have a more-used near-duplicate — plus an informational reuse hint on chat's gap offers. `build.verify` / `build.archive` telemetry spans. See [`docs/architecture.md`](docs/architecture.md) §20.
+
+**Alternate runtimes + remote-auth completion (Slice 26).** Declaring `runtime: RuntimeKind.LlamaCpp` or `RuntimeKind.LmStudio` on a model now runs real inference, not just a download: `src/runtime/managed-openai-compatible.ts`'s `createManagedRuntime(strategy)` is the shared implementation behind both, plus a rewritten `mlx-server.ts`. llama.cpp **relaunches** `llama-server -c <numCtx>` to change context (or `-hf <org/repo>` when the model looks like an HF repo id rather than a local path); LM Studio **reloads** the model via `@lmstudio/sdk`'s `client.llm.load(model,{config:{contextLength}})` against its always-on daemon; MLX's context is **fixed** (`mlx_lm.server` has no context flag) — a requested window is honestly never applied rather than silently ignored. All three are spawn/health-polled/kill-on-timeout-supervised by `process-supervisor.ts` (a fresh free port every relaunch) and circuit-breaker-wrapped per runtime kind. `select-hook.ts` now calls `rt.control.warm(model, numCtx)` for every non-Ollama runtime so a resolved context actually reaches the process. Separately, MCP OAuth is now **live**, not contract-tested-only: `src/mcp/oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (Dynamic Client Registration, PKCE, a CSRF `state` nonce, a browser-loopback redirect capture, and authorization-server metadata persistence), backed by a `token-store.ts` atomic **0600** on-disk store; `with-mcp-run.ts` now actually constructs one per `auth.kind: oauth` config entry (previously always empty, so OAuth silently degraded every time), and `mcp/client.ts`'s `mountMcpServer` completes the handshake the first time a server is used. Live-verified on real hardware: llama.cpp, LM Studio, and MLX all serving inference; a GitHub-PAT remote server; and a full Linear OAuth handshake (DCR → browser → token exchange → 47 tools, with silent token-reuse on a second run). See [`docs/architecture.md`](docs/architecture.md) §5 / §14.
 
 ---
 
@@ -253,11 +282,11 @@ they're reusable across other agent tools (Claude Code, Cursor, …).
 | `src/core/` | `agent.ts` (the loop), `agent-def.ts`, `delegate.ts`, `orchestrator.ts`, `capability-gap.ts`, `resource-capture.ts` (the `{kind:'resource'}` seam), `types.ts` (download `ProviderKind` + inference `RuntimeKind`), `kind-map.ts` (`downloadKindFor`/`runtimeKindFor`), `errors.ts` |
 | `src/providers/` | `ollama.ts` — builds an AI SDK model from a declaration |
 | `src/resource/` | `hardware.ts` (live free-RAM via `vm_stat` + Metal-cap ceiling), `footprint.ts` (weights + KV split), `kv-cache.ts` (per-model arch-derived KV sizing + quant-risk), `model-manager.ts` (load/evict/pin + dynamic `num_ctx`), `model-store.ts` (installed-model cache), `selector.ts` (capability filter + largest-that-fits + `resolveModel` fallback loop), `ollama-control.ts` (pull/warm/unload/`getModelMaxContext`/`getModelKvArch`) |
-| `src/runtime/` | `runtime.ts` (runtime port), `ollama.ts` + `mlx-server.ts` (adapters), `registry.ts` (runtime registry) — build a model from a declaration per provider |
+| `src/runtime/` | `runtime.ts` (runtime port), `ollama.ts` (its own control impl) + `mlx-server.ts`/`strategies/{llamacpp,lmstudio,mlx}.ts` (4 adapters, the latter 3 sharing `managed-openai-compatible.ts`'s `createManagedRuntime(strategy)` control surface, Slice 26), `process-supervisor.ts` (spawn/health-poll/kill-on-timeout for spawned strategies), `registry.ts` (runtime registry) — build a model from a declaration per provider |
 | `src/discovery/` | `discover.ts` + `build-registry.ts` (offline registry merge), `catalog-source.ts` + `huggingface-gguf.ts` + `huggingface-mlx.ts` + `hf-client.ts` (HF catalogs), `host.ts` (machine detect), `catalog-cache.ts`, `quant.ts`, `sources.ts` |
 | `src/run/` | `run-store.ts` (run dirs + artifacts), `journal.ts` (resumable JSONL log) |
 | `src/tools/` | `read-file.ts` — the `read_file` tool |
-| `src/mcp/` | `types.ts`/`config.ts` (`mcp.json` registry, per-entry degrade), `consent.ts` (spec/tools-hash pinning, `.mcp-approvals.json`), `mount.ts` (`mountAll`, per-agent slices), `pack.ts` (12-entry starter pack), `client.ts` (`mountMcpServer` primitive), `server.ts`/`sqlite-server.ts` (in-repo servers) |
+| `src/mcp/` | `types.ts`/`config.ts` (`mcp.json` registry, per-entry degrade), `consent.ts` (spec/tools-hash pinning, `.mcp-approvals.json`), `mount.ts` (`mountAll`, per-agent slices), `pack.ts` (12-entry starter pack), `client.ts` (`mountMcpServer` primitive; completes the first-time OAuth handshake, Slice 26), `oauth-provider.ts` (real `OAuthClientProvider`: DCR/PKCE/CSRF-state/AS-metadata persistence, Slice 26), `token-store.ts` (0600 atomic on-disk token/client store, Slice 26), `loopback.ts` (browser-redirect capture, Slice 26), `server.ts`/`sqlite-server.ts` (in-repo servers) |
 | `src/cli/` | `chat.ts` (entrypoint), `run-chat.ts` (testable orchestration), `flow.ts` (`bun run flow`), `crew.ts` (`bun run crew`), `with-mcp-run.ts` (per-run scope + telemetry + mount helper, Slice 16), `with-run.ts` (`withRunTelemetry` — the mount-free per-run telemetry scope for the builder + archive CLIs, so their `build.verify`/`build.archive` spans land in `runs/<id>/spans.jsonl`, Slice 20), `select-hook.ts` (selector-driven `onBeforeDelegate`), `selection-notice.ts` (per-delegation notice), `mcp.ts` (`bun run mcp list\|status\|add`), `agent-builder.ts` (`bun run agent-builder "<need>" [--yes] [--force]`, Slice 17; `--force` commits a failed gate at `unverified` with a WARNING), `crew-builder.ts` + `offer-crew.ts` (`bun run crew-builder "<need>" [--yes] [--force]`, Slice 19), `archive.ts` (`bun run archive [--prune]`, Slice 20) |
 | `src/agent-builder/` | Specialist agent generation (Slice 17): `types.ts`, `generate.ts` (prompt-injection-guarded draft), `suggest-tools.ts` (palette-only server pick), `validate.ts` (structural gate), `write.ts` (atomic file + registry + `mcp.json` scoping), `builder.ts` (`buildAgent`/`buildTool`: generate→suggest→validate→retry→consent→write), `deps.ts` (live tools-capable largest-that-fits model); Slice 18 adds the consent-gated inert tool-code path (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts` → `<name>.proposal.ts`) |
 | `src/crew-builder/` | Crew/workflow generation from a multi-step need (Slice 19, Phase D): `ir.ts` (`CrewIR`/`WorkflowIR` + Zod), `safe-helpers.ts` (the closure vocabulary), `classify.ts`/`analyze.ts`/`plan-nodes.ts`/`plan-edges.ts` (staged generation), `validate.ts` (two-tier structural+semantic gate), `resolve-members.ts` (auto-build missing agents via the agent-builder), `transpile.ts` (deterministic IR→TS), `write.ts` (atomic multi-write; split into stage/register since Slice 20), `builder.ts` (`buildCrewOrWorkflow` orchestrator), `deps.ts`; CLI `bun run crew-builder "<need>" [--yes]` (`src/cli/crew-builder.ts`) + a TTY-gated `chat.ts` multi-step gap-offer (`src/cli/offer-crew.ts`) |
@@ -294,10 +323,12 @@ layers an agent system needs on top of it:
   backend, faster than vanilla llama.cpp Metal.
 
 Critically, the model layer is **runtime-agnostic** (ports/adapters via AI SDK's
-`LanguageModel`). Ollama is just the default Tier-1 adapter. If we ever need
-lower-level control (custom sampling, persistent KV-cache), we can add a raw
-**llama.cpp-server** or **MLX-server** (omlx/vMLX) adapter behind the same
-interface — no agent code changes. See
+`LanguageModel`). Ollama is just the default Tier-1 adapter — a managed
+**llama.cpp-server**, **LM Studio**, and **MLX-server** adapter all now sit
+behind the same interface too (Slice 26, §5), for when lower-level control
+(custom sampling, a specific runtime already installed) is wanted; no agent
+code changes either way. Heavier MLX variants (persistent KV-cache via omlx,
+higher concurrency via vMLX) can slot in the same way later. See
 [`docs/architecture.md`](docs/architecture.md#why-ollama).
 
 ---
@@ -327,7 +358,8 @@ interface — no agent code changes. See
 | **19** | **Crew/workflow builder** (Phase D) — compose, not just generate: `src/crew-builder/` turns a multi-step need into a **crew** or **workflow** via a staged, validated IR-then-transpile pipeline (`classify`→`analyze` think-first→`plan-nodes`→`plan-edges`→two-tier `validate`→consent→`resolve-members` auto-build via the agent-builder→deterministic `transpile`→atomic `write`); a small safe-helper vocabulary (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/`whenTruthy`/`mapOver`) is the only closures a model can pick from; shared `assertAcyclic` (`workflow/define.ts`) gates both shapes' graphs; `CrewMember.agentRef` lets a crew member reuse a registered (or freshly-built) agent; triggers via `bun run crew-builder "<need>"` and a TTY-gated `chat.ts` multi-step gap-offer; `crew.build` telemetry span. **Live-verified end to end on Ollama** — a generated crew executed to a correct result, surfacing + fixing 4 live-only defects | ✅ Done |
 | **20** | **Verified "works out of the box"** (Phase D — closes the phase) — `src/verified-build/`: builder writes become **stage → verify → commit** via a shared cheapest-first gate — pre-generation **reuse check** (capability-signature embedding vs a per-registry `.generated.json` manifest; ≥0.85 confirm-gated reuse · 0.75–0.85 offer, ask reuse-or-build · <0.75 generate; `--yes` auto-reuses Reuse, declines Offer) → stage (never the index) → structural → **execution dry-run** (`withWallClock`-raced; the agent path additionally aborts in flight via a new `runAgent` `abortSignal` seam — crew/workflow are wall-clock-raced only; ≤2 self-repair attempts feeding the runtime error back into a regeneration) → **golden-eval** (3–7 auto-generated binary cases, largest-installed judge preferring cross-family, unanimous over 3 runs; no judge ≥ ~24B ⇒ skip + commit `verified: runs` — degrade, never block) → commit (index + `<name>.golden.json` + manifest) at the earned `VerifiedLevel`; failed gate registers nothing and the staged file is discarded (`--force`/`verify.force` ⇒ `unverified` + WARNING). Plus usage aggregation from `spans.jsonl` + reversible archive (`bun run archive [--prune]`, live-reference-protected cross-registry) + a chat reuse hint; `build.verify`/`build.archive` telemetry. **Live-verified on Ollama** — a real build committed at `verified: runs` (judge-degrade path) and a re-run of the same need hit reuse at 89% | ✅ Done |
 | **21** | **Graceful degradation + retries** (Phase A — fills the last reliability gap; the routing-accuracy eval harness remains the one open Phase-A item) — `src/reliability/`: a three-lane error taxonomy (`classify.ts` — `Lane.Transient/RouteWorthy/Terminal`, pure, unknown→Terminal); retry with full-jitter backoff + attempt-cap + `Retry-After` respect, Transient-only (`retry.ts`); run wall-clock + idle-stall timeouts (`timeout.ts`); a hand-rolled circuit breaker with a shared per-dependency registry (`breaker.ts`); a failure-domain-aware model-degradation chain (`degrade.ts`); a user-facing `DegradationLedger` (`ledger.ts`) persisted to `run.dir/degradation.jsonl` and printed as a run summary. Wired into delegation (drop/degrade + record), the workflow engine + crews (per-step retry/timeout, breaker-wrapped Tool/MCP steps), MCP tool calls (`wrapToolsWithBreaker`), and the model selector (`degradeChain`). Per **D5**, the LLM turn itself is never double-retried (AI SDK v6 already retries transport errors) — only cross-boundary ops the framework owns get `withRetry`. Migrated the pre-existing provisioning stall/retry guards and the verified-build wall-clock primitive onto the same layer. **Live-verified on real Ollama** (4 scenarios, `tests/integration/reliability-live.test.ts`, `RELIABILITY_LIVE=1`) — MLX-unreachable degrades to a real Ollama fallback that generates, a failing-then-succeeding Tool step retries to completion, a delegated agent whose model call fails returns a structured error without crashing, and a real `withMcpRun` persists `degradation.jsonl` + a `reliability.degrade` span event. See [`docs/architecture.md`](docs/architecture.md) §21 | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **C** Codex heavy-lifting backup (**Slice 22**) → dependency major-upgrade (23) → **E** automate (daemon + triggers, 24–25) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) | Planned |
+| **26** | **Alternate runtimes + remote-auth completion** (debt — gated on installing those runtimes/having creds, landed out of numeric sequence once both existed) — **Phase A:** `src/runtime/managed-openai-compatible.ts`'s `createManagedRuntime(strategy)` is the one control-surface implementation shared by **llama.cpp** (`strategies/llamacpp.ts`, `contextCapability:'relaunch'` — kills+respawns `llama-server -c <numCtx>`), **LM Studio** (`strategies/lmstudio.ts`, `'reload'` — `@lmstudio/sdk`'s `client.llm.load(model,{config:{contextLength}})` against the always-on daemon), and **MLX** (`strategies/mlx.ts`, `'fixed'` — `mlx_lm.server` has no context flag, so a requested context is honestly never applied); `process-supervisor.ts` owns spawn/health-poll/kill-on-timeout (fresh free port per relaunch, `breakerFor('runtime:'+kind)`); `mlx-server.ts` rewritten onto this base while preserving its external-baseUrl no-spawn compat path; `select-hook.ts` now calls `rt.control.warm(model, numCtx)` for every non-Ollama runtime; new `RUNTIME_*` telemetry (`telemetry/spans.ts`'s `withRuntimeSpan`); the LM Studio download adapter's job-status poll URL fixed (wrong since Slice 18). **Phase B:** `src/mcp/oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (DCR/CIMD, PKCE + CSRF `state`, browser-loopback via `loopback.ts`, authorization-server metadata persistence) backed by `token-store.ts`'s atomic **0600** `~/.config/ai/mcp-tokens.json`; `with-mcp-run.ts` now actually builds an `authProvider` per OAuth config entry (previously never populated — OAuth always silently degraded); `mcp/client.ts`'s `mountMcpServer` completes the first-time handshake on `UnauthorizedError`; new `mcp.auth.*` telemetry. **Live-verified on real hardware:** all 3 managed runtimes end to end (llama.cpp `n_ctx=8192`, LM Studio `ctx=4096`, MLX fixed), both download adapters, a GitHub-PAT remote server, and a full Linear OAuth handshake (DCR→browser→exchange→47 tools; token-reuse with no browser on a second run) — this pass caught 3 real defects (poll URL, incomplete handshake, missing AS-metadata persistence), all fixed in-slice. New dep `@lmstudio/sdk`. See [`docs/architecture.md`](docs/architecture.md) §5 / §14 | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) — Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38); dependency major-upgrade (23) held on ecosystem | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

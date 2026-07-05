@@ -74,21 +74,29 @@ graph TD
         kv["kv-cache.ts"]
         octl["ollama-control.ts"]
     end
-    subgraph RT["Runtime · src/runtime"]
+    subgraph RT["Runtime · src/runtime (Slice 26: managed base + 3 strategies)"]
         reg["registry.ts · runtimeFor(RuntimeKind)"]
         ortime["ollama.ts"]
         mlx["mlx-server.ts · createMlxServerRuntime"]
+        managed["managed-openai-compatible.ts · createManagedRuntime(strategy)"]
+        procsup["process-supervisor.ts · superviseServer (spawn+health-poll+kill)"]
+        stratllama["strategies/llamacpp.ts · relaunch"]
+        stratmlx["strategies/mlx.ts · fixed"]
+        stratlm["strategies/lmstudio.ts · reload · @lmstudio/sdk"]
     end
     subgraph DISC["Discovery · src/discovery"]
         discover["discover.ts"]
         buildreg["build-registry.ts"]
         hfsrc["hf-gguf / hf-mlx"]
     end
-    subgraph MCP["MCP · src/mcp"]
+    subgraph MCP["MCP · src/mcp (Slice 26: live OAuth)"]
         mcpclient["client.ts · mountMcpServer"]
         mcpconfig["config.ts · loadMcpConfig"]
         mcpmount["mount.ts · mountAll"]
         mcppack["pack.ts · STARTER_PACK"]
+        mcpoauth["oauth-provider.ts · createOAuthProvider (OAuthClientProvider)"]
+        mcptokens["token-store.ts · 0600 token/client/AS-metadata store"]
+        mcploopback["loopback.ts · loopbackRedirectUri"]
     end
     subgraph TEL["Telemetry · src/telemetry"]
         spans["spans.ts · ATTR + helpers"]
@@ -265,7 +273,19 @@ graph TD
     mgr --> spans
     reg --> ortime
     reg --> mlx
+    reg --> stratllama
+    reg --> stratlm
     ortime --> octl
+    mlx --> stratmlx
+    stratllama --> managed
+    stratmlx --> managed
+    stratlm --> managed
+    managed --> procsup
+    managed --> relbreaker
+    selhook --> reg
+    mcpclient --> mcpoauth
+    mcpoauth --> mcptokens
+    mcpoauth --> mcploopback
     buildreg --> reg
     buildreg --> models
     discover --> hfsrc
@@ -434,11 +454,11 @@ graph TD
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
-| **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters (keyed by `RuntimeKind`); `registry.ts` `runtimeFor(RuntimeKind)`; `mlx-server.ts` `createMlxServerRuntime(deps)` factory with a filled control surface (`getModelMax`/`listLoaded`/best-effort `pull`); `createModel` per declaration | AI SDK + provider HTTP |
+| **Runtime** | `src/runtime/` | Runtime port + 4 adapters keyed by `RuntimeKind` (Ollama, MLX, LM Studio, llama.cpp — Slice 26 raises the latter two + rewrites MLX onto a shared managed base, see §5); `registry.ts` `runtimeFor(RuntimeKind)`; `managed-openai-compatible.ts` `createManagedRuntime(strategy)` — the shared control-surface implementation (`isInstalled`/`warm`/`unload`/`listLoaded`/`getModelMax` against the runtime's own `/v1/models`) that `strategies/{llamacpp,mlx,lmstudio}.ts` parameterize with `launch`/`daemonLoad`/`contextCapability`; `process-supervisor.ts` `superviseServer` owns spawn + health-poll + wall-clock-guarded kill-on-timeout for spawned (non-daemon) strategies; `mlx-server.ts` `createMlxServerRuntime(deps)` now a thin wrapper choosing between the external-baseUrl no-spawn path and `managed-openai-compatible`'s spawn+supervise path over `strategies/mlx.ts` | AI SDK + provider HTTP |
 | **Providers** | `src/providers/` | Builds a concrete AI SDK `LanguageModel` from a declaration (the Ollama provider binding, `createOllamaModel`) used by the runtime adapters | AI SDK + Ollama provider |
 | **Discovery** | `src/discovery/` | Host detector, HF catalog sources, offline `buildRegistry`, `runDiscovery` | Hugging Face HTTP + `os` |
 | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
-| **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; declarative `mcp.json` registry + per-entry degrade (`config.ts`), consent-gated mounting with spec-hash/tools-hash pinning (`consent.ts`, `mount.ts`), curated 12-entry starter pack (`pack.ts`, Slice 15); mount/consume MCP servers (`client.ts`, `server.ts`, `sqlite-server.ts`) | MCP SDK + AI SDK MCP client |
+| **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; declarative `mcp.json` registry + per-entry degrade (`config.ts`), consent-gated mounting with spec-hash/tools-hash pinning (`consent.ts`, `mount.ts`), curated 12-entry starter pack (`pack.ts`, Slice 15); mount/consume MCP servers (`client.ts`, `server.ts`, `sqlite-server.ts`); **live remote OAuth (Slice 26, §14)** — `oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (DCR/CIMD, PKCE + CSRF `state`, browser-loopback redirect via `loopback.ts`, AS-metadata persistence) backed by `token-store.ts`'s 0600 atomic on-disk store (`~/.config/ai/mcp-tokens.json`); `client.ts`'s `mountMcpServer` completes the first-time handshake on `UnauthorizedError` | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
 | **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example). Since Slice 17, `agents/index.ts` is a small **registry** rather than pure data — `AGENTS: Record<name, AgentFactory>` + `agentNames()`, with `// AGENT-BUILDER:IMPORTS`/`:ENTRIES` marker comments the agent-builder's `write.ts` inserts new generated entries at; `super.ts`/`chat.ts`/`flow.ts` all build their agent set by iterating `agentNames()` instead of importing each factory by hand | nothing beyond the `Agent`/`AgentFactory` types (pure data + one lookup) |
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
@@ -589,13 +609,31 @@ Global type via `AGENT_KV_CACHE_TYPE` (default `q8_0`) + `OLLAMA_FLASH_ATTENTION
 
 ---
 
-## 5. Discovery & runtimes (Slice 6)
+## 5. Discovery & runtimes (Slice 6; Slice 18 split the runtime/download enums + raised MLX; Slice 26 raised llama.cpp + LM Studio to full inference runtimes)
 
-**Runtime port** (`src/runtime/runtime.ts`): `RuntimeControl` (`isInstalled`/`pull`/`warm`/`unload`/`listLoaded`/`getModelMax`/`getModelKvArch`) + `Runtime` (`kind: RuntimeKind`/`isAvailable`/`createModel`/`control`). Adapters: **Ollama** (`ollama.ts`, Tier-1) and **MLX server** (`mlx-server.ts`, OpenAI-compatible at `MLX_BASE_URL` default `:1234/v1`; server owns lifecycle). `registry.ts`: `runtimeFor(kind: RuntimeKind)` / `availableRuntimes()`.
+**Runtime port** (`src/runtime/runtime.ts`): `RuntimeControl` (`isInstalled`/`pull`/`warm`/`unload`/`listLoaded`/`getModelMax`/`getModelKvArch`) + `Runtime` (`kind: RuntimeKind`/`isAvailable`/`createModel`/`control`). **Four adapters**, all registered in `registry.ts` (`runtimeFor(kind: RuntimeKind)` / `availableRuntimes()`): **Ollama** (`ollama.ts`, Tier-1, its own control implementation) and three **managed OpenAI-compatible runtimes** — **MLX server** (`mlx-server.ts`), **llama.cpp** (`strategies/llamacpp.ts`), **LM Studio** (`strategies/lmstudio.ts`) — that share one control-surface implementation (below).
 
-**Download vs inference — two enums (Slice 18).** Downloading a model and running inference on it are separate concerns, so `src/core/types.ts` carries two distinct enums: **`ProviderKind`** (download routing — `Ollama | HfGguf | HfSnapshot | LmStudio`, drives `provisioning/registry.ts` `providerFor`) and **`RuntimeKind`** (inference routing — `Ollama | MlxServer | LmStudio`, drives `runtime/registry.ts` `runtimeFor`). A `ModelDeclaration` carries `runtime: RuntimeKind`; a provisioning `Candidate` carries **both** `runtime: RuntimeKind` and `provider: ProviderKind` (the download provider isn't derivable from the runtime alone). `src/core/kind-map.ts` bridges them: `downloadKindFor(runtime, repoShape)` (MLX repo → `HfSnapshot`; single-file GGUF under Ollama → `HfGguf`; plain Ollama → `Ollama`; LM Studio → `LmStudio`) at discovery time, and the inverse `runtimeKindFor(provider)` for catalog sources that only know the download kind. The guardrail: every pre-existing Ollama path still resolves to `runtime=Ollama, provider=Ollama` — the split changed no Ollama behavior (regression-verified live).
+**Managed runtimes — shared base + per-runtime strategy (Slice 26).** `managed-openai-compatible.ts`'s `createManagedRuntime(strategy: RuntimeStrategy, deps?)` is the single implementation behind `llamaCppRuntime`, `lmStudioRuntime`, and (as of this slice) `mlxServerRuntime`'s spawn path. It owns: `isInstalled`/`listLoaded`/`getModelMax` by reading the runtime's own OpenAI-compatible `GET /v1/models` (degrade-safe — a network failure or non-2xx returns `[]`/`undefined`, never throws); `warm(model, numCtx)` wrapped in `breakerFor('runtime:'+kind)` (the reliability layer's per-dependency circuit breaker, §21) that either **spawns** a fresh process via `process-supervisor.ts`'s `superviseServer` — a fresh, OS-assigned free port on every relaunch, health-polled against the strategy's `healthPath` until ready or a wall-clock `startTimeoutMs` (default 30s) kills the child and throws — or, for a daemon strategy, calls `strategy.daemonLoad`; `unload`; and `createModel` (a thin `createOpenAICompatible` binding against whichever `baseUrl` is currently live). Each `RuntimeStrategy` supplies `detect()`, `launch()` or `daemonLoad()`, `healthPath`, and a **`contextCapability`** describing how (or whether) the runtime's context window can be reconfigured:
 
-**MLX runtime (Slice 18).** `mlx-server.ts`'s `createMlxServerRuntime(deps?)` factory (default export `mlxServerRuntime`) fills the control surface against the OpenAI-compatible server where the data exists and stays honest where it doesn't: `getModelMax` reads `max_context_length ?? context_length ?? max_model_len` (typeof-guarded, `undefined` when absent — no fabrication); `listLoaded` reports real `size_bytes ?? size` else `0`; `pull` is best-effort (already-loaded → return, else a clear "load it in the MLX server" error since the OpenAI-compatible surface has no load endpoint); `getModelKvArch`/`warm`/`unload` are honest no-ops and `embed` throws (memory/verify stay Ollama-pinned). **Selection is opt-in + degrade** (`src/cli/select-hook.ts`): a declaration whose `runtime` is non-Ollama is used only when `isAvailable()` is true; otherwise selection **logs and degrades to Ollama** (never crashes), resolving to `ModelDeclaration.fallbackModel ?? model` so the degrade path hands Ollama a tag it can actually resolve rather than an MLX/HF repo id, and only Ollama gets a `numCtx` (MLX sizing is server-owned). The chosen `RuntimeKind` and whether a degrade occurred are emitted via `ATTR.MODEL_RUNTIME_SELECTED`/`MODEL_RUNTIME_DEGRADED`. **Live-verified both ways in Slice 18** (direct `mlx_lm.server` inference through `createMlxServerRuntime` + a real HF-snapshot download + an Ollama regression pass).
+| `contextCapability` | Runtime (strategy) | Mechanism |
+|---|---|---|
+| `relaunch` | llama.cpp (`strategies/llamacpp.ts`) | Kill + respawn `llama-server -c <numCtx>` (`-hf <org/repo>` when the model string looks like an HF repo id rather than an existing local GGUF path, else `-m <path>`) |
+| `reload` | LM Studio (`strategies/lmstudio.ts`) | `@lmstudio/sdk`'s `client.llm.load(model, {config:{contextLength}})` against the always-on daemon — `daemonLoad`, no process spawn |
+| `fixed` | MLX (`strategies/mlx.ts`) | `mlx_lm.server` has **no** context-length flag — `numCtx` is never threaded into the launch args, and `warm`'s `RUNTIME_CONTEXT_APPLIED` telemetry attribute is left **unset** (an honest limitation, not a silently-ignored request) |
+
+`detect()`: llama.cpp/MLX check `Bun.which('llama-server'\|'mlx_lm.server')` on PATH (plus, for MLX, a live probe of the configured base URL first); LM Studio checks daemon reachability via a plain `fetch` to `/v1/models` — the `@lmstudio/sdk` client itself is constructed **lazily**, only inside `load`/`unload`/`listLoaded`, because eagerly constructing `LMStudioClient` opens a WebSocket and prints a repeating boxed connection-failure error when no daemon is running, a bad default for a health probe most users without LM Studio installed will hit on every scan.
+
+**Context delivery, end to end (`select-hook.ts`).** Ollama already warms via `ensureReady` inside `resolveModel` (unchanged). For every other runtime, `createSelectHook` now explicitly calls `rt.control.warm(model, numCtx)` — new in Slice 26; previously MLX's `warm` was an honest no-op and the resolved context was never actually applied anywhere for a non-Ollama runtime. The per-call `num_ctx` inference option passed back to the caller is still Ollama-only (`numCtx: rt.kind === RuntimeKind.Ollama ? numCtx : undefined`): managed runtimes apply context at **load** time (relaunch/reload above), and MLX's window is fixed regardless of what's requested.
+
+**MLX runtime (`mlx-server.ts`, Slice 18; rewritten onto the managed base in Slice 26).** `createMlxServerRuntime(deps?)` (default export `mlxServerRuntime`) branches on whether an external base URL is configured (`MLX_BASE_URL` env or `deps.baseUrl`): when set, the server is assumed already running and the strategy's `daemonLoad` just adopts that URL — no process spawn, no lifecycle ownership (LM Studio / vllm-mlx / a manually-started `mlx_lm.server` behind it); when unset, it falls through to `strategies/mlx.ts` over the shared spawn+supervise path, so **this runtime now spawns and supervises its own `mlx_lm.server` process** (kill-on-timeout, health-polled) rather than always assuming an external server owns the lifecycle — correcting the Slice-18-era assumption that the MLX server always owns its own lifecycle, which was only ever true on the external-baseUrl path. Either way, context stays `fixed` (see table above); `getModelMax`/`listLoaded` still read real `max_context_length`/`size_bytes` off `/v1/models` (typeof-guarded, no fabrication), and `embed` still throws (memory/verify stay Ollama-pinned). **Selection stays opt-in + degrade** (`select-hook.ts`): a declaration whose `runtime` is non-Ollama is used only when `isAvailable()` is true; otherwise selection **logs and degrades to Ollama** (never crashes), resolving to `ModelDeclaration.fallbackModel ?? model`. The chosen `RuntimeKind` and whether a degrade occurred are emitted via `ATTR.MODEL_RUNTIME_SELECTED`/`MODEL_RUNTIME_DEGRADED`.
+
+**Download vs inference — enums bridge across four runtimes now (Slice 18, extended Slice 26).** Downloading a model and running inference on it are separate concerns, so `src/core/types.ts` carries two distinct enums: **`ProviderKind`** (download routing — `Ollama | HfGguf | HfSnapshot | LmStudio`, drives `provisioning/registry.ts` `providerFor`) and **`RuntimeKind`** (inference routing — `Ollama | MlxServer | LmStudio | LlamaCpp`, drives `runtime/registry.ts` `runtimeFor`). A `ModelDeclaration` carries `runtime: RuntimeKind`; a provisioning `Candidate` carries **both** `runtime: RuntimeKind` and `provider: ProviderKind` (the download provider isn't derivable from the runtime alone). `src/core/kind-map.ts` bridges them: `downloadKindFor(runtime, repoShape)` (LM Studio → `LmStudio`; MLX → `HfSnapshot`; **llama.cpp → `HfGguf`** (Slice 26 — it consumes the same single-file/HF-repo GGUF the shared HF-fetch adapter already downloads); plain Ollama with a GGUF-file shape → `HfGguf`; else plain Ollama → `Ollama`) at discovery time, and the inverse `runtimeKindFor(provider)` for catalog sources that only know the download kind. The guardrail: every pre-existing Ollama path still resolves to `runtime=Ollama, provider=Ollama` — the split changed no Ollama behavior (regression-verified live).
+
+**LM Studio download adapter fix (Slice 26).** `providers/lmstudio.ts`'s job-status poll now correctly hits `/api/v1/models/download/status/{job_id}` — the previously-shipped (Slice 18) URL was wrong and had never been exercised against a real daemon; live-verify against an installed LM Studio caught it. Also surfaced live (not yet automated around): LM Studio's download REST endpoint requires a full HuggingFace model URL for community models, not a bare artifact id.
+
+### Runtime telemetry (Slice 26)
+
+`withRuntimeSpan(kind, fn)` (`telemetry/spans.ts`) wraps every managed-runtime `warm` call in a `runtime.warm` span: `ATTR.RUNTIME_KIND`, `RUNTIME_CONTEXT_CAPABILITY` (`relaunch`/`reload`/`fixed`), `RUNTIME_CONTEXT_REQUESTED`, `RUNTIME_CONTEXT_APPLIED` (omitted for `fixed` — MLX's limitation is observable, not silently swallowed), and `RUNTIME_WARM_OUTCOME` (`reused`/`spawned`/`daemon-loaded`/`failed`).
 
 **Catalog sources** (`CatalogSource`): `hf-gguf` + `hf-mlx` (trusted publishers, tool-capability via `chat_template`, best-fitting quant via `quant.ts`). `detectHost()` probes live budget + available runtimes; `appliesTo(host)` gates each source.
 
@@ -607,7 +645,7 @@ Global type via `AGENT_KV_CACHE_TYPE` (default `q8_0`) + `OLLAMA_FLASH_ATTENTION
 | Axis | Values | Enum |
 |---|---|---|
 | Capability / modality | Tools, Vision, Audio, Video | `Capability` |
-| Inference runtime | Ollama, MlxServer, LmStudio *(reserved — download-only today)* | `RuntimeKind` |
+| Inference runtime | Ollama, MlxServer, LmStudio, LlamaCpp *(all four are full inference runtimes as of Slice 26)* | `RuntimeKind` |
 | Download provider | Ollama, HfGguf, HfSnapshot, LmStudio | `ProviderKind` |
 | Content policy | Default, Uncensored *(seam)* | `ContentPolicy` |
 | Source | hf-gguf, hf-mlx | `CatalogSource.name` |
@@ -616,7 +654,7 @@ Global type via `AGENT_KV_CACHE_TYPE` (default `q8_0`) + `OLLAMA_FLASH_ATTENTION
 
 ## 6. Why Ollama
 
-We use **llama.cpp through Ollama** — it wraps the engine (and Apple MLX on 32 GB+ Macs) and adds model management (`pull`/`ps`, auto-quant), an HTTP control API the resource manager drives, tool-calling, and a clean AI SDK provider. Because the model layer is runtime-agnostic, Ollama is just the default **Tier-1 adapter**; a raw `llama.cpp-server` or dedicated MLX-server can slot behind the same `Runtime` interface with no agent code change.
+We use **llama.cpp through Ollama** — it wraps the engine (and Apple MLX on 32 GB+ Macs) and adds model management (`pull`/`ps`, auto-quant), an HTTP control API the resource manager drives, tool-calling, and a clean AI SDK provider. Because the model layer is runtime-agnostic, Ollama is just the default **Tier-1 adapter**; a raw `llama.cpp-server`, LM Studio, or a dedicated MLX-server now also sit behind the same `Runtime` interface (Slice 26, §5) with no agent code change, for when lower-level control or an already-installed runtime is wanted.
 
 ---
 
@@ -1384,9 +1422,12 @@ agent-builder suggests from (§18).
 - **`types.ts`** — `McpTransportKind` (`Stdio`/`Http`), `McpAuthKind` (`Static`/`OAuth`) + `httpAuthSchema` (Slice 18, the optional `auth: {kind: OAuth}` on an HTTP entry), the raw Zod schemas (`stdioEntrySchema`/`httpEntrySchema`), the validated `StdioServerEntry`/`HttpServerEntry` union (`McpServerEntry`, each carrying the as-written `raw` value alongside the env-expanded fields), `McpConfig` (`entries`/`dormant`/`warnings`), and `PackEntry`.
 - **`config.ts`** — `loadMcpConfig(path, env)`: reads `mcp.json` (default `./mcp.json`, override `AGENT_MCP_CONFIG`), expands `${VAR}`/`${VAR:-default}` (`expandVars`), and degrades per-entry rather than throwing — a malformed entry warns and is skipped, an entry with an unresolved required var goes to `dormant`, and a VS-Code-style `servers` root (instead of `mcpServers`) is tolerated with a warning.
 - **`consent.ts`** — `specHash` (identity hash over raw command/args/env-**key-names**, or url/header-**names** — never values, so secrets are never hashed or stored), `toolsHash` (fingerprints the live tool set: name+description+schema), `ensureConsent` (the gate itself), `pinTools`/`checkDrift` (the rug-pull check), `dangerFlags` (sudo / `rm -rf` / curl\|sh pattern warnings), and `readApprovals`/`writeApprovals` against `.mcp-approvals.json` (git-ignored, atomic temp+rename write).
-- **`mount.ts`** — `mountAll(config)`: for each entry, consent-gate → mount (stdio or HTTP) → hash + drift-check + pin → collect. Returns a `MountedRegistry` — `merged` (every tool, for workflow tool-steps), `forAgent(name)` (unscoped entries + entries naming that agent — the per-agent slice), `mounted`/`skipped` (for status/telemetry), `close()`. Also `warnUnknownAgents` — a typo guard for an `agents` entry naming an agent that doesn't exist (Slice 18 wires it into `chat.ts` too, matching `flow.ts`; `crew.ts` is deliberately excluded because crews use `reg.merged`, not `reg.forAgent`, so agent-scoping doesn't apply). **MCP OAuth (Slice 18):** `resolveAuthProvider(entry, authProviders, warn)` passes an injected `OAuthClientProvider` (the AI SDK MCP client's real `MCPTransportConfig.authProvider` option) into the HTTP transport when an entry declares `auth.kind = OAuth` (`McpAuthKind`, `httpAuthSchema` in `types.ts`); the static-header path (github/brave/exa) is unchanged (no `auth` → no `authProvider`), and a declared-OAuth entry with no registered provider **warns and mounts without auth** (degrade, never crash). This is **contract-tested only** — the live OAuth handshake (PKCE / browser / token persistence) stays deferred.
+- **`mount.ts`** — `mountAll(config)`: for each entry, consent-gate → mount (stdio or HTTP) → hash + drift-check + pin → collect. Returns a `MountedRegistry` — `merged` (every tool, for workflow tool-steps), `forAgent(name)` (unscoped entries + entries naming that agent — the per-agent slice), `mounted`/`skipped` (for status/telemetry), `close()`. Also `warnUnknownAgents` — a typo guard for an `agents` entry naming an agent that doesn't exist (Slice 18 wires it into `chat.ts` too, matching `flow.ts`; `crew.ts` is deliberately excluded because crews use `reg.merged`, not `reg.forAgent`, so agent-scoping doesn't apply). **MCP OAuth (Slice 18 wiring, Slice 26 live):** `resolveAuthProvider(entry, authProviders, warn)` passes an injected `OAuthClientProvider` into the HTTP transport when an entry declares `auth.kind = OAuth` (`McpAuthKind`, `httpAuthSchema` in `types.ts`); the static-header path (github/brave/exa) is unchanged (no `auth` → no `authProvider`), and a declared-OAuth entry with no registered provider **warns and mounts without auth** (degrade, never crash). As of Slice 26 the provider actually supplied is the real, live `createOAuthProvider` (below) — see "Live OAuth" for the completed handshake.
+- **`oauth-provider.ts`** (Slice 26, NEW) — `createOAuthProvider(serverName, opts)` returns a `LiveOAuthClientProvider`: a real `@ai-sdk/mcp` `OAuthClientProvider` implementation backed by the Slice-26 token store. Implements the full optional surface the SDK's `authInternal` looks for, not just the required minimum: `tokens`/`saveTokens` (round-trip through `token-store.ts`), `codeVerifier`/`saveCodeVerifier` (PKCE), `state`/`saveState`/`storedState` (an in-memory per-flow CSRF nonce — implementing these makes the SDK mint and verify a real `state` param instead of skipping CSRF protection), `clientInformation`/`saveClientInformation` (absent → the SDK runs Dynamic Client Registration / CIMD, no preconfigured `client_id` required), and `authorizationServerInformation`/`saveAuthorizationServerInformation` (persists the discovered AS metadata so the **second**, code-exchange `auth()` call — on a possibly-fresh provider instance, e.g. after a process restart — doesn't throw "Stored OAuth authorization server metadata is required when exchanging an authorization code", the exact error the live Linear handshake hit before this was added). `redirectToAuthorization(url)` binds a one-shot loopback listener (`ensureServer`, built the same way as `loopback.ts`'s `awaitOAuthRedirect` but bound once per provider instance and reused for both the advertised `redirectUrl` and the actual callback, since DCR and the authorization URL must agree on the same port) and opens the browser; the non-contract `waitForRedirect()` method (not part of `OAuthClientProvider`) is what `client.ts` awaits after the SDK throws `UnauthorizedError`.
+- **`loopback.ts`** (Slice 26, NEW) — `loopbackRedirectUri(port)` (`http://127.0.0.1:<port>/callback`) and `awaitOAuthRedirect(buildAuthUrl, expectedState, deps?)`: binds an ephemeral localhost server, opens the authorization URL in the browser, resolves `{code, state}` on the first `/callback` hit (rejecting on a `state` mismatch or a missing `code`), and always stops the server on exit — a wall-clock timeout (default 180s) guards a no-show. `oauth-provider.ts` reuses `loopbackRedirectUri` but implements its own listener (a provider instance's redirect+callback must share one bound port across two separate SDK calls, which this standalone helper isn't shaped for).
+- **`token-store.ts`** (Slice 26, NEW) — the on-disk OAuth secret store: `~/.config/ai/mcp-tokens.json` (override `$XDG_CONFIG_HOME`), one `ServerAuthRecord` per server name (`tokens`/`codeVerifier`/`client`/`authorizationServer`). `writeTokenStore` is atomic (temp file + `rename`) and **0600** on both the temp and final file (`mkdirSync` the parent at `0700`) — this file holds real access/refresh tokens and client secrets in **plaintext**; encryption-at-rest is deliberately deferred to Slice 35, so the permission bits are the only protection and must not be weakened. `getServerAuth`/`setServerAuth` do a read-modify-(field-merge)-write per server key; a corrupt or missing store degrades to `{}` (re-auth) rather than crashing.
 - **`pack.ts`** — `STARTER_PACK`: 12 capability-tagged entries (`file-tools`, `sqlite`, `filesystem`, `memory`, `sequential-thinking`, `fetch`, `git`, `time`, `playwright`, `github`, `brave-search`, `exa-search`), 2026-07 verified to exclude servers the MCP org archived in 2025 (the official sqlite/postgres/brave/puppeteer/github packages). `getPackEntry`/`packByCapability` for programmatic lookup.
-- **`client.ts`** — unchanged integration primitive: `mountMcpServer(spec)` connects to any stdio or Streamable-HTTP server and returns `{tools, close}`. The original `createFileTools`/`createFetchTools` presets still live here as thin wrappers but are no longer called by any CLI — the registry replaced them.
+- **`client.ts`** — `mountMcpServer(spec)` connects to any stdio or Streamable-HTTP server and returns `{tools, close}`. **Completes the first-time OAuth handshake (Slice 26):** the SDK's HTTP transport calls `auth()` internally with no code on a never-before-authorized server, which fires the provider's `redirectToAuthorization` (pops the browser) and throws `UnauthorizedError` — there is no `transport.finishAuth` re-entry point, so `connectMcpClient` catches that (only when `spec.authProvider` is a `LiveOAuthClientProvider`, i.e. has `waitForRedirect`), awaits the loopback callback the provider already captured, exchanges the code via the SDK's exported `auth()` (validates `state`, calls `saveTokens`), and retries `createClient` exactly once with a fresh transport (now reads back the just-saved tokens). A second `UnauthorizedError` on retry rethrows — it means the exchange itself failed, not that another browser hop would help. The original `createFileTools`/`createFetchTools` presets still live here as thin wrappers but are no longer called by any CLI — the registry replaced them.
 - **`server.ts`** / **`sqlite-server.ts`** — the two in-repo servers: `read_file` (stdio), and `query` (read-only) / `execute` (writes) / `schema` on `bun:sqlite` (the `sqlite` pack entry defaults to `data/agent.db`; `bun:sqlite` itself does not create parent directories, so `sqlite-server.ts` calls `mkdirSync(dirname(dbPath), { recursive: true })` before opening the database — fixed pre-merge in Slice 15 final review so a bare clone's first `sqlite` mount succeeds without a manual `mkdir -p data`). **`query`'s read-only guarantee is now engine-enforced (Slice 18):** it runs under `PRAGMA query_only = ON` (set → run synchronously → reset OFF in a `finally`; `execute` forces it OFF first), so SQLite itself rejects any write — replacing a home-rolled SQL string-classifier that a task+security review found bypassable via string-literal parentheses (`WITH x AS (SELECT ')select(' AS s) DELETE …` executed a real DELETE). This also *allows* legitimate read-only `WITH…SELECT` CTEs the old classifier false-rejected. (Relies on `bun:sqlite` being a synchronous binding — no `await` in the critical section.)
 - **`src/cli/mcp.ts`** — `bun run mcp list` (pack + in-config state), `bun run mcp status` (configured servers, dormant reasons), `bun run mcp add <name>` (copies a pack entry's `server` value into `mcp.json`, refuses to overwrite an existing key). Slice 18 made `addPackEntry` **crash-atomic and race-safe**: a per-`configPath` promise-chain mutex (`withFileLock`) serializes concurrent adds with a fresh read-modify-write inside the lock (no stale snapshot / lost update) and a per-call temp-name + `rename`.
 
@@ -1507,7 +1548,42 @@ per mounted server** (Slice 18): the entry's `McpTransportKind` (`stdio`/`http`)
 threads `mountAll` → `MountedRegistry.mounted[].kind` → the `with-mcp-run`
 record → `withMcpMountSpan`'s optional `transport` param → the span attribute
 (spread-guarded so telemetry stays MCP-agnostic; dormant/skipped entries have
-no kind and honestly omit it).
+no kind and honestly omit it). **MCP auth telemetry (Slice 26):**
+`withMcpMountSpan`'s callback gained a second recorder, `recordAuth(name,
+kind, outcome)`, emitting one `mcp.server.auth` event per HTTP entry
+alongside its `mcp.server.mount` event — `ATTR.MCP_AUTH_KIND`
+(`static`/`oauth`) and `ATTR.MCP_AUTH_OUTCOME` (`static-key` for a
+header-auth entry; `token-reused` when the token store already holds an
+access token for that OAuth server; `authenticated` when a fresh handshake
+is expected during mount). Never carries a secret value — only the server
+name and the two enum-shaped fields.
+
+### Live OAuth (Slice 26)
+
+Slice 18 wired `resolveAuthProvider` to accept an injected
+`OAuthClientProvider` but never actually **supplied** one — `mount.ts`'s
+`deps.authProviders` was always whatever the caller passed in, and no
+caller populated it, so every declared-`oauth` entry silently degraded to
+"mounts without auth." `src/cli/with-mcp-run.ts`'s `buildAuthProviders(config)`
+closes that gap: for every HTTP entry with `auth.kind === oauth`, it builds
+a real `createOAuthProvider(entry.name, {scopes, clientId})`
+(`src/mcp/oauth-provider.ts`) keyed by entry name, merged under
+caller-supplied providers (which still win, for tests). `mountMcpServer`
+(`client.ts`) then completes the interactive handshake the **first** time a
+server is used: the SDK throws `UnauthorizedError` → the provider's
+loopback already popped the browser and is waiting on `/callback` →
+`waitForRedirect()` resolves `{code, state}` → the SDK's `auth()` exchanges
+the code for tokens (validating `state`, persisting via `saveTokens`) → the
+client reconnects, now presenting the just-saved access token. Tokens (and
+the discovered client registration + authorization-server metadata)
+persist to the Slice-26 `token-store.ts` (0600, `~/.config/ai/mcp-tokens.json`),
+so a **second** run reads them straight back — `tokens()` returns them,
+`auth()` never throws `UnauthorizedError`, and no browser pops. Deterministic
+coverage of the whole flow lives in `tests/mcp/oauth-flow.test.ts` against a
+mock authorization server (no network); live coverage is
+`tests/integration/linear-oauth.live.test.ts` (`MCP_OAUTH_LIVE=1`, see
+Live-verify below) and `tests/integration/github-mcp.live.test.ts`
+(`GITHUB_PAT=<token>`, the static-header remote-HTTP path).
 
 ### Live-verify (Slice 15 Task 6)
 
@@ -1528,8 +1604,27 @@ per-entry as designed; the other three servers were unaffected. Fixed
 pre-merge in Slice 15 final review: `sqlite-server.ts` now creates its
 db's parent directory before opening it (see §14 above and
 `docs/ROADMAP.md` "Slice 15 follow-ons"), so this no longer reproduces.
-GitHub's remote HTTP server was **not** live-verified — no `GITHUB_PAT` set
-on this machine — logged-deferred per the ledger.
+GitHub's remote HTTP server was **not** live-verified at the time — no
+`GITHUB_PAT` set on this machine — logged-deferred per the ledger.
+**Verified in Slice 26** (below).
+
+### Live-verify (Slice 26 — OAuth + GitHub-PAT)
+
+With a real `GITHUB_PAT` set: the `github` pack entry's static-header
+remote-HTTP path mounted and its tools were callable, closing the
+Slice-15-era deferral above. With a real Linear OAuth app configured: the
+full DCR→browser→code-exchange→token-persist flow ran end to end against
+Linear's live authorization server, mounting **47 tools**; a second
+process, reusing the persisted token store, connected with **no browser
+prompt** (`tokens()` satisfied the SDK's `auth()` without a fresh
+redirect). This live pass caught the three real defects fixed in this
+slice: the LM Studio download poll URL (§5), `mountMcpServer` never
+actually completing the OAuth handshake it triggered (`with-mcp-run.ts`'s
+`authProviders` was previously always empty), and the authorization-server
+metadata not being persisted across the redirect→exchange pair (the
+`authorizationServerInformation`/`saveAuthorizationServerInformation`
+provider methods, added specifically because the live Linear exchange
+threw without them).
 
 ---
 

@@ -46,8 +46,9 @@ export type MountAllDeps = {
   /** OAuth providers, keyed by entry name, for entries whose `auth.kind` is
    *  `oauth`. Never sourced from JSON config (a provider is a stateful
    *  runtime object, not data) — the caller constructs and registers one.
-   *  An `oauth` entry with no registered provider degrades to mounting
-   *  without auth (warns; never crashes) — live OAuth wiring is deferred. */
+   *  As of Slice 26 `withMcpRun` constructs + registers a live provider for
+   *  every `oauth` entry; an entry with no registered provider still degrades
+   *  to mounting without auth (warns; never crashes). */
   authProviders?: Record<string, OAuthClientProvider>;
 };
 
@@ -72,9 +73,10 @@ function toSpec(
   };
 }
 
-/** Resolve the authProvider for an entry declaring OAuth. Degrades to
- *  `undefined` (mount without auth) + a warning when none is registered —
- *  never crashes, never attempts a live handshake. */
+/** Resolve the authProvider for an entry declaring OAuth. When one is
+ *  registered, `mountMcpServer` drives the live handshake with it; when none
+ *  is registered this degrades to `undefined` (mount without auth) + a
+ *  warning — never crashes. */
 function resolveAuthProvider(
   entry: McpServerEntry,
   authProviders: Record<string, OAuthClientProvider> | undefined,
@@ -85,7 +87,7 @@ function resolveAuthProvider(
   const provider = authProviders?.[entry.name];
   if (!provider) {
     warn(
-      `MCP server "${entry.name}" declares OAuth but no authProvider is registered — live OAuth is deferred; mounting without auth`,
+      `MCP server "${entry.name}" declares OAuth but no authProvider is registered — mounting without auth`,
     );
   }
   return provider;

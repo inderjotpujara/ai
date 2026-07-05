@@ -10,8 +10,8 @@ export enum McpTransportKind {
  *  today). `OAuth` marks the entry as wanting an `authProvider` — the actual
  *  provider instance is supplied by the caller (deps.authProviders in
  *  mount.ts), never by JSON config, since it's a stateful runtime object.
- *  Live OAuth token exchange is deferred (contract-tested only — see
- *  docs/architecture.md §14). */
+ *  Live OAuth (DCR/CIMD + PKCE + browser loopback + token persistence) is
+ *  wired end-to-end as of Slice 26 — see docs/architecture.md §14. */
 export enum McpAuthKind {
   Static = 'static',
   OAuth = 'oauth',
