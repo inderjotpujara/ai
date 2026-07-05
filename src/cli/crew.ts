@@ -2,6 +2,7 @@ import type { ToolSet } from 'ai';
 import { getCrew } from '../../crews/index.ts';
 import { type CrewDeps, runCrew } from '../crew/engine.ts';
 import type { CrewDef, CrewOutcome } from '../crew/types.ts';
+import type { DegradationLedger } from '../reliability/ledger.ts';
 import { type RunHandle, writeArtifact } from '../run/run-store.ts';
 import type { VerifyDeps } from '../verification/types.ts';
 import { createSelectionRuntime } from './select-runtime.ts';
@@ -18,6 +19,9 @@ export type CrewCliDeps = {
   /** Grounded-verification deps. Presence forces every task to verify
    *  (crew-wide default), mirroring `--verify` at the CLI. */
   verifyDeps?: VerifyDeps;
+  /** Optional degradation ledger; forwarded to the crew's delegation path so
+   *  a dropped member is recorded. */
+  ledger?: DegradationLedger;
 };
 
 /** Run a crew with telemetry + artifact persistence (mirrors runFlow).
@@ -30,6 +34,7 @@ export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
     onBeforeDelegate: deps.onBeforeDelegate,
     runAgentStep: deps.runAgentStep,
     verifyDeps: deps.verifyDeps,
+    ledger: deps.ledger,
   });
   if (outcome.kind === 'done') {
     const text =
@@ -93,6 +98,7 @@ async function main(): Promise<void> {
             tools,
             onBeforeDelegate: selection.onBeforeDelegate,
             verifyDeps: verifyRuntime?.verifyDeps,
+            ledger,
           });
           if (outcome.kind === 'done') {
             console.log(

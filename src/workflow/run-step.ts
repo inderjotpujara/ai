@@ -5,6 +5,7 @@ import { WorkflowError } from '../core/errors.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import { MemoryKind } from '../memory/types.ts';
 import { breakerFor } from '../reliability/breaker.ts';
+import type { DegradationLedger } from '../reliability/ledger.ts';
 import { withRetry } from '../reliability/retry.ts';
 import { ATTR, annotateStep, withToolSpan } from '../telemetry/spans.ts';
 import {
@@ -71,11 +72,18 @@ export async function autoPersistStepOutput(
 export function defaultRunAgentStep(
   agents: Record<string, Agent>,
   onBeforeDelegate?: BeforeDelegate,
+  ledger?: DegradationLedger,
 ): WorkflowDeps['runAgentStep'] {
   return async (agentName, task) => {
     const agent = agents[agentName];
     if (!agent) throw new WorkflowError(`unknown agent: ${agentName}`);
-    const result = await runGuardedAgent(agent, task, onBeforeDelegate);
+    const result = await runGuardedAgent(
+      agent,
+      task,
+      onBeforeDelegate,
+      undefined,
+      ledger,
+    );
     if ('error' in result) throw new WorkflowError(result.error);
     return result.text;
   };
