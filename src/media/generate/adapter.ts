@@ -173,10 +173,12 @@ export function runOneShotJob(
       store
         .putFile(strategy.kind, outPath, mediaType)
         .then((item) => {
+          if (settled) return;
           currentStatus = JobStatus.Completed;
           settleResolve(store.toFileHandle(item));
         })
         .catch((err: unknown) => {
+          if (settled) return;
           currentStatus = JobStatus.Failed;
           settleReject(err instanceof Error ? err : new Error(String(err)));
         })
