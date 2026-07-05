@@ -21,6 +21,7 @@ import {
   interactiveTTY,
   stdinInput,
 } from '../provisioning/ui/prompt.ts';
+import { formatLedger } from '../reliability/ledger.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
 import {
   effectiveKvBytesPerToken,
@@ -184,95 +185,100 @@ async function main(): Promise<void> {
   try {
     await withMcpRun(
       { runsRoot: 'runs', runId: `run-${process.pid}` },
-      async ({ run, reg, config }) => {
-        warnUnknownChatAgents(config);
-        const orchestrator = createSuperAgent(
-          (name) => reg.forAgent(name),
-          onBeforeDelegate,
-        );
-        const result = await runChat({
-          orchestrator,
-          task,
-          run,
-          routerNumCtx,
-          capture,
-        });
-        if (result.kind === 'answer') {
-          console.log(result.text);
-        } else if (result.kind === 'gap') {
-          console.log(result.message);
-          // Reuse hint before any build offer: if a manifest entry already
-          // looks similar, say so. Guarded on the embed model being installed
-          // (never speculatively pull) and best-effort (never blocks the flow).
-          try {
-            const embedModel =
-              process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
-            if (await isModelInstalled(embedModel)) {
-              const embedder = makeEmbedder({
-                ensureReady: (d) => manager.ensureReady(d),
-                control: runtimeFor(RuntimeKind.Ollama).control,
-                model: embedModel,
-              });
-              const hint = await reuseHintText(
-                `${result.missingCapability} ${task}`,
-                embedder.embed,
+      async ({ run, reg, config, ledger }) => {
+        try {
+          warnUnknownChatAgents(config);
+          const orchestrator = createSuperAgent(
+            (name) => reg.forAgent(name),
+            onBeforeDelegate,
+          );
+          const result = await runChat({
+            orchestrator,
+            task,
+            run,
+            routerNumCtx,
+            capture,
+          });
+          if (result.kind === 'answer') {
+            console.log(result.text);
+          } else if (result.kind === 'gap') {
+            console.log(result.message);
+            // Reuse hint before any build offer: if a manifest entry already
+            // looks similar, say so. Guarded on the embed model being installed
+            // (never speculatively pull) and best-effort (never blocks the flow).
+            try {
+              const embedModel =
+                process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
+              if (await isModelInstalled(embedModel)) {
+                const embedder = makeEmbedder({
+                  ensureReady: (d) => manager.ensureReady(d),
+                  control: runtimeFor(RuntimeKind.Ollama).control,
+                  model: embedModel,
+                });
+                const hint = await reuseHintText(
+                  `${result.missingCapability} ${task}`,
+                  embedder.embed,
+                );
+                if (hint !== undefined) console.log(hint);
+              }
+            } catch {
+              // Hint is informational only; an embed failure must not block the offers.
+            }
+            if (
+              interactiveTTY() &&
+              shouldOfferCrew(`${result.missingCapability} ${task}`)
+            ) {
+              const wantsCrew = await askYesNo(
+                `This looks multi-step. Propose a crew/workflow for "${result.missingCapability}"?`,
+                { input: stdinInput(), autoYes: false },
               );
-              if (hint !== undefined) console.log(hint);
-            }
-          } catch {
-            // Hint is informational only; an embed failure must not block the offers.
-          }
-          if (
-            interactiveTTY() &&
-            shouldOfferCrew(`${result.missingCapability} ${task}`)
-          ) {
-            const wantsCrew = await askYesNo(
-              `This looks multi-step. Propose a crew/workflow for "${result.missingCapability}"?`,
-              { input: stdinInput(), autoYes: false },
-            );
-            if (wantsCrew) {
-              const { deps, cleanup } = await makeRealCrewBuilderDeps();
-              try {
-                const built = await buildCrewOrWorkflow(
-                  `${result.missingCapability}. Original task: ${task}`,
-                  deps,
-                );
-                if (built.kind === 'written') {
-                  console.log(
-                    `Created ${built.shape} "${built.name}" — re-run to use it.`,
+              if (wantsCrew) {
+                const { deps, cleanup } = await makeRealCrewBuilderDeps();
+                try {
+                  const built = await buildCrewOrWorkflow(
+                    `${result.missingCapability}. Original task: ${task}`,
+                    deps,
                   );
+                  if (built.kind === 'written') {
+                    console.log(
+                      `Created ${built.shape} "${built.name}" — re-run to use it.`,
+                    );
+                  }
+                } finally {
+                  await cleanup();
                 }
-              } finally {
-                await cleanup();
-              }
-              return;
-            }
-          }
-          if (interactiveTTY()) {
-            const wants = await askYesNo(
-              `Propose a new agent for "${result.missingCapability}"?`,
-              { input: stdinInput(), autoYes: false },
-            );
-            if (wants) {
-              const { deps, cleanup } = await makeRealBuilderDeps();
-              try {
-                const built = await buildAgent(
-                  `${result.missingCapability}. Original task: ${task}`,
-                  deps,
-                );
-                if (built.kind === 'written') {
-                  console.log(
-                    `Created "${built.proposal.name}" — re-run your task to use it.`,
-                  );
-                }
-              } finally {
-                await cleanup();
+                return;
               }
             }
+            if (interactiveTTY()) {
+              const wants = await askYesNo(
+                `Propose a new agent for "${result.missingCapability}"?`,
+                { input: stdinInput(), autoYes: false },
+              );
+              if (wants) {
+                const { deps, cleanup } = await makeRealBuilderDeps();
+                try {
+                  const built = await buildAgent(
+                    `${result.missingCapability}. Original task: ${task}`,
+                    deps,
+                  );
+                  if (built.kind === 'written') {
+                    console.log(
+                      `Created "${built.proposal.name}" — re-run your task to use it.`,
+                    );
+                  }
+                } finally {
+                  await cleanup();
+                }
+              }
+            }
+          } else {
+            console.error(result.message);
+            process.exitCode = 1;
           }
-        } else {
-          console.error(result.message);
-          process.exitCode = 1;
+        } finally {
+          const summary = formatLedger(ledger);
+          if (summary) console.error(summary);
         }
       },
     );
