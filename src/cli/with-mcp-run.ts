@@ -49,7 +49,13 @@ export async function withMcpRun<T>(
     return await body({ run, reg, config, ledger });
   } finally {
     if (ledger.events.length > 0) {
-      await writeArtifact(run, 'degradation.jsonl', serializeLedger(ledger));
+      try {
+        await writeArtifact(run, 'degradation.jsonl', serializeLedger(ledger));
+      } catch (err) {
+        console.error(
+          `failed to persist degradation ledger: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     await reg.close();
     await tel.shutdown();
