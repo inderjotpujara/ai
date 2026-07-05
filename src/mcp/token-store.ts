@@ -18,10 +18,23 @@ export type StoredTokens = {
 
 export type ClientRecord = { client_id: string; client_secret?: string };
 
+/** Mirrors `@ai-sdk/mcp`'s `OAuthAuthorizationServerInformation` — the
+ *  authorization-server identity discovered on the FIRST `auth()` call
+ *  (DCR/redirect), which `auth()`'s code-exchange call requires back via the
+ *  provider's `authorizationServerInformation()` or it throws "Stored OAuth
+ *  authorization server metadata is required when exchanging an
+ *  authorization code" (see oauth-provider.ts). New optional field — old
+ *  stores without it still parse fine via `getServerAuth`'s `?? {}` fallback. */
+export type AuthorizationServerInformation = {
+  authorizationServerUrl: string;
+  tokenEndpoint: string;
+};
+
 export type ServerAuthRecord = {
   tokens?: StoredTokens;
   codeVerifier?: string;
   client?: ClientRecord;
+  authorizationServer?: AuthorizationServerInformation;
 };
 
 /** Default location: $XDG_CONFIG_HOME|~/.config + /ai/mcp-tokens.json.

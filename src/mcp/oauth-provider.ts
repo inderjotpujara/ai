@@ -1,4 +1,5 @@
 import type {
+  OAuthAuthorizationServerInformation,
   OAuthClientInformation,
   OAuthClientMetadata,
   OAuthClientProvider,
@@ -278,6 +279,48 @@ export function createOAuthProvider(
           client: {
             client_id: clientInformation.client_id,
             client_secret: clientInformation.client_secret,
+          },
+        },
+        storePath,
+      );
+    },
+
+    // Optional AS-metadata persistence members (Task-18b): `@ai-sdk/mcp`'s
+    // `authInternal` discovers authorization-server metadata (issuer,
+    // token_endpoint) on the FIRST `auth()` call — the DCR/redirect one —
+    // and needs it echoed back on the SECOND, code-exchange `auth()` call to
+    // assert the AS hasn't changed out from under a stored client/token
+    // (`assertAuthorizationServerInformationMatches`). Without these two
+    // members the SDK falls back to smuggling the same info through
+    // `saveClientInformation`'s `clientInformation` argument (via
+    // `addAuthorizationServerInformationToClientInformation`) and reading it
+    // back off `provider.clientInformation()`'s return value — but this
+    // provider's `clientInformation()`/`saveClientInformation()` above only
+    // round-trip `client_id`/`client_secret` through the token store's
+    // `ClientRecord`, so that fallback path silently drops the AS info and
+    // the exchange throws "Stored OAuth authorization server metadata is
+    // required when exchanging an authorization code" — the exact error the
+    // live Linear handshake hit. Persisting to the Task-10 token store
+    // (rather than an in-memory field on this provider instance) also
+    // covers the refresh-token flow on a FRESH provider instance later
+    // (`authInternal`'s no-authorizationCode/has-refresh_token branch calls
+    // `getStoredAuthorizationServerInformation` too), not just the
+    // same-instance redirect→exchange pair Task-18a's orchestration reuses.
+    authorizationServerInformation():
+      | OAuthAuthorizationServerInformation
+      | undefined {
+      return getServerAuth(serverName, storePath).authorizationServer;
+    },
+
+    saveAuthorizationServerInformation(
+      info: OAuthAuthorizationServerInformation,
+    ): void {
+      setServerAuth(
+        serverName,
+        {
+          authorizationServer: {
+            authorizationServerUrl: info.authorizationServerUrl,
+            tokenEndpoint: info.tokenEndpoint,
           },
         },
         storePath,
