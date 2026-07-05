@@ -2174,7 +2174,7 @@ confirm-gated reuse band exercised live.
 
 ---
 
-## 21. Reliability — graceful degradation + retries (Slice 21, Phase A — closes the phase)
+## 21. Reliability — graceful degradation + retries (Slice 21, Phase A — fills the last reliability gap)
 
 Before this slice, retry/timeout logic was duplicated 8 ways with no shared
 contract, degradation was siloed and invisible to the user (a specialist
@@ -2316,14 +2316,17 @@ loops (repair, not transport retry).
 
 ### 21.6 Telemetry
 
-New `ATTR.RELIABILITY_*` keys in `src/telemetry/spans.ts`:
-`retry.attempts`, `retry.lane`, `breaker.state`, `degrade.from`,
-`degrade.to`, `degrade.reason`, `partial_failure.dropped_agent` — plus the
-standard OTel `error.type` attribute (`ATTR.ERROR_TYPE`). `recordDegrade(event)`
-mutates the active span with these attributes whenever a `DegradeEvent` is
-recorded, mirroring the existing `recordGuardrailViolation` pattern — so
-every ledger entry is visible both in the printed user summary (§21.3) and
-in `runs/<id>/spans.jsonl`.
+New `ATTR.RELIABILITY_*` keys in `src/telemetry/spans.ts`. `recordDegrade(event)`
+(commit `a87b742`) adds a `reliability.degrade` event to the active span,
+mirroring the existing `recordGuardrailViolation` pattern. It always sets
+`error.type` (`ATTR.ERROR_TYPE`, the `DegradeKind`), `degrade.subject`, and
+`degrade.reason`, plus `degrade.detail` when the event carries one; it then
+adds the field(s) specific to that degrade, when present on the event:
+`degrade.from`/`degrade.to` (model degrade), `retry.attempts` (retry),
+`retry.lane` (drop), `partial_failure.dropped_agent` (`DegradeKind.AgentDropped`),
+and `breaker.state='Open'` (`DegradeKind.CircuitOpen`) — so every ledger
+entry is visible both in the printed user summary (§21.3) and in
+`runs/<id>/spans.jsonl`.
 
 ### 21.7 Flagged consideration — recorded decision (spec §11)
 
@@ -2359,8 +2362,12 @@ recording + persistence. **Integration:** a workflow Tool step retries
 Transient failures and emits `DegradeKind.Retried`; an MCP server going down
 opens its breaker and drops the dependent agent with a ledger note; a
 delegation RouteWorthy failure degrades to a fallback model/runtime with no
-LLM re-backoff (D5). **Live-verify:** real Ollama runs confirmed a crew
-completes with a dependent agent dropped (not crashed) when its MCP server
-is unreachable, a cross-runtime/next-candidate degrade fires when a runtime
-is unavailable, and `reliability.*` span attributes + `degradation.jsonl`
-land in `runs/<id>/`. Full suite: **823 pass / 6 skip / 0 fail**.
+LLM re-backoff (D5). **Live-verify:** `tests/integration/reliability-live.test.ts`
+(`RELIABILITY_LIVE=1`, real Ollama) runs 4 scenarios: (1) an unreachable MLX
+runtime degrades to a real Ollama fallback model that actually generates a
+response, recording `ModelDegraded`; (2) a Tool step that fails once then
+succeeds is retried and the workflow completes, recording `Retried`; (3) a
+delegated agent whose model call fails returns a structured error instead of
+crashing the run, recording `AgentDropped`; (4) a real `withMcpRun` writes
+`runs/<id>/degradation.jsonl` and a `reliability.degrade` span event to
+`spans.jsonl`. Full suite: **827 pass / 10 skip / 0 fail**.
