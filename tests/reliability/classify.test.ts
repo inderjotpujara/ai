@@ -5,8 +5,8 @@ import {
   ResourceError,
   ToolError,
 } from '../../src/core/errors.ts';
-import { CircuitOpenError } from '../../src/reliability/errors.ts';
 import { classify, Lane } from '../../src/reliability/classify.ts';
+import { CircuitOpenError } from '../../src/reliability/errors.ts';
 
 function apiError(statusCode: number, isRetryable: boolean): APICallError {
   return new APICallError({

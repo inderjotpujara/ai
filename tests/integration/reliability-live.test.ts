@@ -129,11 +129,15 @@ describe.skipIf(!LIVE)('reliability live-verify (real Ollama)', () => {
       ],
     };
     const ledger = createLedger();
-    const outcome = await runWorkflow(def as never, {}, {
-      runAgentStep: async () => 'x',
-      tools: { flaky: flakyTool } as never,
-      ledger,
-    });
+    const outcome = await runWorkflow(
+      def as never,
+      {},
+      {
+        runAgentStep: async () => 'x',
+        tools: { flaky: flakyTool } as never,
+        ledger,
+      },
+    );
     expect(calls).toBe(2);
     expect(outcome.kind).toBe('done');
     const retried = ledger.events.find((e) => e.kind === DegradeKind.Retried);
@@ -151,9 +155,9 @@ describe.skipIf(!LIVE)('reliability live-verify (real Ollama)', () => {
       ledger,
     );
     expect('error' in result).toBe(true);
-    expect(
-      ledger.events.some((e) => e.kind === DegradeKind.AgentDropped),
-    ).toBe(true);
+    expect(ledger.events.some((e) => e.kind === DegradeKind.AgentDropped)).toBe(
+      true,
+    );
   }, 30_000);
 
   test('persistence + telemetry: withMcpRun writes degradation.jsonl and a reliability.degrade span event', async () => {
@@ -175,13 +179,15 @@ describe.skipIf(!LIVE)('reliability live-verify (real Ollama)', () => {
       );
 
       const runDir = join(runsRoot, runId);
-      const ledgerLines = (await readFile(join(runDir, 'degradation.jsonl'), 'utf8'))
+      const ledgerLines = (
+        await readFile(join(runDir, 'degradation.jsonl'), 'utf8')
+      )
         .trim()
         .split('\n')
         .map((l) => JSON.parse(l));
-      expect(
-        ledgerLines.some((e) => e.kind === DegradeKind.AgentDropped),
-      ).toBe(true);
+      expect(ledgerLines.some((e) => e.kind === DegradeKind.AgentDropped)).toBe(
+        true,
+      );
 
       const spanLines = (await readFile(join(runDir, 'spans.jsonl'), 'utf8'))
         .trim()
