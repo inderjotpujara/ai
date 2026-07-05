@@ -9,6 +9,11 @@ type TranscribeDeps = {
   readJson?: (p: string) => Promise<{ text: string }>;
   model?: string;
   outDir?: string;
+  /** The mlx_whisper CLI binary. Env fallback-only (`AGENT_STT_CMD`) so a venv
+   *  install location is configurable; defaults to `mlx_whisper` (on PATH).
+   *  NOTE: `python3 -m mlx_whisper` does NOT work — the package has no
+   *  `__main__`; the CLI entry point is the supported invocation. */
+  cmd?: string;
 };
 
 const defaultSpawn: SpawnFn = (cmd, args) => {
@@ -47,10 +52,9 @@ export async function transcribe(
     'mlx-community/whisper-large-v3-turbo';
   const outDir = deps.outDir ?? mkdtempSync(join(tmpdir(), 'agent-stt-'));
   const readJson = deps.readJson ?? defaultReadJson;
+  const cmd = deps.cmd ?? process.env.AGENT_STT_CMD ?? 'mlx_whisper';
 
   const args = [
-    '-m',
-    'mlx_whisper',
     audioPath,
     '--model',
     model,
@@ -64,7 +68,7 @@ export async function transcribe(
     const startedAt = Date.now();
     try {
       const text = await new Promise<string>((resolve, reject) => {
-        const child = spawn('python3', args);
+        const child = spawn(cmd, args);
         child.onExit((code) => {
           if (code !== 0) {
             reject(new Error(`transcription failed (exit ${code})`));

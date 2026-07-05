@@ -18,7 +18,11 @@ export type MediaItem = {
 export type MediaFilePart = {
   type: 'file';
   mediaType: string;
-  data: Uint8Array;
+  /** Base64-encoded bytes. Live-verify caught that a raw Uint8Array here is
+   *  rejected by Ollama (`images[]` wants base64 strings — JSON-serializing a
+   *  Uint8Array yields an object → 400). Base64 works across the AI-SDK v6
+   *  FilePart contract and every provider. */
+  data: string;
 };
 
 export type ResolvedMedia = { parts: MediaFilePart[] } | { transcript: string };

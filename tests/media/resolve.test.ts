@@ -24,8 +24,10 @@ test('resolveAttachments materializes image parts as v6 file parts', async () =>
     `describe [${'img'}:${item.handle}]`,
     store,
   );
+  // data is base64 (Ollama images[] wants a base64 string, not raw bytes —
+  // caught by live-verify). Buffer.from([9]).toString('base64') === 'CQ=='.
   expect(parts).toEqual([
-    { type: 'file', mediaType: 'image/png', data: new Uint8Array([9]) },
+    { type: 'file', mediaType: 'image/png', data: 'CQ==' },
   ]);
 });
 

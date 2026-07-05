@@ -10,7 +10,7 @@ test('attachments -> messages with text + file parts', () => {
     {
       type: 'file' as const,
       mediaType: 'image/png',
-      data: new Uint8Array([1]),
+      data: 'AQ==', // base64 (MediaFilePart.data is base64, not raw bytes)
     },
   ];
   expect(buildCallInput('describe', att)).toEqual({

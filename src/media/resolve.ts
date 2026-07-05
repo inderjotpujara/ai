@@ -31,13 +31,21 @@ export async function resolveAttachments(
       for (const frameHandle of item.frames) {
         const frameItem = store.get(frameHandle);
         if (!frameItem) continue;
-        const data = await store.resolveBytes(frameHandle);
-        parts.push({ type: 'file', mediaType: frameItem.mediaType, data });
+        const bytes = await store.resolveBytes(frameHandle);
+        parts.push({
+          type: 'file',
+          mediaType: frameItem.mediaType,
+          data: Buffer.from(bytes).toString('base64'),
+        });
       }
       continue;
     }
-    const data = await store.resolveBytes(handle);
-    parts.push({ type: 'file', mediaType: item.mediaType, data });
+    const bytes = await store.resolveBytes(handle);
+    parts.push({
+      type: 'file',
+      mediaType: item.mediaType,
+      data: Buffer.from(bytes).toString('base64'),
+    });
   }
   return parts;
 }
