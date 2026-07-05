@@ -1,0 +1,79 @@
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+
+export type StoredTokens = {
+  access_token: string;
+  token_type?: string;
+  refresh_token?: string;
+  expires_at?: number;
+};
+
+export type ClientRecord = { client_id: string; client_secret?: string };
+
+export type ServerAuthRecord = {
+  tokens?: StoredTokens;
+  codeVerifier?: string;
+  client?: ClientRecord;
+};
+
+/** Default location: $XDG_CONFIG_HOME|~/.config + /ai/mcp-tokens.json.
+ *  NOTE: this file holds real OAuth secrets in plaintext, protected only by
+ *  0600 file permissions — encryption-at-rest is deliberately deferred to
+ *  Slice 35. Do not weaken the permissions set in writeTokenStore(). */
+export function tokenStorePath(): string {
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  return join(configHome, 'ai', 'mcp-tokens.json');
+}
+
+export function readTokenStore(
+  path: string = tokenStorePath(),
+): Record<string, ServerAuthRecord> {
+  try {
+    if (!existsSync(path)) return {};
+    return JSON.parse(readFileSync(path, 'utf8')) as Record<
+      string,
+      ServerAuthRecord
+    >;
+  } catch {
+    return {}; // corrupt store → re-auth, never crash
+  }
+}
+
+/** Atomic write (temp + rename), mode 0600 on both temp and final file —
+ *  this store holds real secrets so a world-readable window is unacceptable. */
+export function writeTokenStore(
+  store: Record<string, ServerAuthRecord>,
+  path: string = tokenStorePath(),
+): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  renameSync(tmp, path);
+  chmodSync(path, 0o600); // belt-and-suspenders: rename should preserve mode, but verify
+}
+
+export function getServerAuth(
+  server: string,
+  path: string = tokenStorePath(),
+): ServerAuthRecord {
+  return readTokenStore(path)[server] ?? {};
+}
+
+/** Merges the record for `server` into the store and persists it. */
+export function setServerAuth(
+  server: string,
+  rec: ServerAuthRecord,
+  path: string = tokenStorePath(),
+): void {
+  const store = readTokenStore(path);
+  store[server] = rec;
+  writeTokenStore(store, path);
+}
