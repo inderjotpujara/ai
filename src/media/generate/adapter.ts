@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SpawnFn } from '../../runtime/process-supervisor.ts';
+import { withGenerateSpan } from '../../telemetry/spans.ts';
 import type { MediaStore } from '../store.ts';
 import type {
   ExecMode,
@@ -162,8 +163,42 @@ export function runOneShotJob(
     `media-gen-${randomUUID()}.${extFor(mediaType)}`,
   );
   const { cmd, args, env } = buildOneShot(prompt, outPath, opts);
+  const startedAt = Date.now();
   const child = spawn(cmd, args, env ? { env } : undefined);
   currentStatus = JobStatus.Working;
+
+  // Observability only: wraps `resultPromise` (the spawn→exit→store chain
+  // that the callbacks below drive) so the completion is recorded as a
+  // `media.generate` span. This must never change the settle logic that
+  // `job.result()`/`job.status()`/`job.cancel()` depend on — `currentStatus`
+  // is already updated to its terminal value by every path that settles
+  // `resultPromise` (onExit success/failure, cancel), so it's safe to read
+  // here to classify the outcome. The extra `.catch` below only prevents an
+  // unhandled-rejection warning on this internal span promise; the original
+  // rejection still propagates to whoever awaits `job.result()`.
+  withGenerateSpan(
+    {
+      kind: strategy.kind,
+      engine: cmd,
+      model: opts.model,
+      execMode: strategy.execMode,
+    },
+    async (rec) => {
+      try {
+        const fh = await resultPromise;
+        rec.done('completed', Date.now() - startedAt, fh.sizeBytes);
+        return fh;
+      } catch (err) {
+        const outcome =
+          currentStatus === JobStatus.Cancelled ? 'cancelled' : 'failed';
+        rec.done(outcome, Date.now() - startedAt);
+        throw err;
+      }
+    },
+  ).catch(() => {
+    // already recorded on the span above; job.result() is the surface for
+    // callers to observe success/failure.
+  });
 
   child.onExit((code) => {
     if (currentStatus === JobStatus.Cancelled) {

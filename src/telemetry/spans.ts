@@ -124,6 +124,13 @@ export const ATTR = {
   MEDIA_FRAMES_FPS: 'media.frames.fps',
   MEDIA_FRAMES_SAMPLED: 'media.frames.sampled',
   MEDIA_FRAMES_DURATION_MS: 'media.frames.duration_ms',
+  MEDIA_GENERATE_KIND: 'media.generate.kind',
+  MEDIA_GENERATE_ENGINE: 'media.generate.engine',
+  MEDIA_GENERATE_MODEL: 'media.generate.model',
+  MEDIA_GENERATE_EXEC_MODE: 'media.generate.exec_mode',
+  MEDIA_GENERATE_DURATION_MS: 'media.generate.duration_ms',
+  MEDIA_GENERATE_SIZE_BYTES: 'media.generate.size_bytes',
+  MEDIA_GENERATE_OUTCOME: 'media.generate.outcome',
 } as const;
 
 export type ModelSelectInfo = {
@@ -771,5 +778,44 @@ export function withFrameSampleSpan<T>(
       span.setAttribute(ATTR.MEDIA_FRAMES_DURATION_MS, info.durationMs);
     }
     return fn(span);
+  });
+}
+
+export type GenerateSpanInfo = {
+  kind: string;
+  engine: string;
+  model?: string;
+  execMode: string;
+};
+
+/** Root span for one media-generation call (Slice 27). Seeds kind/engine/
+ *  model/execMode up-front, mirroring `withProvisionSpan`; the body reports
+ *  outcome/duration/size at settle time via the returned recorder, mirroring
+ *  `withRuntimeSpan`'s recorder-callback shape. This fits the one-shot job's
+ *  async lifecycle: `runOneShotJob` returns a `JobHandle` synchronously while
+ *  the spawn→exit→store work settles later, so the recorder is called from
+ *  wherever that later settlement happens rather than from a return value. */
+export function withGenerateSpan<T>(
+  info: GenerateSpanInfo,
+  fn: (rec: {
+    done: (outcome: string, durationMs: number, sizeBytes?: number) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('media.generate', async (span) => {
+    span.setAttribute(ATTR.MEDIA_GENERATE_KIND, info.kind);
+    span.setAttribute(ATTR.MEDIA_GENERATE_ENGINE, info.engine);
+    if (info.model !== undefined) {
+      span.setAttribute(ATTR.MEDIA_GENERATE_MODEL, info.model);
+    }
+    span.setAttribute(ATTR.MEDIA_GENERATE_EXEC_MODE, info.execMode);
+    return fn({
+      done: (outcome, durationMs, sizeBytes) => {
+        span.setAttribute(ATTR.MEDIA_GENERATE_OUTCOME, outcome);
+        span.setAttribute(ATTR.MEDIA_GENERATE_DURATION_MS, durationMs);
+        if (sizeBytes !== undefined) {
+          span.setAttribute(ATTR.MEDIA_GENERATE_SIZE_BYTES, sizeBytes);
+        }
+      },
+    });
   });
 }
