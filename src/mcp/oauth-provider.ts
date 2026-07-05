@@ -64,8 +64,30 @@ export function createOAuthProvider(
       }
     | undefined;
   let pendingPromise: Promise<{ code: string; state: string }> | undefined;
+  /** Per-flow CSRF nonce: minted by `state()`, echoed back by the SDK in the
+   *  authorization URL's `state` param, and checked against the incoming
+   *  callback both by the SDK itself (via `storedState()`, in `auth()`'s
+   *  code-exchange call) and by this provider's own loopback listener (via
+   *  `pending.expectedState`, set from the URL in `redirectToAuthorization`). */
+  let stateNonce: string | undefined;
+  /** Fallback cleanup for the window between `ensureServer()` binding the
+   *  socket (triggered by the `redirectUrl`/`clientMetadata` getters, which
+   *  the SDK reads before calling `redirectToAuthorization`) and that call
+   *  actually installing the wall-clock-guarded cleanup below. If DCR or an
+   *  auth-server rejection throws in between, this timer stops the listener
+   *  instead of leaking it forever. Disarmed once `redirectToAuthorization`
+   *  takes over. */
+  let armTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function disarmFallbackTimer(): void {
+    if (armTimer !== undefined) {
+      clearTimeout(armTimer);
+      armTimer = undefined;
+    }
+  }
 
   function stopServer(): void {
+    disarmFallbackTimer();
     server?.stop();
     server = undefined;
     boundPort = undefined;
@@ -89,7 +111,7 @@ export function createOAuthProvider(
         }
         const code = url.searchParams.get('code') ?? '';
         const state = url.searchParams.get('state') ?? '';
-        if (state !== pending.expectedState) {
+        if (state === '' || state !== pending.expectedState) {
           pending.reject(new Error('state mismatch'));
           return new Response('Bad request', { status: 400 });
         }
@@ -104,6 +126,12 @@ export function createOAuthProvider(
     if (server.port === undefined)
       throw new Error('loopback server has no bound port');
     boundPort = server.port;
+    // Arm the leak guard on every fresh bind; `redirectToAuthorization`
+    // disarms it once it installs its own wall-clock-guarded cleanup.
+    armTimer = setTimeout(() => {
+      armTimer = undefined;
+      stopServer();
+    }, REDIRECT_WAIT_TIMEOUT_MS);
     return boundPort;
   }
 
@@ -147,7 +175,17 @@ export function createOAuthProvider(
 
     redirectToAuthorization(url: URL): void {
       ensureServer();
-      const state = url.searchParams.get('state') ?? '';
+      // The wall-clock guard below takes over cleanup from here.
+      disarmFallbackTimer();
+      const state = url.searchParams.get('state');
+      if (!state) {
+        // Only reachable if `state()` below stops being called by the SDK
+        // (e.g. a future SDK version) — fail loudly rather than silently
+        // degrade to no CSRF protection.
+        throw new Error(
+          `oauth-provider(${serverName}): authorization URL is missing a state param — refusing to proceed without CSRF protection`,
+        );
+      }
       pendingPromise = withWallClock(
         REDIRECT_WAIT_TIMEOUT_MS,
         () =>
@@ -184,6 +222,27 @@ export function createOAuthProvider(
         );
       }
       return codeVerifier;
+    },
+
+    // Optional CSRF-protection members: implementing these makes the SDK's
+    // `authInternal` (in `@ai-sdk/mcp`) mint a real per-flow nonce, bake it
+    // into the authorization URL as `state`, and verify it against
+    // `storedState()` when exchanging the authorization code — see
+    // task-12-report.md for the SDK source trace. The same provider
+    // instance handles both `auth()` calls in a flow (the initial redirect
+    // and the later code exchange), so an in-memory nonce is sufficient —
+    // no need to round-trip it through the on-disk token store.
+    state(): string {
+      stateNonce = crypto.randomUUID();
+      return stateNonce;
+    },
+
+    saveState(state: string): void {
+      stateNonce = state;
+    },
+
+    storedState(): string | undefined {
+      return stateNonce;
     },
 
     get redirectUrl(): string {
