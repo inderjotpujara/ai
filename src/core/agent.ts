@@ -5,6 +5,8 @@ import {
   stepCountIs,
   type ToolSet,
 } from 'ai';
+import { runTimeoutMs } from '../reliability/config.ts';
+import { withWallClock } from '../reliability/timeout.ts';
 import { recordIoEnabled } from '../telemetry/provider.ts';
 import { MaxStepsError } from './errors.ts';
 
@@ -27,22 +29,24 @@ export async function runAgent(input: RunAgentInput): Promise<{
   text: string;
   steps: Awaited<ReturnType<typeof generateText>>['steps'];
 }> {
-  const result = await generateText({
-    model: input.model,
-    system: input.systemPrompt,
-    prompt: input.prompt,
-    tools: input.tools,
-    temperature: input.temperature,
-    providerOptions: input.providerOptions,
-    abortSignal: input.abortSignal,
-    stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
-    experimental_telemetry: {
-      isEnabled: true,
-      functionId: input.functionId,
-      recordInputs: recordIoEnabled(),
-      recordOutputs: recordIoEnabled(),
-    },
-  });
+  const result = await withWallClock(runTimeoutMs(), () =>
+    generateText({
+      model: input.model,
+      system: input.systemPrompt,
+      prompt: input.prompt,
+      tools: input.tools,
+      temperature: input.temperature,
+      providerOptions: input.providerOptions,
+      abortSignal: input.abortSignal,
+      stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: input.functionId,
+        recordInputs: recordIoEnabled(),
+        recordOutputs: recordIoEnabled(),
+      },
+    }),
+  );
   const { text, finishReason, steps } = result;
   if (text.trim() === '' && finishReason !== 'stop') {
     throw new MaxStepsError(
