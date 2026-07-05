@@ -1,153 +1,32 @@
-### Task 5: Timeouts — withWallClock + IdleWatchdog + withIdleTimeout
+### Task 5: MLX strategy + rewrite `mlx-server.ts` onto the base
 
 **Files:**
-- Create: `src/reliability/timeout.ts`
-- Test: `tests/reliability/timeout.test.ts`
+- Create: `src/runtime/strategies/mlx.ts`
+- Modify: `src/runtime/mlx-server.ts` (rewrite to delegate to the base; KEEP exports `createMlxServerRuntime(deps?)` + `mlxServerRuntime`)
+- Modify: `src/runtime/registry.ts` (MLX now comes from the base; no new array entry — `mlxServerRuntime` already listed)
+- Test: `tests/runtime/mlx-server.test.ts` (existing — must still pass; extend for spawn)
 
 **Interfaces:**
-- Produces:
-  - `withWallClock<T>(ms: number, fn: () => Promise<T>): Promise<T>` (rejects `Error('timeout')` on expiry; clears its timer)
-  - `class IdleWatchdog` — generalized `StallWatchdog`: `constructor(timeoutMs, onIdle, now?)`, `beat(progress: number)`, `tick()`, `start(intervalMs)`, `stop()`
-  - `withIdleTimeout<T>(fn: (beat: (progress: number) => void) => Promise<T>, opts: { idleMs: number; onIdle: () => void; intervalMs?: number }): Promise<T>`
+- Consumes: Task 3.
+- Produces: `mlxStrategy: RuntimeStrategy` (`kind: MlxServer`, `contextCapability: 'fixed'`, `defaultPort: 1234` — MLX/LM Studio default, `healthPath: '/v1/models'`, `basePath: '/v1'`; `launch(model, _numCtx, port)` → `{ cmd: 'mlx_lm.server', args: ['--model', model, '--host', '127.0.0.1', '--port', String(port)], port }`; `detect()` → `Bun.which('mlx_lm.server') != null` OR the `MLX_BASE_URL` server answers `/v1/models` — preserve today's env-based reachability so existing behavior is retained). `createMlxServerRuntime(deps?)` builds `createManagedRuntime(mlxStrategy, deps)` while preserving the `deps.baseUrl`/`deps.fetchImpl` injection (map `baseUrl` → override the fallback base URL so the existing tests that inject `baseUrl: 'http://fake:1234/v1'` keep working).
 
-- [ ] **Step 1: Write the failing test**
+**CRITICAL COMPAT NOTE:** the existing `tests/runtime/mlx-server.test.ts` (verbatim in the spec source) injects `{ baseUrl, fetchImpl }` and expects `getModelMax`/`listLoaded`/`isInstalled`/`isAvailable` to work against that injected fetch WITHOUT any spawn. So: when `deps.baseUrl` is provided, the MLX runtime must treat the server as already-running at that URL (no spawn) — `warm` becomes a no-op reachability path, exactly as today. Only spawn when NO external `baseUrl`/`MLX_BASE_URL` is configured. Preserve every existing test assertion.
 
-```ts
-// tests/reliability/timeout.test.ts
-import { describe, expect, it } from 'bun:test';
-import { IdleWatchdog, withIdleTimeout, withWallClock } from '../../src/reliability/timeout.ts';
-
-describe('withWallClock', () => {
-  it('resolves the fn result when it finishes in time', async () => {
-    const r = await withWallClock(1000, async () => 42);
-    expect(r).toBe(42);
-  });
-  it('rejects with a timeout when the fn is too slow', async () => {
-    await expect(
-      withWallClock(10, () => new Promise((r) => setTimeout(() => r('late'), 1000))),
-    ).rejects.toThrow('timeout');
-  });
-});
-
-describe('IdleWatchdog', () => {
-  it('fires onIdle only after the timeout with no progress', () => {
-    let fired = 0;
-    let clock = 0;
-    const w = new IdleWatchdog(100, () => fired++, () => clock);
-    w.beat(0); // start tracking at time 0 (no advance yet)
-    clock = 50;
-    w.tick();
-    expect(fired).toBe(0);
-    clock = 150;
-    w.tick();
-    expect(fired).toBe(1);
-  });
-  it('resets the idle timer on progress', () => {
-    let fired = 0;
-    let clock = 0;
-    const w = new IdleWatchdog(100, () => fired++, () => clock);
-    w.beat(0);
-    clock = 90;
-    w.beat(10); // progress → resets
-    clock = 150;
-    w.tick(); // only 60ms since last progress
-    expect(fired).toBe(0);
-  });
-});
-
-describe('withIdleTimeout', () => {
-  it('passes a beat fn and returns the result', async () => {
-    const r = await withIdleTimeout(
-      async (beat) => {
-        beat(1);
-        beat(2);
-        return 'done';
-      },
-      { idleMs: 10_000, onIdle: () => {}, intervalMs: 1000 },
-    );
-    expect(r).toBe('done');
-  });
+- [ ] **Step 1:** Run the EXISTING `tests/runtime/mlx-server.test.ts` first to capture green baseline, then add one spawn test:
+```typescript
+test('mlx warm spawns mlx_lm.server when no external base url is set', async () => {
+  const seen: string[] = [];
+  const spawn = ((cmd: string) => { seen.push(cmd); return { pid: 1, kill: () => {}, onExit: () => {} }; }) as unknown as import('../../src/runtime/process-supervisor.ts').SpawnFn;
+  const health = (async () => new Response(JSON.stringify({ data: [{ id: 'm' }] }), { status: 200 })) as unknown as typeof fetch;
+  const rt = createMlxServerRuntime({ spawn, fetchImpl: health } as never);
+  await rt.control.warm('m', 8192); // fixed capability: no context flag, but process is spawned
+  expect(seen).toEqual(['mlx_lm.server']);
 });
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/reliability/timeout.test.ts`
-Expected: FAIL — cannot resolve `timeout.ts`.
-
-- [ ] **Step 3: Write minimal implementation**
-
-```ts
-// src/reliability/timeout.ts
-/** Hard wall-clock cap (run_timeout). Rejects Error('timeout') on expiry. */
-export function withWallClock<T>(ms: number, fn: () => Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const clock = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error('timeout')), ms);
-  });
-  return Promise.race([fn(), clock]).finally(() => clearTimeout(timer));
-}
-
-/** Fires onIdle when a monotonic progress counter hasn't advanced within timeoutMs. */
-export class IdleWatchdog {
-  private lastProgress = -1;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private idleSince: number | null = null;
-  constructor(
-    private readonly timeoutMs: number,
-    private readonly onIdle: () => void,
-    private readonly now: () => number = () => Date.now(),
-  ) {}
-  beat(progress: number): void {
-    if (progress > this.lastProgress) {
-      this.lastProgress = progress;
-      this.idleSince = null;
-    } else if (this.idleSince === null) {
-      this.idleSince = this.now();
-    }
-  }
-  tick(): void {
-    if (this.idleSince !== null && this.now() - this.idleSince >= this.timeoutMs) {
-      this.onIdle();
-    }
-  }
-  start(intervalMs: number): void {
-    this.timer = setInterval(() => this.tick(), intervalMs);
-  }
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-  }
-}
-
-/** Run a progress-bearing op with an idle timeout; `beat(progress)` resets the timer. */
-export async function withIdleTimeout<T>(
-  fn: (beat: (progress: number) => void) => Promise<T>,
-  opts: { idleMs: number; onIdle: () => void; intervalMs?: number },
-): Promise<T> {
-  const w = new IdleWatchdog(opts.idleMs, opts.onIdle);
-  w.beat(0);
-  w.start(opts.intervalMs ?? 1000);
-  try {
-    return await fn((p) => w.beat(p));
-  } finally {
-    w.stop();
-  }
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun test tests/reliability/timeout.test.ts`
-Expected: PASS (all).
-
-- [ ] **Step 5: Typecheck, lint, commit**
-
-```bash
-bun run typecheck && bun run lint:file -- "src/reliability/timeout.ts" "tests/reliability/timeout.test.ts"
-git add src/reliability/timeout.ts tests/reliability/timeout.test.ts
-git commit -m "feat(reliability): withWallClock + IdleWatchdog + withIdleTimeout"
-```
+- [ ] **Step 2: fail** — new test fails (spawn seam not wired).
+- [ ] **Step 3: implement** — rewrite `mlx-server.ts` to build on `createManagedRuntime(mlxStrategy, ...)`, threading the compat `baseUrl`/`fetchImpl`/`spawn` deps. Extend `MlxServerDeps` with optional `spawn`. Keep `MemoryError` on `embed`.
+- [ ] **Step 4: pass** — the FULL existing mlx-server.test.ts + the new test all pass.
+- [ ] **Step 5: commit** (`refactor(runtime): rewrite MLX onto the managed base (fixed-context, supervised)`).
 
 ---
 

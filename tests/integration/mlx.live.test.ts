@@ -5,7 +5,10 @@ import { mlxServerRuntime } from '../../src/runtime/mlx-server.ts';
 import { mlxReady } from './mlx-available.ts';
 
 const model = process.env.MLX_LIVE_MODEL;
-const ready = await mlxReady(model);
+// Require the model to be explicitly configured: the round-trip/getModelMax
+// tests need it, and MLX's default base URL (:1234) collides with LM Studio's,
+// so port-reachability alone must NOT flip this gate on.
+const ready = !!model && (await mlxReady(model));
 
 describe.skipIf(!ready)('live MLX server', () => {
   test('lists at least one loaded model', async () => {

@@ -2,8 +2,15 @@ import type { RuntimeKind } from '../core/types.ts';
 import { mlxServerRuntime } from './mlx-server.ts';
 import { ollamaRuntime } from './ollama.ts';
 import type { Runtime } from './runtime.ts';
+import { llamaCppRuntime } from './strategies/llamacpp.ts';
+import { lmStudioRuntime } from './strategies/lmstudio.ts';
 
-export const RUNTIMES: Runtime[] = [ollamaRuntime, mlxServerRuntime];
+export const RUNTIMES: Runtime[] = [
+  ollamaRuntime,
+  mlxServerRuntime,
+  llamaCppRuntime,
+  lmStudioRuntime,
+];
 
 export function runtimeFor(kind: RuntimeKind): Runtime {
   const rt = RUNTIMES.find((r) => r.kind === kind);

@@ -23,4 +23,12 @@ describe('downloadKindFor', () => {
       ProviderKind.LmStudio,
     );
   });
+  it('llama.cpp GGUF downloads route to the HfGguf provider', () => {
+    expect(downloadKindFor(RuntimeKind.LlamaCpp, 'gguf-file')).toBe(
+      ProviderKind.HfGguf,
+    );
+    expect(downloadKindFor(RuntimeKind.LlamaCpp, 'ollama')).toBe(
+      ProviderKind.HfGguf,
+    );
+  });
 });

@@ -1,83 +1,48 @@
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { MemoryError } from '../core/errors.ts';
-import type { ModelDeclaration } from '../core/types.ts';
-import { RuntimeKind } from '../core/types.ts';
 import { probeTimeoutMs } from '../reliability/config.ts';
-import type { LoadedModel, Runtime } from './runtime.ts';
+import {
+  createManagedRuntime,
+  type RuntimeStrategy,
+} from './managed-openai-compatible.ts';
+import type { SpawnFn } from './process-supervisor.ts';
+import type { Runtime } from './runtime.ts';
+import { mlxStrategy } from './strategies/mlx.ts';
 
-const MLX_BASE_URL = process.env.MLX_BASE_URL ?? 'http://localhost:1234/v1';
-
-/** A single entry from the OpenAI-compatible `GET /models` payload. Fields beyond
- * `id` are non-standard extensions some servers (LM Studio, vllm-mlx) add. */
-type MlxModelEntry = {
-  id: string;
-  max_context_length?: number;
-  context_length?: number;
-  max_model_len?: number;
-  size_bytes?: number;
-  size?: number;
-};
-
-type MlxModelsResponse = { data?: MlxModelEntry[] };
-
-/** The context length field, if the server reports one under any known name. */
-function contextLengthOf(entry: MlxModelEntry): number | undefined {
-  const v =
-    entry.max_context_length ?? entry.context_length ?? entry.max_model_len;
-  return typeof v === 'number' ? v : undefined;
-}
-
-/** The on-disk/in-memory size field, if the server reports one; else 0 (honest fallback). */
-function sizeBytesOf(entry: MlxModelEntry): number {
-  const v = entry.size_bytes ?? entry.size;
-  return typeof v === 'number' ? v : 0;
-}
+// Resolved per-call (not captured once) so tests can swap `globalThis.fetch`
+// after the runtime is constructed without needing to pass `fetchImpl`.
+const dynamicFetch = ((input, init) => fetch(input, init)) as typeof fetch;
 
 export type MlxServerDeps = {
+  /** When set (or `MLX_BASE_URL` is set in the environment), the MLX server is
+   * treated as already running at this URL: no process is spawned, and `warm`
+   * is a no-op reachability path. Only when neither is set does `warm` spawn
+   * `mlx_lm.server` itself. */
   baseUrl?: string;
   fetchImpl?: typeof fetch;
+  spawn?: SpawnFn;
 };
 
-/**
- * MLX models run via a local OpenAI-compatible server (LM Studio / vllm-mlx).
- * The server owns model download/load, so `pull`/`warm`/`unload` are best-effort:
- * a model must be loaded in the server; we surface a clear message if it is not.
- *
- * `deps` injects the base URL and fetch implementation so this is testable
- * without a live server.
- */
-export function createMlxServerRuntime(deps?: MlxServerDeps): Runtime {
-  const baseUrl = deps?.baseUrl ?? MLX_BASE_URL;
-  // Resolved per-call (not captured once) so tests can swap `globalThis.fetch`
-  // after the runtime is constructed without needing to pass `fetchImpl`.
-  const getFetch = (): typeof fetch => deps?.fetchImpl ?? fetch;
-  const provider = createOpenAICompatible({
-    name: 'mlx-server',
-    baseURL: baseUrl,
-  });
+/** Builds the compat strategy for an externally-configured MLX server: the
+ * server is assumed already running at `baseUrl`, so `warm` never spawns a
+ * process — it just adopts that URL as the current connection. */
+function externalServerStrategy(
+  baseUrl: string,
+  fetchImpl: typeof fetch,
+): { strategy: RuntimeStrategy; host: string } {
+  const url = new URL(baseUrl);
+  const port = url.port
+    ? Number(url.port)
+    : url.protocol === 'https:'
+      ? 443
+      : 80;
+  const basePath = url.pathname || '/v1';
 
-  async function listModels(): Promise<MlxModelEntry[]> {
-    try {
-      const res = await getFetch()(`${baseUrl}/models`, {
-        signal: AbortSignal.timeout(probeTimeoutMs()),
-      });
-      if (!res.ok) return [];
-      const data = (await res.json()) as MlxModelsResponse;
-      return data.data ?? [];
-    } catch {
-      return [];
-    }
-  }
-
-  async function listIds(): Promise<string[]> {
-    return (await listModels()).map((m) => m.id);
-  }
-
-  return {
-    kind: RuntimeKind.MlxServer,
-    async isAvailable() {
+  const strategy: RuntimeStrategy = {
+    ...mlxStrategy,
+    defaultPort: port,
+    basePath,
+    async detect(): Promise<boolean> {
       try {
-        const res = await getFetch()(`${baseUrl}/models`, {
+        const res = await fetchImpl(`${baseUrl}/models`, {
           signal: AbortSignal.timeout(probeTimeoutMs()),
         });
         return res.ok;
@@ -85,39 +50,40 @@ export function createMlxServerRuntime(deps?: MlxServerDeps): Runtime {
         return false;
       }
     },
-    createModel: (decl: ModelDeclaration) => provider(decl.model),
-    control: {
-      isInstalled: async (m) => (await listIds()).includes(m),
-      pull: async (m) => {
-        if ((await listIds()).includes(m)) return;
-        // The OpenAI-compatible surface has no standard "load a model" endpoint
-        // (LM Studio's load is a GUI/CLI action, not a documented REST call), so
-        // there is nothing reliable to attempt here — degrade with a clear error.
-        throw new Error(
-          `MLX model "${m}" is not loaded in the MLX server at ${baseUrl}. Load it there (e.g. in LM Studio), then retry.`,
-        );
-      },
-      warm: async () => {},
-      unload: async () => {},
-      listLoaded: async (): Promise<LoadedModel[]> =>
-        (await listModels()).map((m) => ({
-          name: m.id,
-          sizeBytes: sizeBytesOf(m),
-        })),
-      getModelMax: async (m) => {
-        const entry = (await listModels()).find((e) => e.id === m);
-        return entry ? contextLengthOf(entry) : undefined;
-      },
-      // MLX servers don't expose llama.cpp-style architecture/attention metadata —
-      // honestly unavailable, not derivable from the OpenAI-compatible surface.
-      getModelKvArch: async () => undefined,
-      embed: async () => {
-        throw new MemoryError(
-          'embeddings are not supported on the MLX runtime yet',
-        );
-      },
+    async daemonLoad() {
+      return { baseUrl };
     },
   };
+
+  return { strategy, host: url.hostname };
+}
+
+/**
+ * MLX models run either via a local OpenAI-compatible server that's already
+ * running (LM Studio / vllm-mlx / a manually-started `mlx_lm.server`), or —
+ * when nothing else answers — a `mlx_lm.server` process this runtime spawns
+ * and supervises itself (fixed context: `mlx_lm.server` has no context-length
+ * flag, so `numCtx` is never threaded through).
+ *
+ * `deps` injects the base URL, fetch implementation, and spawn function so
+ * this is testable without a live server or a real process.
+ */
+export function createMlxServerRuntime(deps: MlxServerDeps = {}): Runtime {
+  const configuredBaseUrl = deps.baseUrl ?? process.env.MLX_BASE_URL;
+  const fetchImpl = deps.fetchImpl ?? dynamicFetch;
+
+  if (configuredBaseUrl) {
+    const { strategy, host } = externalServerStrategy(
+      configuredBaseUrl,
+      fetchImpl,
+    );
+    return createManagedRuntime(strategy, { host, fetchImpl });
+  }
+
+  return createManagedRuntime(mlxStrategy, {
+    fetchImpl,
+    spawn: deps.spawn,
+  });
 }
 
 export const mlxServerRuntime: Runtime = createMlxServerRuntime();

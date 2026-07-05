@@ -1,144 +1,123 @@
-# Task 2 Report: Three-Lane Error Classifier (Slice 21)
+# Task 2 report — Process supervisor (spawn + health-poll + reuse + stop)
 
-> Slice 21 Task 2: Error-lane classifier for reliability module.
-> Slice 19 Task 2 (safe-helpers.ts) preserved in git history.
+## Changes
+- Created `src/runtime/process-supervisor.ts`:
+  - Exports `ChildHandle`, `SpawnFn`, `SupervisedServer`, `SuperviseDeps`, `SuperviseCfg` types exactly per the brief's interface block.
+  - `superviseServer(cfg, deps)`: spawns via `deps.spawn ?? defaultSpawn`, computes `baseUrl = http://{host}:{port}{basePath}` and `healthUrl = http://{host}:{port}{healthPath}`, then polls `healthUrl` every `pollMs` (default 250) inside `withWallClock(startTimeoutMs, ...)` (default 30000) from `src/reliability/timeout.ts`. Each poll wraps `fetchImpl` in a try/catch (network errors/non-ok just fall through to the next poll) and calls `healthOk(res)` (default `res.ok`) to decide readiness. On the wall-clock's `Error('timeout')` rejection, the child is killed with `SIGTERM` and the function throws `Error('runtime failed to become healthy after ${startTimeoutMs}ms')`.
+  - `stop()` on the returned `SupervisedServer` sends `SIGTERM` to the child.
+  - `defaultSpawn` uses `Bun.spawn` exactly as given in the brief's snippet (stdout/stderr ignored, env merged with `process.env`).
+- Created `tests/runtime/process-supervisor.test.ts` — the two tests from the brief, verbatim, with one adjustment: removed the unused `type ChildHandle` import (flagged by biome's `noUnusedImports`; the test never references `ChildHandle` directly, only via `SpawnFn`'s return type).
 
-## Status
+## Test output (verbatim)
 
-**COMPLETED**
-
-## Implementation Summary
-
-Implemented the error-lane classifier for Slice 21's reliability module, mapping errors into three lanes (Transient, RouteWorthy, Terminal) to drive retry/degrade/partial-failure decisions.
-
-## Files Created
-
-- `src/reliability/classify.ts` (28 lines) — `enum Lane` + `classify(err: unknown): Lane` pure function
-- `tests/reliability/classify.test.ts` (46 lines) — 6 test cases covering all classification branches
-
-## TDD Evidence
-
-**RED** (Step 1 — Test fails, module doesn't exist):
+Before implementation (confirming failure):
 ```
-$ bun test tests/reliability/classify.test.ts
-error: Cannot find module 'src/reliability/classify.ts'
-```
+bun test v1.3.11 (af24e281)
 
-**GREEN** (Step 4 — Test passes after implementation):
-```
-$ bun test tests/reliability/classify.test.ts
-✓ 6 pass
-✓ 0 fail
-✓ 10 expect() calls
-Ran 6 tests across 1 file. [55.00ms]
+tests/runtime/process-supervisor.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+error: Cannot find module '../../src/runtime/process-supervisor.ts' from '/Users/inderjotsingh/ai/tests/runtime/process-supervisor.test.ts'
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [16.00ms]
 ```
 
-All six test cases pass:
-- ✓ retryable API errors are Transient (429, 503 with isRetryable=true)
-- ✓ non-retryable client API errors are Terminal (400, 401 with isRetryable=false)
-- ✓ ProviderError and ResourceError are RouteWorthy
-- ✓ ToolError is Terminal
-- ✓ network reset codes (ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE) are Transient
-- ✓ unknown errors fail safe to Terminal (Error, string, any non-error)
+After implementation:
+```
+bun test v1.3.11 (af24e281)
 
-## APICallError Guard Verification
+ 2 pass
+ 0 fail
+ 3 expect() calls
+Ran 2 tests across 1 file. [46.00ms]
+```
 
-**Guard Selected:** `APICallError.isInstance(err)`
+## Typecheck
+```
+$ tsc --noEmit
+```
+(no output — clean)
 
-**Verification Method:**
-1. Checked `/node_modules/@ai-sdk/provider/dist/index.d.ts` for APICallError class definition
-2. Found: `static isInstance(error: unknown): error is APICallError`
-3. Ran `bun run typecheck` — passed with no errors
-4. Test constructs `new APICallError({...})` and classify() correctly identifies it
+## Lint
+```
+$ biome check src/runtime/process-supervisor.ts tests/runtime/process-supervisor.test.ts
+Checked 2 files in 3ms. No fixes applied.
+```
+(Ran `bunx biome check --write` once first to apply the project's formatting style — trailing multi-line object/import formatting — which biome's own formatter enforces; the unused `ChildHandle` import was an unsafe fix so I removed it by hand since it's genuinely unused.)
 
-**Status:** ✅ CONFIRMED
-- The guard is a proper TypeScript type predicate (error is APICallError)
-- Provides correct type narrowing after the check
-- Verified in ai package v6 (@ai-sdk/provider re-export)
+## docs:check
+```
+$ bun run scripts/docs-check.ts
+✔ docs-check: living docs present + linked; every src subsystem documented.
+```
+No architecture.md change was needed — `src/runtime/` is an existing documented subsystem; this task adds one more file to it, not a new top-level subsystem.
 
-## Quality Checks
+## Commit
+```
+$ git commit -m "feat(runtime): process supervisor with health-poll + kill-on-timeout" (+ body)
+[slice-26-altruntime-remote-auth d0b6d7b] feat(runtime): process supervisor with health-poll + kill-on-timeout
+ 2 files changed, 154 insertions(+)
+ create mode 100644 src/runtime/process-supervisor.ts
+ create mode 100644 tests/runtime/process-supervisor.test.ts
+```
+Only the two task files were staged/committed; other files already modified in the working tree (`.remember/*`, `docs/ROADMAP.md`, `.superpowers/sdd/progress.md`, task-1 files) were left untouched as out of scope for this task.
 
-**Typecheck:**
+## Self-review
+- Interfaces match the brief's `Produces` block exactly (types, function signature, defaults: `startTimeoutMs` 30000, `pollMs` 250, `healthOk` defaults to `res.ok`).
+- Poll loop matches the brief's pseudocode: per-poll `fetchImpl` call wrapped in try/catch, `AbortSignal.timeout(pollMs + 1000)` per attempt, `sleep(pollMs)` between attempts, whole loop wrapped in `withWallClock`.
+- On timeout: child killed with `SIGTERM`, then rethrown with the more descriptive `after ${startTimeoutMs}ms` message (per the task instructions' "Key context," which is stricter than the brief's plain `Error('runtime failed to become healthy')` — the test only asserts `.rejects.toThrow('healthy')`, a substring match, so both messages satisfy it; used the more informative one per the explicit key-context instruction).
+- `defaultSpawn` copied verbatim from the brief's snippet.
+- `stop()` kills the child but does not await its exit; the brief's spec for `stop()` is just "kills the child (SIGTERM)" with no wait-for-exit requirement, so this matches spec.
+- No lingering timers: `withWallClock`'s `finally` clears its own timer; the poll loop's `setTimeout` calls are one-shot and not stored/leaked beyond their own resolution.
+
+## Concerns
+- Minor, non-blocking: `stop()` does not await the child's actual exit (only sends the signal) — matches the brief's literal spec, but a later "managed base" task building on this may want a `stop()` that resolves only after `onExit` fires, if callers need a synchronous-shutdown guarantee before reusing the port.
+
+## Fix: orphaned health-poll loop after wall-clock timeout (reviewer finding)
+
+**Finding:** In `superviseServer`, the health-poll `for (;;)` loop inside `withWallClock`'s callback was the "loser" of the internal `Promise.race` in `src/reliability/timeout.ts` — when the wall-clock deadline won the race, `withWallClock` rejected and `superviseServer` threw, but the loser promise (the poll loop) was never cancelled and kept running forever, repeatedly calling the (by then killed) health endpoint. Unbounded orphaned loop burning CPU/sockets in production.
+
+**Fix (`src/runtime/process-supervisor.ts`):**
+- Hoisted `let timedOut = false;` above the `try` block (previously the loop used `for (;;)`).
+- Changed the poll loop to `while (!timedOut)`.
+- In the `catch` block (kill-child + rethrow "failed to become healthy" path), set `timedOut = true` before killing the child and throwing, so the still-in-flight loop iteration observes the flag on its next check and exits instead of looping forever.
+- Success path and fetch-throws-while-not-timed-out behavior unchanged (fetch errors are still swallowed and the loop keeps retrying until either health succeeds or the timeout flag flips).
+
+**Regression test added (`tests/runtime/process-supervisor.test.ts`):**
+`'stops polling the health endpoint once the wall-clock deadline wins'` — uses an always-throwing `fetchImpl` that counts calls, `pollMs: 0`, `startTimeoutMs: 20`. Awaits the rejection (`.rejects.toThrow('healthy')`), records the call count at rejection, waits ~100ms, then asserts `calls - callsAtRejection <= 1` (allows at most one in-flight call that was already started before the flag flipped; proves the loop does not keep looping indefinitely).
+
+### Commands run
+
+```
+$ bun test tests/runtime/process-supervisor.test.ts
+bun test v1.3.11 (af24e281)
+
+ 3 pass
+ 0 fail
+ 5 expect() calls
+Ran 3 tests across 1 file. [170.00ms]
+```
+
 ```
 $ bun run typecheck
-✓ tsc --noEmit
-(clean, no output)
+$ tsc --noEmit
+```
+(no output — clean)
+
+```
+$ bun run lint:file src/runtime/process-supervisor.ts tests/runtime/process-supervisor.test.ts
+$ biome check src/runtime/process-supervisor.ts tests/runtime/process-supervisor.test.ts
+Checked 2 files in 4ms. No fixes applied.
 ```
 
-**Lint:**
-```
-$ bun run lint:file -- src/reliability/classify.ts tests/reliability/classify.test.ts
-✓ Checked 2 files in 3ms. No fixes applied.
-```
-Formatting adjustments applied (Biome line-width rules):
-- TRANSIENT_CODES Set expanded to multi-line
-- Test imports expanded to multi-line
+### Commit
+Committed as a fix on branch `slice-26-altruntime-remote-auth` (see git log for SHA), scoped to `src/runtime/process-supervisor.ts`, `tests/runtime/process-supervisor.test.ts`, and this report file.
 
-**Commit:**
-```
-$ git commit -m "feat(reliability): three-lane error classifier"
-[slice-21-graceful-degradation-retries e8a1870] feat(reliability): three-lane error classifier
- 2 files changed, 81 insertions(+)
- create mode 100644 src/reliability/classify.ts
- create mode 100644 tests/reliability/classify.test.ts
-✓ docs-check: living docs present + linked; every src subsystem documented.
-```
-
-## Implementation Details
-
-### Lane Classifications
-
-**Transient** (back off + retry):
-- `APICallError` with `isRetryable=true` (HTTP 429, 503, etc.)
-- OS network errors with code in {ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE}
-
-**RouteWorthy** (degrade/fallback/skip, don't retry):
-- `ProviderError` — model provider/runtime failed (Ollama unreachable, pull failed)
-- `ResourceError` — model doesn't fit memory budget
-
-**Terminal** (fail fast, surface to user):
-- `APICallError` with `isRetryable=false` (HTTP 400, 401, etc.)
-- `ToolError` — tool invocation failed in unrecoverable way
-- Unknown/unclassifiable errors (fail-safe: never silently retry the unknown)
-
-### Code Quality
-
-- ✅ Pure function: never throws, never modifies state
-- ✅ `enum` used for finite named set (Lane)
-- ✅ Early returns in classify()
-- ✅ Exhaustive error handling (unknown → Terminal as safe default)
-- ✅ Type guards (instanceof, APICallError.isInstance) all verified
-- ✅ No console.log, no unnecessary side effects
-- ✅ .ts extensions on all imports
-- ✅ Integrates cleanly with `src/core/errors.ts` framework error classes
-
-## Self-Review
-
-**Strengths:**
-- Classification logic is exhaustive: every branch either matches a specific error type or falls through to Terminal
-- Safe by design: unknown/unclassifiable errors default to Terminal (fail-safe: never retry the unknown)
-- Type guards verified and correct (APICallError.isInstance confirmed in ai SDK v6)
-- All test cases pass consistently
-- Typecheck and lint clean after formatting fixes
-
-**Concerns:**
-None. The implementation matches the brief exactly, guards are verified, and all quality gates pass.
-
-## Key Findings
-
-The three-lane model is production-ready:
-- APICallError type guard (isInstance) is the correct and reliable way to detect AI SDK errors in v6
-- Framework error instanceof checks (ProviderError, ResourceError, ToolError) work as expected
-- Network error code detection handles generic Error objects with optional code property
-- Unknown errors fail safe to Terminal — the right behavior for untrusted inputs
-
-This classifier is ready for wiring into the retry/degrade logic in subsequent reliability-module tasks (delay, backoff, fallback mechanisms).
-
-## Minor Fix (Post-Implementation)
-
-**Fix:** Converted `Lane` enum from numeric to string-valued (per project convention in root CLAUDE.md).
-- Changed: `Transient`, `RouteWorthy`, `Terminal` to `Transient = 'Transient'`, etc.
-- Logic unchanged: enum-identity comparisons in `classify()` remain unaffected.
-
-**Test result:** `bun test tests/reliability/classify.test.ts` → 6 pass, 0 fail
-**Commit:** `9b17c89` — fix(reliability): Lane as string enum per project convention
+### Concerns
+None outstanding — the fix is minimal and behavior-preserving on the success and "still retrying" paths; only the timeout-then-orphaned-loop path changes (loop now terminates).

@@ -131,4 +131,32 @@ describe('loadMcpConfig', () => {
     const cfg = loadMcpConfig(path, {});
     expect(cfg.entries[0]?.kind).toBe(McpTransportKind.Stdio);
   });
+  it('carries optional scopes/clientId through an oauth auth entry', () => {
+    const path = writeConfig({
+      mcpServers: {
+        h: {
+          type: 'http',
+          url: 'https://x.test',
+          auth: { kind: 'oauth', scopes: ['read'], clientId: 'cid' },
+        },
+      },
+    });
+    const cfg = loadMcpConfig(path, {});
+    const [h] = cfg.entries;
+    if (h?.kind !== McpTransportKind.Http) throw new Error('expected http');
+    expect(h.auth?.scopes).toEqual(['read']);
+    expect(h.auth?.clientId).toBe('cid');
+  });
+  it('leaves scopes/clientId undefined for a bare oauth auth entry', () => {
+    const path = writeConfig({
+      mcpServers: {
+        h: { type: 'http', url: 'https://x.test', auth: { kind: 'oauth' } },
+      },
+    });
+    const cfg = loadMcpConfig(path, {});
+    const [h] = cfg.entries;
+    if (h?.kind !== McpTransportKind.Http) throw new Error('expected http');
+    expect(h.auth?.scopes).toBeUndefined();
+    expect(h.auth?.clientId).toBeUndefined();
+  });
 });

@@ -1,99 +1,117 @@
-# Task 1 Report: Reliability config (computed env-fallback knobs) — Slice 21
+# Slice 26, Task 1 Report: Add RuntimeKind.LlamaCpp + kind-map wiring
 
-## Status: DONE
+## What Changed
 
-## What Was Implemented
+### Files Modified
+1. **src/core/types.ts** — RuntimeKind enum
+2. **src/core/kind-map.ts** — downloadKindFor function
+3. **tests/core/kind-map.test.ts** — new test case
 
-Created the foundational `src/reliability/` module with a single file (`config.ts`) that exports 9 configuration functions for reliability knobs. All knobs follow the env-fallback pattern: they read from an environment variable, or fall back to a sensible default if the env var is missing, non-numeric, or zero.
+### Implementation Summary
 
-**Exported functions:**
-- `maxAttempts()` → `AGENT_MAX_ATTEMPTS` or 4
-- `runTimeoutMs()` → `AGENT_RUN_TIMEOUT_MS` or 120,000
-- `idleTimeoutMs()` → `AGENT_IDLE_TIMEOUT_MS` or 90,000
-- `breakerThreshold()` → `AGENT_BREAKER_THRESHOLD` or 5
-- `breakerCooldownMs()` → `AGENT_BREAKER_COOLDOWN_MS` or 60,000
-- `breakerHalfOpenProbes()` → `AGENT_BREAKER_HALF_OPEN_PROBES` or 1
-- `retryBaseMs()` → `AGENT_RETRY_BASE_MS` or 1,000
-- `retryCapMs()` → `AGENT_RETRY_CAP_MS` or 45,000
-- `probeTimeoutMs()` → `AGENT_PROBE_TIMEOUT_MS` or 1,500
+#### src/core/types.ts
+- Added new enum member: `LlamaCpp = 'LlamaCpp'` to RuntimeKind
+- Updated comment for LmStudio from "reserved: LM Studio as an inference runtime (download-only in Slice 18)" to "LM Studio as an inference runtime"
+- New LlamaCpp comment: "GGUF via a managed llama.cpp-server (-c dynamic context)"
 
-## TDD Evidence
+#### src/core/kind-map.ts
+- Added routing in downloadKindFor: `if (runtime === RuntimeKind.LlamaCpp) return ProviderKind.HfGguf;`
+- Placed before the Ollama fallthrough logic as specified
+- runtimeKindFor remains unchanged (as per brief — HfGguf still defaults to Ollama)
 
-### Step 1/2 — RED (test file written first, referencing not-yet-existing `config.ts`)
+#### tests/core/kind-map.test.ts
+- Added new test case: "llama.cpp GGUF downloads route to the HfGguf provider"
+- Tests both 'gguf-file' and 'ollama' shape variants
+- Verifies both paths return ProviderKind.HfGguf
 
+## TDD Workflow Execution
+
+### Step 1: Write Failing Test
+Added test case to tests/core/kind-map.test.ts as specified in brief.
+
+### Step 2: Run Test (Failure Verification)
 ```
-$ bun test tests/reliability/config.test.ts
-error: Cannot find module '../../src/reliability/config.ts'
-0 pass
-1 fail
-1 error
-Ran 1 test across 1 file. [10.00ms]
+bun test v1.3.11 (af24e281)
+
+tests/core/kind-map.test.ts:
+error: expect(received).toBe(expected)
+
+Expected: "HfGguf"
+Received: "Ollama"
+
+(fail) downloadKindFor > llama.cpp GGUF downloads route to the HfGguf provider [0.68ms]
+
+ 4 pass
+ 1 fail
+ 6 expect() calls
+Ran 5 tests across 1 file. [16.00ms]
 ```
 
-### Step 3/4 — GREEN (implemented `src/reliability/config.ts` per brief, unchanged)
+### Step 3 & 4: Implement and Verify Green
+Changes made to types.ts and kind-map.ts as specified.
 
+Final test run:
 ```
-$ bun test tests/reliability/config.test.ts
- 3 pass
+bun test v1.3.11 (af24e281)
+
+ 5 pass
  0 fail
- 11 expect() calls
-Ran 3 tests across 1 file. [10.00ms]
+ 6 expect() calls
+Ran 5 tests across 1 file. [10.00ms]
+```
 
-$ bun run typecheck
+## Quality Checks
+
+### Typecheck
+```
 $ tsc --noEmit
-(clean, no output)
-
-$ bun run lint:file -- "src/reliability/config.ts" "tests/reliability/config.test.ts"
-Checked 2 files in 30ms. No fixes applied.
+(no errors)
 ```
 
-### Pre-commit gate: Docs check
-
+### Lint
 ```
-$ git commit -m "feat(reliability): computed env-fallback config knobs"
-$ bun run scripts/docs-check.ts
-✔ docs-check: living docs present + linked; every src subsystem documented.
-[slice-21-graceful-degradation-retries 45156a8] feat(reliability): computed env-fallback config knobs
- 2 files changed, 92 insertions(+)
- create mode 100644 src/reliability/config.ts
- create mode 100644 tests/reliability/config.test.ts
+$ biome check src/core/types.ts src/core/kind-map.ts tests/core/kind-map.test.ts
+Checked 3 files in 32ms. No fixes applied.
 ```
-
-Pre-commit hook detected the new subsystem and enforced documentation; I added:
-- One new `REL` subgraph node to the Mermaid diagram (lines ~60)
-- One new **Reliability** row to the subsystem table (lines ~389)
-
-## Files Changed
-
-Created:
-- `src/reliability/config.ts` (39 lines) — Single `envNumber(name, fallback)` helper + 9 exported functions
-- `tests/reliability/config.test.ts` (45 lines) — 3 test cases (all passing) with proper cleanup
-
-Updated:
-- `docs/architecture.md` — Added REL subgraph node + table row documenting the reliability config layer
 
 ## Commit
 
-`45156a8 feat(reliability): computed env-fallback config knobs`
-- 2 files changed, 92 insertions
-- All 3 tests passing
-- Typecheck + lint clean
-- Pre-commit docs-check passed
+**SHA:** `8a22986b6771fe1efcc1feb17a61d945d75d2466`
 
-## Self-Review
+**Message:**
+```
+feat(runtime): add RuntimeKind.LlamaCpp + kind-map routing
 
-**What went well:**
-- TDD flow was clean: RED → implement → GREEN → quality gates → commit
-- All 9 functions follow the exact spec from the brief (names, env var keys, defaults)
-- Env-fallback pattern matches the project's foundational principle ("Compute live, env vars fallback-only")
-- Pre-commit docs-check enforced architecture documentation immediately
-- Implementation is minimal and focused
+Add LlamaCpp as a new inference runtime enum member and wire its download routing to HfGguf, enabling llama.cpp-server to retrieve GGUF models from HuggingFace repositories.
 
-**No concerns:**
-- No unused imports; no `console.log` left behind
-- All defaults are sensible and align with timeout/retry strategy (120s run timeout, 60s breaker cooldown, 1.5s probe timeout)
-- `retryCapMs()` ≥ `retryBaseMs()` verified by test (line 48 of test file)
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
 
-## Next Task
+**Files committed:**
+- src/core/kind-map.ts (1 insertion)
+- src/core/types.ts (3 insertions, 1 deletion)
+- tests/core/kind-map.test.ts (8 insertions)
 
-Task 2 (Retry primitive) will use these config knobs to implement exponential backoff logic in `src/reliability/retry.ts`.
+## Self-Review Notes
+
+### Correctness
+✓ Enum member added with correct string value matching the constant name (string enum style, per project rules)
+✓ LlamaCpp routing returns ProviderKind.HfGguf as specified
+✓ Both test cases (gguf-file and ollama shapes) now pass
+✓ runtimeKindFor mapping unchanged as per brief note — HfGguf still defaults to Ollama (llama.cpp opts in via explicit declaration per Task 5)
+✓ Comment clarification for LmStudio completed
+
+### Code Quality
+✓ Enum member placement — added after LmStudio, before closing brace
+✓ Routing logic placement — added before Ollama fallthrough as specified
+✓ No style violations; lint passes clean
+✓ Typecheck clean; no type errors
+✓ Test assertions clear and specific
+
+### Task Compliance
+✓ Used TDD: failing test → green implementation
+✓ All three files modified as specified
+✓ Inline test run confirmed locally
+✓ Conventional commit format with co-authored-by line
+✓ No existing enum members renamed or removed
+✓ Brief requirements fully satisfied

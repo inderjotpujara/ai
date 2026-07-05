@@ -10,8 +10,8 @@ export enum McpTransportKind {
  *  today). `OAuth` marks the entry as wanting an `authProvider` — the actual
  *  provider instance is supplied by the caller (deps.authProviders in
  *  mount.ts), never by JSON config, since it's a stateful runtime object.
- *  Live OAuth token exchange is deferred (contract-tested only — see
- *  docs/architecture.md §14). */
+ *  Live OAuth (DCR/CIMD + PKCE + browser loopback + token persistence) is
+ *  wired end-to-end as of Slice 26 — see docs/architecture.md §14. */
 export enum McpAuthKind {
   Static = 'static',
   OAuth = 'oauth',
@@ -25,7 +25,11 @@ export const stdioEntrySchema = z.object({
   agents: z.array(z.string()).optional(),
 });
 
-export const httpAuthSchema = z.object({ kind: z.literal(McpAuthKind.OAuth) });
+export const httpAuthSchema = z.object({
+  kind: z.literal(McpAuthKind.OAuth),
+  scopes: z.array(z.string()).optional(),
+  clientId: z.string().optional(),
+});
 
 export const httpEntrySchema = z.object({
   type: z.enum(['http', 'streamable-http', 'sse']), // aliases tolerated; all mount as HTTP
@@ -55,8 +59,10 @@ export type HttpServerEntry = {
   url: string;
   headers: Record<string, string>;
   /** Absent = static-header auth (default, unchanged). Present = the entry
-   *  wants an OAuth authProvider (see McpAuthKind doc above). */
-  auth?: { kind: McpAuthKind.OAuth };
+   *  wants an OAuth authProvider (see McpAuthKind doc above). `scopes` /
+   *  `clientId` are optional hints forwarded to the OAuth provider
+   *  constructor (Task 14); absent means provider-side defaults apply. */
+  auth?: { kind: McpAuthKind.OAuth; scopes?: string[]; clientId?: string };
   agents?: string[];
   raw: unknown;
 };

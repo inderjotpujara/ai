@@ -1,99 +1,42 @@
-# Task 6 Report (Slice 21) — Circuit breaker + shared registry
+# Task 6 report — LM Studio inference-runtime strategy via `@lmstudio/sdk`
 
-**Status:** DONE
-**Branch:** slice-21-graceful-degradation-retries
-**Commit:** 5522925 — feat(reliability): hand-rolled circuit breaker + shared registry
+## Status: DONE
 
-## Summary
-Implemented hand-rolled circuit breaker with shared registry for `src/reliability/breaker.ts` following TDD methodology from the brief, with **mandatory string-enum deviation** per project convention (root CLAUDE.md: "prefer enum over string literal unions").
+## Commits
+- `b9e4360` — feat(runtime): LM Studio inference runtime via @lmstudio/sdk (reload context)
+- `a8b714c` — fix(runtime): probe LM Studio reachability over REST, not the SDK client
 
-## What was implemented
+## What was built
 
-### src/reliability/breaker.ts
-- `enum BreakerState { Closed = 'Closed', Open = 'Open', HalfOpen = 'HalfOpen' }` (string values, per project convention)
-- `type BreakerOpts` — optional overrides for threshold, cooldownMs, halfOpenProbes, now()
-- `class CircuitBreaker(id, opts)` with three-state machine:
-  - **Closed** → (≥threshold consecutive failures) → **Open**
-  - **Open** → (after cooldownMs elapses, checked lazily) → **HalfOpen**
-  - **HalfOpen** → (≥halfOpenProbes successes) → **Closed**; (any failure) → **Open**
-  - `state(): BreakerState` (lazy cooldown check)
-  - `run<T>(fn): Promise<T>` (throws CircuitOpenError when Open)
-- `breakerFor(id, opts?): CircuitBreaker` — shared registry (same id → same instance)
-- `resetBreakers(): void` — test seam
+- Ran `bun add @lmstudio/sdk` — landed `@lmstudio/sdk@1.5.0` in `package.json` `dependencies` and `bun.lock` (transitive: `@lmstudio/lms-isomorphic`, `ws`, `chalk`, `jsonschema`, `zod-to-json-schema`).
+- `src/runtime/strategies/lmstudio.ts`:
+  - `export type LmStudioClient = { load(model, ctx?): Promise<void>; unload(model): Promise<void>; listLoaded(): Promise<string[]>; reachable(): Promise<boolean> }` — the injectable seam, exactly as specified.
+  - `export function makeLmStudioStrategy(getClient: () => LmStudioClient): RuntimeStrategy` — `kind: RuntimeKind.LmStudio`, `contextCapability: 'reload'`, `defaultPort: 1234`, `healthPath: '/v1/models'`, `basePath: '/v1'`, no `launch`. `daemonLoad(model, numCtx)` → `getClient().load(model, numCtx)` then returns `{ baseUrl: 'http://127.0.0.1:1234/v1' }`; `daemonUnload(model)` → `getClient().unload(model)`; `detect()` → `getClient().reachable()`.
+  - `createDefaultLmStudioClient()` — the real-SDK-backed default client, all SDK usage isolated to this one file.
+  - `export const lmStudioStrategy = makeLmStudioStrategy(getDefaultClient)` + `export const lmStudioRuntime = createManagedRuntime(lmStudioStrategy)`.
+- `src/runtime/registry.ts` — appended `lmStudioRuntime` to `RUNTIMES` (order preserved: ollama, mlx-server, llama.cpp, lm-studio).
+- `tests/runtime/lmstudio-runtime.test.ts` — the brief's failing test plus 3 more (daemonUnload, detect() reachable/unreachable, static config fields), all using a fake `LmStudioClient`. Adapted the brief's exact test body to avoid non-null assertions (`daemonLoad!`) since the project's Biome config forbids `noNonNullAssertion` — used the same narrowing-helper pattern already established in `tests/runtime/llamacpp.test.ts`.
 
-### tests/reliability/breaker.test.ts
-All 4 tests from brief (verbatim):
-1. `opens after threshold consecutive failures`
-2. `half-opens after cooldown and closes on a successful probe`
-3. `a success resets the consecutive-failure count`
-4. `breakerFor registry: returns the same breaker for the same id`
+## Exact `@lmstudio/sdk` API bound to (v1.5.0, read directly from `node_modules/@lmstudio/sdk/dist/index.d.ts`)
 
-## TDD evidence
+- `new LMStudioClient(opts?)` — `opts.logger?: LoggerInterface` etc. No `baseUrl` passed (defaults to guessing localhost ports).
+- `client.llm` is a `LLMNamespace extends ModelNamespace<LLMLoadModelConfig, LLMInstanceInfo, LLMInfo, LLMDynamicHandle, LLM>`, exposing:
+  - `load(modelKey: string, opts?: BaseLoadModelOpts<LLMLoadModelConfig>): Promise<LLM>` — `opts.config?: LLMLoadModelConfig` and `LLMLoadModelConfig.contextLength?: number`. Bound as `client.llm.load(model, { config: ctx ? { contextLength: ctx } : undefined })` — matches the plan's guess exactly.
+  - `unload(identifier: string): Promise<void>` — bound as `client.llm.unload(model)`.
+  - `listLoaded(): Promise<Array<LLM>>` — each `LLM` has `readonly identifier: string`; bound as `.map(m => m.identifier)`.
+- **Deviation from the brief's guessed `detect()`:** the brief suggested SDK-client reachability (or `lms` CLI presence). I initially wired `detect()`/`reachable()` to `client.system.getLMStudioVersion()` (confirmed to exist: `SystemNamespace.getLMStudioVersion(): Promise<{version, build}>`), wrapped in a timeout race. **Live-verified this was a bad default**: merely constructing `new LMStudioClient()` when no daemon is listening eagerly opens a WebSocket and starts a background reconnect loop that prints a boxed "Failed to connect to LM Studio" error (via `chalk`/`boxen`) on a ~1s repeating timer for the life of the process — and this happens even with `logger: <silent no-op>` passed to the constructor (the box bypasses the `logger` option entirely; reproduced by direct `bun -e` script, both via `getLMStudioVersion()` and via bare construction with zero method calls). Since `detect()`/`isAvailable()` is exactly the kind of check `availableRuntimes()` runs routinely, this would spam stderr indefinitely for every user who doesn't have LM Studio installed. Fixed in the second commit: `reachable()` now does a plain, silent `fetch('http://127.0.0.1:1234/v1/models', { signal: AbortSignal.timeout(probeTimeoutMs()) })` — same pattern already used by `src/runtime/ollama.ts`/`mlx-server.ts` — and the real `LMStudioClient` is now constructed lazily, only inside `load`/`unload`/`listLoaded`, i.e. only once this runtime is actually selected to warm/unload a model. Live-verified after the fix: `lmStudioStrategy.detect()` returns `false` in ~9ms with zero console output (no LM Studio running on this machine).
 
-**RED** (before src/reliability/breaker.ts existed):
-```
-$ bun test tests/reliability/breaker.test.ts
-error: Cannot find module '../../src/reliability/breaker.ts'
- 0 pass
- 1 fail
- 1 error
-```
+## Test summary
 
-**GREEN** (after implementing breaker.ts):
-```
-$ bun test tests/reliability/breaker.test.ts
- 4 pass
- 0 fail
- 8 expect() calls
-Ran 4 tests across 1 file. [13.00ms]
-```
+- `bun test tests/runtime/lmstudio-runtime.test.ts` — 4 pass, 0 fail, 11 expect() calls.
+- `bun test tests/runtime/` (full dir, 6 files incl. registry.test.ts which iterates `RUNTIMES`) — 38 pass, 0 fail, 75 expect() calls.
+- `bun run typecheck` — clean.
+- `bun run lint:file src/runtime/strategies/lmstudio.ts src/runtime/registry.ts tests/runtime/lmstudio-runtime.test.ts` — clean.
+- Live-verified (no mocks): `lmStudioStrategy.detect()` against a real, freshly-installed `@lmstudio/sdk@1.5.0` with no LM Studio daemon running → returns `false` in 9ms, no stderr output.
 
-**Typecheck** (clean):
-```
-$ bun run typecheck
-$ tsc --noEmit
-(no output = success)
-```
+## Concerns / follow-ups for the reviewer
 
-**Lint** (with --fix applied, then verified clean):
-```
-$ bun run lint:file -- --fix src/reliability/breaker.ts tests/reliability/breaker.test.ts
-Fixed 2 files. (import grouping, line breaks)
-
-$ bun run lint:file -- src/reliability/breaker.ts tests/reliability/breaker.test.ts
-Checked 2 files in 4ms. No fixes applied.
-```
-
-## Files touched
-
-- `src/reliability/breaker.ts` (new, 105 lines)
-- `tests/reliability/breaker.test.ts` (new, 41 lines)
-
-## Deviations from the brief
-
-**Mandatory deviation (project convention):** enum BreakerState uses string values:
-```ts
-export enum BreakerState {
-  Closed = 'Closed',
-  Open = 'Open',
-  HalfOpen = 'HalfOpen',
-}
-```
-(vs. numeric enum in brief). All test comparisons (e.g., `toBe(BreakerState.Open)`) work unchanged. Required per root CLAUDE.md: "prefer enum over string literal unions for finite sets of named values (string enums only)".
-
-**Formatting:** `biome check --fix` reformatted imports and multi-line argument lists (line breaks, trailing commas); no logic/behavior change from brief's code.
-
-## Self-review
-
-- State machine logic correctly implements the three-state FSM (Closed → Open → HalfOpen → Closed).
-- Consecutive-failure count resets on any success in Closed state; success in HalfOpen increments probe counter instead.
-- Cooldown checked **lazily** in `state()` (no timers) — matches brief's design.
-- `run()` throws `CircuitOpenError(id)` when state is Open — correct.
-- Shared registry uses Map; same id always returns the same breaker instance; `resetBreakers()` clears the registry.
-- No `console.log`, early returns, small focused file (~105 lines of implementation + comments).
-- Uses config defaults (`breakerThreshold()`, etc.) with injectable opts overrides.
-- All tests passing; typecheck clean; lint clean.
-
-## Concerns
-
-None blocking. Implementation follows brief precisely, with the required string-enum deviation applied.
+1. **SDK version installed:** `@lmstudio/sdk@1.5.0` (latest at install time, 2026-07-05).
+2. **Untested against a real running LM Studio daemon** (none available in this environment) — the `load`/`unload`/`listLoaded` bindings are verified against the SDK's shipped `.d.ts` signatures only, not exercised live. If Slice 26's live-verify gate expects an actual LM Studio install, that check should happen on a machine that has it.
+3. The noisy-reconnect-loop finding above is specific to `@lmstudio/sdk@1.5.0`'s `LMStudioClient` constructor/WS layer; if a future SDK bump changes this behavior, the `reachable()`-via-REST design is still the more conservative default and shouldn't need to change.
+4. `createManagedRuntime`'s `stopCurrent()` calls `strategy.daemonUnload(current.model)` whenever `current` is set (including right before a new `daemonLoad`, i.e. on every model switch) — so switching models on LM Studio incurs an SDK `unload` + `load` round trip each time. This matches the existing `daemonLoad`/`daemonUnload` contract from `managed-openai-compatible.ts` (Task 3) and is not something this task's scope changes.

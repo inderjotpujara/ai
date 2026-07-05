@@ -73,6 +73,13 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
         // is to reuse `decl.model` as-is (already logged above).
         effectiveDecl = { ...decl, model: decl.fallbackModel ?? decl.model };
       }
+      // Ollama already warms via `ensureReady` inside `resolveModel`. Managed
+      // runtimes (MLX/LM Studio/llama.cpp) need an explicit warm at the
+      // resolved context so the process is loaded with the right window
+      // before the first call. Skipped when degraded to Ollama above.
+      if (rt.kind !== RuntimeKind.Ollama) {
+        await rt.control.warm(effectiveDecl.model, numCtx);
+      }
       recordModelSelect({
         modelId: effectiveDecl.model,
         provider: decl.runtime, // telemetry field name is legacy; value is the *declared* inference runtime (gen_ai.system).

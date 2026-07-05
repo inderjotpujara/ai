@@ -5,6 +5,7 @@ import {
   trace,
 } from '@opentelemetry/api';
 import { currentDelegationContext } from '../core/guardrails.ts';
+import type { RuntimeKind } from '../core/types.ts';
 import { type DegradeEvent, DegradeKind } from '../reliability/ledger.ts';
 import type { ArtifactKind, VerifiedLevel } from '../verified-build/types.ts';
 import { recordIoEnabled } from './provider.ts';
@@ -73,6 +74,8 @@ export const ATTR = {
   MCP_TOOL_COUNT: 'mcp.tool.count',
   MCP_MOUNT_OUTCOME: 'mcp.mount.outcome',
   MCP_SERVER_COUNT: 'mcp.server.count',
+  MCP_AUTH_OUTCOME: 'mcp.auth.outcome',
+  MCP_AUTH_KIND: 'mcp.auth.kind',
   BUILD_NEED: 'agent.build.need',
   BUILD_AGENT: 'agent.build.agent_name',
   BUILD_OUTCOME: 'agent.build.outcome',
@@ -105,6 +108,12 @@ export const ATTR = {
   RELIABILITY_DEGRADE_REASON: 'degrade.reason',
   RELIABILITY_DROPPED_AGENT: 'partial_failure.dropped_agent',
   ERROR_TYPE: 'error.type',
+  // Runtime warm/spawn (Slice 26)
+  RUNTIME_KIND: 'runtime.kind',
+  RUNTIME_CONTEXT_CAPABILITY: 'runtime.context.capability',
+  RUNTIME_CONTEXT_REQUESTED: 'runtime.context.requested',
+  RUNTIME_CONTEXT_APPLIED: 'runtime.context.applied',
+  RUNTIME_WARM_OUTCOME: 'runtime.warm.outcome',
 } as const;
 
 export type ModelSelectInfo = {
@@ -492,7 +501,10 @@ export function withToolSpan<T>(
   });
 }
 
-/** Root span for an MCP mount pass; the body records one event per server. */
+/** Root span for an MCP mount pass; the body records one event per server
+ *  (via `record`) plus, for HTTP entries, one auth-determination event per
+ *  server (via `recordAuth`) on the same span. `recordAuth` never receives
+ *  secret values — only the server name and the auth kind/outcome enums. */
 export function withMcpMountSpan<T>(
   fn: (
     record: (
@@ -501,6 +513,7 @@ export function withMcpMountSpan<T>(
       toolCount?: number,
       transport?: string,
     ) => void,
+    recordAuth: (name: string, kind: string, outcome: string) => void,
   ) => Promise<T>,
 ): Promise<T> {
   return inSpan('mcp.mount', async (span) => {
@@ -525,7 +538,14 @@ export function withMcpMountSpan<T>(
         ...(transport !== undefined ? { [ATTR.MCP_TRANSPORT]: transport } : {}),
       });
     };
-    const out = await fn(record);
+    const recordAuth = (name: string, kind: string, outcome: string): void => {
+      span.addEvent('mcp.server.auth', {
+        [ATTR.MCP_SERVER]: name,
+        [ATTR.MCP_AUTH_KIND]: kind,
+        [ATTR.MCP_AUTH_OUTCOME]: outcome,
+      });
+    };
+    const out = await fn(record, recordAuth);
     span.setAttribute(ATTR.MCP_SERVER_COUNT, mountedServers);
     span.setAttribute(ATTR.MCP_TOOL_COUNT, mountedTools);
     return out;
@@ -647,6 +667,40 @@ export function withBuildArchiveSpan<T>(
       done: (candidates, pruned) => {
         span.setAttribute(ATTR.ARCHIVE_CANDIDATES, candidates);
         span.setAttribute(ATTR.ARCHIVE_PRUNED, pruned);
+      },
+    });
+  });
+}
+
+/** Root span for one runtime warm/spawn call (Slice 26). Mirrors
+ *  withCrewBuildSpan's recorder shape: the body reports the requested vs.
+ *  applied context window, the runtime's context capability, and the warm
+ *  outcome at the end via the returned recorder. `appliedCtx` should be
+ *  `undefined` for `fixed`-capability runtimes (e.g. MLX) so the attribute
+ *  is omitted rather than implying a context change actually happened. */
+export function withRuntimeSpan<T>(
+  kind: RuntimeKind,
+  fn: (rec: {
+    applied: (
+      requestedCtx: number | undefined,
+      appliedCtx: number | undefined,
+      outcome: string,
+      capability: string,
+    ) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('runtime.warm', async (span) => {
+    span.setAttribute(ATTR.RUNTIME_KIND, kind);
+    return fn({
+      applied: (requestedCtx, appliedCtx, outcome, capability) => {
+        span.setAttribute(ATTR.RUNTIME_CONTEXT_CAPABILITY, capability);
+        if (requestedCtx !== undefined) {
+          span.setAttribute(ATTR.RUNTIME_CONTEXT_REQUESTED, requestedCtx);
+        }
+        if (appliedCtx !== undefined) {
+          span.setAttribute(ATTR.RUNTIME_CONTEXT_APPLIED, appliedCtx);
+        }
+        span.setAttribute(ATTR.RUNTIME_WARM_OUTCOME, outcome);
       },
     });
   });

@@ -117,3 +117,18 @@ test('a non-ok /models response degrades to undefined/[] instead of throwing', a
   await expect(runtime.control.getModelMax('model-a')).resolves.toBeUndefined();
   await expect(runtime.control.listLoaded()).resolves.toEqual([]);
 });
+
+test('mlx warm spawns mlx_lm.server when no external base url is set', async () => {
+  const seen: string[] = [];
+  const spawn = ((cmd: string) => {
+    seen.push(cmd);
+    return { pid: 1, kill: () => {}, onExit: () => {} };
+  }) as unknown as import('../../src/runtime/process-supervisor.ts').SpawnFn;
+  const health = (async () =>
+    new Response(JSON.stringify({ data: [{ id: 'm' }] }), {
+      status: 200,
+    })) as unknown as typeof fetch;
+  const rt = createMlxServerRuntime({ spawn, fetchImpl: health } as never);
+  await rt.control.warm('m', 8192); // fixed capability: no context flag, but process is spawned
+  expect(seen).toEqual(['mlx_lm.server']);
+});

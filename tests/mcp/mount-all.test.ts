@@ -298,7 +298,7 @@ describe('mountAll', () => {
     await reg.close();
   });
 
-  it('OAuth entry with no registered authProvider degrades: warns and mounts without auth (live OAuth deferred)', async () => {
+  it('OAuth entry with no registered authProvider degrades: warns and mounts without auth', async () => {
     const config: McpConfig = {
       entries: [
         {
@@ -329,7 +329,9 @@ describe('mountAll', () => {
     expect(reg.mounted.map((m) => m.name)).toEqual(['oauth-server']);
     expect(
       warnings.some(
-        (w) => w.includes('oauth-server') && w.includes('deferred'),
+        (w) =>
+          w.includes('oauth-server') &&
+          w.includes('no authProvider is registered'),
       ),
     ).toBe(true);
     await reg.close();

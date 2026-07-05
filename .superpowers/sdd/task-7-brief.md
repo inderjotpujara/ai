@@ -1,132 +1,45 @@
-### Task 7: Degradation ledger
+### Task 7: Deliver load-time context in `select-hook.ts`
 
 **Files:**
-- Create: `src/reliability/ledger.ts`
-- Test: `tests/reliability/ledger.test.ts`
+- Modify: `src/cli/select-hook.ts` (warm managed runtimes with the computed numCtx before `createModel`)
+- Test: `tests/cli/select-hook.test.ts` (existing — add a case; else create)
 
 **Interfaces:**
-- Produces:
-  - `enum DegradeKind { ModelDegraded, AgentDropped, ToolSkipped, Retried, CircuitOpen }`
-  - `type DegradeEvent = { kind: DegradeKind; subject: string; reason: string; detail?: string }`
-  - `type DegradationLedger = { events: DegradeEvent[]; record(e: DegradeEvent): void }`
-  - `createLedger(): DegradationLedger`
-  - `formatLedger(ledger: DegradationLedger): string` (concise multi-line user summary; `''` when empty)
-  - `serializeLedger(ledger: DegradationLedger): string` (JSONL, one event per line)
+- Consumes: `Runtime.control.warm`. The per-call `numCtx: rt.kind === RuntimeKind.Ollama ? numCtx : undefined` line stays. New: for a non-Ollama runtime that is available, call `await rt.control.warm(effectiveDecl.model, numCtx)` before `recordModelSelect`/`createModel`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: failing test** — a fake runtime whose `control.warm` records the numCtx it was warmed with; assert select-hook warms it with the resolved ctx.
 
-```ts
-// tests/reliability/ledger.test.ts
-import { describe, expect, it } from 'bun:test';
-import { DegradeKind, createLedger, formatLedger, serializeLedger } from '../../src/reliability/ledger.ts';
-
-describe('DegradationLedger', () => {
-  it('records events in order', () => {
-    const l = createLedger();
-    l.record({ kind: DegradeKind.AgentDropped, subject: 'pdf_agent', reason: 'mcp server down' });
-    l.record({ kind: DegradeKind.ModelDegraded, subject: 'writer', reason: 'runtime unreachable', detail: 'mlx→ollama' });
-    expect(l.events).toHaveLength(2);
-    expect(l.events[0].subject).toBe('pdf_agent');
-  });
-
-  it('formatLedger returns empty string with no events', () => {
-    expect(formatLedger(createLedger())).toBe('');
-  });
-
-  it('formatLedger summarizes events for the user', () => {
-    const l = createLedger();
-    l.record({ kind: DegradeKind.AgentDropped, subject: 'pdf_agent', reason: 'mcp server down' });
-    const out = formatLedger(l);
-    expect(out).toContain('pdf_agent');
-    expect(out).toContain('mcp server down');
-  });
-
-  it('serializeLedger emits one JSON object per line', () => {
-    const l = createLedger();
-    l.record({ kind: DegradeKind.Retried, subject: 'download', reason: 'ECONNRESET' });
-    const lines = serializeLedger(l).trim().split('\n');
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0]).subject).toBe('download');
-  });
+```typescript
+// tests/cli/select-hook.test.ts (add)
+import { expect, test } from 'bun:test';
+import { RuntimeKind } from '../../src/core/types.ts';
+import { createSelectHook } from '../../src/cli/select-hook.ts';
+// ... build minimal deps: a registry with one non-Ollama decl, ensureReady stub returning ctx, and a fake runtimeFor
+test('select-hook warms a managed runtime with the resolved context', async () => {
+  const warmed: Array<[string, number | undefined]> = [];
+  const fakeRt = {
+    kind: RuntimeKind.LlamaCpp, isAvailable: async () => true,
+    createModel: () => ({}) as never,
+    control: { warm: async (m: string, c?: number) => { warmed.push([m, c]); }, isInstalled: async () => true, pull: async () => {}, unload: async () => {}, listLoaded: async () => [], getModelMax: async () => undefined, getModelKvArch: async () => undefined, embed: async () => [] },
+  };
+  // resolveModel is real; provide a registry decl with runtime=LlamaCpp and an ensureReady that returns e.g. 8192.
+  // (Fill deps per the existing select-hook test harness in this file.)
+  // Assert warmed[0] === ['<model>', 8192] after invoking the hook on an agent with a modelReq.
+  expect(true).toBe(true); // replace with the real assertion using the harness
 });
 ```
+> NOTE to implementer: this file already has a select-hook harness (the runtime source shows `SelectHookDeps` + `runtimeFor` override). Reuse it; the assertion is `expect(warmed).toEqual([[effectiveModel, 8192]])`. Do NOT ship the placeholder `expect(true)`.
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/reliability/ledger.test.ts`
-Expected: FAIL — cannot resolve `ledger.ts`.
-
-- [ ] **Step 3: Write minimal implementation**
-
-```ts
-// src/reliability/ledger.ts
-/** In-run record of degradation events; surfaced to the user + telemetry. */
-export enum DegradeKind {
-  ModelDegraded = 'model_degraded',
-  AgentDropped = 'agent_dropped',
-  ToolSkipped = 'tool_skipped',
-  Retried = 'retried',
-  CircuitOpen = 'circuit_open',
-}
-
-export type DegradeEvent = {
-  kind: DegradeKind;
-  subject: string;
-  reason: string;
-  detail?: string;
-};
-
-export type DegradationLedger = {
-  events: DegradeEvent[];
-  record(e: DegradeEvent): void;
-};
-
-export function createLedger(): DegradationLedger {
-  const events: DegradeEvent[] = [];
-  return {
-    events,
-    record(e) {
-      events.push(e);
-    },
-  };
-}
-
-const LABEL: Record<DegradeKind, string> = {
-  [DegradeKind.ModelDegraded]: 'degraded model',
-  [DegradeKind.AgentDropped]: 'dropped agent',
-  [DegradeKind.ToolSkipped]: 'skipped tool',
-  [DegradeKind.Retried]: 'retried',
-  [DegradeKind.CircuitOpen]: 'circuit open',
-};
-
-/** Concise user-facing summary; empty string when nothing degraded. */
-export function formatLedger(ledger: DegradationLedger): string {
-  if (ledger.events.length === 0) return '';
-  const lines = ledger.events.map((e) => {
-    const tail = e.detail ? ` (${e.detail})` : '';
-    return `  ⚠ ${LABEL[e.kind]}: ${e.subject} — ${e.reason}${tail}`;
-  });
-  return `Degraded during this run:\n${lines.join('\n')}`;
-}
-
-/** JSONL for persistence into run.dir. */
-export function serializeLedger(ledger: DegradationLedger): string {
-  return ledger.events.map((e) => JSON.stringify(e)).join('\n') + '\n';
-}
+- [ ] **Step 2: fail** — warm not called.
+- [ ] **Step 3: implement** — after the availability/degrade block, before `recordModelSelect`:
+```typescript
+      if (rt.kind !== RuntimeKind.Ollama) {
+        await rt.control.warm(effectiveDecl.model, numCtx);
+      }
 ```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun test tests/reliability/ledger.test.ts`
-Expected: PASS (all).
-
-- [ ] **Step 5: Typecheck, lint, commit**
-
-```bash
-bun run typecheck && bun run lint:file -- "src/reliability/ledger.ts" "tests/reliability/ledger.test.ts"
-git add src/reliability/ledger.ts tests/reliability/ledger.test.ts
-git commit -m "feat(reliability): degradation ledger (record/format/serialize)"
-```
+(Ollama continues to warm via `ensureReady` inside `resolveModel`; managed runtimes warm here.)
+- [ ] **Step 4: pass**.
+- [ ] **Step 5: commit** (`feat(runtime): deliver load-time context to managed runtimes in select-hook`).
 
 ---
 
