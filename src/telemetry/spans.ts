@@ -5,7 +5,7 @@ import {
   trace,
 } from '@opentelemetry/api';
 import { currentDelegationContext } from '../core/guardrails.ts';
-import type { DegradeEvent } from '../reliability/ledger.ts';
+import { type DegradeEvent, DegradeKind } from '../reliability/ledger.ts';
 import type { ArtifactKind, VerifiedLevel } from '../verified-build/types.ts';
 import { recordIoEnabled } from './provider.ts';
 
@@ -271,6 +271,24 @@ export function recordDegrade(event: DegradeEvent): void {
     'degrade.subject': event.subject,
     [ATTR.RELIABILITY_DEGRADE_REASON]: event.reason,
     ...(event.detail ? { 'degrade.detail': event.detail } : {}),
+    ...(event.from !== undefined
+      ? { [ATTR.RELIABILITY_DEGRADE_FROM]: event.from }
+      : {}),
+    ...(event.to !== undefined
+      ? { [ATTR.RELIABILITY_DEGRADE_TO]: event.to }
+      : {}),
+    ...(event.attempts !== undefined
+      ? { [ATTR.RELIABILITY_RETRY_ATTEMPTS]: event.attempts }
+      : {}),
+    ...(event.lane !== undefined
+      ? { [ATTR.RELIABILITY_RETRY_LANE]: event.lane }
+      : {}),
+    ...(event.kind === DegradeKind.AgentDropped
+      ? { [ATTR.RELIABILITY_DROPPED_AGENT]: event.subject }
+      : {}),
+    ...(event.kind === DegradeKind.CircuitOpen
+      ? { [ATTR.RELIABILITY_BREAKER_STATE]: 'Open' }
+      : {}),
   });
 }
 

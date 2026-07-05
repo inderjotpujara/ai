@@ -12,6 +12,12 @@ export type DegradeEvent = {
   subject: string;
   reason: string;
   detail?: string;
+  /** Structured counterparts to `detail`, populated by emit sites so
+   *  telemetry can set typed span attributes without parsing the string. */
+  from?: string;
+  to?: string;
+  attempts?: number;
+  lane?: string;
 };
 
 export type DegradationLedger = {

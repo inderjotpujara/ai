@@ -75,6 +75,7 @@ export function runGuardedAgent(
         subject: agent.name,
         reason: message,
         detail: `lane=${lane}`,
+        lane,
       };
       ledger?.record(event);
       recordDegrade(event);

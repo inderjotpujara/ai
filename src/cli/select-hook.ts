@@ -64,6 +64,8 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
           subject: decl.model,
           reason: `runtime "${decl.runtime}" unreachable`,
           detail: `${decl.runtime}→ollama`,
+          from: String(decl.runtime),
+          to: 'ollama',
         });
         // The declared model id belongs to the original runtime (e.g. an MLX/HF
         // repo id) and is not resolvable by Ollama. Use the declared Ollama

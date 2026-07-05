@@ -171,6 +171,7 @@ export function runStepByKind(
                 subject: `tool:${step.tool}`,
                 reason: `retry attempt ${n}`,
                 detail: `step=${step.id}`,
+                attempts: n,
               };
               deps.ledger?.record(event);
               recordDegrade(event);
