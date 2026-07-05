@@ -44,6 +44,9 @@ graph TD
         crewcli["crew.ts · bun run crew"]
         provcli["provision.ts · bun run provision"]
         abcli["agent-builder.ts · bun run agent-builder"]
+        crbcli["crew-builder.ts · bun run crew-builder"]
+        archcli["archive.ts · bun run archive (--prune)"]
+        withrun["with-run.ts · withRunTelemetry"]
     end
     subgraph CORE["Core · src/core"]
         orch["orchestrator.ts"]
@@ -102,6 +105,7 @@ graph TD
         memtypes["types.ts · MemoryRecord/SpaceMeta"]
         membudget["budget.ts · retrievalBudgetChars"]
         memembed["embed.ts · makeEmbedder"]
+        mememb1["embed-one.ts · embedOne/cosine"]
         memchunk["chunk.ts · semantic+fixed"]
         memsql["sqlite-store.ts · spaces+documents"]
         memlance["lancedb-store.ts · table-per-space"]
@@ -151,8 +155,32 @@ graph TD
         abgentool["generate-tool.ts · generateToolProposal (brand-new tool code)"]
         abvaltool["validate-tool.ts · validateToolProposal"]
         abwritetool["write-tool.ts · writeToolProposal (&lt;name&gt;.proposal.ts, inert)"]
-        abbuilder["builder.ts · buildAgent + buildTool (retry→consent→write)"]
+        abbuilder["builder.ts · buildAgent + buildTool (retry→consent→stage→verify→commit)"]
         abdeps["deps.ts · makeRealBuilderDeps (live tools-capable largest-that-fits model)"]
+    end
+    subgraph CRB["Crew-builder · src/crew-builder"]
+        crbir["ir.ts · CrewIR/WorkflowIR (Zod) + safe-helpers.ts vocabulary"]
+        crbstages["classify/analyze/plan-nodes/plan-edges.ts · staged generation"]
+        crbvalidate["validate.ts · two-tier structural+semantic gate"]
+        crbresolve["resolve-members.ts · auto-build missing agents"]
+        crbtranspile["transpile.ts · deterministic IR→TS"]
+        crbwrite["write.ts · writeCrewFile/registerCrewOrWorkflow (atomic)"]
+        crbbuilder["builder.ts · buildCrewOrWorkflow (classify→…→stage→verify→commit)"]
+        crbdeps["deps.ts · makeRealCrewBuilderDeps"]
+    end
+    subgraph VB["Verified-build · src/verified-build"]
+        vbgate["gate.ts · verifyAndCommit (stage→verify→commit)"]
+        vbreuse["reuse.ts · reuseDecision (cosine bands ≥0.85/0.75)"]
+        vbsig["signature.ts · signatureFromNeed/Proposal/IR"]
+        vbdry["dry-run.ts · withWallClock + representativeTask"]
+        vbrepair["repair.ts · repairLoop (≤maxRepairs)"]
+        vbjudge["judge.ts · selectJudge (≥judgeMinParams, prefers cross-family)"]
+        vbgolden["golden.ts · generateGolden (3–7 binary cases)"]
+        vbeval["eval.ts · evalCases (unanimous over evalRuns)"]
+        vbmanifest["manifest.ts · .generated.json sidecar read/upsert"]
+        vbusage["usage.ts · aggregateUsage(spans.jsonl)"]
+        vbarchive["archive.ts · archiveDecision/archiveArtifact (reversible)"]
+        vbconfig["config.ts · live thresholds (env fallback-only)"]
     end
     subgraph DATA["On-disk · git-ignored"]
         spansfile[("runs/&lt;id&gt;/ spans.jsonl + .txt")]
@@ -164,6 +192,7 @@ graph TD
         workflows["workflows/* · WORKFLOWS"]
         crews["crews/* · CREWS"]
         mcpjson["mcp.json · registry"]
+        manifests["&lt;registry&gt;/.generated.json + &lt;name&gt;.golden.json + archive/ (Slice 20 sidecars)"]
     end
 
     chat --> runchat
@@ -300,11 +329,61 @@ graph TD
     abdeps --> agents
     abdeps --> mcppack
     abdeps --> mcpconfig
+    crbcli --> crbbuilder
+    crbcli --> crbdeps
+    chat -. TTY multi-step gap-offer, optional .-> crbbuilder
+    crbbuilder --> crbstages
+    crbbuilder --> crbvalidate
+    crbbuilder --> crbresolve
+    crbbuilder --> crbtranspile
+    crbbuilder --> crbwrite
+    crbbuilder --> spans
+    crbstages --> crbir
+    crbvalidate --> crbir
+    crbvalidate --> wfdefine
+    crbresolve --> abbuilder
+    crbtranspile --> crbir
+    crbwrite --> crews
+    crbwrite --> workflows
+    crbdeps --> abdeps
+    abbuilder --> vbgate
+    crbbuilder --> vbgate
+    abbuilder -. reuse check, pre-generate .-> vbreuse
+    crbbuilder -. reuse check, post-classify .-> vbreuse
+    abbuilder --> vbsig
+    crbbuilder --> vbsig
+    abbuilder --> vbjudge
+    crbbuilder --> vbjudge
+    abbuilder --> vbgolden
+    crbbuilder --> vbgolden
+    abbuilder --> vbeval
+    crbbuilder --> vbeval
+    abbuilder --> vbmanifest
+    crbbuilder --> vbmanifest
+    vbgate --> vbrepair
+    vbgate --> spans
+    vbreuse --> vbsig
+    vbreuse --> vbmanifest
+    vbreuse --> mememb1
+    abbuilder --> vbdry
+    crbbuilder --> vbdry
+    abdeps --> delegate
+    vbmanifest --> manifests
+    vbgolden --> manifests
+    vbusage --> spansfile
+    vbarchive --> vbmanifest
+    vbarchive --> vbconfig
+    archcli --> vbarchive
+    archcli --> vbusage
+    abcli --> withrun
+    crbcli --> withrun
+    archcli --> withrun
+    chat -. reuse hint on gap .-> vbreuse
 ```
 
 | Layer | Files | Responsibility | Knows about |
 |---|---|---|---|
-| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14); agent-builder entry (`agent-builder.ts`, `bun run agent-builder "<need>" [--yes]`, Slice 17) plus a TTY-gated capability-gap offer wired into `chat.ts`'s `{kind:'gap'}` branch (§18) | everything below |
+| **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14); agent-builder entry (`agent-builder.ts`, `bun run agent-builder "<need>" [--yes] [--force]`, Slice 17; `--force` commits a failed verify gate at `unverified` and prints a WARNING, §20) plus a TTY-gated capability-gap offer wired into `chat.ts`'s `{kind:'gap'}` branch (§18); crew-builder entry (`crew-builder.ts`, `bun run crew-builder "<need>" [--yes] [--force]`, Slice 19; same `--force` semantics) plus the `offer-crew.ts` multi-step gap-offer heuristic (§19); archive entry (`archive.ts`, `bun run archive [--prune]`, Slice 20 — reports idle near-duplicate generated artifacts per registry, `--prune` archives each behind a per-candidate consent prompt); a per-run telemetry scope for CLIs that mount no MCP servers (`with-run.ts`, Slice 20) — `withRunTelemetry(opts, body)` owns `createRun` → `initRunTelemetry` → `body` → `finally{tel.shutdown()}` for the builder + archive CLIs, so their `agent.build`/`crew.build`/`build.verify`/`build.archive` spans land in `runs/<id>/spans.jsonl` instead of hitting the no-op provider; and `chat.ts`'s informational reuse hint (`reuseHintText`, shown on a gap before any build offer, §20) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
 | **Runtime** | `src/runtime/` | Runtime port + Ollama-GGUF & MLX-server adapters (keyed by `RuntimeKind`); `registry.ts` `runtimeFor(RuntimeKind)`; `mlx-server.ts` `createMlxServerRuntime(deps)` factory with a filled control surface (`getModelMax`/`listLoaded`/best-effort `pull`); `createModel` per declaration | AI SDK + provider HTTP |
@@ -319,8 +398,9 @@ graph TD
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
 | **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
 | **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`) → **bounded-parallel** downloads (`DOWNLOAD_CONCURRENCY=2` on a TTY, sequential otherwise) through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`, keyed by the download `ProviderKind`) with a unified progress protocol; adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF single-file + MLX whole-snapshot) now persists bytes to disk atomically and was real-snapshot live-verified in Slice 18**, **LM Studio download wired into `providerFor` but contract-tested only** (not installed on the dev machine); dest-dir resolution (`dest-dir.ts`); dependency-free UI (`ui/`, incl. `MultiProgressBar`); a manual `scripts/refresh-snapshot.ts`; CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (download `ProviderKind` + inference `RuntimeKind`) + `core/kind-map.ts`, `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
-| **Agent-builder** | `src/agent-builder/` | Specialist agent generation (Slice 17, Phase D): draft a proposal from a plain-language need (`generate.ts`), pick a minimal palette-only MCP-server subset (`suggest-tools.ts`), gate it structurally (`validate.ts`), get explicit consent, then write the agent file + registry entry + scoped `mcp.json` atomically (`write.ts`); `builder.ts`'s `buildAgent` sequences generate→suggest→validate→(bounded same-run retry)→consent→write under an `agent.build` span; `deps.ts` assembles the live tools-capable largest-that-fits model + fs paths + TTY consent prompt. Slice 18 (Task 24) adds the consent-gated **tool-code** path (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts`, `builder.ts`'s `buildTool`): it writes an **inert `<name>.proposal.ts`** for review only — never wired into any registry/index/`mcp.json`, so nothing in the run can import or activate it. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on a `{kind:'gap'}` chat outcome. See §18 | `core/types.ts` (`ModelRequirement`, `Capability`, `PreferPolicy`), `mcp/pack.ts` (`STARTER_PACK`, `getPackEntry`), `agents/index.ts` (`agentNames`, the write target), `resource/selector.ts` + `resource/model-manager.ts` + `runtime/registry.ts` (live model), `telemetry/spans.ts` (`withAgentBuildSpan`) |
-| **Crew-builder** | `src/crew-builder/` | Crew/workflow generation from a plain-language need (Slice 19, Phase D follow-on to the agent-builder — see §19 for the full narrative). Declarative IR (`ir.ts`): Zod-validated `WorkflowIR`/`CrewIR` graphs — JSON-safe `InputDescriptor`/`PredicateDescriptor` closures (`fromInput`/`fromStep`/`fromTemplate`, `whenEquals`/`whenContains`/`whenTruthy`, `mapOver`; rendered by the matching `safe-helpers.ts` factories) so step inputs/branch predicates/map sources stay declarative data rather than compiled closures; step kinds `agent`/`tool`/`branch`/`map` (`WorkflowStepIRSchema`, discriminated union); crew members support inline definitions or `agentRef` reuse of a registered agent (`CrewMemberIRSchema`), with `CrewTaskIRSchema` binding a task to a member. `buildCrewOrWorkflow` (`builder.ts`) sequences **classify → analyze → (bounded regenerate: planNodes → planEdges → validate) → consent → resolveMissingAgents → transpile → write** under a `crew.build` span: `classify.ts` picks crew-vs-workflow, `analyze.ts` think-first prose-plans the decomposition (`.text`, no JSON), `plan-nodes.ts`/`plan-edges.ts` generate the node list then the fully-wired IR via the model, `validate.ts` structurally gates it (palette-only tools, known/to-be-built agent refs, snake_case id, member/task-id integrity, acyclicity via the **shared** `assertAcyclic` now extracted to `workflow/define.ts`) then semantically (an LLM-judge goal-alignment check, reached only when structural is clean), `resolve-members.ts` auto-builds genuinely-missing agents (delegating to the agent-builder's `buildAgent`) **once, after consent**, reconciling any renamed refs, `transpile.ts` deterministically renders the IR to a `crews/<id>.ts`/`workflows/<id>.ts` module (every value `JSON.stringify`'d, never raw-interpolated), and `write.ts` inserts it + a registry-index entry atomically. Two triggers: `bun run crew-builder "<need>" [--yes]` (`src/cli/crew-builder.ts`) and a TTY-gated `chat.ts` gap-offer (`offer-crew.ts`'s `shouldOfferCrew` multi-step heuristic, tried **before** falling through to the single-agent agent-builder offer). `deps.ts`'s `makeRealCrewBuilderDeps` reuses the agent-builder's live model/consent and wires the crew/workflow/agent/pack registries. **Live-verified** end to end on Ollama (§19) | `agent-builder/` (model/consent reuse, `buildAgent` delegation), `crew/` + `workflow/` (`defineCrew`/`defineWorkflow` + `assertAcyclic` reuse; `crewAgentMap`/`buildCrewAgent`'s `agentRef`-miss-falls-back-to-inline-build behavior is what lets a freshly-built agent run in-process pre-restart), `agents/`, `mcp/pack.ts`, `telemetry/spans.ts` (`withCrewBuildSpan`) |
+| **Agent-builder** | `src/agent-builder/` | Specialist agent generation (Slice 17, Phase D): draft a proposal from a plain-language need (`generate.ts`), pick a minimal palette-only MCP-server subset (`suggest-tools.ts`), gate it structurally (`validate.ts`), get explicit consent, then write the agent file + registry entry + scoped `mcp.json` atomically (`write.ts`); `builder.ts`'s `buildAgent` sequences generate→suggest→validate→(bounded same-run retry)→consent→write under an `agent.build` span; `deps.ts` assembles the live tools-capable largest-that-fits model + fs paths + TTY consent prompt. Slice 18 (Task 24) adds the consent-gated **tool-code** path (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts`, `builder.ts`'s `buildTool`): it writes an **inert `<name>.proposal.ts`** for review only — never wired into any registry/index/`mcp.json`, so nothing in the run can import or activate it. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on a `{kind:'gap'}` chat outcome. Since Slice 20, when `BuilderDeps.verify` is wired (as `makeRealBuilderDeps` does), `buildAgent` runs **reuse-check → generate → … → consent → stage → verify → commit** through the verified-build gate instead of writing straight through — `write.ts` split into `writeAgentFile` (stage, disk only) + `registerAgent` (commit: index + `mcp.json` splice), and `BuildResult` gained `reused` / `failed-verification` variants + `level?` on `written` (§20). See §18 | `core/types.ts` (`ModelRequirement`, `Capability`, `PreferPolicy`), `mcp/pack.ts` (`STARTER_PACK`, `getPackEntry`), `agents/index.ts` (`agentNames`, the write target), `resource/selector.ts` + `resource/model-manager.ts` + `runtime/registry.ts` (live model), `verified-build/` (the Slice-20 gate), `core/delegate.ts` (`runGuardedAgent` for dry-run/golden-eval), `memory/embed.ts`+`embed-one.ts` (signature embedding), `telemetry/spans.ts` (`withAgentBuildSpan`) |
+| **Crew-builder** | `src/crew-builder/` | Crew/workflow generation from a plain-language need (Slice 19, Phase D follow-on to the agent-builder — see §19 for the full narrative). Declarative IR (`ir.ts`): Zod-validated `WorkflowIR`/`CrewIR` graphs — JSON-safe `InputDescriptor`/`PredicateDescriptor` closures (`fromInput`/`fromStep`/`fromTemplate`, `whenEquals`/`whenContains`/`whenTruthy`, `mapOver`; rendered by the matching `safe-helpers.ts` factories) so step inputs/branch predicates/map sources stay declarative data rather than compiled closures; step kinds `agent`/`tool`/`branch`/`map` (`WorkflowStepIRSchema`, discriminated union); crew members support inline definitions or `agentRef` reuse of a registered agent (`CrewMemberIRSchema`), with `CrewTaskIRSchema` binding a task to a member. `buildCrewOrWorkflow` (`builder.ts`) sequences **classify → analyze → (bounded regenerate: planNodes → planEdges → validate) → consent → resolveMissingAgents → transpile → write** under a `crew.build` span: `classify.ts` picks crew-vs-workflow, `analyze.ts` think-first prose-plans the decomposition (`.text`, no JSON), `plan-nodes.ts`/`plan-edges.ts` generate the node list then the fully-wired IR via the model, `validate.ts` structurally gates it (palette-only tools, known/to-be-built agent refs, snake_case id, member/task-id integrity, acyclicity via the **shared** `assertAcyclic` now extracted to `workflow/define.ts`) then semantically (an LLM-judge goal-alignment check, reached only when structural is clean), `resolve-members.ts` auto-builds genuinely-missing agents (delegating to the agent-builder's `buildAgent`) **once, after consent**, reconciling any renamed refs, `transpile.ts` deterministically renders the IR to a `crews/<id>.ts`/`workflows/<id>.ts` module (every value `JSON.stringify`'d, never raw-interpolated), and `write.ts` inserts it + a registry-index entry atomically. Two triggers: `bun run crew-builder "<need>" [--yes]` (`src/cli/crew-builder.ts`) and a TTY-gated `chat.ts` gap-offer (`offer-crew.ts`'s `shouldOfferCrew` multi-step heuristic, tried **before** falling through to the single-agent agent-builder offer). `deps.ts`'s `makeRealCrewBuilderDeps` reuses the agent-builder's live model/consent and wires the crew/workflow/agent/pack registries. **Live-verified** end to end on Ollama (§19). Since Slice 20, when `CrewBuilderDeps.verify` is wired, the tail of the pipeline runs through the verified-build gate — a post-classify **reuse check** against the matching registry's manifest, then (after consent + member resolution) **stage → verify → commit**: `write.ts` split into `writeCrewFile` (stage, disk only; the staged file is dynamic-imported, cache-busted, to obtain the runnable def) + `registerCrewOrWorkflow` (commit: index splice), and `CrewBuildResult` gained `reused` / `failed-verification` variants + `level?` on `written` (§20) | `agent-builder/` (model/consent reuse, `buildAgent` delegation), `crew/` + `workflow/` (`defineCrew`/`defineWorkflow` + `assertAcyclic` reuse; `crewAgentMap`/`buildCrewAgent`'s `agentRef`-miss-falls-back-to-inline-build behavior is what lets a freshly-built agent run in-process pre-restart), `agents/`, `mcp/pack.ts`, `verified-build/` (the Slice-20 gate), `telemetry/spans.ts` (`withCrewBuildSpan`) |
+| **Verified-build** | `src/verified-build/` | Behavioral verification of builder-generated artifacts (Slice 20, closes Phase D — see §20 for the full narrative): every agent-builder/crew-builder write becomes **stage → verify → commit**, so nothing lands in a registry index until it has actually run. One shared, cheapest-first gate (`gate.ts`, `verifyAndCommit`) serves all three `ArtifactKind`s: **(0) reuse check** *before any generation* — `signature.ts` distills the need into a `CapabilitySignature`, `memory/embed-one.ts` embeds its canonical text, and `reuse.ts` cosine-compares against the per-registry manifest sidecar (`manifest.ts`, `<registry>/.generated.json`) under `config.ts` `reuseBands()` (**≥0.85 Reuse — confirm-gated: ask, reuse on yes, generate on decline · 0.75–0.85 Offer — inform a close match exists, ask reuse-or-build · <0.75 generate**; non-interactive `--yes` auto-reuses a Reuse hit but declines an Offer hit → builds new); **(1) stage** to a staged def file only (the builders' split `writeAgentFile`/`writeCrewFile`), never the registry index; **(2) structural** via the existing validators (`validateProposal`/`validateStructural`); **(3) dry-run** — bounded REAL execution against a benign representative task (`dry-run.ts`, `withWallClock(dryRunMs())` wall-clock race for all kinds; the **agent path additionally aborts in flight** via `AbortSignal.timeout(dryRunMs())` threaded down to `generateText` — crew/workflow runs are wall-clock-raced only, `runCrew`/`runWorkflow` take no signal yet), with a bounded **self-repair loop** on failure (`repair.ts`, ≤`maxRepairs()`=2, feeding the real runtime error back into a fresh regeneration that keeps the consented name/id); **(4) golden-eval** — auto-decompose the need into 3–7 binary cases (`golden.ts`), judged by the largest installed model clearing `judgeMinParams()`≈24e9, **preferring** a different family from the generator, falling back to same-family/largest (`judge.ts`, degrades to a skipped eval — never blocks); a case passes only on a unanimous yes over `evalRuns()`=3 judge runs, `GoldenKind.Grounded` cases judged through the verification layer's `checkClaim` (`eval.ts`); **(5) commit** — index splice + `<name>.golden.json` + manifest upsert at the earned `VerifiedLevel` (behaves/runs/unverified). A failed gate registers **nothing** and the staged file is **discarded** (the gate's `discard` deletes it on any non-committed outcome — failure or throw — so a rejected build never leaves an orphan file); `verify.force` (CLI `--force`) downgrades a failure to an `unverified` commit instead. Also: usage aggregation from every run's `spans.jsonl` (`usage.ts`) and reversible **archive** of idle near-duplicates (`archive.ts`, `bun run archive [--prune]`). `types.ts`/`config.ts` carry the shared vocabulary (`VerifiedLevel`, `ReuseKind`, `GoldenKind`, `ArtifactKind`, `CapabilitySignature`, `Manifest*`, `VerificationResult`) + env-fallback-only live thresholds | `agent-builder/` + `crew-builder/` (the two callers, which inject stage/dry-run/eval/commit closures), `memory/embed-one.ts` (embedOne/cosine), `telemetry/spans.ts` (`withBuildVerifySpan`/`withBuildArchiveSpan`), the `agents/`/`crews/`/`workflows/` registries + their `.generated.json` sidecars, `runs/<id>/spans.jsonl` (usage) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -406,6 +486,37 @@ sequenceDiagram
     Prov-->>CLI: ProvisionResult {downloaded, declined, failed}
     CLI-->>User: "Provisioned: N · declined: N · failed: N"
     Note over User,DP: chat.ts has an optional, TTY+consent-gated auto-detect<br/>hook (maybeAutoProvision) that calls this same runProvision path<br/>when a declared model is missing — never invoked inline mid-turn.
+```
+
+### 3b. Verified-build flow (builder → gate, Slice 20)
+
+Like provisioning, this is **not part of a chat run** — it runs inside a
+`bun run agent-builder` / `bun run crew-builder` build (when the builder's
+`verify` deps are wired, as the real `makeReal*Deps` do). It is the
+stage→verify→commit spine §20 narrates; cheapest checks run first.
+
+```mermaid
+sequenceDiagram
+    participant Builder as agent-/crew-builder builder.ts
+    participant Reuse as verified-build/reuse.ts
+    participant Gate as verified-build/gate.ts · verifyAndCommit
+    participant Repair as repair.ts + dry-run
+    participant Eval as judge.ts + golden.ts + eval.ts
+    participant Reg as registry index + .generated.json manifest
+
+    Builder->>Reuse: reuseDecision(need signature) — BEFORE generating
+    Note over Reuse: cosine vs manifest vectors — ≥0.85 Reuse (ask to reuse; yes → return<br/>the existing artifact, decline → generate) · 0.75–0.85 Offer (inform +<br/>ask reuse-or-build) · <0.75 generate. --yes auto-reuses Reuse, declines Offer
+    Builder->>Builder: generate → validate → consent (§18/§19, unchanged)
+    Builder->>Gate: verifyAndCommit(GateDeps) — build.verify span
+    Gate->>Gate: stage() → staged def file ONLY (writeAgentFile / writeCrewFile), no index splice
+    Gate->>Gate: structural(def) — validateProposal / validateStructural
+    Gate->>Repair: repairLoop(dryRunOnce) — REAL bounded execution vs representativeTask
+    Note over Repair: ≤ maxRepairs()=2 re-stages, the runtime error fed back<br/>into a fresh regeneration (same consented name/id)
+    Gate->>Eval: selectJudge (largest installed ≥ judgeMinParams()≈24e9, prefers cross-family)
+    Note over Eval: no qualifying judge → eval SKIPPED, commit marked<br/>`verified: runs` — degrade, never block (no auto-pull)
+    Gate->>Eval: generateGolden (3–7 binary cases) → evalCases (unanimous over evalRuns()=3)
+    Gate->>Reg: commit(level) — registerAgent/registerCrewOrWorkflow + <name>.golden.json + manifest upsert
+    Note over Gate,Reg: a failed gate registers NOTHING — the staged file is<br/>REMOVED (discard on any non-committed outcome);<br/>verify.force downgrades to a commit marked `unverified`
 ```
 
 ---
@@ -1370,6 +1481,7 @@ on this machine — logged-deferred per the ledger.
 
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` / `unverified.txt` (human-facing artifacts; the last written on a Slice-13 `--verify` abstention). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
+- **`<registry>/.generated.json` + `<registry>/<name>.golden.json` + `<registry>/archive/`** (tracked, Slice 20) — per-registry (`agents/`, `crews/`, `workflows/`) verified-build sidecars: the capability **manifest** (`.generated.json` — per generated artifact: original need, `CapabilitySignature` + embedding vector, `verifiedLevel`, `goldenPath`, `createdAtMs`/`lastUsedMs`/`useCount`, `lastEvalPass`), the per-artifact **golden set**, and the reversible **archive** directory `bun run archive --prune` moves idle near-duplicates into (§20).
 
 ---
 
@@ -1384,6 +1496,7 @@ on this machine — logged-deferred per the ledger.
 - **Verification** (`tests/verification/`) — pure unit tests per module (`verify.test.ts`) with injected `VerifyDeps` (no Ollama needed); `faithfulness.eval.test.ts` is the in-repo golden-set eval gate (`tests/verification/golden/cases.json`, ~15–20 cases, offline stand-in judge — no external eval framework); `tests/crew/verify-wiring.test.ts` + `tests/workflow/verify-wiring.test.ts` cover the compile-time splice + `{kind:'unverified'}` outcome mapping; `tests/integration/verification.live.test.ts` needs a real `bespoke-minicheck` pull.
 - **Provisioning** (`tests/provisioning/`) — pure unit tests per module (`fit`, `supervisor`, `progress-tracker`, `provisioner`, `ollama-pull`, `ollama-catalog`, `hf-catalog`, `snapshot-source`, `hf-fetch`, `lmstudio`, `ui-format`, `ui-prompt`, `detect-missing`) with injected fakes (no real network/runtime for any of them); `hf-fetch.test.ts` now asserts real disk-write behavior (file present with expected byte length, no leftover `.part`, `Verifying`/`Finalizing` phases, sha256 verify-when-present + mismatch-fails-and-cleans-up, snapshot multi-file enumeration, `../evil.bin` traversal rejection, retry-then-succeed); `eval.test.ts` is the fit-selection golden set across RAM tiers plus a telemetry-emission assertion for `agent.model.provision` (`registerTestProvider`). Ollama's adapter is **live-verified** in the Slice-14 ledger (fresh pull to 100%, idempotent re-provision) and the HF-fetch adapter is **live-verified** in the Slice-18 ledger (real MLX snapshot download to disk); LM Studio's download adapter is contract-tested only pending a runtime install.
 - **Agent-builder** (`tests/agent-builder/`, Slice 17) — pure unit tests per module with injected fakes, no Ollama/AI-SDK needed: `validate.test.ts` (structural gates: snake_case/reserved/unique name, non-empty fields, palette-only + scoped servers), `generate.test.ts` (prompt shape, the `<need>` delimiter, field mapping onto `AgentProposal`), `suggest-tools.test.ts` (palette-only filtering, dedup, per-agent scoping), `write.test.ts` (rendered file content, idempotent index-marker insertion, missing-markers throw, the deep-clone-vs-shared-`STARTER_PACK`-mutation regression), `builder.test.ts` (the generate→suggest→validate→consent→write sequence, invalid-returns-before-consent, declined writes nothing), `deps.test.ts` (`makeBuilderModel`'s injected `generateText` seam). Slice 18 (Task 24) adds coverage for the same-run bounded retry (exactly-2-generate-calls pinned for both `buildAgent` and `buildTool`) and the consent-gated tool-code path (`validate-tool`/`write-tool`/`buildTool` — inert `.proposal.ts`, mandatory consent, name-pattern traversal guard). No `*.live.test.ts` exists yet for agent-builder (a real end-to-end generate-and-run pass is a logged follow-on, §18).
+- **Verified-build** (`tests/verified-build/`, Slice 20) — pure unit tests per module with injected fakes, no Ollama needed (`config`, `signature`, `manifest`, `reuse`, `dry-run`, `repair`, `judge`, `golden`, `eval`, `gate`, `usage`, `archive`), plus `reuse.eval.test.ts` — a 10-case in-repo **band-calibration eval** for the reuse/offer thresholds (the deliberate stand-in for human-labeled judge calibration). Builder integration is covered in `tests/agent-builder/gate-integration.test.ts` (reuse-hit short-circuits before generation; a passing gate commits at `behaves`; a failing dry-run with `force=false` → `failed-verification` with **nothing registered**; `force=true` → committed at `unverified`) and `tests/crew-builder/gate-integration.test.ts` (its crew/workflow mirror); `tests/core/agent-abort.test.ts` pins the new `runAgent` `abortSignal` seam; `tests/telemetry/build-verify-span.test.ts` pins the `build.verify`/`build.archive` emission.
 - **Live** (`*.live.test.ts`, skip when the dep is down) — `orchestrator`, `model-manager`, `selection`, `kv-cache`, `fetch-mount`, `run-viewer`, `workflow`, `crew`, `memory`, `verification` (real Ollama); `discover` (real HF); `mlx` (needs an MLX server — the Slice-18 gate `tests/integration/mlx-available.ts` mirrors `ollama-available.ts`; `mlx.live.test.ts` runs a real `createMlxServerRuntime` → `generateText` round-trip + `getModelMax` + `listLoaded`, and was **live-verified against a running `mlx_lm.server`** in Slice 18, not just skipped).
 
 ---
@@ -1402,6 +1515,8 @@ on this machine — logged-deferred per the ledger.
 - **MiniCheck** — `bespoke-minicheck`, a small model fine-tuned for `(document, claim) → supported?` fact-checking; Slice 13's default faithfulness judge, distinct from the general/router model used elsewhere.
 - **CRAG (Corrective RAG)** — grade retrieved context `CORRECT/AMBIGUOUS/INCORRECT`, and if weak, rewrite the query and re-retrieve once before re-answering. Shipped in Slice 13 as one bounded, unrolled corrective step (not a runtime loop).
 - **Agent-builder** — `src/agent-builder/`; generates a new specialist agent file from a plain-language capability need, review-before-activate (Slice 17, §18).
+- **Verified level** — `VerifiedLevel` (`src/verified-build/types.ts`): what a committed generated artifact has earned — `behaves` (dry-run + golden-eval passed), `runs` (dry-run passed; behavioral eval skipped, e.g. no qualifying judge), `unverified` (a `verify.force` commit despite a failing gate). Recorded per artifact in the registry's `.generated.json` manifest (Slice 20, §20).
+- **Capability signature** — `CapabilitySignature` (purpose/tools/modelTier/io/roles): the distilled, embeddable description of what an artifact (or a not-yet-built need) does; its embedding vector is what reuse detection cosine-compares (Slice 20, §20).
 
 ---
 
@@ -1494,6 +1609,17 @@ yet (it exists + is unit-tested; a `bun run` entry point is a future step).
 now the consent-gated inert `.proposal.ts` path above (there is a *bounded
 same-run regeneration* on validation failure now, distinct from same-run
 *activation*, which stays off).
+
+**Slice 20 update — write-through is gone when `verify` is wired.** With
+`BuilderDeps.verify` present (the default via `makeRealBuilderDeps`),
+`buildAgent` becomes **reuse-check → generate → suggest → validate →
+consent → stage → verify → commit**: a pre-generation reuse check can
+resolve to `{kind:'reused'}` (confirm-gated — the user accepts the reuse
+offer, or `--yes` auto-accepts a Reuse-band hit) before any generation, and a granted
+proposal is *staged* (`writeAgentFile`) and run through the verified-build
+gate (§20) — only a passing (or `verify.force`d) gate reaches `registerAgent`
+(the index + `mcp.json` splice). Without `verify` (every pre-existing unit
+test), the original write-straight-through path is unchanged.
 
 ## 19. Crew/workflow-builder (Slice 19, Phase D)
 
@@ -1745,10 +1871,247 @@ verification — dry-run/golden-eval/reuse — for Slice 20).
 
 - **Behavioral verification** of a generated crew (execution dry-run +
   golden-eval + reuse/archive) — Slice 20's whole purpose, not a subset
-  skipped here. Slice 19's bar is structural + semantic validity plus one
+  skipped here (**now shipped — §20**: with `CrewBuilderDeps.verify` wired,
+  `buildCrewOrWorkflow` gains a post-classify reuse check and its tail
+  becomes stage → verify → commit through the shared verified-build gate).
+  Slice 19's bar is structural + semantic validity plus one
   real live-verify pass, not an automated behavioral guarantee for arbitrary
   generated crews.
 - **A serialized runtime IR format / loader** for hand-authored crews — the
   IR here is build-time-internal; the runtime format stays hand-written TS
   calling `defineCrew`/`defineWorkflow`.
 - Triggers/scheduling (Phase E), multimodal (Phase F).
+
+## 20. Verified build (Slice 20, Phase D — closes the phase)
+
+Slices 17 and 19 made generated artifacts *structurally* (and, since 19,
+semantically-judged) valid; `src/verified-build/` makes them **behaviorally
+verified**. Both builders' write step turns from write-then-return into
+**stage → verify → commit**: a proposal/IR is rendered to a *staged* file
+(never the registry index), actually **executed** against a benign
+representative task, optionally behaviorally evaluated against an
+auto-generated golden set, and only then spliced into the registry — so
+nothing broken ever lands where the next run can pick it up. One shared,
+kind-agnostic gate (`gate.ts`, `verifyAndCommit(GateDeps)`) serves all three
+`ArtifactKind`s (agent / crew / workflow); the agent-builder (§18) and
+crew-builder (§19) each inject their own stage/structural/dry-run/eval/commit
+closures. The pipeline is deliberately **cheapest-first**: an embedding
+comparison before any generation, a sync structural check before any
+execution, one bounded dry-run before any multi-case eval.
+
+### The pipeline
+
+0. **Reuse check (before generating).** `signature.ts` distills the need into
+   a `CapabilitySignature` (`purpose`/`tools`/`modelTier`/`io`/`roles`) —
+   `signatureFromNeed` via one small `model.object` call for a raw need,
+   `signatureFromProposal`/`signatureFromIR` for finished artifacts —
+   `signatureText` canonicalizes it, `memory/embed-one.ts`'s `embedOne`
+   embeds it (the Slice-12 embedder, `qwen3-embedding:0.6b`, via the Model
+   Manager), and `reuse.ts`'s `reuseDecision` cosine-compares the vector
+   against every entry in the target registry's manifest sidecar (entries
+   with mismatched/empty vector dimensions — e.g. `[]` from
+   `rebuildFromArtifacts`, or a different embed model — are skipped as "not
+   comparable" rather than scored; `cosine` itself throws a
+   `CosineDimensionError` on such pairs, and both the reuse scan and the
+   archive decision guard against it). Bands (`config.ts` `reuseBands()`):
+   **≥0.85 → `ReuseKind.Reuse`** — the builder **asks for confirmation
+   first** (`renderReuseOffer`): accept → `{kind:'reused'}`, the existing
+   artifact is the answer and nothing is generated; decline → the build
+   falls through to generation. **0.75–0.85 → `Offer`** — the builder
+   informs the user a close match exists and asks reuse-or-build the same
+   way. **<0.75 → `Generate`**. The non-interactive policy (`--yes`,
+   carried by `confirmReuse`): auto-reuse a Reuse-band hit, but **decline**
+   an Offer-band hit → build new. Ties break toward the higher `useCount`
+   (currently inert — see "Deliberate scoping": manifest usage counters
+   stay 0). The agent-builder checks before `generateProposal`; the
+   crew-builder checks right after `classify` (the registry to compare
+   against depends on the shape).
+1. **Stage.** The builders' write modules were split so staging and
+   registration are separate acts: `writeAgentFile` / `writeCrewFile` render
+   the def file to disk (same atomic `.tmp`+`rename`), but **no index splice,
+   no `mcp.json` scoping** happens yet. The crew-builder dynamic-imports the
+   staged file (cache-busted with a `?t=` query, since a repair re-stage
+   overwrites the same path) to obtain the runnable `CrewDef`/`WorkflowDef`;
+   the agent-builder builds an in-memory `Agent` from the proposal
+   (`agentFromProposal`).
+2. **Structural.** The *existing* validators, re-run on the staged def —
+   `validateProposal` (agents) / `validateStructural` (crew/workflow IR).
+   Nothing new; the gate just refuses to spend execution on a
+   structurally-broken artifact.
+3. **Dry-run + bounded self-repair.** The staged artifact is **really
+   executed** — `runGuardedAgent` for agents, `runCrew`/`runWorkflow` for
+   crew/workflow (injected as `verify.runAgent`/`verify.runArtifact`) —
+   against `representativeTask(need, sig)`, a deliberately benign, read-only
+   smoke task derived from the signature's purpose ("do not modify, create,
+   or delete anything"). `dry-run.ts` carries the bounding primitives, and
+   the builders' own `dryRunOnce`/`goldenEval` closures apply them
+   themselves around every dry-run and golden-eval model call:
+   `withWallClock(dryRunMs())` (default 45 s) races the run against a timer
+   for **all** artifact kinds, and the **agent path** additionally threads
+   `AbortSignal.timeout(dryRunMs())` down to `generateText`
+   (`RunAgentInput.abortSignal`, a seam `runAgent` gained in this slice) so
+   the hung model call itself aborts in flight. **Crew/workflow runs are
+   wall-clock-raced only** — `runCrew`/`runWorkflow` accept no signal yet,
+   so their in-flight work is abandoned, not aborted, on timeout. On
+   failure, `repair.ts`'s `repairLoop` retries up to `maxRepairs()`=2 times,
+   feeding the **real runtime error back into a fresh regeneration**: the
+   agent-builder re-drafts the proposal with the error as `retryFeedback`
+   (keeping the consented *name* — a repair may only revise
+   prompt/description/tools, so the staged path stays stable), and the
+   crew-builder re-plans (`planNodes`→`planEdges`) with the error appended
+   to the analysis (keeping the consented *id*). A regeneration that fails
+   validation or throws is discarded and the previous proposal/IR re-staged
+   — the repair is bounded and can never do worse than a plain retry.
+4. **Golden-eval (degrades, never blocks).** `golden.ts`'s `generateGolden`
+   auto-decomposes the need into **3–7 binary cases** (`{input, assert,
+   kind}`, `GoldenKind` task-success/grounded/routing — mirroring the §12
+   golden-set pattern). `judge.ts`'s `selectJudge` picks the judge from the
+   *installed* registry: it must clear `judgeMinParams()`≈24e9 (i.e. the
+   largest-local ~26–30b tier), preferring a **different family from the
+   generator** (self-judging bias), then the largest. If **no** installed
+   model clears the bar, the behavioral eval is **skipped** and the artifact
+   commits marked `verified: runs` — degrade, never block, and never an
+   unconsented model pull (the standing consent-before-pull policy).
+   `eval.ts`'s `evalCases` runs every case through the artifact and judges
+   each output, requiring a **unanimous yes over `evalRuns()`=3 judge runs**
+   per case (short-circuiting on the first no). The verdict routes by case
+   kind: **`GoldenKind.Grounded` cases go through the verification layer's
+   `checkClaim`** (assert = claim, artifact output = document — the same
+   MiniCheck-style grounding primitive §12 uses, including its
+   empty-evidence auto-fail), every other kind uses a generic yes/no
+   requirement rubric. All cases passing ⇒ `VerifiedLevel.Behaves`.
+5. **Commit.** Only now do `registerAgent` / `registerCrewOrWorkflow` splice
+   the index (+ `mcp.json` scoping for agents), write
+   `<registry>/<name>.golden.json`, and `upsertEntry` the manifest with the
+   earned `VerifiedLevel`. A failed gate returns
+   `{kind:'failed', stage, detail}`, registers **nothing**, and the staged
+   file is **removed** — the gate calls `deps.discard` on *every*
+   non-committed outcome (failed stage or a throw anywhere), so a rejected
+   build never leaves an orphan `<name>.ts` that would break the next
+   typecheck/lint (I2). Registry index + `mcp.json` are untouched either
+   way: commit is the only step that writes them. The escape hatch is
+   `verify.force` (`BuilderVerifyDeps.force`/`CrewBuilderVerifyDeps.force`,
+   surfaced as `--force` on both builder CLIs): it downgrades any failing
+   stage to a commit marked `unverified`, and the CLI prints a WARNING that
+   verification failed but the artifact was registered anyway.
+
+### The manifest sidecar (`<registry>/.generated.json`)
+
+`manifest.ts` maintains one JSON sidecar per registry dir (`agents/`,
+`crews/`, `workflows/`), keyed by artifact name:
+`{need, signature, vector, verifiedLevel, goldenPath, createdAtMs,
+lastUsedMs, useCount, lastEvalPass}`. This closes two long-standing gaps at
+once: the **original need was never persisted** (a generated agent's "why"
+evaporated at write time) and **no usage tracking existed** (nothing knew
+whether a generated artifact was ever exercised). The manifest is what reuse
+detection compares against, what the archive decision reads, and what a
+future re-eval pass would key off (`lastEvalPass`). It is a **rebuildable
+cache, not a source of truth**: `rebuildFromArtifacts(dir)` recovers a
+lost/corrupt sidecar offline from the on-disk artifacts and their
+`<name>.golden.json` sidecars — existing entries are preserved, missing ones
+are reconstructed (`need` from the golden file, `createdAtMs` from the
+artifact mtime) with safe defaults for what can't be recomputed offline:
+vector `[]` (treated as "not comparable" by reuse/archive) and
+`verifiedLevel: unverified`.
+
+### Usage aggregation + archive
+
+- **`usage.ts`** — `aggregateUsage(runsRoot)` scans every run's
+  `spans.jsonl` (sync, tolerant of malformed lines) for artifact-naming span
+  attributes (`crew.id`, `workflow.id`, `agent.delegation.target`) and folds
+  them into per-artifact `{lastUsedMs, useCount}` — usage is *derived from
+  the existing telemetry* at archive time, no new bookkeeping write path.
+  The manifest's own `lastUsedMs`/`useCount` fields stay 0 (span-derived
+  usage is not folded back into the sidecar — see "Deliberate scoping").
+- **`archive.ts`** — `archiveDecision(manifest, usage, nowMs)` flags an entry
+  only when it is **idle** (unused beyond `archiveIdleDays()`=30 and zero
+  observed uses) **and** a near-duplicate (cosine ≥ the reuse band; pairs
+  with mismatched/empty vector dimensions are skipped as not comparable)
+  that *is* in use exists — idle-but-unique artifacts are preserved.
+  `archiveArtifact` is **reversible, not delete**: it moves `<name>.ts` into
+  `<registry>/archive/`, drops the manifest entry, and drops any `index.ts`
+  line referencing it. **Live-reference protection:** it first scans the
+  caller-supplied `refDirs` (the archive CLI passes *all three* registries,
+  so a cross-registry reference — e.g. a crew whose member `agentRef`s the
+  candidate agent, or a workflow step's `agent:` — also blocks) and throws a
+  `LiveReferenceError` rather than stranding a referencing artifact at run
+  time (a textual scan of the generated-source reference patterns).
+- **CLI** — `bun run archive` (`src/cli/archive.ts`) prints the per-registry
+  candidate report; `bun run archive --prune` additionally archives, behind a
+  **per-candidate consent prompt** (no bulk yes).
+- **Chat reuse hint** — on a `{kind:'gap'}` outcome, before any build offer,
+  `chat.ts`'s `reuseHintText` best-effort embeds the raw need and prints
+  "an existing X looks similar (NN%)" when a manifest entry lands in the
+  offer/reuse bands. Informational only — it never gates the offers (and it
+  deliberately uses the raw need text rather than spending a
+  `signatureFromNeed` LLM call before the user has consented to anything).
+
+### Data types (shared vocabulary, `types.ts` + `config.ts`)
+
+String enums `VerifiedLevel` (`behaves`/`runs`/`unverified`), `ReuseKind`
+(`reuse`/`offer`/`generate`), `GoldenKind`, `ArtifactKind`; types
+`CapabilitySignature`, `GoldenCase`/`GoldenSet`, `DryRunResult`,
+`EvalResult`/`EvalCaseResult`, `ReuseDecision`, `ManifestEntry`/`Manifest`,
+and the `VerificationResult` discriminated union
+(`committed`/`reused`/`failed`). `config.ts` follows the fallback-only env
+pattern (`Number(process.env.X) || DEFAULT`): `dryRunMs()` 45 000,
+`maxRepairs()` 2, `reuseBands()` 0.85/0.75, `judgeMinParams()` 24e9,
+`archiveIdleDays()` 30, `evalRuns()` 3.
+
+### Telemetry
+
+`withBuildVerifySpan(kind, fn)` (`src/telemetry/spans.ts`) opens one
+`build.verify` span per gate pass, sets `artifact.kind` up front, hands the
+body an `event`/`result` recorder (stage events `structural`/`dry_run`/
+`golden_eval` with issue/repair/pass counts; `result(level)` sets
+`ATTR.VERIFY_LEVEL`), and the `ATTR` table gains the `verify.*` family
+(`verify.reuse.decision`/`.similarity`, `verify.dry_run.ran`/`.repairs`,
+`verify.judge.model`/`.below_bar`, `verify.golden.passed`/`.total`,
+`verify.level`) plus `archive.candidates`/`archive.pruned` for
+`withBuildArchiveSpan`'s `build.archive` span. The builders' own
+`agent.build`/`crew.build` spans are unchanged — the gate's span nests inside
+them, and the builders add `reuse_checked`/`gate_result` stage events.
+
+### Deliberate scoping (by design, not punted)
+
+- **Plain cosine, not SimHash/ANN** — the registries are tiny (tens of
+  artifacts, not millions); a linear scan over manifest vectors is exact and
+  cheap. Revisit only if a registry ever grows past that.
+- **Judge protocol shipped without human-labeled κ calibration** — the
+  reuse/offer **band-calibration eval** lives in-repo instead
+  (`tests/verified-build/reuse.eval.test.ts`, 10 labeled need-pairs), same
+  posture as §12's in-repo golden set.
+- **Representative-task selection is a heuristic** — a read-only smoke
+  prompt derived from the signature purpose, not a learned task picker.
+- **`dryRunMs()` is a sensible default, not adaptive** — 45 s with an
+  `AGENT_DRY_RUN_MS` env override; the spec's aspiration of computing the
+  bound from observed model speed is not implemented.
+- **Usage is span-derived only** — `aggregateUsage` computes
+  `lastUsedMs`/`useCount` from `spans.jsonl` at archive time; the manifest's
+  own usage fields stay 0 (nothing folds the derived stats back into the
+  sidecar). Consequence: the reuse tie-break by `useCount` is currently
+  inert.
+- **KNOWN MINOR — staged-file discard can hit a pre-existing file:** a
+  failed gate's discard deletes the file at the staged path; if an
+  *unregistered, hand-written* file already existed at the exact generated
+  name, staging overwrites it and a failed gate then deletes it. A narrow
+  edge (registered artifacts collide at validation, so only unregistered
+  same-name files are exposed); a pre-stage existence guard is a deferred
+  follow-on.
+- **Carried TODOs (logged):** the staged `Agent`/workflow agent-steps mount
+  **no real MCP tools** yet (dry-run/golden-eval exercise the model loop, not
+  scoped servers — needs MCP clients spun up for a staged, not-yet-registered
+  artifact); judge *family* is parsed heuristically from the model tag
+  (no family registry exists); `Shape` remains a string-literal union
+  (carry-forward minor, §19).
+
+### Live-verify (real models, pre-merge gate)
+
+Slice 20 was live-verified end to end on Ollama: `bun run agent-builder`
+generated an agent, ran the full gate, and committed at `verified: runs` —
+the judge-degrade path, since no ≥24b judge model was installed on the dev
+machine. The run's `build.verify` span landed in `runs/<id>/spans.jsonl`
+with the `verify.level` / `verify.dry_run.*` / `verify.judge.below_bar` /
+`verify.reuse.*` attributes populated. Re-running the *same need* then hit
+the reuse path at **89% similarity** and generated nothing — the
+confirm-gated reuse band exercised live.

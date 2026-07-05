@@ -1,5 +1,11 @@
-import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
+import {
+  type Attributes,
+  type Span,
+  SpanStatusCode,
+  trace,
+} from '@opentelemetry/api';
 import { currentDelegationContext } from '../core/guardrails.ts';
+import type { ArtifactKind, VerifiedLevel } from '../verified-build/types.ts';
 import { recordIoEnabled } from './provider.ts';
 
 export const ATTR = {
@@ -77,6 +83,18 @@ export const ATTR = {
   CREW_BUILD_STEPS: 'crew.build.step_count',
   CREW_BUILD_MEMBERS_BUILT: 'crew.build.members_built',
   CREW_BUILD_OUTCOME: 'crew.build.outcome',
+  ARTIFACT_KIND: 'artifact.kind',
+  VERIFY_REUSE_DECISION: 'verify.reuse.decision',
+  VERIFY_REUSE_SIMILARITY: 'verify.reuse.similarity',
+  VERIFY_DRYRUN_RAN: 'verify.dry_run.ran',
+  VERIFY_DRYRUN_REPAIRS: 'verify.dry_run.repairs',
+  VERIFY_JUDGE_MODEL: 'verify.judge.model',
+  VERIFY_JUDGE_BELOW_BAR: 'verify.judge.below_bar',
+  VERIFY_GOLDEN_PASSED: 'verify.golden.passed',
+  VERIFY_GOLDEN_TOTAL: 'verify.golden.total',
+  VERIFY_LEVEL: 'verify.level',
+  ARCHIVE_CANDIDATES: 'archive.candidates',
+  ARCHIVE_PRUNED: 'archive.pruned',
 } as const;
 
 export type ModelSelectInfo = {
@@ -536,6 +554,59 @@ export function withCrewBuildSpan<T>(
           );
         if (built !== undefined)
           span.setAttribute(ATTR.CREW_BUILD_MEMBERS_BUILT, built);
+      },
+    });
+  });
+}
+
+/** Root span for one build-verification pass (reuse gate / dry-run / judge /
+ *  golden set). Mirrors withCrewBuildSpan: the body records stage events,
+ *  sets `verify.*` attributes as stages complete (via `attrs`), and sets the
+ *  earned VerifiedLevel at the end via the returned recorder. */
+export function withBuildVerifySpan<T>(
+  kind: ArtifactKind,
+  fn: (rec: {
+    event(name: string, attrs?: Record<string, unknown>): void;
+    attrs(attrs: Record<string, unknown>): void;
+    result(level: VerifiedLevel, attrs?: Record<string, unknown>): void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('build.verify', async (span) => {
+    span.setAttribute(ATTR.ARTIFACT_KIND, kind);
+    return fn({
+      event: (name, attrs) => span.addEvent(name, attrs as Attributes),
+      attrs: (attrs) => span.setAttributes(attrs as Attributes),
+      result: (level, attrs) => {
+        span.setAttribute(ATTR.VERIFY_LEVEL, level);
+        if (attrs) span.setAttributes(attrs as Attributes);
+      },
+    });
+  });
+}
+
+/** Set the reuse decision + similarity on the active span (the agent.build /
+ *  crew.build span at the builders' reuse-check site) so a reuse hit/offer
+ *  is observable even though no build.verify span opens for it. */
+export function recordReuseDecision(
+  decision: string,
+  similarity: number,
+): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.setAttribute(ATTR.VERIFY_REUSE_DECISION, decision);
+  span.setAttribute(ATTR.VERIFY_REUSE_SIMILARITY, similarity);
+}
+
+/** Root span for one artifact-archive maintenance pass; the body reports the
+ *  candidate/pruned counts at the end via the returned recorder. */
+export function withBuildArchiveSpan<T>(
+  fn: (rec: { done(candidates: number, pruned: number): void }) => Promise<T>,
+): Promise<T> {
+  return inSpan('build.archive', async (span) => {
+    return fn({
+      done: (candidates, pruned) => {
+        span.setAttribute(ATTR.ARCHIVE_CANDIDATES, candidates);
+        span.setAttribute(ATTR.ARCHIVE_PRUNED, pruned);
       },
     });
   });

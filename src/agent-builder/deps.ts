@@ -2,15 +2,28 @@ import { generateText, type LanguageModel } from 'ai';
 import { z } from 'zod';
 import { agentNames } from '../../agents/index.ts';
 import { ollamaCtxOptions } from '../core/agent-def.ts';
-import { Capability, PreferPolicy } from '../core/types.ts';
+import { runGuardedAgent } from '../core/delegate.ts';
+import {
+  Capability,
+  type ModelDeclaration,
+  PreferPolicy,
+  RuntimeKind,
+} from '../core/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { STARTER_PACK } from '../mcp/pack.ts';
+import { makeEmbedder } from '../memory/embed.ts';
 import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { listLoadedModels } from '../resource/ollama-control.ts';
 import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
+import { dryRunMs } from '../verified-build/config.ts';
+import {
+  type JudgeCandidate,
+  JudgeUnavailableError,
+} from '../verified-build/judge.ts';
+import { ReuseKind } from '../verified-build/types.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
 type GenerateTextFn = typeof generateText;
@@ -214,11 +227,37 @@ export function makeBuilderModel(
   };
 }
 
+/** Heuristic "model family" from its tag, e.g. "qwen3.5" from "qwen3.5:9b".
+ *  The repo has no canonical model-family registry — this is only used to
+ *  prefer a judge from a DIFFERENT family than the generator (selectJudge),
+ *  a soft preference, not a correctness requirement. */
+function modelFamily(modelName: string): string {
+  return modelName.split(':')[0] ?? modelName;
+}
+
+function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
+  return {
+    model: decl.model,
+    params: decl.footprint.approxParamsBillions * 1e9,
+    family: modelFamily(decl.model),
+  };
+}
+
 /** Assemble live builder deps: a tools-capable largest-that-fits model, the
  *  pack palette, the existing-agent names, a TTY consent prompt, and default fs
- *  paths. Returns a cleanup that unloads the model. */
+ *  paths. Returns a cleanup that unloads the model.
+ *
+ *  Also wires `deps.verify` (Slice 20 — the verify-then-commit gate) against
+ *  the same model manager + registry: a manager-backed embedder, judge
+ *  candidates from the full discovered registry, `runGuardedAgent` for the
+ *  dry-run/golden-eval calls, and a yes/no judge that resolves and runs the
+ *  model `selectJudge` picked (never the generator grading itself).
+ *  TODO(controller): `runAgent`'s staged `Agent` currently mounts NO real MCP
+ *  tools (see `agentFromProposal` in builder.ts) — a live-verify pass on an
+ *  agent whose suggested servers matter will need scoped MCP clients spun up
+ *  for the staged, not-yet-registered agent before this is fully faithful. */
 export async function makeRealBuilderDeps(
-  opts: { autoYes?: boolean } = {},
+  opts: { autoYes?: boolean; force?: boolean } = {},
 ): Promise<{ deps: BuilderDeps; cleanup: () => Promise<void> }> {
   const manager = createModelManager();
   const registry = await buildRegistry();
@@ -235,7 +274,41 @@ export async function makeRealBuilderDeps(
     },
   );
   const model = runtimeFor(decl.runtime).createModel(decl);
+  // Resolve (and cache) a LanguageModel for the judge `selectJudge` picked —
+  // the judge must run on THAT model, never the generator grading itself
+  // (C3). Judge ids come from this same registry, so the lookup only misses
+  // if the registry changed mid-run; degrade to the builder model then
+  // rather than crash the gate.
+  const judgeModels = new Map<string, LanguageModel>();
+  const judgeModelFor = async (id: string): Promise<LanguageModel> => {
+    if (id === decl.model) return model;
+    const cached = judgeModels.get(id);
+    if (cached) return cached;
+    const judgeDecl = registry.find((d) => d.model === id);
+    // Degrade (skip behavioral eval → commit `runs`), never self-grade on the
+    // generator model, and never crash: the golden-eval caller catches
+    // JudgeUnavailableError. Covers both "id vanished from the registry" and
+    // "found but the runtime can't load it" (e.g. ResourceError when it won't
+    // fit even after LRU eviction — realistic on constrained local hardware).
+    if (!judgeDecl) throw new JudgeUnavailableError(id);
+    try {
+      await manager.ensureReady(judgeDecl);
+      const judgeModel = runtimeFor(judgeDecl.runtime).createModel(judgeDecl);
+      judgeModels.set(id, judgeModel);
+      return judgeModel;
+    } catch (err) {
+      if (err instanceof JudgeUnavailableError) throw err;
+      throw new JudgeUnavailableError(id);
+    }
+  };
   const input = stdinInput();
+  const embedModel =
+    process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
+  const embedder = makeEmbedder({
+    ensureReady: (d) => manager.ensureReady(d),
+    control: runtimeFor(RuntimeKind.Ollama).control,
+    model: embedModel,
+  });
   const deps: BuilderDeps = {
     model: makeBuilderModel(model, numCtx),
     existingNames: () => agentNames(),
@@ -253,6 +326,42 @@ export async function makeRealBuilderDeps(
       mcpConfigPath: defaultConfigPath(),
     },
     log: (m) => console.error(m),
+    verify: {
+      embed: embedder.embed,
+      judgeCandidates: () => registry.map(toJudgeCandidate),
+      runAgent: (agent, task, signal) =>
+        runGuardedAgent(agent, task, undefined, signal),
+      judge: async (prompt, judgeModelId) => {
+        // Runs on the SELECTED judge model (C3), deterministically
+        // (temperature 0, M5), and bounded like every other verify-gate
+        // model call: a hung judge aborts after dryRunMs() instead of
+        // hanging the build (C1).
+        const r = await generateText({
+          model: await judgeModelFor(judgeModelId),
+          prompt,
+          temperature: 0,
+          abortSignal: AbortSignal.timeout(dryRunMs()),
+        });
+        return r.text.trim().toLowerCase().startsWith('yes');
+      },
+      generatorFamily: modelFamily(decl.model),
+      dir: 'agents',
+      // `--force` (I1): downgrade a failing gate to an Unverified commit
+      // instead of aborting (see gate.ts).
+      force: opts.force === true,
+      confirmReuse: async (kind, text) => {
+        // Non-interactive policy (I3): autoYes auto-reuses a Reuse-band
+        // match (it clears the confident band, reuse is the point of the
+        // check) but DECLINES an Offer-band one — a merely-close match
+        // defaults to building new rather than silently substituting.
+        if (kind === ReuseKind.Offer && opts.autoYes === true) return false;
+        process.stderr.write(`${text}\n`);
+        return askYesNo('Reuse it?', {
+          input,
+          autoYes: opts.autoYes === true,
+        });
+      },
+    },
   };
   return { deps, cleanup: () => manager.unloadAll() };
 }

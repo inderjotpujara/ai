@@ -10,7 +10,24 @@ function fixed(text: string, capChars: number): string[] {
   return out;
 }
 
-function cosine(a: number[], b: number[]): number {
+/** Thrown when `cosine` is given vectors it cannot meaningfully compare:
+ *  different lengths (e.g. embedded under different embed models) or empty.
+ *  Callers that scan many vectors should pre-check lengths and skip
+ *  incomparable pairs instead of trusting a garbage similarity score. */
+export class CosineDimensionError extends Error {
+  constructor(aLength: number, bLength: number) {
+    super(
+      `cosine: incomparable vectors (length ${aLength} vs ${bLength}); ` +
+        'both must be non-empty and equal-length',
+    );
+    this.name = 'CosineDimensionError';
+  }
+}
+
+export function cosine(a: number[], b: number[]): number {
+  if (a.length === 0 || b.length === 0 || a.length !== b.length) {
+    throw new CosineDimensionError(a.length, b.length);
+  }
   let dot = 0,
     na = 0,
     nb = 0;

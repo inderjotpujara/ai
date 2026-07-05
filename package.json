@@ -22,7 +22,8 @@
     "provision": "bun run src/cli/provision.ts",
     "mcp": "bun run src/cli/mcp.ts",
     "agent-builder": "bun run src/cli/agent-builder.ts",
-    "crew-builder": "bun run src/cli/crew-builder.ts"
+    "crew-builder": "bun run src/cli/crew-builder.ts",
+    "archive": "bun run src/cli/archive.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.56",

@@ -55,35 +55,72 @@ function registerInIndex(
   atomicWrite(indexPath, idx);
 }
 
+function validateName(name: string, context: string): void {
+  // Defense-in-depth mirror of agent-builder/write.ts's `validateName`:
+  // write.ts must not assume validate.ts already ran on every call path.
+  if (!NAME_PATTERN.test(name)) {
+    throw new Error(
+      `${context}: invalid name ${JSON.stringify(name)} — must match ${NAME_PATTERN}`,
+    );
+  }
+}
+
+function indexPathFor(shape: Shape, paths: CrewWritePaths): string {
+  return shape === 'crew' ? paths.crewsIndexPath : paths.workflowsIndexPath;
+}
+
+/** Write ONLY the generated def file (crews/<name>.ts or workflows/<name>.ts)
+ *  via atomicWrite — no index splice. Split out (verified-build gate) so a
+ *  candidate crew/workflow can be staged to disk and dry-run/eval'd BEFORE it
+ *  is registered anywhere live — see `registerCrewOrWorkflow`. Returns the
+ *  path written. */
+export function writeCrewFile(
+  name: string,
+  source: string,
+  shape: Shape,
+  paths: CrewWritePaths,
+): string {
+  validateName(name, 'writeCrewFile');
+  const dir = shape === 'crew' ? paths.crewsDir : paths.workflowsDir;
+  const defPath = join(dir, `${name}.ts`);
+  atomicWrite(defPath, source);
+  return defPath;
+}
+
+/** Register an already-written def file in the matching index (crews/index.ts
+ *  or workflows/index.ts) — the side effect that makes the crew/workflow
+ *  live. Split out of `writeCrewOrWorkflow` so the verify-then-commit gate
+ *  can call this ONLY after a staged file has earned it. Returns the index
+ *  path written. */
+export function registerCrewOrWorkflow(
+  name: string,
+  shape: Shape,
+  paths: CrewWritePaths,
+): string[] {
+  validateName(name, 'registerCrewOrWorkflow');
+  const indexPath = indexPathFor(shape, paths);
+  const idx = assertIndexMarkers(indexPath);
+  const local = camelCase(name);
+  registerInIndex(indexPath, idx, name, local);
+  return [indexPath];
+}
+
 /** Write the generated crew/workflow def file and register it in the
  *  matching index (crews/index.ts or workflows/index.ts). Atomic per file;
  *  asserts the index markers exist BEFORE writing the def file so a bad
- *  index never leaves an orphan def file on disk. Returns files written. */
+ *  index never leaves an orphan def file on disk. Returns files written.
+ *  Equivalent to `writeCrewFile` + `registerCrewOrWorkflow` — the one-shot
+ *  entry point every non-gated caller (and these tests) still uses. */
 export function writeCrewOrWorkflow(
   name: string,
   source: string,
   shape: Shape,
   paths: CrewWritePaths,
 ): string[] {
-  if (!NAME_PATTERN.test(name)) {
-    throw new Error(
-      `writeCrewOrWorkflow: invalid name ${JSON.stringify(name)} — must match ${NAME_PATTERN}`,
-    );
-  }
-  const dir = shape === 'crew' ? paths.crewsDir : paths.workflowsDir;
-  const indexPath =
-    shape === 'crew' ? paths.crewsIndexPath : paths.workflowsIndexPath;
+  validateName(name, 'writeCrewOrWorkflow');
   // Check the index markers BEFORE writing the def file: if registration
   // would fail, we must not leave an orphan <dir>/<name>.ts on disk.
-  const idx = assertIndexMarkers(indexPath);
-
-  const written: string[] = [];
-  const defPath = join(dir, `${name}.ts`);
-  atomicWrite(defPath, source);
-  written.push(defPath);
-
-  const local = camelCase(name);
-  registerInIndex(indexPath, idx, name, local);
-  written.push(indexPath);
-  return written;
+  assertIndexMarkers(indexPathFor(shape, paths));
+  const defPath = writeCrewFile(name, source, shape, paths);
+  return [defPath, ...registerCrewOrWorkflow(name, shape, paths)];
 }

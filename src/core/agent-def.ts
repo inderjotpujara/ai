@@ -23,12 +23,16 @@ export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
     : { ollama: { options: { num_ctx: numCtx } } };
 }
 
-/** Run an agent definition against a task, optionally at a chosen context size and model. */
+/** Run an agent definition against a task, optionally at a chosen context
+ *  size and model, and optionally bounded by an AbortSignal (the verify
+ *  gate's dry-run/golden-eval calls pass `AbortSignal.timeout(dryRunMs())`
+ *  so a hung model call aborts instead of hanging the build). */
 export function runDefinedAgent(
   agent: Agent,
   task: string,
   numCtx?: number,
   modelOverride?: LanguageModel,
+  abortSignal?: AbortSignal,
 ): ReturnType<typeof runAgent> {
   return runAgent({
     model: modelOverride ?? agent.model,
@@ -37,5 +41,6 @@ export function runDefinedAgent(
     tools: agent.tools,
     providerOptions: ollamaCtxOptions(numCtx),
     functionId: agent.name,
+    abortSignal,
   });
 }

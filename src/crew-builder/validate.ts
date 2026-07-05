@@ -248,12 +248,26 @@ async function goalAlignment(
   ];
 }
 
+/** Tier 1 alone (sync, no model call): agent refs resolve to existingAgents ∪
+ *  toBeBuilt (including a map step's inner sub-step agent), tool refs are
+ *  palette-only (ditto for a map sub-step tool), every
+ *  fromStep/fromTemplate/predicate/map ref names a real upstream step, branch
+ *  targets exist, member `agentRef` resolves, and the dependency graph is
+ *  id-unique + acyclic (`assertAcyclic`). Exported so the verify-then-commit
+ *  gate (verified-build) can re-check a staged IR's structure without paying
+ *  for another goal-alignment model call. */
+export function validateStructural(
+  ir: CrewIR | WorkflowIR,
+  shape: Shape,
+  ctx: ValidateCtx,
+): ValidationIssue[] {
+  return shape === 'workflow'
+    ? structuralWorkflow(ir as WorkflowIR, ctx)
+    : structuralCrew(ir as CrewIR, ctx);
+}
+
 /** Two-tier IR validation gate.
- *  Tier 1 STRUCTURAL (sync): agent refs resolve to existingAgents ∪ toBeBuilt
- *  (including a map step's inner sub-step agent), tool refs are palette-only
- *  (ditto for a map sub-step tool), every fromStep/fromTemplate/predicate/map
- *  ref names a real upstream step, branch targets exist, member `agentRef`
- *  resolves, and the dependency graph is id-unique + acyclic (`assertAcyclic`).
+ *  Tier 1 STRUCTURAL (sync): see `validateStructural`.
  *  Tier 2 SEMANTIC (async): an LLM-judge goal-alignment check, reached only
  *  when tier 1 found nothing — a structurally-broken graph never spends a
  *  model call. Empty array = valid. */
@@ -263,10 +277,7 @@ export async function validateIR(
   ctx: ValidateCtx,
   need = '',
 ): Promise<ValidationIssue[]> {
-  const issues =
-    shape === 'workflow'
-      ? structuralWorkflow(ir as WorkflowIR, ctx)
-      : structuralCrew(ir as CrewIR, ctx);
+  const issues = validateStructural(ir, shape, ctx);
   if (issues.length > 0) return issues; // don't spend a model call on a structurally-broken graph
   return goalAlignment(need, ir, ctx.model);
 }

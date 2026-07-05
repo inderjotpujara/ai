@@ -27,7 +27,7 @@ below becomes its own **brainstorm → spec → plan → subagent-driven build**
 ## Where we are vs. the target (the honest gap)
 
 Seven shipped slices built a deep, sophisticated **engine** (hardware-aware
-model/resource management). Twelve more (Slices 8–19) have since landed the
+model/resource management). Thirteen more (Slices 8–20) have since landed the
 first wave of the **product** pivot: an OTel run-viewer, composition
 guardrails, a deterministic workflow/DAG engine, a crews & roles layer
 composed on top of it, a persistent semantic memory layer (LanceDB +
@@ -41,7 +41,7 @@ registry + 12-entry curated starter pack (Slice 15, consent-gated mounting,
 spec-hash/tools-hash pinning against tool-definition drift, `bun run mcp
 list|status|add`, replacing the 2 hardcoded mounts Slices 1–3 shipped), and
 an MCP telemetry-ordering fix + consent robustness hardening (Slice 16). Phase
-D now has three slices: **Slice 17's agent-builder** (`src/agent-builder/`)
+D is now **complete**, with four slices: **Slice 17's agent-builder** (`src/agent-builder/`)
 turns *"describe a need"* into a reviewed, working specialist — generate a
 proposal → suggest a minimal palette-only server subset → validate
 structurally → consent → write, live on the next run; **Slice 18** was a
@@ -59,10 +59,26 @@ agents into a reviewed **crew** or **workflow**, via a staged declarative-IR
 pipeline (never one-shot), a two-tier structural+semantic validation gate, and
 consent-gated auto-build of missing member agents — live-verified end to end
 (a generated crew actually **executed**, not just wrote, to a correct
-result). The **product surface** is still thin beyond that: 3 built-in agents
-(`super`, `file-qa`, `web-fetch`) plus whatever the agent-builder/crew-builder
-have grown; no execution dry-run or reuse tracking for generated agents/crews
-yet (the remaining Phase-D breadth work, **Slice 20**).
+result); and **Slice 20's verified "works out of the box"** pass
+(`src/verified-build/`) closes the phase — every builder write is now
+**stage → verify → commit**: a pre-generation **reuse check** (capability
+signature embedded and cosine-compared against a per-registry
+`.generated.json` manifest; ≥0.85 confirm-gated reuse · 0.75–0.85 offer,
+ask reuse-or-build · <0.75 generate),
+an **execution dry-run** of the staged artifact against a benign
+representative task (bounded, with a ≤2-attempt self-repair loop feeding the
+real runtime error back into a regeneration), a **golden-eval** (3–7
+auto-generated binary cases,
+judged unanimously 3× by the largest installed model, preferring a
+different family than the generator — skipped
+with a `verified: runs` commit when no judge clears the ~24B bar: degrade,
+never block), and only then the registry commit at the earned
+`VerifiedLevel`; plus usage aggregation from run telemetry and a reversible
+`bun run archive [--prune]` for idle near-duplicates. The **product surface**
+is still thin beyond that: 3 built-in agents (`super`, `file-qa`,
+`web-fetch`) plus whatever the agent-builder/crew-builder have grown — but
+what they grow is now behaviorally verified, tracked, and reusable rather
+than write-and-hope.
 
 | n8n / CrewAI concept | Our analog | Status |
 |---|---|---|
@@ -78,6 +94,7 @@ yet (the remaining Phase-D breadth work, **Slice 20**).
 | Triggers (webhook / schedule / event) | scheduled & triggered agents | ❌ not built |
 | Create-a-node / create-an-agent | **agent-builder ⭐** | ✅ **shipped (Slice 17)** |
 | **Compose a crew/workflow from a need** | **crew/workflow builder ⭐** | ✅ **shipped (Slice 19)** |
+| **Verified generation (dry-run · golden-eval · reuse/archive)** | **verified-build gate ⭐** | ✅ **shipped (Slice 20)** |
 | **Shared agent memory (RAG + vector DB)** | memory subsystem | ✅ **built (Slice 12)** |
 | **Grounded answers / anti-hallucination** | verification layer (verifier/critic agents) | ✅ **built (Slice 13)** |
 | Reliability / retries | graceful degradation | ❌ not built |
@@ -139,7 +156,7 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 |---|---|---|
 | **Run-viewer (`/runs`)** ⭐ — ✅ **shipped (Slice 8)** | Instruments each run as an **OpenTelemetry trace** (root + delegation + model-lifecycle spans; AI-SDK gives agent/tool/token spans free) to `runs/<id>/spans.jsonl`, rendered as a terminal timeline (`bun run runs`, with `--follow`). Establishes the **extensible `src/telemetry/` layer every later feature emits into** (see the observable-by-default principle above) + a swappable OTLP backend seam. Makes 7 slices of invisible engine **demoable**, and becomes the **debugging surface** you'll need the instant workflows/crews/agent-builder start misrouting. Lowest cost, highest visibility. | run store (Slice 1) |
 | **Graceful degradation** | If `uvx` / an MCP server / a model is down, **drop that agent and tell the user** instead of failing the whole CLI. Essential for an always-on autonomous box; today a dead dependency can sink a run. | Slices 2–3 |
-| **Telemetry + eval harness** | Log per-agent latency / tokens / tool-call success; a small harness scoring **routing accuracy** (did the orchestrator pick the right specialist?) **and answer faithfulness / citation-faithfulness** (RAGAS-style: % of claims supported by retrieved evidence; penalize fabricated citations) against a ~100-item golden set. The moment agent-builder adds specialists *and* RAG adds retrieved context, routing quality + groundedness are what break — cheap insurance, measurable. | Slice 2 |
+| **Telemetry + eval harness** | Log per-agent latency / tokens / tool-call success; a small harness scoring **routing accuracy** (did the orchestrator pick the right specialist?) **and answer faithfulness / citation-faithfulness** (RAGAS-style: % of claims supported by retrieved evidence; penalize fabricated citations) against a ~100-item golden set. The moment agent-builder adds specialists *and* RAG adds retrieved context, routing quality + groundedness are what break — cheap insurance, measurable. *(Partially folded into Slice 20: per-generated-artifact golden-evals + usage aggregation from spans; a routing-accuracy harness over the built-in orchestrator is still open.)* | Slice 2 |
 
 ## Phase B — Compose it  *(the heart of n8n & CrewAI)*
 
@@ -162,11 +179,16 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 
 ## Phase D — Grow it  *(self-extension — the ⭐ differentiator)*
 
+> ✅ **Phase D is complete** (Slices 17 · 19 · 20, with Slice 18's debt
+> wrap-up in between): generate a specialist, compose a crew/workflow, and
+> verify that what was generated actually works — reuse it instead of
+> regenerating, archive it when it goes idle.
+
 | Item | Why | Depends on |
 |---|---|---|
 | **Agent-builder** ⭐ — ✅ **shipped (Slice 17)** | On a reported capability need (`report_capability_gap`'s TTY offer, or a direct `bun run agent-builder "<need>"`), `src/agent-builder/` drafts a new agent definition (`generate.ts`, prompt-injection-guarded) **and suggests a minimal palette-only MCP-server subset to mount** (`suggest-tools.ts`, from the Slice 15 pack) — *"describe a need → the system grows the capability."* Structurally validated (`validate.ts`), consent-gated (review-before-activate — no write without an explicit yes), then written atomically: the agent file, a new `agents/index.ts` registry entry, and a scoped `mcp.json` (`write.ts`, `builder.ts`). Live on the *next* run, not the one that discovered the gap — no same-run activation, no tool-code generation, no OAuth. See [`docs/architecture.md`](architecture.md) §18. | Slices 2–3, B, C ✅ |
 | **Crew/workflow builder** ⭐ — ✅ **shipped (Slice 19)** | Slice 17 grows *individual* specialists only; `src/crew-builder/` extends the same generate→consent→write pattern one level up — describe a **multi-step** need and get a proposed `crews/`/`workflows/` definition wiring **existing and freshly-built** agents together (roles/tasks/process, or a full DAG). Because `CrewDef`/`WorkflowDef` carry live closures and aren't serializable, generation is staged through a declarative, Zod-validated **IR** (`classify`→think-first `analyze`→`plan-nodes`→`plan-edges`) expressed in a small safe-helper vocabulary, gated by a **two-tier validate** (structural, then an LLM-judge goal-alignment check) before a **deterministic, model-free transpiler** renders real TS. Missing member agents are auto-built via the agent-builder, consent-gated per agent. Two triggers: `bun run crew-builder "<need>"` and a TTY-gated `chat.ts` multi-step offer. **Live-verified end to end** — a generated crew was written *and executed* to a correct result. See [`docs/architecture.md`](architecture.md) §19. | Slice 17 ✅ |
-| **Verified "works out of the box"** (next Phase-D slice — **Slice 20**) | Today a generated agent/crew is *structurally* (and, since Slice 19, semantically-judged) valid but never actually run before being handed to the user as a general guarantee — Slice 19's live-verify proved **one** hand-picked case end to end, not a repeatable per-generation check. The path to a genuinely verified "just works": (1) an **execution dry-run** — invoke the freshly-written agent/crew/workflow against a small representative task the moment it's created, before declaring success; (2) a **golden-eval** per generated artifact (a few need→expected-behavior cases, mirroring the verification layer's golden-set pattern, §12); (3) **reuse/archive** — detect when a new need matches an already-generated agent/crew closely enough to reuse it instead of generating a near-duplicate, and archive/prune ones that stop being used. None of these three exist yet. | Slice 19 |
+| **Verified "works out of the box"** ⭐ — ✅ **shipped (Slice 20 — closes Phase D)** | A generated agent/crew used to be *structurally* (and, since Slice 19, semantically-judged) valid but never actually run before being handed to the user — Slice 19's live-verify proved **one** hand-picked case end to end, not a repeatable per-generation check. `src/verified-build/` makes the check per-generation: every builder write is **stage → verify → commit** through a shared cheapest-first gate — (1) an **execution dry-run** invokes the freshly-staged agent/crew/workflow against a benign representative task the moment it's created (bounded; ≤2 self-repair attempts feeding the real runtime error back); (2) a **golden-eval** per generated artifact (3–7 auto-decomposed binary cases, mirroring the verification layer's golden-set pattern §12, judged unanimously 3× by the largest installed model — preferring a different family than the generator; degrades to a `verified: runs` commit when no judge clears the ~24B bar — never blocks); (3) **reuse/archive** — a pre-generation capability-signature cosine check against a per-registry `.generated.json` manifest (≥0.85 confirm-gated reuse · 0.75–0.85 offer, ask reuse-or-build · <0.75 generate) plus `bun run archive [--prune]` for idle artifacts with a more-used near-duplicate (reversible move, per-candidate consent, live-reference-protected across registries). A failed gate registers nothing — the staged file is discarded. See [`docs/architecture.md`](architecture.md) §20. | Slice 19 ✅ |
 
 ## Phase E — Run it always  *(triggers & automation — n8n's identity)*
 
@@ -243,6 +265,7 @@ Pulled in opportunistically as real load demands; not blocking the product line.
 9. ✅ **shipped, Slice 17** — **Agent-builder** ⭐ (Phase D) — the self-extension headline; now safe (guardrails) and useful (integration library). `src/agent-builder/` sequences generate (prompt-injection-guarded) → suggest (palette-only, from the Slice 15 pack) → validate (structural) → consent (mandatory) → write (atomic: agent file + a new `agents/index.ts` registry entry + scoped `mcp.json`), under an `agent.build` telemetry span. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on `chat.ts`'s existing `{kind:'gap'}` outcome (unchanged, purely additive). Safety model: review-before-activate, palette-only tools, no same-run activation (live next run only). See `docs/architecture.md` §18.
 9c. ✅ **shipped, Slice 18** — **Debt wrap-up + MLX completion**. One slice discharging the dischargeable-now deferred work logged through Slice 17: split the overloaded `ProviderKind` into a download `ProviderKind` + an inference `RuntimeKind` (`kind-map.ts` bridges them); made `hf-fetch` **actually persist weights to disk** (atomic `.part`→rename, HF-LFS-oid verify-when-present, single-file GGUF + MLX snapshot, traversal-guarded, retry/stall parity); raised **MLX** to a full inference runtime (`createMlxServerRuntime`, opt-in + degrade-to-Ollama via `fallbackModel`), **live-verified both ways** (direct `mlx_lm.server` + real HF-snapshot download + Ollama regression); wired **LM Studio's download** adapter into `providerFor`; and cleared the accumulated Slice-14/15/16/17 polish (bounded-parallel downloads + `MultiProgressBar`, truthful `provision.*` telemetry, an injectable Metal reader + `bytesPerWeight` 0.6, an engine-enforced read-only sqlite gate via `PRAGMA query_only`, MCP OAuth `authProvider` [contract-tested], `mcp.transport`, an atomic `addPackEntry`, and a consent-gated agent-builder tool-code path writing an inert `.proposal.ts`). Deferred with reasons (below): LM Studio / llama.cpp *inference* runtimes, the live OAuth handshake, GitHub-PAT live-verify, TS-SDK-v2 migration. See `docs/architecture.md` §5/§13/§14/§18.
 9d. ✅ **shipped, Slice 19** — **Crew/workflow builder** ⭐ (Phase D) — self-extension one level up from the agent-builder. `src/crew-builder/` sequences classify (crew vs workflow) → analyze (think-first, prose-only) → plan-nodes → plan-edges (assemble a declarative, Zod-validated IR — `CrewIR`/`WorkflowIR` — never a one-shot `CrewDef`/`WorkflowDef`, since those carry live closures and aren't serializable) → **two-tier validate** (structural, then an LLM-judge goal-alignment check) → consent → `resolve-members` (auto-build genuinely-missing member agents via the agent-builder, per-agent consent, once, after consent) → deterministic model-free `transpile` → atomic `write`, under a `crew.build` telemetry span. A small **safe-helper vocabulary** (`fromInput`/`fromStep`/`fromTemplate`/`whenEquals`/`whenContains`/`whenTruthy`/`mapOver`) is the only closures a model can pick from. The pure graph-cycle gate (`assertAcyclic`) was extracted out of `defineWorkflow`/`defineCrew` into a shared `workflow/define.ts` export, reused by the crew-builder's validator. `CrewMember` gained an optional `agentRef` so a crew member can reuse a registered (or freshly-built) agent. Two triggers: `bun run crew-builder "<need>" [--yes]` and a TTY-gated `chat.ts` multi-step gap-offer (tried before the existing single-agent offer). **Live-verified end to end on Ollama** — the first live run of this pipeline generated a crew, wrote it, and then **executed** it (`runCrew`) to a correct result, surfacing and fixing 4 real defects (a nested-schema key-hint gap in the shared `BuilderModel` seam, under-specified IR prompt constraints, a regeneration loop that didn't catch a throw, and a tool-name/`ToolSet` type mismatch). Full suite 617 pass/4 skip/0 fail. See `docs/architecture.md` §19.
+9e. ✅ **shipped, Slice 20** — **Verified "works out of the box"** ⭐ (Phase D — closes the phase). `src/verified-build/` turns both builders' write step into **stage → verify → commit** through one shared, cheapest-first gate (`gate.ts` `verifyAndCommit`, serving all three `ArtifactKind`s): a **pre-generation reuse check** (a `CapabilitySignature` of the need is embedded via the Slice-12 embedder and cosine-compared against a per-registry `.generated.json` **manifest sidecar** — ≥0.85 ask to reuse the existing artifact (decline → generate), 0.75–0.85 offer it and ask reuse-or-build, <0.75 generate; `--yes` auto-reuses Reuse, declines Offer) → **stage** to a def file only (the builders' `write.ts` modules split into stage/register halves; never the registry index) → **structural** re-check via the existing validators → **execution dry-run** against a benign read-only representative task (`withWallClock`-raced for all kinds; the agent path additionally aborts in flight via a new `runAgent` `abortSignal` seam — crew/workflow are wall-clock-raced only; a bounded **self-repair loop**, ≤2, feeds the real runtime error back into a regeneration keeping the consented name/id) → **golden-eval** (3–7 auto-decomposed binary cases; judge = largest installed model clearing ~24B params, preferring a **different family than the generator**; a case passes only on a unanimous yes over 3 judge runs; **no qualifying judge ⇒ eval skipped, commit marked `verified: runs`** — degrade, never block, never an unconsented pull) → **commit** (index splice + `<name>.golden.json` + manifest upsert) at the earned `VerifiedLevel` (`behaves`/`runs`/`unverified`). A failed gate registers **nothing** and the staged file is discarded; `verify.force` (`--force` on both builder CLIs) downgrades to an `unverified` commit, with a WARNING. The manifest closes two prior gaps (the original need was never persisted; no usage tracking existed); `usage.ts` derives per-artifact use counts from every run's `spans.jsonl`, and `archive.ts` + `bun run archive [--prune]` reversibly archives idle artifacts that have a more-used near-duplicate (per-candidate consent). `build.verify`/`build.archive` telemetry spans; an informational reuse hint on chat's gap offers. In-repo **band-calibration eval** (`reuse.eval.test.ts`) instead of human-labeled judge calibration; plain cosine (tiny registry) instead of SimHash/ANN — deliberate scoping, recorded in §20. See `docs/architecture.md` §20.
 ### Committed forward plan (Slices 20–30) — locked 2026-07-04
 
 This is the full remaining sequence, agreed with the user so direction is not
@@ -260,8 +283,8 @@ or raised to the user as a hard blocker — never silently punted. The pre-Slice
 Slice 26), not license to create more.
 
 10. ✅ **shipped, Slice 19** — **Crew/workflow builder** ⭐ (Phase D) — Slice 17 only grew *individual* specialists; `src/crew-builder/` extends the generate→consent→write pattern one level up: describe a multi-step need, get a proposed `crews/`/`workflows/` definition composing existing + freshly-built agents, review it, write it. **Key design constraint resolved:** `WorkflowDef`/`CrewDef` carry live closures (`input`/`predicate`/`over`) + Zod schemas and are **not JSON-serializable**, so the builder emits TS source via a **declarative IR that compiles to those types** (staged generation + a deterministic, model-free transpiler + a small safe-helper vocabulary for the closures) — not a one-shot emit. Live-verified end to end. See item 9d above / `docs/architecture.md` §19.
-11. **Verified "works out of the box"** (Phase D + Phase-A eval, **Slice 20 — next**) — an execution **dry-run** the moment an agent/crew is written, a per-agent/crew **golden-eval** (mirrors the verification golden-set pattern, §12), and **reuse/archive** (reuse a near-duplicate instead of generating; prune unused). Folds in Phase-A's deferred **telemetry+eval harness**. Moves validation from structural → behavioral; closes Phase D.
-12. **Graceful degradation + retries** (Phase A, **Slice 21**) — the last Phase-A gap: retry policies, fallback-model degradation, partial-failure handling across delegation/workflow. Reliability the daemon (Slice 24) leans on.
+11. ✅ **shipped, Slice 20** — **Verified "works out of the box"** (Phase D + Phase-A eval) — an execution **dry-run** the moment an agent/crew is written, a per-artifact **golden-eval** (mirrors the verification golden-set pattern, §12), and **reuse/archive** (reuse a near-duplicate instead of generating; archive unused near-duplicates, reversibly). Partially folds in Phase-A's deferred **telemetry+eval harness** (per-artifact evals + spans-derived usage; the routing-accuracy harness over the built-in orchestrator is still open). Moved validation from structural → behavioral; **closes Phase D**. See item 9e above / `docs/architecture.md` §20.
+12. **Graceful degradation + retries** (Phase A, **Slice 21 — next**) — the last Phase-A gap: retry policies, fallback-model degradation, partial-failure handling across delegation/workflow. Reliability the daemon (Slice 24) leans on.
 13. **Codex heavy-lifting backup** (Phase C, **Slice 22**) — the last Phase-C item: tier-2 cloud delegate via `@openai/codex-sdk` (consent + cost design) for jobs too big for local models.
 14. **Dependency major-upgrade** (foundation, **Slice 23**) — `ai` 6→7, `typescript` 5→6, `@ai-sdk/mcp` 1→2, `@ai-sdk/openai-compatible` 1→3; re-green all tests. Placed **immediately before Phase E** deliberately: AI SDK 7's headline is `WorkflowAgent` + durable/resumable execution — the exact substrate Phase E needs. Doing it earlier is churn with no payoff. See `deferred-dependency-major-upgrades` memory.
 15. **Always-on daemon + task queue + resumable jobs + secure remote access** (Phase E, **Slice 24**) — `--resume <run-id>` (run store/journal already replay-capable), built on the Slice-23 `WorkflowAgent`. n8n's always-on identity begins here. **Includes secure remote access (user requirement 2026-07-04): drive the Mac-Mini daemon from anywhere** — an authenticated network entry point (API surface + auth/token; tunnel such as Tailscale/Cloudflare or reverse proxy rather than raw port exposure; TLS). Distinct from Slice 30's multi-machine *delegation* and A2A. Carries a real security/threat-model surface, so it gets explicit design in the slice spec (may split into its own sub-slice if scope demands).
@@ -279,9 +302,12 @@ Slice 26), not license to create more.
 > hand-written definition required. Slice 17 proved the *generate a
 > specialist* half; **Slice 19's crew/workflow builder proved the *compose a
 > crew/workflow* half** (live-verified — a generated crew was written and
-> actually executed to a correct result); the verified-out-of-the-box work
-> (Slice 20) closes the remaining gap between "structurally/semantically
-> valid" and "reliably verified to work every time."
+> actually executed to a correct result); and **Slice 20's verified-build
+> gate closed the remaining gap** between "structurally/semantically valid"
+> and "verified to actually run" — every generated artifact is now
+> dry-run, golden-evaled (judge permitting), reuse-checked, and
+> usage-tracked before/after it lands. The **D half of the D→E arc is done**;
+> what remains is the E half: run it always (daemon, triggers, schedule).
 
 Modalities & multi-machine (Phases F + the deferred A2A) come in on demand —
 after the compose→verify→automate core exists.
@@ -328,9 +354,9 @@ Recorded so nothing is silently lost (see the Slice-15 spec §12 + `docs/archite
 
 Recorded so nothing is silently lost (see `docs/architecture.md` §18):
 - ~~**Crew/workflow builder**~~ — ✅ **shipped (Slice 19)**: `src/crew-builder/` extends the same generate→consent→write pattern one level up, composing generated + existing agents into a multi-step crew or workflow. See item 9d / `docs/architecture.md` §19.
-- **Execution dry-run at write-time** — a freshly-written agent/crew is validated structurally (+ semantically, since Slice 19's goal-alignment judge) but never actually run before being handed to the user as a *repeatable, general* guarantee; no proof it behaves as intended every time. Invoking it against a small representative task at build time is the first step toward a genuinely *verified* "works out of the box." **Slice 20.**
-- **Per-agent/crew golden-eval** — mirror the verification layer's golden-set pattern (§12): a few need→expected-behavior cases per generated artifact, run before declaring the build a success. **Slice 20.**
-- **Reuse / archive** — detect when a new need is close enough to an already-generated agent/crew to reuse it rather than generate a near-duplicate; archive/prune generated artifacts that stop being used. **Slice 20.**
+- ~~**Execution dry-run at write-time**~~ — ✅ **shipped (Slice 20)**: the verified-build gate stages every freshly-written agent/crew/workflow and **really executes** it against a benign representative task before it may commit, with a bounded (≤2) self-repair loop feeding the real runtime error back. See `docs/architecture.md` §20.
+- ~~**Per-agent/crew golden-eval**~~ — ✅ **shipped (Slice 20)**: 3–7 auto-decomposed binary cases per generated artifact (`<name>.golden.json`), judged unanimously 3× by the largest installed model, preferring a different family than the generator; skipped (commit marked `verified: runs`) when no judge clears the ~24B bar — degrade, never block.
+- ~~**Reuse / archive**~~ — ✅ **shipped (Slice 20)**: a pre-generation capability-signature cosine check against the per-registry `.generated.json` manifest (≥0.85 confirm-gated reuse · 0.75–0.85 offer, ask reuse-or-build · <0.75 generate) heads off near-duplicate generation; `bun run archive [--prune]` reversibly archives idle artifacts that have a more-used near-duplicate (per-candidate consent).
 - **Same-run retry of the original task** — after a chat gap-offer writes a new agent, the user must manually re-run their task; the new agent isn't picked up mid-process. Deliberately deferred (the "no same-run activation" safety property), not a bug. (Slice 18 added a bounded same-run *regeneration* on validation failure — distinct from same-run *activation*, which stays off.)
 - **OAuth-gated server suggestions** — the agent-builder only ever suggests from the palette-only, static-key-or-keyless pack entries (same posture as Slice 15's own OAuth deferral above); it doesn't gain a credential flow of its own.
 - ~~**Tool-code generation**~~ — ✅ **shipped, declawed (Slice 18)**: `buildTool` (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts`) can now generate a *new* tool implementation, but only behind mandatory consent and only to an **inert `tool-proposals/<name>.proposal.ts`** — never wired into any registry/index/`mcp.json`, so there is **no same-run activation**. A `bun run` CLI entry point for it is still a future step.
@@ -343,6 +369,21 @@ Recorded so nothing is silently lost (see the Slice-19 ledger MINORs + spec non-
 - **`assertAcyclic`'s error messages are id-only** (no step/task name) — a DX nicety, not a correctness gap; tests pass either way.
 - **`Shape = 'crew' | 'workflow'` is a string-literal union, not a string enum** — a defensible internal discriminator (mirrors the pre-existing `RepoShape`/`StepError` precedent), flagged only for CLAUDE.md's "prefer enum for finite named sets" style guidance.
 - **Member-scoped MCP tool resolution doesn't exist** — a crew member's validated tool-name strings have nowhere to resolve to a real per-member `ToolSet` yet, so `transpile.ts` deliberately omits the field (fix #4 from the live-verify, §19); every generated crew member runs with crew-level tools only until this exists.
+
+### Slice 20 follow-ons (logged scoping decisions + carried TODOs, not deferred features)
+
+Per the full-throttle posture, Slice 20 shipped complete; these are the
+recorded scoping decisions and controller-logged TODOs (see
+`docs/architecture.md` §20 "Deliberate scoping"):
+- **Staged artifacts mount no real MCP tools during dry-run/golden-eval** — the staged `Agent` (`agentFromProposal`) and staged workflow agent-steps run the model loop without scoped servers; spinning up MCP clients for a staged, not-yet-registered artifact is the logged next step toward fully-faithful dry-runs of tool-dependent agents.
+- **`DRY_RUN_MS` is a sensible default, not adaptive** — the dry-run/golden-eval bound is a 45 s default with an `AGENT_DRY_RUN_MS` env override; the spec's aspiration of computing it from observed model speed is not implemented.
+- **Usage is span-derived, not folded back into the manifest** — `aggregateUsage` derives `lastUsedMs`/`useCount` from every run's `spans.jsonl` at archive time; the manifest's own usage fields stay 0, so the reuse tie-break by `useCount` is currently inert.
+- **KNOWN MINOR — failed-gate discard can delete a pre-existing file:** the gate's staged-file discard removes the file at the staged path; a *pre-existing, unregistered, hand-written* file sitting at the exact generated name would be overwritten by staging and then deleted on a failed gate. Narrow edge; a pre-stage existence guard is a deferred follow-on.
+- **Judge *family* is a tag heuristic** — parsed from the model tag (no model-family registry exists in the repo); the cross-family *preference* (it falls back to same-family/largest when nothing else clears the bar) is only as good as that parse.
+- **Plain cosine, not SimHash/ANN** — deliberate keep-decision for tiny registries (linear scan over manifest vectors is exact and cheap); revisit only if a registry grows past tens of artifacts.
+- **In-repo band-calibration eval instead of human-labeled judge calibration** — `tests/verified-build/reuse.eval.test.ts` (10 labeled need-pairs) calibrates the reuse/offer bands; no human-labeled κ study (same posture as §12's in-repo golden set).
+- **Representative-task selection is a heuristic** — a read-only smoke prompt derived from the signature's purpose, not a learned task picker.
+- **`Shape` remains a string-literal union** — carry-forward minor from Slice 19 (see above).
 
 ### Slice 18 follow-ons (deferred deliberately — MUST be included in future, not dropped)
 

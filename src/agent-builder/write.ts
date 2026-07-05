@@ -25,7 +25,7 @@ function factoryName(p: AgentProposal): string {
   return `create${pascalCase(p.name)}Agent`;
 }
 
-function atomicWrite(path: string, content: string): void {
+export function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, content);
   renameSync(tmp, path);
@@ -129,25 +129,37 @@ function scopeMcp(mcpConfigPath: string, p: AgentProposal): void {
   atomicWrite(mcpConfigPath, `${JSON.stringify(cfg, null, 2)}\n`);
 }
 
-/** Write the generated agent file, register it in agents/index.ts, and add/scope
- *  its suggested pack servers in mcp.json. Atomic per file. Returns files written. */
-export function writeAgent(p: AgentProposal, paths: WritePaths): string[] {
+function validateName(name: string, context: string): void {
   // Defense-in-depth: write.ts must not assume validate.ts already ran on
   // every call path. A bad name here would otherwise produce a syntactically
   // broken generated file, a broken import specifier/registry key, and (via
-  // `${p.name}.ts` in the on-disk path) a path-traversal write.
-  if (!NAME_PATTERN.test(p.name)) {
+  // `${name}.ts` in the on-disk path) a path-traversal write.
+  if (!NAME_PATTERN.test(name)) {
     throw new Error(
-      `writeAgent: invalid agent name ${JSON.stringify(p.name)} — must match ${NAME_PATTERN}`,
+      `${context}: invalid agent name ${JSON.stringify(name)} — must match ${NAME_PATTERN}`,
     );
   }
-  // Check the index markers BEFORE writing the agent file: if registration
-  // would fail, we must not leave an orphan agents/<name>.ts on disk.
-  const idx = assertIndexMarkers(paths.indexPath);
-  const written: string[] = [];
+}
+
+/** Write ONLY the generated agent file (agents/<name>.ts) via atomicWrite —
+ *  no index splice, no mcp scoping. Split out (verified-build gate) so a
+ *  candidate agent can be staged to disk and dry-run/eval'd BEFORE it is
+ *  registered anywhere live — see `registerAgent`. Returns the path written. */
+export function writeAgentFile(p: AgentProposal, paths: WritePaths): string {
+  validateName(p.name, 'writeAgentFile');
   const agentPath = join(paths.agentsDir, `${p.name}.ts`);
   atomicWrite(agentPath, renderAgentFile(p));
-  written.push(agentPath);
+  return agentPath;
+}
+
+/** Register an already-written agent file in agents/index.ts and add/scope its
+ *  suggested pack servers in mcp.json — the side effect that makes the agent
+ *  live. Split out of `writeAgent` so the verify-then-commit gate can call
+ *  this ONLY after a staged file has earned it. */
+export function registerAgent(p: AgentProposal, paths: WritePaths): string[] {
+  validateName(p.name, 'registerAgent');
+  const idx = assertIndexMarkers(paths.indexPath);
+  const written: string[] = [];
   registerInIndex(paths.indexPath, idx, p);
   written.push(paths.indexPath);
   if (p.suggestedServers.length > 0) {
@@ -155,4 +167,17 @@ export function writeAgent(p: AgentProposal, paths: WritePaths): string[] {
     written.push(paths.mcpConfigPath);
   }
   return written;
+}
+
+/** Write the generated agent file, register it in agents/index.ts, and add/scope
+ *  its suggested pack servers in mcp.json. Atomic per file. Returns files written.
+ *  Equivalent to `writeAgentFile` + `registerAgent` — the one-shot entry point
+ *  every non-gated caller (and these tests) still uses. */
+export function writeAgent(p: AgentProposal, paths: WritePaths): string[] {
+  validateName(p.name, 'writeAgent');
+  // Check the index markers BEFORE writing the agent file: if registration
+  // would fail, we must not leave an orphan agents/<name>.ts on disk.
+  assertIndexMarkers(paths.indexPath);
+  const agentPath = writeAgentFile(p, paths);
+  return [agentPath, ...registerAgent(p, paths)];
 }

@@ -6,11 +6,13 @@ import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
+import { RuntimeKind } from '../core/types.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
+import { makeEmbedder } from '../memory/embed.ts';
 import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
 import { detectMissing } from '../provisioning/detect-missing.ts';
 import { runProvision } from '../provisioning/provisioner.ts';
@@ -31,6 +33,10 @@ import {
   isModelInstalled,
   listLoadedModels,
 } from '../resource/ollama-control.ts';
+import { runtimeFor } from '../runtime/registry.ts';
+import { reuseDecision } from '../verified-build/reuse.ts';
+import type { CapabilitySignature } from '../verified-build/types.ts';
+import { ReuseKind } from '../verified-build/types.ts';
 import { shouldOfferCrew } from './offer-crew.ts';
 import { runChat } from './run-chat.ts';
 import { createSelectHook } from './select-hook.ts';
@@ -77,6 +83,38 @@ export async function maybeAutoProvision(
   if (!ok) return;
   const host = await detectHost();
   await runProvision({ autoYes, deps: buildProvisionDeps(host, { autoYes }) });
+}
+
+/** Best-effort reuse hint text for a need against the registry manifests, or
+ *  undefined when nothing lands in the Offer/Reuse bands. Informational only —
+ *  it never gates the build offers that follow.
+ *  TODO(reuse-hint): this uses a purpose-only signature (the raw need text)
+ *  rather than signatureFromNeed(), which would distill tools/roles via an
+ *  extra LLM call — too heavy before the user has consented to a build. */
+export async function reuseHintText(
+  need: string,
+  embed: (t: string[]) => Promise<number[][]>,
+  dirs: readonly string[] = ['agents', 'crews', 'workflows'],
+): Promise<string | undefined> {
+  const sig: CapabilitySignature = {
+    purpose: need,
+    tools: [],
+    modelTier: '',
+    io: '',
+    roles: [],
+  };
+  let best: { match: string; similarity: number } | undefined;
+  for (const dir of dirs) {
+    const decision = await reuseDecision(sig, { embed, dir });
+    if (decision.kind === ReuseKind.Generate) continue;
+    if (decision.match === undefined) continue;
+    if (best === undefined || decision.similarity > best.similarity) {
+      best = { match: decision.match, similarity: decision.similarity };
+    }
+  }
+  if (best === undefined) return undefined;
+  const pct = Math.round(best.similarity * 100);
+  return `💡 An existing ${best.match} looks similar (${pct}%) — you may not need a new one.`;
 }
 
 async function main(): Promise<void> {
@@ -163,6 +201,27 @@ async function main(): Promise<void> {
           console.log(result.text);
         } else if (result.kind === 'gap') {
           console.log(result.message);
+          // Reuse hint before any build offer: if a manifest entry already
+          // looks similar, say so. Guarded on the embed model being installed
+          // (never speculatively pull) and best-effort (never blocks the flow).
+          try {
+            const embedModel =
+              process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
+            if (await isModelInstalled(embedModel)) {
+              const embedder = makeEmbedder({
+                ensureReady: (d) => manager.ensureReady(d),
+                control: runtimeFor(RuntimeKind.Ollama).control,
+                model: embedModel,
+              });
+              const hint = await reuseHintText(
+                `${result.missingCapability} ${task}`,
+                embedder.embed,
+              );
+              if (hint !== undefined) console.log(hint);
+            }
+          } catch {
+            // Hint is informational only; an embed failure must not block the offers.
+          }
           if (
             interactiveTTY() &&
             shouldOfferCrew(`${result.missingCapability} ${task}`)
