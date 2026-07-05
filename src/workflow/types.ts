@@ -29,6 +29,11 @@ type StepBase<O> = {
   /** Per-step override of the engine's memory auto-write policy. Only takes
    *  effect when `deps.memory` is set; default true (inherits engine default). */
   persistMemory?: boolean;
+  /** Opt-in retry-on-Transient-failure (Tool steps only; see D5 — never for
+   *  Agent-turn steps). Default off. */
+  retry?: boolean;
+  /** Per-step wall-clock override (ms); default `runTimeoutMs()`. */
+  timeout?: number;
 };
 
 export type AgentStep<O = unknown> = StepBase<O> & {

@@ -4,6 +4,8 @@ import { type BeforeDelegate, runGuardedAgent } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import { MemoryKind } from '../memory/types.ts';
+import { breakerFor } from '../reliability/breaker.ts';
+import { withRetry } from '../reliability/retry.ts';
 import { ATTR, annotateStep, withToolSpan } from '../telemetry/spans.ts';
 import {
   type MapSubStep,
@@ -139,9 +141,13 @@ export function runStepByKind(
       if (!tool?.execute) {
         return Promise.reject(new WorkflowError(`unknown tool: ${step.tool}`));
       }
-      return withToolSpan(step.tool, () =>
-        callTool(tool, step.input(ctx), step.id),
-      );
+      const guarded = () =>
+        breakerFor(`tool:${step.tool}`).run(() =>
+          withToolSpan(step.tool, () =>
+            callTool(tool, step.input(ctx), step.id),
+          ),
+        );
+      return step.retry ? withRetry(guarded) : guarded();
     }
     case StepKind.Branch: {
       const taken = step.predicate(ctx) ? 'whenTrue' : 'whenFalse';
