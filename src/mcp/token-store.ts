@@ -74,6 +74,6 @@ export function setServerAuth(
   path: string = tokenStorePath(),
 ): void {
   const store = readTokenStore(path);
-  store[server] = rec;
+  store[server] = { ...store[server], ...rec };
   writeTokenStore(store, path);
 }

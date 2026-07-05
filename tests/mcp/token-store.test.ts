@@ -49,12 +49,19 @@ describe('token-store', () => {
     expect(store.b?.tokens?.access_token).toBe('b-token');
   });
 
-  it('setServerAuth overwrites the record for the same server', () => {
-    const path = join(tmpdir(), `mcp-tokens-overwrite-${Date.now()}.json`);
+  it('setServerAuth field-merges into the existing record for the same server', () => {
+    const path = join(tmpdir(), `mcp-tokens-merge-fields-${Date.now()}.json`);
     setServerAuth('a', { codeVerifier: 'v1' }, path);
-    setServerAuth('a', { tokens: { access_token: 'new' } }, path);
+    setServerAuth(
+      'a',
+      { tokens: { access_token: 'tok', token_type: 'Bearer' } },
+      path,
+    );
     const rec = getServerAuth('a', path);
-    expect(rec.tokens?.access_token).toBe('new');
+    // The codeVerifier saved by the first call must survive the second call's
+    // save of tokens — a whole-record replace would wipe it mid-handshake.
+    expect(rec.codeVerifier).toBe('v1');
+    expect(rec.tokens?.access_token).toBe('tok');
   });
 
   it('writeTokenStore creates the parent directory with mode 0700', () => {
