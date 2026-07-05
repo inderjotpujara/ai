@@ -1,140 +1,89 @@
-### Task 9: transpile IR → TypeScript (`transpile.ts`)
+### Task 9: Telemetry — reliability attrs + recordDegrade
 
 **Files:**
-- Create: `src/crew-builder/transpile.ts`
-- Test: `tests/crew-builder/transpile.test.ts`
+- Modify: `src/telemetry/spans.ts` (add ATTR keys + `recordDegrade`)
+- Test: `tests/telemetry/reliability-spans.test.ts`
 
 **Interfaces:**
-- Consumes: `CrewIR`/`WorkflowIR`, safe-helper names.
-- Produces: `transpile(ir, shape): string` — the full TS module source. Deterministic; no model. Output must re-parse through `defineCrew`/`defineWorkflow` (Task 10 contract test proves it).
+- Consumes: `DegradeEvent`, `DegradeKind` from `src/reliability/ledger.ts`; existing `ATTR` object + active-span helpers.
+- Produces: new `ATTR` keys `RELIABILITY_RETRY_ATTEMPTS='retry.attempts'`, `RELIABILITY_RETRY_LANE='retry.lane'`, `RELIABILITY_BREAKER_STATE='breaker.state'`, `RELIABILITY_DEGRADE_FROM='degrade.from'`, `RELIABILITY_DEGRADE_TO='degrade.to'`, `RELIABILITY_DEGRADE_REASON='degrade.reason'`, `RELIABILITY_DROPPED_AGENT='partial_failure.dropped_agent'`, `ERROR_TYPE='error.type'`; `recordDegrade(event: DegradeEvent): void` (adds a span event `'reliability.degrade'` on the active span with the standard `error.type` attribute).
 
-- [ ] **Step 1: Write the failing test** (golden output + shape assertions)
+- [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/crew-builder/transpile.test.ts
-import { expect, test } from 'bun:test';
-import { transpile } from '../../src/crew-builder/transpile.ts';
-import type { CrewIR, WorkflowIR } from '../../src/crew-builder/ir.ts';
+// tests/telemetry/reliability-spans.test.ts
+import { describe, expect, it } from 'bun:test';
+import { ATTR, recordDegrade } from '../../src/telemetry/spans.ts';
+import { DegradeKind } from '../../src/reliability/ledger.ts';
 
-test('workflow transpile renders defineWorkflow + safe-helper calls', () => {
-  const ir: WorkflowIR = { id: 'fetch_then_sum', description: 'd', steps: [
-    { kind: 'tool', id: 'fetch', tool: 'fetch', input: { kind: 'fromInput' } },
-    { kind: 'agent', id: 'sum', agent: 'web_fetch', dependsOn: ['fetch'], input: { kind: 'fromStep', ref: 'fetch' } },
-  ] };
-  const src = transpile(ir, 'workflow');
-  expect(src).toContain('export default defineWorkflow(');
-  expect(src).toContain('kind: StepKind.Tool');
-  expect(src).toContain('input: fromInput()');
-  expect(src).toContain("input: fromStep(\"fetch\")");
-  expect(src).toContain('"fetch_then_sum"');
-});
-
-test('crew transpile renders defineCrew + members (inline + agentRef)', () => {
-  const ir: CrewIR = { id: 'rc', process: 'sequential',
-    members: [{ name: 'researcher', role: 'r', goal: 'g', backstory: 'b', requires: ['tools'] }],
-    tasks: [{ id: 'gather', description: 'd', expectedOutput: 'o', member: 'researcher' }] };
-  const src = transpile(ir, 'crew');
-  expect(src).toContain('export default defineCrew(');
-  expect(src).toContain('CrewProcess.Sequential');
-  expect(src).toContain('"researcher"');
+describe('reliability telemetry', () => {
+  it('exposes reliability ATTR keys', () => {
+    expect(ATTR.RELIABILITY_DEGRADE_REASON).toBe('degrade.reason');
+    expect(ATTR.RELIABILITY_DROPPED_AGENT).toBe('partial_failure.dropped_agent');
+    expect(ATTR.ERROR_TYPE).toBe('error.type');
+  });
+  it('recordDegrade does not throw without an active span', () => {
+    expect(() =>
+      recordDegrade({ kind: DegradeKind.AgentDropped, subject: 'a', reason: 'down' }),
+    ).not.toThrow();
+  });
 });
 ```
 
-- [ ] **Step 2: Run — FAIL.**
+- [ ] **Step 2: Run test to verify it fails**
 
-- [ ] **Step 3: Implement** — every string via `JSON.stringify`; StepKind/CrewProcess as member forms; input/predicate/over rendered as safe-helper calls. (Full renderer; verify agent-step ref resolution against the safe-helpers module import path `../src/crew-builder/safe-helpers.ts`.)
+Run: `bun test tests/telemetry/reliability-spans.test.ts`
+Expected: FAIL — `ATTR.RELIABILITY_DEGRADE_REASON` undefined / `recordDegrade` not exported.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/telemetry/spans.ts`, add to the `ATTR` object (before the closing `} as const;`):
 
 ```ts
-// src/crew-builder/transpile.ts
-import type { CrewIR, InputDescriptor, PredicateDescriptor, WorkflowIR } from './ir.ts';
-import type { Shape } from './types.ts';
+  // Reliability (Slice 21)
+  RELIABILITY_RETRY_ATTEMPTS: 'retry.attempts',
+  RELIABILITY_RETRY_LANE: 'retry.lane',
+  RELIABILITY_BREAKER_STATE: 'breaker.state',
+  RELIABILITY_DEGRADE_FROM: 'degrade.from',
+  RELIABILITY_DEGRADE_TO: 'degrade.to',
+  RELIABILITY_DEGRADE_REASON: 'degrade.reason',
+  RELIABILITY_DROPPED_AGENT: 'partial_failure.dropped_agent',
+  ERROR_TYPE: 'error.type',
+```
 
-const j = (v: unknown): string => JSON.stringify(v);
+Add the recorder (near `recordGuardrailViolation`), importing the types at the top of the file:
 
-function renderInput(d: InputDescriptor): string {
-  if (d.kind === 'fromInput') return 'fromInput()';
-  if (d.kind === 'fromStep') return `fromStep(${j(d.ref)})`;
-  return `fromTemplate(${j(d.template)})`;
-}
-function renderPredicate(d: PredicateDescriptor): string {
-  if (d.kind === 'whenEquals') return `whenEquals(${j(d.ref)}, ${j(d.value)})`;
-  if (d.kind === 'whenContains') return `whenContains(${j(d.ref)}, ${j(d.substr)})`;
-  return `whenTruthy(${j(d.ref)})`;
-}
-const KIND: Record<string, string> = { agent: 'StepKind.Agent', tool: 'StepKind.Tool', branch: 'StepKind.Branch', map: 'StepKind.Map' };
+```ts
+import type { DegradeEvent } from '../reliability/ledger.ts';
+```
 
-function renderWorkflowStep(s: WorkflowIR['steps'][number]): string {
-  const dep = 'dependsOn' in s && s.dependsOn ? `    dependsOn: ${j(s.dependsOn)},\n` : '';
-  const head = `  {\n    id: ${j(s.id)},\n    kind: ${KIND[s.kind]},\n${dep}`;
-  if (s.kind === 'agent') return `${head}    agent: ${j(s.agent)},\n    input: ${renderInput(s.input)},\n    output: z.string(),\n${s.verify ? '    verify: true,\n' : ''}  }`;
-  if (s.kind === 'tool') return `${head}    tool: ${j(s.tool)},\n    input: ${renderInput(s.input)},\n    output: z.unknown(),\n  }`;
-  if (s.kind === 'branch') return `${head}    predicate: ${renderPredicate(s.predicate)},\n    whenTrue: ${j(s.whenTrue)},\n    whenFalse: ${j(s.whenFalse)},\n    output: z.unknown(),\n  }`;
-  // map
-  const sub = s.step.kind === 'agent'
-    ? `{ kind: StepKind.Agent, agent: ${j(s.step.agent)}, input: ${renderInput(s.step.input)}, output: z.string() }`
-    : `{ kind: StepKind.Tool, tool: ${j(s.step.tool)}, input: ${renderInput(s.step.input)}, output: z.unknown() }`;
-  return `${head}    over: mapOver(${j(s.over.ref)}),\n    step: ${sub},\n    output: z.unknown(),\n  }`;
-}
-
-function transpileWorkflow(ir: WorkflowIR): string {
-  const steps = ir.steps.map(renderWorkflowStep).join(',\n');
-  return `import { z } from 'zod';
-import { defineWorkflow } from '../src/workflow/define.ts';
-import { StepKind } from '../src/workflow/types.ts';
-import { fromInput, fromStep, fromTemplate, mapOver, whenContains, whenEquals, whenTruthy } from '../src/crew-builder/safe-helpers.ts';
-
-// Generated by the crew/workflow-builder (Slice 19). Safe to edit by hand.
-export default defineWorkflow({
-  id: ${j(ir.id)},${ir.description ? `\n  description: ${j(ir.description)},` : ''}
-  steps: [
-${steps},
-  ],
-});
-`;
-}
-
-function transpileCrew(ir: CrewIR): string {
-  const members = ir.members.map((m) => {
-    const tools = m.tools && m.tools.length > 0 ? `,\n      tools: ${j(m.tools)}` : '';
-    const ref = m.agentRef ? `,\n      agentRef: ${j(m.agentRef)}` : '';
-    return `    {\n      name: ${j(m.name)},\n      role: ${j(m.role)},\n      goal: ${j(m.goal)},\n      backstory: ${j(m.backstory)},\n      requires: [Capability.Tools],\n      prefer: PreferPolicy.LargestThatFits${ref}${tools},\n    }`;
-  }).join(',\n');
-  const tasks = ir.tasks.map((t) => {
-    const dep = t.dependsOn ? `,\n      dependsOn: ${j(t.dependsOn)}` : '';
-    return `    {\n      id: ${j(t.id)},\n      description: ${j(t.description)},\n      expectedOutput: ${j(t.expectedOutput)},\n      member: ${j(t.member)}${dep},\n      output: z.string(),${t.verify ? '\n      verify: true,' : ''}\n    }`;
-  }).join(',\n');
-  const proc = ir.process === 'hierarchical' ? 'CrewProcess.Hierarchical' : 'CrewProcess.Sequential';
-  return `import { z } from 'zod';
-import { Capability, PreferPolicy } from '../src/core/types.ts';
-import { defineCrew } from '../src/crew/define.ts';
-import { CrewProcess } from '../src/crew/types.ts';
-
-// Generated by the crew/workflow-builder (Slice 19). Safe to edit by hand.
-export default defineCrew({
-  id: ${j(ir.id)},${ir.description ? `\n  description: ${j(ir.description)},` : ''}
-  process: ${proc},
-  members: [
-${members},
-  ],
-  tasks: [
-${tasks},
-  ],
-});
-`;
-}
-
-export function transpile(ir: CrewIR | WorkflowIR, shape: Shape): string {
-  return shape === 'crew' ? transpileCrew(ir as CrewIR) : transpileWorkflow(ir as WorkflowIR);
+```ts
+/** Record a degradation event on the active span (mirrors recordGuardrailViolation). */
+export function recordDegrade(event: DegradeEvent): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.addEvent('reliability.degrade', {
+    [ATTR.ERROR_TYPE]: event.kind,
+    'degrade.subject': event.subject,
+    [ATTR.RELIABILITY_DEGRADE_REASON]: event.reason,
+    ...(event.detail ? { 'degrade.detail': event.detail } : {}),
+  });
 }
 ```
 
-- [ ] **Step 4: Run — PASS** (`bun test tests/crew-builder/transpile.test.ts && bun run typecheck`).
+(If `trace` is not already imported in the module, reuse the existing import used by `recordGuardrailViolation`/`getActiveSpan`.)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bun test tests/telemetry/reliability-spans.test.ts`
+Expected: PASS (2 tests).
+
+- [ ] **Step 5: Typecheck, lint, commit**
 
 ```bash
-git add src/crew-builder/transpile.ts tests/crew-builder/transpile.test.ts
-git commit -m "feat(crew-builder): deterministic IR->TS transpiler"
+bun run typecheck && bun run lint:file -- "src/telemetry/spans.ts" "tests/telemetry/reliability-spans.test.ts"
+git add src/telemetry/spans.ts tests/telemetry/reliability-spans.test.ts
+git commit -m "feat(telemetry): reliability attrs + recordDegrade"
 ```
 
 ---

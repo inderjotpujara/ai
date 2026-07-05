@@ -1,46 +1,89 @@
-### Task 10: transpiler↔engine contract test (round-trip)
+### Task 10: Migrate provisioning onto reliability/{retry,timeout}
 
 **Files:**
-- Test: `tests/crew-builder/transpile-contract.test.ts` (no new source)
+- Modify: `src/provisioning/supervisor.ts` (re-export from reliability; keep `checkDiskSpace`)
+- Modify: `src/provisioning/providers/ollama.ts` (use shared `defaultDownloadRetry()` + `IdleWatchdog`)
+- Modify: `src/provisioning/providers/hf-fetch.ts` (same)
+- Create: `src/reliability/download-retry.ts` (shared download retry config)
+- Test: `tests/reliability/download-retry.test.ts`; existing `tests/provisioning/supervisor.test.ts` must still pass.
 
 **Interfaces:**
-- Consumes: `transpile` (Task 9), the generated source, `defineCrew`/`defineWorkflow`.
+- Consumes: `withRetry`, `abortableSleep` (retry.ts); `IdleWatchdog` (timeout.ts).
+- Produces: `defaultDownloadRetry(): { attempts: number; baseMs: number; capMs: number; jitter: () => number }`; `downloadStallMs(): number`.
+- `supervisor.ts` re-exports `withRetry`, `abortableSleep`, and a back-compat `StallWatchdog` alias = `IdleWatchdog` so existing imports keep working.
 
-- [ ] **Step 1: Write the test** — write transpiled source to a temp file, dynamic-`import()` it, assert the default export is a valid def (the `define*` call inside runs at import → throws on an invalid graph).
+- [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/crew-builder/transpile-contract.test.ts
-import { expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { transpile } from '../../src/crew-builder/transpile.ts';
-import type { WorkflowIR } from '../../src/crew-builder/ir.ts';
+// tests/reliability/download-retry.test.ts
+import { describe, expect, it } from 'bun:test';
+import { defaultDownloadRetry, downloadStallMs } from '../../src/reliability/download-retry.ts';
 
-test('generated workflow source imports + defines without throwing', async () => {
-  const ir: WorkflowIR = { id: 'ct', steps: [
-    { kind: 'tool', id: 'f', tool: 'fetch', input: { kind: 'fromInput' } },
-    { kind: 'agent', id: 'a', agent: 'web_fetch', dependsOn: ['f'], input: { kind: 'fromStep', ref: 'f' } },
-  ] };
-  // NOTE: generated imports are '../src/...'; place the temp file at repo root depth-1 so relative paths resolve.
-  const dir = mkdtempSync(join(process.cwd(), 'workflows', '.tmp-'));
-  const file = join(dir, 'gen.ts');
-  writeFileSync(file, transpile(ir, 'workflow'));
-  const mod = await import(file);
-  expect(mod.default.id).toBe('ct');
-  expect(mod.default.steps.length).toBe(2);
+describe('download retry defaults', () => {
+  it('provides positive backoff parameters', () => {
+    const r = defaultDownloadRetry();
+    expect(r.attempts).toBeGreaterThan(0);
+    expect(r.capMs).toBeGreaterThanOrEqual(r.baseMs);
+    expect(typeof r.jitter()).toBe('number');
+    expect(downloadStallMs()).toBeGreaterThan(0);
+  });
 });
 ```
 
-> NOTE for implementer: the generated files use `'../src/...'` imports (they live in `crews/`/`workflows/` at repo root). The temp file MUST be created at the same directory depth (inside `workflows/`), as above, so relative imports resolve. Clean up the temp dir in an `afterEach`/`finally` with `rmSync(dir, { recursive: true, force: true })`. Add a crew variant of this test too.
+- [ ] **Step 2: Run test to verify it fails**
 
-- [ ] **Step 2: Run — FAIL then iterate** until the generated source imports cleanly. If it fails, the transpiler (Task 9) has a bug — fix Task 9's renderer, not the test.
+Run: `bun test tests/reliability/download-retry.test.ts`
+Expected: FAIL — cannot resolve `download-retry.ts`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Write the shared config + migrate**
+
+```ts
+// src/reliability/download-retry.ts
+import { retryBaseMs, retryCapMs } from './config.ts';
+
+/** Shared download retry shape (was duplicated in ollama.ts + hf-fetch.ts). */
+export function defaultDownloadRetry(): {
+  attempts: number;
+  baseMs: number;
+  capMs: number;
+  jitter: () => number;
+} {
+  return {
+    attempts: Number(process.env.AGENT_DOWNLOAD_ATTEMPTS) || 6,
+    baseMs: retryBaseMs(),
+    capMs: retryCapMs(),
+    jitter: () => 0.5 + Math.random() / 2,
+  };
+}
+
+/** Idle/stall timeout for a download with no byte progress. */
+export function downloadStallMs(): number {
+  return Number(process.env.AGENT_DOWNLOAD_STALL_MS) || 90_000;
+}
+```
+
+In `src/provisioning/supervisor.ts`: delete the local `abortableSleep`, `withRetry`, and `StallWatchdog` bodies; replace with re-exports (keep `checkDiskSpace` + `PreflightInput` in place):
+
+```ts
+export { abortableSleep, withRetry } from '../reliability/retry.ts';
+export { IdleWatchdog as StallWatchdog } from '../reliability/timeout.ts';
+```
+
+In `src/provisioning/providers/ollama.ts`: replace the inline `withRetry(..., { attempts: 6, baseMs: 1_000, capMs: 45_000, jitter: ... })` config with `defaultDownloadRetry()` (spread), and the `STALL_MS`/`new StallWatchdog(STALL_MS, ...)` with `downloadStallMs()`/`new IdleWatchdog(downloadStallMs(), ...)`; `beat(bytes)` replaces `beat(bytes)` (signature identical — `progress` is the byte count). Import from `../../reliability/download-retry.ts` and `../../reliability/timeout.ts`.
+
+In `src/provisioning/providers/hf-fetch.ts`: replace the local `DEFAULT_RETRY` constant with `deps.retry ?? defaultDownloadRetry()` (keep the `RetryConfig`-shaped `deps.retry` injection seam by widening its type to the returned shape) and `STALL_MS` with `downloadStallMs()`, `StallWatchdog` with `IdleWatchdog`.
+
+- [ ] **Step 4: Run tests to verify no regression**
+
+Run: `bun test tests/reliability/download-retry.test.ts tests/provisioning/`
+Expected: PASS — the new test plus all existing provisioning tests (supervisor, ollama, hf-fetch) still green.
+
+- [ ] **Step 5: Typecheck, lint, commit**
 
 ```bash
-git add tests/crew-builder/transpile-contract.test.ts
-git commit -m "test(crew-builder): transpiler<->engine round-trip contract"
+bun run typecheck && bun run lint:file -- "src/reliability/download-retry.ts" "src/provisioning/supervisor.ts" "src/provisioning/providers/ollama.ts" "src/provisioning/providers/hf-fetch.ts"
+git add src/reliability/download-retry.ts src/provisioning/
+git commit -m "refactor(provisioning): migrate retry/stall onto reliability module"
 ```
 
 ---

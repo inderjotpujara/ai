@@ -133,3 +133,12 @@ The three-lane model is production-ready:
 - Unknown errors fail safe to Terminal — the right behavior for untrusted inputs
 
 This classifier is ready for wiring into the retry/degrade logic in subsequent reliability-module tasks (delay, backoff, fallback mechanisms).
+
+## Minor Fix (Post-Implementation)
+
+**Fix:** Converted `Lane` enum from numeric to string-valued (per project convention in root CLAUDE.md).
+- Changed: `Transient`, `RouteWorthy`, `Terminal` to `Transient = 'Transient'`, etc.
+- Logic unchanged: enum-identity comparisons in `classify()` remain unaffected.
+
+**Test result:** `bun test tests/reliability/classify.test.ts` → 6 pass, 0 fail
+**Commit:** `9b17c89` — fix(reliability): Lane as string enum per project convention

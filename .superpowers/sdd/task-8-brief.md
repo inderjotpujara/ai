@@ -1,183 +1,112 @@
-### Task 8: two-tier validation (`validate.ts`)
+### Task 8: Model-degradation chain
 
 **Files:**
-- Create: `src/crew-builder/validate.ts`
-- Test: `tests/crew-builder/validate.test.ts`
+- Create: `src/reliability/degrade.ts`
+- Test: `tests/reliability/degrade.test.ts`
 
 **Interfaces:**
-- Consumes: `CrewIR`/`WorkflowIR`, `ValidationIssue` (`src/agent-builder/types.ts`), `BuilderModel`, `defineCrew`/`defineWorkflow` for the structural gate, `AGENTS` names + pack names via params.
-- Produces: `validateIR(ir, shape, ctx): Promise<ValidationIssue[]>` where `ctx = { existingAgents, packNames, toBeBuilt, model }`. Runs structural (sync) then semantic (async). Empty array = valid.
+- Consumes: `ModelDeclaration` from `src/core/types.ts` (fields used: `model: string`, `runtime: RuntimeKind`, `fallbackModel?: string`); `RuntimeKind` from `src/core/types.ts`.
+- Produces:
+  - `type FailureDomain = string` — an identity for "the thing that could be down" (runtime + endpoint). Two declarations sharing a domain must not be tried back-to-back on a RouteWorthy failure.
+  - `failureDomain(decl: ModelDeclaration): FailureDomain`
+  - `degradeChain(candidates: ModelDeclaration[]): ModelDeclaration[]` — reorders so consecutive entries never share a failure domain where a differing-domain candidate exists (stable otherwise).
+
+Note: `resolveModel` already walks candidates best-first; `degrade.ts` supplies the failure-domain-aware ORDERING it should walk, so an unreachable Ollama daemon isn't retried by picking another Ollama model next when an MLX candidate exists.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/crew-builder/validate.test.ts
-import { expect, test } from 'bun:test';
-import type { BuilderModel } from '../../src/agent-builder/types.ts';
-import { validateIR } from '../../src/crew-builder/validate.ts';
-import type { WorkflowIR } from '../../src/crew-builder/ir.ts';
+// tests/reliability/degrade.test.ts
+import { describe, expect, it } from 'bun:test';
+import { RuntimeKind } from '../../src/core/types.ts';
+import { degradeChain, failureDomain } from '../../src/reliability/degrade.ts';
+import type { ModelDeclaration } from '../../src/core/types.ts';
 
-const okJudge: BuilderModel = { object: async () => ({ aligned: true, reason: 'ok' } as never), text: async () => '' };
+function decl(model: string, runtime: RuntimeKind): ModelDeclaration {
+  return { role: 'general', model, runtime, requires: [] } as unknown as ModelDeclaration;
+}
 
-test('flags a fromStep ref that names no upstream step (structural)', async () => {
-  const ir: WorkflowIR = { id: 'w', steps: [
-    { kind: 'agent', id: 'a', agent: 'web_fetch', input: { kind: 'fromStep', ref: 'ghost' } },
-  ] };
-  const issues = await validateIR(ir, 'workflow', { existingAgents: ['web_fetch'], packNames: [], toBeBuilt: [], model: okJudge });
-  expect(issues.some((i) => i.problem.includes('ghost'))).toBe(true);
+describe('failureDomain', () => {
+  it('same runtime → same domain; different runtime → different domain', () => {
+    expect(failureDomain(decl('a', RuntimeKind.Ollama))).toBe(
+      failureDomain(decl('b', RuntimeKind.Ollama)),
+    );
+    expect(failureDomain(decl('a', RuntimeKind.Ollama))).not.toBe(
+      failureDomain(decl('a', RuntimeKind.MlxServer)),
+    );
+  });
 });
 
-test('flags an agent step referencing an unknown agent', async () => {
-  const ir: WorkflowIR = { id: 'w', steps: [
-    { kind: 'agent', id: 'a', agent: 'nope', input: { kind: 'fromInput' } },
-  ] };
-  const issues = await validateIR(ir, 'workflow', { existingAgents: ['web_fetch'], packNames: [], toBeBuilt: [], model: okJudge });
-  expect(issues.some((i) => i.field === 'agent')).toBe(true);
-});
+describe('degradeChain', () => {
+  it('interleaves so consecutive entries avoid the same failure domain', () => {
+    const chain = degradeChain([
+      decl('o1', RuntimeKind.Ollama),
+      decl('o2', RuntimeKind.Ollama),
+      decl('m1', RuntimeKind.MlxServer),
+    ]);
+    // first is still the best (o1); second must switch domain (m1), not o2
+    expect(chain[0].model).toBe('o1');
+    expect(failureDomain(chain[1])).not.toBe(failureDomain(chain[0]));
+  });
 
-test('passes a valid workflow (agent known, ref resolves, goal aligned)', async () => {
-  const ir: WorkflowIR = { id: 'w', steps: [
-    { kind: 'tool', id: 'f', tool: 'fetch', input: { kind: 'fromInput' } },
-    { kind: 'agent', id: 'a', agent: 'web_fetch', dependsOn: ['f'], input: { kind: 'fromStep', ref: 'f' } },
-  ] };
-  const issues = await validateIR(ir, 'workflow', { existingAgents: ['web_fetch'], packNames: ['fetch'], toBeBuilt: [], model: okJudge });
-  expect(issues).toEqual([]);
-});
-
-test('surfaces a goal-misaligned graph (semantic tier)', async () => {
-  const noJudge: BuilderModel = { object: async () => ({ aligned: false, reason: 'does not answer the need' } as never), text: async () => '' };
-  const ir: WorkflowIR = { id: 'w', steps: [{ kind: 'agent', id: 'a', agent: 'web_fetch', input: { kind: 'fromInput' } }] };
-  const issues = await validateIR(ir, 'workflow', { existingAgents: ['web_fetch'], packNames: [], toBeBuilt: [], model: noJudge });
-  expect(issues.some((i) => i.field === 'goal-alignment')).toBe(true);
+  it('is a stable passthrough when all share one domain', () => {
+    const input = [decl('o1', RuntimeKind.Ollama), decl('o2', RuntimeKind.Ollama)];
+    expect(degradeChain(input).map((d) => d.model)).toEqual(['o1', 'o2']);
+  });
 });
 ```
 
-- [ ] **Step 2: Run — FAIL.**
+- [ ] **Step 2: Run test to verify it fails**
 
-- [ ] **Step 3: Implement** — structural first (reuse `defineWorkflow`/`defineCrew` for acyclicity via try/catch + explicit ref checks), then the LLM-judge goal-alignment. `toBeBuilt` = agent names that WILL be built this run (so a reference to a to-be-built agent is valid).
+Run: `bun test tests/reliability/degrade.test.ts`
+Expected: FAIL — cannot resolve `degrade.ts`.
+
+- [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/crew-builder/validate.ts
-import { z } from 'zod';
-import type { BuilderModel, ValidationIssue } from '../agent-builder/types.ts';
-import { defineCrew } from '../crew/define.ts';
-import { CrewProcess, type CrewDef } from '../crew/types.ts';
-import { defineWorkflow } from '../workflow/define.ts';
-import type { CrewIR, WorkflowIR } from './ir.ts';
-import type { Shape } from './types.ts';
+// src/reliability/degrade.ts
+import type { ModelDeclaration } from '../core/types.ts';
 
-export type ValidateCtx = {
-  existingAgents: string[]; packNames: string[]; toBeBuilt: string[]; model: BuilderModel;
-};
+/** Identity of the thing that could be down. Today: the runtime. */
+export type FailureDomain = string;
 
-const AlignSchema = z.object({ aligned: z.boolean(), reason: z.string() });
+export function failureDomain(decl: ModelDeclaration): FailureDomain {
+  return String(decl.runtime);
+}
 
-/** Collect every input/predicate/map ref in a workflow step. */
-function refsOf(step: WorkflowIR['steps'][number]): string[] {
-  const out: string[] = [];
-  if ('input' in step && step.input.kind === 'fromStep') out.push(step.input.ref);
-  if (step.kind === 'branch') out.push(step.predicate.ref);
-  if (step.kind === 'map') {
-    out.push(step.over.ref);
-    if (step.step.input.kind === 'fromStep') out.push(step.step.input.ref);
+/**
+ * Reorder candidates (already best-first) so no two CONSECUTIVE entries share a
+ * failure domain when a different-domain candidate is available — so a dead
+ * daemon isn't "degraded" to another model behind the same daemon. Stable:
+ * relative order within a domain is preserved; falls back to the input order
+ * when only one domain exists.
+ */
+export function degradeChain(candidates: ModelDeclaration[]): ModelDeclaration[] {
+  const remaining = [...candidates];
+  const out: ModelDeclaration[] = [];
+  let lastDomain: FailureDomain | undefined;
+  while (remaining.length > 0) {
+    let idx = remaining.findIndex((d) => failureDomain(d) !== lastDomain);
+    if (idx === -1) idx = 0; // only same-domain left
+    const [picked] = remaining.splice(idx, 1);
+    out.push(picked);
+    lastDomain = failureDomain(picked);
   }
   return out;
 }
-
-function structuralWorkflow(ir: WorkflowIR, ctx: ValidateCtx): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  const ids = new Set(ir.steps.map((s) => s.id));
-  const known = new Set([...ctx.existingAgents, ...ctx.toBeBuilt]);
-  for (const step of ir.steps) {
-    if (step.kind === 'agent' && !known.has(step.agent)) {
-      issues.push({ field: 'agent', problem: `step ${step.id} references unknown agent "${step.agent}"` });
-    }
-    if (step.kind === 'tool' && !ctx.packNames.includes(step.tool)) {
-      issues.push({ field: 'tool', problem: `step ${step.id} uses tool "${step.tool}" not in the palette` });
-    }
-    for (const ref of refsOf(step)) {
-      if (!ids.has(ref)) issues.push({ field: 'ref', problem: `step ${step.id} references unknown step "${ref}"` });
-    }
-    if (step.kind === 'branch') {
-      for (const t of [step.whenTrue, step.whenFalse]) {
-        if (!ids.has(t)) issues.push({ field: 'branch', problem: `branch ${step.id} target "${t}" is unknown` });
-      }
-    }
-  }
-  return issues;
-}
-
-function structuralCrew(ir: CrewIR, ctx: ValidateCtx): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  const known = new Set([...ctx.existingAgents, ...ctx.toBeBuilt]);
-  for (const m of ir.members) {
-    if (m.agentRef && !known.has(m.agentRef)) {
-      issues.push({ field: 'agentRef', problem: `member ${m.name} references unknown agent "${m.agentRef}"` });
-    }
-    for (const t of m.tools ?? []) {
-      if (!ctx.packNames.includes(t)) issues.push({ field: 'tools', problem: `member ${m.name} tool "${t}" not in the palette` });
-    }
-  }
-  return issues;
-}
-
-async function goalAlignment(need: string, ir: unknown, model: BuilderModel): Promise<ValidationIssue[]> {
-  const prompt = [
-    'Does the plan below actually accomplish the stated need? Answer JSON { "aligned": boolean, "reason": string }.',
-    `Need: ${need}`, `Plan: ${JSON.stringify(ir)}`,
-  ].join('\n');
-  const { aligned, reason } = await model.object({ schema: AlignSchema, prompt });
-  return aligned ? [] : [{ field: 'goal-alignment', problem: reason || 'graph does not accomplish the need' }];
-}
-
-/** Two-tier gate: structural (acyclicity via define* + ref/agent/tool checks) then semantic (goal-alignment). */
-export async function validateIR(
-  ir: CrewIR | WorkflowIR, shape: Shape, ctx: ValidateCtx, need = '',
-): Promise<ValidationIssue[]> {
-  const issues: ValidationIssue[] = [];
-  if (shape === 'workflow') {
-    issues.push(...structuralWorkflow(ir as WorkflowIR, ctx));
-    try {
-      // acyclicity + id-uniqueness + dep resolution (closures are stubbed; we only need the graph checks)
-      defineWorkflow({ id: ir.id, steps: (ir as WorkflowIR).steps.map((s) => ({
-        id: s.id, kind: s.kind as never, dependsOn: 'dependsOn' in s ? s.dependsOn : undefined,
-        // minimal stubs so the validator's graph checks run:
-        ...(s.kind === 'agent' ? { agent: (s as { agent: string }).agent, input: () => '' } : {}),
-        ...(s.kind === 'tool' ? { tool: (s as { tool: string }).tool, input: () => ({}) } : {}),
-        ...(s.kind === 'branch' ? { predicate: () => true, whenTrue: (s as { whenTrue: string }).whenTrue, whenFalse: (s as { whenFalse: string }).whenFalse } : {}),
-        ...(s.kind === 'map' ? { over: () => [], step: { kind: 'agent', agent: 'x', input: () => '', output: undefined as never } } : {}),
-        output: undefined as never,
-      })) as never });
-    } catch (e) {
-      issues.push({ field: 'graph', problem: (e as Error).message });
-    }
-  } else {
-    issues.push(...structuralCrew(ir as CrewIR, ctx));
-    try {
-      const crew: CrewDef = {
-        id: ir.id, process: (ir as CrewIR).process === 'hierarchical' ? CrewProcess.Hierarchical : CrewProcess.Sequential,
-        members: (ir as CrewIR).members.map((m) => ({ name: m.name, role: m.role, goal: m.goal, backstory: m.backstory, requires: [] as never, prefer: 'largest-that-fits' as never })),
-        tasks: (ir as CrewIR).tasks.map((t) => ({ id: t.id, description: t.description, expectedOutput: t.expectedOutput, member: t.member, dependsOn: t.dependsOn })),
-      };
-      defineCrew(crew);
-    } catch (e) {
-      issues.push({ field: 'graph', problem: (e as Error).message });
-    }
-  }
-  if (issues.length > 0) return issues; // don't spend a model call on a structurally-broken graph
-  return goalAlignment(need, ir, ctx.model);
-}
 ```
 
-> NOTE for implementer: the `defineWorkflow`/`defineCrew` stub-mapping above exists ONLY to reuse their Kahn acyclicity + id/dep checks without building real closures. If mapping to the exact `Step`/`CrewMember` types proves noisy, extract the pure graph checks (`effectiveDeps` + Kahn) into a shared `assertAcyclic(ids, edges)` helper in `src/workflow/define.ts` and call it directly from both `defineWorkflow` and here (DRY). Prefer the shared helper if the stub casts get ugly — decide during implementation, keep it typechecking-clean with no `any`.
+- [ ] **Step 4: Run test to verify it passes**
 
-- [ ] **Step 4: Run — PASS** (`bun test tests/crew-builder/validate.test.ts && bun run typecheck`).
+Run: `bun test tests/reliability/degrade.test.ts`
+Expected: PASS (all).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Typecheck, lint, commit**
 
 ```bash
-git add src/crew-builder/validate.ts tests/crew-builder/validate.test.ts src/workflow/define.ts
-git commit -m "feat(crew-builder): two-tier structural + semantic IR validation"
+bun run typecheck && bun run lint:file -- "src/reliability/degrade.ts" "tests/reliability/degrade.test.ts"
+git add src/reliability/degrade.ts tests/reliability/degrade.test.ts
+git commit -m "feat(reliability): failure-domain-aware model-degrade chain"
 ```
 
 ---
