@@ -1,7 +1,11 @@
 import type { LanguageModel } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import { classify } from '../reliability/classify.ts';
+import { CircuitOpenError } from '../reliability/errors.ts';
+import { type DegradationLedger, DegradeKind } from '../reliability/ledger.ts';
 import {
+  recordDegrade,
   recordGuardrailViolation,
   withDelegationSpan,
 } from '../telemetry/spans.ts';
@@ -38,6 +42,7 @@ export function runGuardedAgent(
   task: string,
   onBeforeDelegate?: BeforeDelegate,
   abortSignal?: AbortSignal,
+  ledger?: DegradationLedger,
 ): Promise<{ text: string } | { error: string }> {
   return withDelegationSpan(agent.name, async () => {
     const check = checkDelegation(agent.name);
@@ -59,9 +64,21 @@ export function runGuardedAgent(
       );
       return { text: concise(text, callerNumCtx) };
     } catch (cause) {
-      return {
-        error: `Agent ${agent.name} failed: ${(cause as Error).message}`,
+      const message = cause instanceof Error ? cause.message : String(cause);
+      const kind =
+        cause instanceof CircuitOpenError
+          ? DegradeKind.CircuitOpen
+          : DegradeKind.AgentDropped;
+      const lane = classify(cause);
+      const event = {
+        kind,
+        subject: agent.name,
+        reason: message,
+        detail: `lane=${lane}`,
       };
+      ledger?.record(event);
+      recordDegrade(event);
+      return { error: `Agent ${agent.name} failed: ${message}` };
     }
   });
 }
@@ -73,12 +90,20 @@ export function runGuardedAgent(
 export function asDelegateTool(
   agent: Agent,
   onBeforeDelegate?: BeforeDelegate,
+  ledger?: DegradationLedger,
 ) {
   return tool({
     description: agent.description,
     inputSchema: z.object({
       task: z.string().describe('The task for this agent'),
     }),
-    execute: async ({ task }) => runGuardedAgent(agent, task, onBeforeDelegate),
+    execute: async ({ task }, options) =>
+      runGuardedAgent(
+        agent,
+        task,
+        onBeforeDelegate,
+        options?.abortSignal,
+        ledger,
+      ),
   });
 }
