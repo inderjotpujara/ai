@@ -1,9 +1,12 @@
-import { describe, expect, it } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
+import { resetBreakers } from '../../src/reliability/breaker.ts';
 import { runWorkflow } from '../../src/workflow/engine.ts';
 import { StepKind } from '../../src/workflow/types.ts';
 
 describe('workflow step reliability', () => {
+  beforeEach(() => resetBreakers());
+
   it('retries a Transient tool failure then continues', async () => {
     let calls = 0;
     const flakyTool = {

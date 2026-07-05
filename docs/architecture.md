@@ -2205,15 +2205,19 @@ export function classify(err: unknown): Lane
 ```
 
 `Transient` (for ops we own — MCP/download/probe/direct-HTTP): AI SDK
-`APICallError` with `isRetryable === true`, `ECONNRESET`/`ETIMEDOUT`, an
-idle-stall abort (not a user abort). `RouteWorthy`: `ProviderError`,
-`ResourceError`, the new `CircuitOpenError`, a content-filter
-`finishReason`, a runtime `isAvailable()` false. `Terminal`: 4xx client
-errors, validation failures, `ToolError`, `MaxStepsError`,
-context-length-exceeded. **Unknown → Terminal** (fail safe, never silently
-retry the unclassifiable). Classification is advisory data the
+`APICallError` with `isRetryable === true`, or a network error code
+(`ECONNRESET`/`ETIMEDOUT`/`ECONNREFUSED`/`EPIPE`). `RouteWorthy`:
+`ProviderError`, `ResourceError`, the new `CircuitOpenError`. `Terminal`:
+a non-retryable `APICallError` (4xx/validation), `ToolError`, and
+everything unclassifiable. **Unknown → Terminal** (fail safe, never
+silently retry the unclassifiable). Classification is advisory data the
 retry/degrade/partial-failure wiring consumes; `classify` itself never
-throws.
+throws. Three triggers that sound like classifier work are handled
+**elsewhere, not by `classify`**: an idle-stall abort is detected by
+`IdleWatchdog` (`timeout.ts`, §21.2) directly, a content-filter
+`finishReason` has no dedicated classify branch today, and a runtime
+`isAvailable()` false is handled inline at the selector hook
+(`cli/select-hook.ts`), not routed through this taxonomy.
 
 **D5 — the LLM turn is never double-retried.** AI SDK v6 already retries a
 `generateText` call's transport errors internally (`maxRetries: 2`). A
@@ -2250,24 +2254,28 @@ hierarchical). Whenever `core/delegate.ts` drops a specialist or degrades
 its model, or a workflow/crew Tool step retries or trips a breaker, it calls
 `ledger.record({kind, subject, reason, detail?})`. At the end of a run:
 `with-mcp-run.ts` persists non-empty ledgers to `run.dir/degradation.jsonl`
-(mirroring `spans.jsonl`) via `serializeLedger`, and `cli/chat.ts` prints
-`formatLedger(ledger)` — a concise `"Degraded during this run: ⚠ dropped
-agent X — reason"` block — so a partial failure that used to be visible only
-to the *model* (as a structured `{error}` tool result) is now visible to the
-**user** too. This is the single mechanism that satisfies both "tell the
-user" and future silent-quality-regression detection.
+(mirroring `spans.jsonl`) via `serializeLedger`, and all three entry
+points — `cli/chat.ts`, `cli/crew.ts`, `cli/flow.ts` — print
+`formatLedger(ledger)` on completion — a concise `"Degraded during this
+run: ⚠ dropped agent X — reason"` block — so a partial failure that used
+to be visible only to the *model* (as a structured `{error}` tool result)
+is now visible to the **user** too, regardless of which entry point ran.
+This is the single mechanism that satisfies both "tell the user" and
+future silent-quality-regression detection.
 
 ### 21.4 Wiring — where the layer is consumed
 
 - **`core/agent.ts` (`runAgent`)** — the single `generateText` call is
   wrapped in `withWallClock(runTimeoutMs())` (belt to the AI SDK's own
   `abortSignal` timeout). No second backoff retry, per D5.
-- **`core/delegate.ts` (`runGuardedAgent`)** — on a caught cause:
-  `classify(err)`; RouteWorthy (including a Transient that escaped the SDK)
-  → `degradeChain` to a fallback model/runtime, then drop-and-record if
-  exhausted; Terminal → drop-and-record immediately. Every drop/degrade
-  calls `ledger.record(...)`. Still returns the structured `{error}` (never
-  throws up the call stack), now *after* degrade and *with* a ledger note.
+- **`core/delegate.ts` (`runGuardedAgent`)** — on a caught cause,
+  `classify(err)` is **advisory only**: the lane is recorded on the
+  ledger event as `detail` (`lane=...`) but does not branch the recovery
+  path — every lane drops-and-records uniformly (the specialist fails,
+  `ledger.record(...)` fires, and the structured `{error}` is returned,
+  never thrown up the call stack). Model degrade/fallback is a *separate*
+  mechanism that runs upstream, at model selection — see
+  `resource/selector.ts`'s `resolveModel` below — not inside this catch.
   `asDelegateTool` forwards `abortSignal` through (previously dropped).
 - **`core/orchestrator.ts` + `agents/super.ts`** — thread the ledger to
   every `asDelegateTool`-wrapped specialist so a mid-run drop is recorded

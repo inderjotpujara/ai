@@ -61,6 +61,20 @@ describe('withRetry', () => {
     expect(calls).toBe(2);
   });
 
+  it('clamps a misconfigured attempts:0 to at least 1 (still runs once, throws the real error)', async () => {
+    let calls = 0;
+    await expect(
+      withRetry(
+        async () => {
+          calls++;
+          throw Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        },
+        { attempts: 0, baseMs: 0, capMs: 0, jitter: () => 0 },
+      ),
+    ).rejects.toThrow('reset');
+    expect(calls).toBe(1);
+  });
+
   it('stops early when the signal is already aborted', async () => {
     let calls = 0;
     const ctrl = new AbortController();

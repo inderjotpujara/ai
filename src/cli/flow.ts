@@ -6,6 +6,7 @@ import type { BeforeDelegate } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
+import { formatLedger } from '../reliability/ledger.ts';
 import { type RunHandle, writeArtifact } from '../run/run-store.ts';
 import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
 import type { VerifyDeps } from '../verification/types.ts';
@@ -170,6 +171,8 @@ async function main(): Promise<void> {
             verifyRuntime.store.close();
             await verifyRuntime.manager.unloadAll();
           }
+          const summary = formatLedger(ledger);
+          if (summary) console.error(summary);
         }
       } finally {
         await selection.close();

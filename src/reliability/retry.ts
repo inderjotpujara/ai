@@ -52,7 +52,7 @@ export async function withRetry<T>(
   fn: () => Promise<T>,
   opts: RetryOpts = {},
 ): Promise<T> {
-  const attempts = opts.attempts ?? maxAttempts();
+  const attempts = Math.max(1, opts.attempts ?? maxAttempts());
   const baseMs = opts.baseMs ?? retryBaseMs();
   const capMs = opts.capMs ?? retryCapMs();
   const jitter = opts.jitter ?? (() => 0.5 + Math.random() / 2);

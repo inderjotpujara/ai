@@ -3,6 +3,7 @@ import { getCrew } from '../../crews/index.ts';
 import { type CrewDeps, runCrew } from '../crew/engine.ts';
 import type { CrewDef, CrewOutcome } from '../crew/types.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
+import { formatLedger } from '../reliability/ledger.ts';
 import { type RunHandle, writeArtifact } from '../run/run-store.ts';
 import type { VerifyDeps } from '../verification/types.ts';
 import { createSelectionRuntime } from './select-runtime.ts';
@@ -122,6 +123,8 @@ async function main(): Promise<void> {
             verifyRuntime.store.close();
             await verifyRuntime.manager.unloadAll();
           }
+          const summary = formatLedger(ledger);
+          if (summary) console.error(summary);
         }
       } finally {
         await selection.close();
