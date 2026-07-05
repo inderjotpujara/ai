@@ -114,6 +114,16 @@ export const ATTR = {
   RUNTIME_CONTEXT_REQUESTED: 'runtime.context.requested',
   RUNTIME_CONTEXT_APPLIED: 'runtime.context.applied',
   RUNTIME_WARM_OUTCOME: 'runtime.warm.outcome',
+  // Multimodal analysis (Slice 27)
+  INPUT_MODALITY: 'gen_ai.input.modality',
+  CONTENT_POLICY: 'content.policy',
+  MEDIA_TRANSCRIBE_MODEL: 'media.transcribe.model',
+  MEDIA_TRANSCRIBE_AUDIO_SECONDS: 'media.transcribe.audio_seconds',
+  MEDIA_TRANSCRIBE_DURATION_MS: 'media.transcribe.duration_ms',
+  MEDIA_TRANSCRIBE_OUTCOME: 'media.transcribe.outcome',
+  MEDIA_FRAMES_FPS: 'media.frames.fps',
+  MEDIA_FRAMES_SAMPLED: 'media.frames.sampled',
+  MEDIA_FRAMES_DURATION_MS: 'media.frames.duration_ms',
 } as const;
 
 export type ModelSelectInfo = {
@@ -703,5 +713,63 @@ export function withRuntimeSpan<T>(
         span.setAttribute(ATTR.RUNTIME_WARM_OUTCOME, outcome);
       },
     });
+  });
+}
+
+export type TranscribeSpanInfo = {
+  model: string;
+  audioSeconds?: number;
+  durationMs?: number;
+  outcome?: string;
+};
+
+/** Root span for one audio transcription call (Slice 27). Seeds the model and
+ *  any pre-known attrs (audio length, duration, outcome) up-front, mirroring
+ *  withProvisionSpan; callers that only learn `durationMs`/`outcome` after
+ *  the work completes can pass the span through via the returned `fn(span)`
+ *  and set attributes directly. */
+export function withTranscribeSpan<T>(
+  info: TranscribeSpanInfo,
+  fn: (span: Span) => Promise<T>,
+): Promise<T> {
+  return inSpan('media.transcribe', async (span) => {
+    span.setAttribute(ATTR.MEDIA_TRANSCRIBE_MODEL, info.model);
+    span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
+    if (info.audioSeconds !== undefined) {
+      span.setAttribute(ATTR.MEDIA_TRANSCRIBE_AUDIO_SECONDS, info.audioSeconds);
+    }
+    if (info.durationMs !== undefined) {
+      span.setAttribute(ATTR.MEDIA_TRANSCRIBE_DURATION_MS, info.durationMs);
+    }
+    if (info.outcome !== undefined) {
+      span.setAttribute(ATTR.MEDIA_TRANSCRIBE_OUTCOME, info.outcome);
+    }
+    return fn(span);
+  });
+}
+
+export type FrameSampleSpanInfo = {
+  fps: number;
+  framesSampled?: number;
+  durationMs?: number;
+};
+
+/** Root span for one video frame-sampling call (Slice 27). Seeds the fps and
+ *  any pre-known attrs (frames sampled, duration) up-front, mirroring
+ *  withProvisionSpan. */
+export function withFrameSampleSpan<T>(
+  info: FrameSampleSpanInfo,
+  fn: (span: Span) => Promise<T>,
+): Promise<T> {
+  return inSpan('media.frames', async (span) => {
+    span.setAttribute(ATTR.MEDIA_FRAMES_FPS, info.fps);
+    span.setAttribute(ATTR.INPUT_MODALITY, 'video');
+    if (info.framesSampled !== undefined) {
+      span.setAttribute(ATTR.MEDIA_FRAMES_SAMPLED, info.framesSampled);
+    }
+    if (info.durationMs !== undefined) {
+      span.setAttribute(ATTR.MEDIA_FRAMES_DURATION_MS, info.durationMs);
+    }
+    return fn(span);
   });
 }

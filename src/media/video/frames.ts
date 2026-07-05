@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SpawnFn } from '../../runtime/process-supervisor.ts';
+import { ATTR, withFrameSampleSpan } from '../../telemetry/spans.ts';
 import type { MediaStore } from '../store.ts';
 import { type MediaHandle, type MediaItem, MediaKind } from '../types.ts';
 
@@ -77,15 +78,23 @@ export async function sampleFrames(
     longEdge,
   });
 
-  return new Promise<MediaItem>((resolve, reject) => {
-    const child = spawn('ffmpeg', args);
-    child.onExit((code) => {
-      if (code !== 0) {
-        reject(new Error(`frame sampling failed (exit ${code})`));
-        return;
-      }
-      storeFrames(store, listFrames(dir), dir).then(resolve).catch(reject);
+  return withFrameSampleSpan({ fps }, async (span) => {
+    const startedAt = Date.now();
+    const item = await new Promise<MediaItem>((resolve, reject) => {
+      const child = spawn('ffmpeg', args);
+      child.onExit((code) => {
+        if (code !== 0) {
+          reject(new Error(`frame sampling failed (exit ${code})`));
+          return;
+        }
+        storeFrames(store, listFrames(dir), dir).then(resolve).catch(reject);
+      });
     });
+    span.setAttributes({
+      [ATTR.MEDIA_FRAMES_DURATION_MS]: Date.now() - startedAt,
+      [ATTR.MEDIA_FRAMES_SAMPLED]: item.frames?.length ?? 0,
+    });
+    return item;
   });
 }
 

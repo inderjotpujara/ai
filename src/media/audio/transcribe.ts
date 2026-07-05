@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import type { SpawnFn } from '../../runtime/process-supervisor.ts';
+import { ATTR, withTranscribeSpan } from '../../telemetry/spans.ts';
 
 type TranscribeDeps = {
   spawn?: SpawnFn;
@@ -59,16 +60,32 @@ export async function transcribe(
     'json',
   ];
 
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn('python3', args);
-    child.onExit((code) => {
-      if (code !== 0) {
-        reject(new Error(`transcription failed (exit ${code})`));
-        return;
-      }
-      readJson(jsonPathFor(audioPath, outDir))
-        .then((result) => resolve(result.text))
-        .catch(reject);
-    });
+  return withTranscribeSpan({ model }, async (span) => {
+    const startedAt = Date.now();
+    try {
+      const text = await new Promise<string>((resolve, reject) => {
+        const child = spawn('python3', args);
+        child.onExit((code) => {
+          if (code !== 0) {
+            reject(new Error(`transcription failed (exit ${code})`));
+            return;
+          }
+          readJson(jsonPathFor(audioPath, outDir))
+            .then((result) => resolve(result.text))
+            .catch(reject);
+        });
+      });
+      span.setAttributes({
+        [ATTR.MEDIA_TRANSCRIBE_DURATION_MS]: Date.now() - startedAt,
+        [ATTR.MEDIA_TRANSCRIBE_OUTCOME]: 'ok',
+      });
+      return text;
+    } catch (err) {
+      span.setAttributes({
+        [ATTR.MEDIA_TRANSCRIBE_DURATION_MS]: Date.now() - startedAt,
+        [ATTR.MEDIA_TRANSCRIBE_OUTCOME]: 'failed',
+      });
+      throw err;
+    }
   });
 }
