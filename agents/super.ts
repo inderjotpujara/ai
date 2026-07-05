@@ -3,6 +3,7 @@ import qwenRouter from '../models/qwen-router.ts';
 import type { Agent } from '../src/core/agent-def.ts';
 import type { BeforeDelegate } from '../src/core/delegate.ts';
 import { createOrchestrator } from '../src/core/orchestrator.ts';
+import type { MediaStore } from '../src/media/store.ts';
 import { createOllamaModel } from '../src/providers/ollama.ts';
 import type { DegradationLedger } from '../src/reliability/ledger.ts';
 import { AGENTS, agentNames } from './index.ts';
@@ -13,11 +14,14 @@ const BASE_PROMPT =
 /** Build the super-agent (orchestrator) with every registered specialist.
  *  `toolsFor(name)` supplies each agent's MCP-scoped tool set (reg.forAgent).
  *  `ledger`, when supplied, is forwarded to the orchestrator so a dropped
- *  sub-agent (or a tripped circuit) during delegation is recorded. */
+ *  sub-agent (or a tripped circuit) during delegation is recorded.
+ *  `mediaStore`, when supplied, is forwarded so specialists can resolve
+ *  `[img:h]`/`[video:h]` markers attached to a chat's media flags. */
 export function createSuperAgent(
   toolsFor: (name: string) => ToolSet,
   onBeforeDelegate?: BeforeDelegate,
   ledger?: DegradationLedger,
+  mediaStore?: MediaStore,
 ): Agent {
   const agents: Agent[] = agentNames().map((name) => {
     const factory = AGENTS[name];
@@ -31,5 +35,6 @@ export function createSuperAgent(
     agents,
     onBeforeDelegate,
     ledger,
+    mediaStore,
   });
 }
