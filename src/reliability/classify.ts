@@ -1,5 +1,6 @@
 import { APICallError } from 'ai';
 import { ProviderError, ResourceError, ToolError } from '../core/errors.ts';
+import { CircuitOpenError } from './errors.ts';
 
 /** Three lanes drive the retry/degrade/partial-failure wiring. */
 export enum Lane {
@@ -22,6 +23,9 @@ const TRANSIENT_CODES = new Set([
 export function classify(err: unknown): Lane {
   if (APICallError.isInstance(err)) {
     return err.isRetryable ? Lane.Transient : Lane.Terminal;
+  }
+  if (err instanceof CircuitOpenError) {
+    return Lane.RouteWorthy;
   }
   if (err instanceof ProviderError || err instanceof ResourceError) {
     return Lane.RouteWorthy;

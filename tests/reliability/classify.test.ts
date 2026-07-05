@@ -5,6 +5,7 @@ import {
   ResourceError,
   ToolError,
 } from '../../src/core/errors.ts';
+import { CircuitOpenError } from '../../src/reliability/errors.ts';
 import { classify, Lane } from '../../src/reliability/classify.ts';
 
 function apiError(statusCode: number, isRetryable: boolean): APICallError {
@@ -29,6 +30,9 @@ describe('classify', () => {
   it('ProviderError and ResourceError are RouteWorthy', () => {
     expect(classify(new ProviderError('pull failed'))).toBe(Lane.RouteWorthy);
     expect(classify(new ResourceError('no fit'))).toBe(Lane.RouteWorthy);
+  });
+  it('CircuitOpenError is RouteWorthy', () => {
+    expect(classify(new CircuitOpenError('mcp:x'))).toBe(Lane.RouteWorthy);
   });
   it('ToolError is Terminal', () => {
     expect(classify(new ToolError('bad args'))).toBe(Lane.Terminal);
