@@ -10,7 +10,7 @@ const qwenVision: ModelDeclaration = {
   model: 'qwen2.5vl:7b',
   params: { temperature: 0.2, numCtx: 16384 },
   role: 'vision analysis',
-  capabilities: [Capability.Vision],
+  capabilities: [Capability.Vision, Capability.Tools],
   footprint: { approxParamsBillions: 7, bytesPerWeight: 0.56 },
 };
 
