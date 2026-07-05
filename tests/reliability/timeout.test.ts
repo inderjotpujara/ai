@@ -52,6 +52,22 @@ describe('IdleWatchdog', () => {
     w.tick(); // only 60ms since last progress
     expect(fired).toBe(0);
   });
+  it('fires onIdle when progress goes silent after advancing (the classic hang)', () => {
+    let fired = 0;
+    let clock = 0;
+    const w = new IdleWatchdog(
+      100,
+      () => fired++,
+      () => clock,
+    );
+    w.beat(5); // real progress at t=0
+    clock = 50;
+    w.tick(); // 50ms since last advance → no fire
+    expect(fired).toBe(0);
+    clock = 200;
+    w.tick(); // 200ms since last advance, no further beats → MUST fire
+    expect(fired).toBe(1);
+  });
 });
 
 describe('withIdleTimeout', () => {

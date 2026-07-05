@@ -9,27 +9,24 @@ export function withWallClock<T>(ms: number, fn: () => Promise<T>): Promise<T> {
 
 /** Fires onIdle when a monotonic progress counter hasn't advanced within timeoutMs. */
 export class IdleWatchdog {
-  private lastProgress = 0;
+  private lastProgress = -1;
+  private lastAdvanceAt: number;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private idleSince: number | null = null;
   constructor(
     private readonly timeoutMs: number,
     private readonly onIdle: () => void,
     private readonly now: () => number = () => Date.now(),
-  ) {}
+  ) {
+    this.lastAdvanceAt = now();
+  }
   beat(progress: number): void {
     if (progress > this.lastProgress) {
       this.lastProgress = progress;
-      this.idleSince = null;
-    } else if (this.idleSince === null) {
-      this.idleSince = this.now();
+      this.lastAdvanceAt = this.now();
     }
   }
   tick(): void {
-    if (
-      this.idleSince !== null &&
-      this.now() - this.idleSince >= this.timeoutMs
-    ) {
+    if (this.now() - this.lastAdvanceAt >= this.timeoutMs) {
       this.onIdle();
     }
   }
