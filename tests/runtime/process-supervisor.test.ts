@@ -58,3 +58,34 @@ test('kills the child and throws when health never comes up', async () => {
   ).rejects.toThrow('healthy');
   expect(killed()).toBe(true);
 });
+
+test('stops polling the health endpoint once the wall-clock deadline wins', async () => {
+  const { spawn } = fakeSpawn();
+  let calls = 0;
+  const alwaysFails = (async () => {
+    calls++;
+    throw new Error('connection refused');
+  }) as unknown as typeof fetch;
+
+  await expect(
+    superviseServer(
+      {
+        cmd: 'x',
+        args: [],
+        host: '127.0.0.1',
+        port: 9999,
+        basePath: '/v1',
+        healthPath: '/health',
+      },
+      { spawn, fetchImpl: alwaysFails, pollMs: 0, startTimeoutMs: 20 },
+    ),
+  ).rejects.toThrow('healthy');
+
+  const callsAtRejection = calls;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // If the loser loop from Promise.race were never cancelled, it would keep
+  // calling fetchImpl indefinitely; a stopped loop makes at most one more
+  // in-flight call after rejection.
+  expect(calls - callsAtRejection).toBeLessThanOrEqual(1);
+});

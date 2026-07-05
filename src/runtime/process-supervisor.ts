@@ -69,9 +69,10 @@ export async function superviseServer(
     child.kill('SIGTERM');
   };
 
+  let timedOut = false;
   try {
     await withWallClock(startTimeoutMs, async () => {
-      for (;;) {
+      while (!timedOut) {
         try {
           const res = await fetchImpl(healthUrl, {
             signal: AbortSignal.timeout(pollMs + 1000),
@@ -84,6 +85,7 @@ export async function superviseServer(
       }
     });
   } catch {
+    timedOut = true;
     child.kill('SIGTERM');
     throw new Error(
       `runtime failed to become healthy after ${startTimeoutMs}ms`,
