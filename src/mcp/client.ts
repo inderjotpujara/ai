@@ -1,12 +1,15 @@
 import { createMCPClient, type OAuthClientProvider } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport as StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
+import { type BreakerOpts, breakerFor } from '../reliability/breaker.ts';
 
 /** How to launch a stdio MCP server. */
 export type McpServerSpec = {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Stable id for this server's circuit breaker; falls back to `command`. */
+  name?: string;
 };
 
 /** A remote Streamable-HTTP MCP server. Static-key auth (default): fixed
@@ -20,6 +23,8 @@ export type McpHttpSpec = {
   url: string;
   headers?: Record<string, string>;
   authProvider?: OAuthClientProvider;
+  /** Stable id for this server's circuit breaker; falls back to `url`. */
+  name?: string;
 };
 
 export type McpMountSpec = McpServerSpec | McpHttpSpec;
@@ -39,6 +44,30 @@ export function buildHttpTransportConfig(spec: McpHttpSpec) {
   };
 }
 
+/** Wrap each tool's `execute` in a per-server circuit breaker so one dead MCP
+ *  server can't stall a whole crew: after `opts.threshold` consecutive
+ *  failures the breaker opens and further calls reject fast with
+ *  `CircuitOpenError` instead of hanging/retrying against a dead server. */
+export function wrapToolsWithBreaker(
+  serverName: string,
+  tools: ToolSet,
+  opts?: BreakerOpts,
+): ToolSet {
+  const breaker = breakerFor(`mcp:${serverName}`, opts);
+  const out: ToolSet = {};
+  for (const [name, t] of Object.entries(tools)) {
+    const execute = t.execute;
+    out[name] = execute
+      ? ({
+          ...t,
+          execute: (args: unknown, o: unknown) =>
+            breaker.run(() => execute(args, o as never)),
+        } as typeof t)
+      : t;
+  }
+  return out;
+}
+
 /** Connect to ANY stdio or Streamable-HTTP MCP server and expose its tools.
  *  The integration primitive. */
 export async function mountMcpServer(
@@ -50,7 +79,11 @@ export async function mountMcpServer(
       : new StdioMCPTransport(spec);
   const client = await createMCPClient({ transport });
   const tools = await client.tools();
-  return { tools, close: () => client.close() };
+  const serverName = spec.name ?? ('url' in spec ? spec.url : spec.command);
+  return {
+    tools: wrapToolsWithBreaker(serverName, tools),
+    close: () => client.close(),
+  };
 }
 
 /** Our local read_file MCP server. */

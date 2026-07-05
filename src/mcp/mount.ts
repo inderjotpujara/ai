@@ -61,9 +61,15 @@ function toSpec(
       url: entry.url,
       headers: entry.headers,
       authProvider,
+      name: entry.name,
     };
   }
-  return { command: entry.command, args: entry.args, env: entry.env };
+  return {
+    command: entry.command,
+    args: entry.args,
+    env: entry.env,
+    name: entry.name,
+  };
 }
 
 /** Resolve the authProvider for an entry declaring OAuth. Degrades to
