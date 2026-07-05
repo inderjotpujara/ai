@@ -74,6 +74,8 @@ export const ATTR = {
   MCP_TOOL_COUNT: 'mcp.tool.count',
   MCP_MOUNT_OUTCOME: 'mcp.mount.outcome',
   MCP_SERVER_COUNT: 'mcp.server.count',
+  MCP_AUTH_OUTCOME: 'mcp.auth.outcome',
+  MCP_AUTH_KIND: 'mcp.auth.kind',
   BUILD_NEED: 'agent.build.need',
   BUILD_AGENT: 'agent.build.agent_name',
   BUILD_OUTCOME: 'agent.build.outcome',
@@ -499,7 +501,10 @@ export function withToolSpan<T>(
   });
 }
 
-/** Root span for an MCP mount pass; the body records one event per server. */
+/** Root span for an MCP mount pass; the body records one event per server
+ *  (via `record`) plus, for HTTP entries, one auth-determination event per
+ *  server (via `recordAuth`) on the same span. `recordAuth` never receives
+ *  secret values — only the server name and the auth kind/outcome enums. */
 export function withMcpMountSpan<T>(
   fn: (
     record: (
@@ -508,6 +513,7 @@ export function withMcpMountSpan<T>(
       toolCount?: number,
       transport?: string,
     ) => void,
+    recordAuth: (name: string, kind: string, outcome: string) => void,
   ) => Promise<T>,
 ): Promise<T> {
   return inSpan('mcp.mount', async (span) => {
@@ -532,7 +538,14 @@ export function withMcpMountSpan<T>(
         ...(transport !== undefined ? { [ATTR.MCP_TRANSPORT]: transport } : {}),
       });
     };
-    const out = await fn(record);
+    const recordAuth = (name: string, kind: string, outcome: string): void => {
+      span.addEvent('mcp.server.auth', {
+        [ATTR.MCP_SERVER]: name,
+        [ATTR.MCP_AUTH_KIND]: kind,
+        [ATTR.MCP_AUTH_OUTCOME]: outcome,
+      });
+    };
+    const out = await fn(record, recordAuth);
     span.setAttribute(ATTR.MCP_SERVER_COUNT, mountedServers);
     span.setAttribute(ATTR.MCP_TOOL_COUNT, mountedTools);
     return out;

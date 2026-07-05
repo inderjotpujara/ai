@@ -6,6 +6,7 @@ import {
   mountAll,
 } from '../mcp/mount.ts';
 import { createOAuthProvider } from '../mcp/oauth-provider.ts';
+import { getServerAuth } from '../mcp/token-store.ts';
 import { McpAuthKind, type McpConfig, McpTransportKind } from '../mcp/types.ts';
 import {
   createLedger,
@@ -42,6 +43,32 @@ function buildAuthProviders(
   return providers;
 }
 
+/** Determines (never performs) the auth outcome for each HTTP entry ahead of
+ *  mount, so it's observable without depending on the live OAuth handshake:
+ *  static-header entries are always `static-key`; OAuth entries are
+ *  `token-reused` when the token store already holds an access token for
+ *  that server, else `authenticated` (a fresh handshake is expected to run
+ *  during mount). `auth-failed` is not determinable here — a thrown mount
+ *  for an OAuth server is covered by the live path in Task 18. */
+function recordAuthOutcomes(
+  config: McpConfig,
+  recordAuth: (name: string, kind: string, outcome: string) => void,
+): void {
+  for (const entry of config.entries) {
+    if (entry.kind !== McpTransportKind.Http) continue;
+    if (entry.auth?.kind !== McpAuthKind.OAuth) {
+      recordAuth(entry.name, McpAuthKind.Static, 'static-key');
+      continue;
+    }
+    const hasToken = getServerAuth(entry.name).tokens?.access_token != null;
+    recordAuth(
+      entry.name,
+      McpAuthKind.OAuth,
+      hasToken ? 'token-reused' : 'authenticated',
+    );
+  }
+}
+
 /** Owns the per-run CLI scope so the ordering invariant lives in ONE place:
  *  create the run dir, install the run-scoped telemetry provider, THEN mount
  *  MCP under it (so `mcp.mount` reaches runs/<id>/spans.jsonl), run the body,
@@ -64,7 +91,8 @@ export async function withMcpRun<T>(
     ...buildAuthProviders(config),
     ...opts.mountDeps?.authProviders,
   };
-  const reg = await withMcpMountSpan(async (record) => {
+  const reg = await withMcpMountSpan(async (record, recordAuth) => {
+    recordAuthOutcomes(config, recordAuth);
     const r = await mountAll(config, { ...opts.mountDeps, authProviders });
     for (const m of r.mounted) record(m.name, 'mounted', m.toolCount, m.kind);
     for (const s of r.skipped) record(s.name, s.reason);

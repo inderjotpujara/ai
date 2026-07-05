@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { OAuthClientProvider } from '@ai-sdk/mcp';
 import { withMcpRun } from '../../src/cli/with-mcp-run.ts';
 import type { McpHttpSpec } from '../../src/mcp/client.ts';
+import { setServerAuth, tokenStorePath } from '../../src/mcp/token-store.ts';
 import {
   McpAuthKind,
   type McpConfig,
@@ -188,5 +189,142 @@ describe('withMcpRun', () => {
     );
     expect(received?.authProvider).toBe(callerProvider);
     await rm(runsRoot, { recursive: true, force: true });
+  });
+
+  const STATIC_HTTP_CONFIG: McpConfig = {
+    entries: [
+      {
+        kind: McpTransportKind.Http,
+        name: 'static-server',
+        url: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer static-token' },
+        raw: { type: 'http', url: 'https://example.test/mcp' },
+      },
+    ],
+    dormant: [],
+    warnings: [],
+  };
+
+  it('emits mcp.auth.outcome=static-key for a static-header http entry', async () => {
+    const runsRoot = await mkdtemp(join(tmpdir(), 'withmcprun-'));
+    const approvalsFile = join(runsRoot, 'approvals.json');
+    await withMcpRun(
+      {
+        runsRoot,
+        runId: 'auth-static',
+        config: STATIC_HTTP_CONFIG,
+        mountDeps: {
+          consent: { autoYes: true },
+          approvalsFile,
+          mount: async () => ({ tools: {}, close: async () => {} }),
+        },
+      },
+      async () => {},
+    );
+    const lines = (
+      await readFile(join(runsRoot, 'auth-static', 'spans.jsonl'), 'utf8')
+    )
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    const mountSpan = lines.find((s) => s.name === 'mcp.mount');
+    const authEvent = mountSpan?.events?.find(
+      (e: { name: string }) => e.name === 'mcp.server.auth',
+    );
+    expect(authEvent?.attributes?.['mcp.server']).toBe('static-server');
+    expect(authEvent?.attributes?.['mcp.auth.kind']).toBe('static');
+    expect(authEvent?.attributes?.['mcp.auth.outcome']).toBe('static-key');
+    await rm(runsRoot, { recursive: true, force: true });
+  });
+
+  it('emits mcp.auth.outcome=token-reused for an OAuth entry with a pre-seeded token store', async () => {
+    const configHome = await mkdtemp(join(tmpdir(), 'xdg-config-'));
+    const prevXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configHome;
+    try {
+      setServerAuth(
+        'oauth-server',
+        { tokens: { access_token: 'seeded-token' } },
+        tokenStorePath(),
+      );
+      const runsRoot = await mkdtemp(join(tmpdir(), 'withmcprun-'));
+      const approvalsFile = join(runsRoot, 'approvals.json');
+      await withMcpRun(
+        {
+          runsRoot,
+          runId: 'auth-oauth-reused',
+          config: OAUTH_HTTP_CONFIG,
+          mountDeps: {
+            consent: { autoYes: true },
+            approvalsFile,
+            mount: async () => ({ tools: {}, close: async () => {} }),
+          },
+        },
+        async () => {},
+      );
+      const lines = (
+        await readFile(
+          join(runsRoot, 'auth-oauth-reused', 'spans.jsonl'),
+          'utf8',
+        )
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const mountSpan = lines.find((s) => s.name === 'mcp.mount');
+      const authEvent = mountSpan?.events?.find(
+        (e: { name: string }) => e.name === 'mcp.server.auth',
+      );
+      expect(authEvent?.attributes?.['mcp.server']).toBe('oauth-server');
+      expect(authEvent?.attributes?.['mcp.auth.kind']).toBe('oauth');
+      expect(authEvent?.attributes?.['mcp.auth.outcome']).toBe('token-reused');
+      await rm(runsRoot, { recursive: true, force: true });
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdg;
+      await rm(configHome, { recursive: true, force: true });
+    }
+  });
+
+  it('emits mcp.auth.outcome=authenticated for an OAuth entry with no stored token', async () => {
+    const configHome = await mkdtemp(join(tmpdir(), 'xdg-config-'));
+    const prevXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configHome;
+    try {
+      const runsRoot = await mkdtemp(join(tmpdir(), 'withmcprun-'));
+      const approvalsFile = join(runsRoot, 'approvals.json');
+      await withMcpRun(
+        {
+          runsRoot,
+          runId: 'auth-oauth-fresh',
+          config: OAUTH_HTTP_CONFIG,
+          mountDeps: {
+            consent: { autoYes: true },
+            approvalsFile,
+            mount: async () => ({ tools: {}, close: async () => {} }),
+          },
+        },
+        async () => {},
+      );
+      const lines = (
+        await readFile(
+          join(runsRoot, 'auth-oauth-fresh', 'spans.jsonl'),
+          'utf8',
+        )
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const mountSpan = lines.find((s) => s.name === 'mcp.mount');
+      const authEvent = mountSpan?.events?.find(
+        (e: { name: string }) => e.name === 'mcp.server.auth',
+      );
+      expect(authEvent?.attributes?.['mcp.auth.outcome']).toBe('authenticated');
+      await rm(runsRoot, { recursive: true, force: true });
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdg;
+      await rm(configHome, { recursive: true, force: true });
+    }
   });
 });
