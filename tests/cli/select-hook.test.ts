@@ -185,3 +185,74 @@ test('hook degrades using fallbackModel: Ollama receives the fallback tag, not t
   expect(seenModelId).toBe('qwen2.5:7b-instruct');
   expect(seenModelId).not.toBe(declWithFallback.model);
 });
+
+const llamaCppDecl: ModelDeclaration = {
+  runtime: RuntimeKind.LlamaCpp,
+  model: 'qwen2.5-7b-instruct-q4_k_m.gguf',
+  params: {},
+  role: 'general reasoning + tool use',
+  capabilities: [Capability.Tools],
+  footprint: { approxParamsBillions: 7, bytesPerWeight: 0.55 },
+};
+
+/** Fake runtime that records every `control.warm(model, numCtx)` call into `warmed`. */
+function warmRecordingRuntime(
+  kind: RuntimeKind,
+  available: boolean,
+  warmed: Array<[string, number | undefined]>,
+): Runtime {
+  return {
+    kind,
+    isAvailable: async () => available,
+    createModel: () => ({ modelId: kind }) as unknown as LanguageModel,
+    control: {
+      isInstalled: async () => true,
+      pull: async () => {},
+      warm: async (model: string, numCtx?: number) => {
+        warmed.push([model, numCtx]);
+      },
+      unload: async () => {},
+      listLoaded: async () => [],
+      getModelMax: async () => undefined,
+      getModelKvArch: async () => undefined,
+      embed: async () => [],
+    },
+  };
+}
+
+test('select-hook warms a managed (non-Ollama) runtime with the resolved context', async () => {
+  const warmed: Array<[string, number | undefined]> = [];
+  const ensureReady = mock(async () => 8192);
+  const hook = createSelectHook({
+    registry: [llamaCppDecl],
+    ensureReady,
+    pinned: [],
+    capture: {},
+    runtimeFor: (kind) => warmRecordingRuntime(kind, true, warmed),
+  });
+  const pre = await hook(specialist());
+  expect(pre && 'model' in pre && pre.model).toBeTruthy();
+  expect(warmed).toEqual([[llamaCppDecl.model, 8192]]);
+});
+
+test('select-hook does NOT warm the managed runtime when degraded to Ollama', async () => {
+  const warmed: Array<[string, number | undefined]> = [];
+  const ensureReady = mock(async () => 8192);
+  const log = mock((_msg: string) => {});
+  const hook = createSelectHook({
+    registry: [llamaCppDecl],
+    ensureReady,
+    pinned: [],
+    capture: {},
+    // Only Ollama is reachable, so the hook degrades to Ollama.
+    runtimeFor: (kind) =>
+      warmRecordingRuntime(kind, kind === RuntimeKind.Ollama, warmed),
+    log,
+  });
+  const pre = await hook(specialist());
+  expect(pre && 'model' in pre && pre.model).toBeTruthy();
+  expect(log).toHaveBeenCalledTimes(1);
+  // Degraded to Ollama: managed `control.warm` must NOT be invoked (Ollama
+  // warms via `ensureReady` inside `resolveModel`, not via `control.warm` here).
+  expect(warmed).toEqual([]);
+});
