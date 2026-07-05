@@ -3,6 +3,7 @@ import qwenRouter from '../models/qwen-router.ts';
 import type { Agent } from '../src/core/agent-def.ts';
 import type { BeforeDelegate } from '../src/core/delegate.ts';
 import { createOrchestrator } from '../src/core/orchestrator.ts';
+import { createGenerateTools } from '../src/media/generate/tools.ts';
 import type { MediaStore } from '../src/media/store.ts';
 import { createOllamaModel } from '../src/providers/ollama.ts';
 import type { DegradationLedger } from '../src/reliability/ledger.ts';
@@ -26,7 +27,16 @@ export function createSuperAgent(
   const agents: Agent[] = agentNames().map((name) => {
     const factory = AGENTS[name];
     if (!factory) throw new Error(`unknown agent: ${name}`);
-    return factory(toolsFor(name));
+    const agent = factory(toolsFor(name));
+    // The media_creator specialist needs the run-scoped generate tools to
+    // actually produce files; every other agent keeps just its injected set.
+    if (name === 'media_creator' && mediaStore) {
+      return {
+        ...agent,
+        tools: { ...agent.tools, ...createGenerateTools(mediaStore) },
+      };
+    }
+    return agent;
   });
   return createOrchestrator({
     name: 'super',

@@ -1,6 +1,7 @@
 import type { ToolSet } from 'ai';
 import type { Agent } from '../src/core/agent-def.ts';
 import { createFileQaAgent } from './file-qa.ts';
+import { createMediaCreatorAgent } from './media-creator.ts';
 import { createVisionAgent } from './vision.ts';
 import { createWebFetchAgent } from './web-fetch.ts';
 // AGENT-BUILDER:IMPORTS (generated agent imports are inserted above this line — do not remove)
@@ -14,6 +15,7 @@ export const AGENTS: Record<string, AgentFactory> = {
   file_qa: createFileQaAgent,
   web_fetch: createWebFetchAgent,
   vision: createVisionAgent,
+  media_creator: createMediaCreatorAgent,
   // AGENT-BUILDER:ENTRIES (generated agent entries are inserted above this line — do not remove)
 };
 
