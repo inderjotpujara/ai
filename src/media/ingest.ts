@@ -13,7 +13,11 @@ export type IngestFlags = {
   paste: boolean;
 };
 
-export type IngestResult = { prompt: string; items: MediaItem[] };
+export type IngestResult = {
+  prompt: string;
+  items: MediaItem[];
+  warnings: string[];
+};
 
 type IngestDeps = {
   capturePaste?: typeof captureClipboardImage;
@@ -63,40 +67,59 @@ async function ingestFlags(
   store: MediaStore,
   deps: ResolvedDeps,
   items: MediaItem[],
+  warnings: string[],
 ): Promise<string> {
   let suffix = '';
 
   for (const path of flags.images) {
-    const item = await store.putFile(
-      MediaKind.Image,
-      path,
-      deps.mediaTypeOf(path),
-    );
-    items.push(item);
-    suffix += ` [img:${item.handle}]`;
-  }
-
-  for (const path of flags.videos) {
-    const item = await deps.sampleFrames(path, store);
-    items.push(item);
-    suffix += ` [video:${item.handle}]`;
-  }
-
-  for (const path of flags.audios) {
-    const text = await deps.transcribe(path);
-    suffix += `\n\nTranscript:\n${text}`;
-  }
-
-  if (flags.paste) {
-    const pasted = await deps.capturePaste();
-    if (pasted) {
-      const item = await store.put(
+    try {
+      const item = await store.putFile(
         MediaKind.Image,
-        pasted.bytes,
-        pasted.mediaType,
+        path,
+        deps.mediaTypeOf(path),
       );
       items.push(item);
       suffix += ` [img:${item.handle}]`;
+    } catch (err) {
+      warnings.push(`could not process ${path}: ${(err as Error).message}`);
+    }
+  }
+
+  for (const path of flags.videos) {
+    try {
+      const item = await deps.sampleFrames(path, store);
+      items.push(item);
+      suffix += ` [video:${item.handle}]`;
+    } catch (err) {
+      warnings.push(`could not process ${path}: ${(err as Error).message}`);
+    }
+  }
+
+  for (const path of flags.audios) {
+    try {
+      const text = await deps.transcribe(path);
+      suffix += `\n\nTranscript:\n${text}`;
+    } catch (err) {
+      warnings.push(`could not process ${path}: ${(err as Error).message}`);
+    }
+  }
+
+  if (flags.paste) {
+    try {
+      const pasted = await deps.capturePaste();
+      if (pasted) {
+        const item = await store.put(
+          MediaKind.Image,
+          pasted.bytes,
+          pasted.mediaType,
+        );
+        items.push(item);
+        suffix += ` [img:${item.handle}]`;
+      }
+    } catch (err) {
+      warnings.push(
+        `could not process pasted image: ${(err as Error).message}`,
+      );
     }
   }
 
@@ -110,6 +133,7 @@ async function autoDetectPaths(
   store: MediaStore,
   deps: ResolvedDeps,
   items: MediaItem[],
+  warnings: string[],
 ): Promise<string> {
   const tokens = prompt.split(/(\s+)/);
   let transcriptSuffix = '';
@@ -122,18 +146,22 @@ async function autoDetectPaths(
     const kind = kindOf(mediaType);
     if (!kind) continue;
 
-    if (kind === MediaKind.Image) {
-      const item = await store.putFile(MediaKind.Image, token, mediaType);
-      items.push(item);
-      tokens[i] = `[img:${item.handle}]`;
-    } else if (kind === MediaKind.Video) {
-      const item = await deps.sampleFrames(token, store);
-      items.push(item);
-      tokens[i] = `[video:${item.handle}]`;
-    } else {
-      const text = await deps.transcribe(token);
-      transcriptSuffix += `\n\nTranscript:\n${text}`;
-      tokens[i] = '';
+    try {
+      if (kind === MediaKind.Image) {
+        const item = await store.putFile(MediaKind.Image, token, mediaType);
+        items.push(item);
+        tokens[i] = `[img:${item.handle}]`;
+      } else if (kind === MediaKind.Video) {
+        const item = await deps.sampleFrames(token, store);
+        items.push(item);
+        tokens[i] = `[video:${item.handle}]`;
+      } else {
+        const text = await deps.transcribe(token);
+        transcriptSuffix += `\n\nTranscript:\n${text}`;
+        tokens[i] = '';
+      }
+    } catch (err) {
+      warnings.push(`could not process ${token}: ${(err as Error).message}`);
     }
   }
 
@@ -154,14 +182,16 @@ export async function ingestMedia(
 ): Promise<IngestResult> {
   const resolved = resolveDeps(deps);
   const items: MediaItem[] = [];
+  const warnings: string[] = [];
 
   const withAutoDetect = await autoDetectPaths(
     rawPrompt,
     store,
     resolved,
     items,
+    warnings,
   );
-  const flagSuffix = await ingestFlags(flags, store, resolved, items);
+  const flagSuffix = await ingestFlags(flags, store, resolved, items, warnings);
 
-  return { prompt: withAutoDetect + flagSuffix, items };
+  return { prompt: withAutoDetect + flagSuffix, items, warnings };
 }

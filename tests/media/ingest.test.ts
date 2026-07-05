@@ -49,3 +49,26 @@ test('a dragged-in image path in the prompt is auto-detected', async () => {
   );
   expect(res.prompt).toContain('[img:img_1]');
 });
+
+test('a failing audio transcription degrades per-item instead of aborting the turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'src-'));
+  const imgPath = join(dir, 'c.png');
+  const audioPath = join(dir, 'c.wav');
+  writeFileSync(imgPath, new Uint8Array([1]));
+  writeFileSync(audioPath, new Uint8Array([1]));
+  const res = await ingestMedia(
+    'what is this',
+    { images: [imgPath], audios: [audioPath], videos: [], paste: false },
+    freshStore(),
+    {
+      transcribe: async () => {
+        throw new Error('mlx_whisper not found');
+      },
+    },
+  );
+  expect(res.items.length).toBe(1);
+  expect(res.prompt).toContain('[img:img_1]');
+  expect(res.prompt).not.toContain('Transcript:');
+  expect(res.warnings.length).toBe(1);
+  expect(res.warnings[0]).toContain(audioPath);
+});
