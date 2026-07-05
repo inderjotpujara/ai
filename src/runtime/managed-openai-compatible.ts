@@ -4,6 +4,7 @@ import { MemoryError } from '../core/errors.ts';
 import type { ModelDeclaration, RuntimeKind } from '../core/types.ts';
 import { breakerFor } from '../reliability/breaker.ts';
 import { probeTimeoutMs } from '../reliability/config.ts';
+import { withRuntimeSpan } from '../telemetry/spans.ts';
 import {
   type SpawnFn,
   type SupervisedServer,
@@ -146,40 +147,63 @@ export function createManagedRuntime(
   }
 
   async function doWarm(model: string, numCtx?: number): Promise<void> {
-    const ctx = effectiveCtx(numCtx);
-    if (current && current.model === model && current.numCtx === ctx) return;
+    return withRuntimeSpan(strategy.kind, async (rec) => {
+      const ctx = effectiveCtx(numCtx);
+      // 'fixed' capability never actually applies a requested context — the
+      // runtime (e.g. MLX) ignores it, so leave RUNTIME_CONTEXT_APPLIED
+      // unset rather than implying a context change took effect.
+      const appliedCtx =
+        strategy.contextCapability === 'fixed' ? undefined : ctx;
+      try {
+        if (current && current.model === model && current.numCtx === ctx) {
+          rec.applied(numCtx, appliedCtx, 'reused', strategy.contextCapability);
+          return;
+        }
 
-    await stopCurrent();
+        await stopCurrent();
 
-    if (strategy.daemonLoad) {
-      const { baseUrl } = await strategy.daemonLoad(model, ctx);
-      current = { model, numCtx: ctx, baseUrl };
-      return;
-    }
+        if (strategy.daemonLoad) {
+          const { baseUrl } = await strategy.daemonLoad(model, ctx);
+          current = { model, numCtx: ctx, baseUrl };
+          rec.applied(
+            numCtx,
+            appliedCtx,
+            'daemon-loaded',
+            strategy.contextCapability,
+          );
+          return;
+        }
 
-    if (!strategy.launch) {
-      throw new Error(
-        `runtime strategy "${strategy.kind}" defines neither launch nor daemonLoad`,
-      );
-    }
+        if (!strategy.launch) {
+          throw new Error(
+            `runtime strategy "${strategy.kind}" defines neither launch nor daemonLoad`,
+          );
+        }
 
-    const port = await portAlloc();
-    // 'fixed' capability never threads numCtx into the launcher.
-    const launchCtx = strategy.contextCapability === 'fixed' ? undefined : ctx;
-    const spec = strategy.launch(model, launchCtx, port);
-    const server = await superviseServer(
-      {
-        cmd: spec.cmd,
-        args: spec.args,
-        env: spec.env,
-        host,
-        port: spec.port,
-        basePath,
-        healthPath: strategy.healthPath,
-      },
-      { spawn: deps.spawn, fetchImpl, startTimeoutMs: deps.startTimeoutMs },
-    );
-    current = { model, numCtx: ctx, baseUrl: server.baseUrl, server };
+        const port = await portAlloc();
+        // 'fixed' capability never threads numCtx into the launcher.
+        const launchCtx =
+          strategy.contextCapability === 'fixed' ? undefined : ctx;
+        const spec = strategy.launch(model, launchCtx, port);
+        const server = await superviseServer(
+          {
+            cmd: spec.cmd,
+            args: spec.args,
+            env: spec.env,
+            host,
+            port: spec.port,
+            basePath,
+            healthPath: strategy.healthPath,
+          },
+          { spawn: deps.spawn, fetchImpl, startTimeoutMs: deps.startTimeoutMs },
+        );
+        current = { model, numCtx: ctx, baseUrl: server.baseUrl, server };
+        rec.applied(numCtx, appliedCtx, 'spawned', strategy.contextCapability);
+      } catch (err) {
+        rec.applied(numCtx, appliedCtx, 'failed', strategy.contextCapability);
+        throw err;
+      }
+    });
   }
 
   return {

@@ -5,6 +5,7 @@ import {
   trace,
 } from '@opentelemetry/api';
 import { currentDelegationContext } from '../core/guardrails.ts';
+import type { RuntimeKind } from '../core/types.ts';
 import { type DegradeEvent, DegradeKind } from '../reliability/ledger.ts';
 import type { ArtifactKind, VerifiedLevel } from '../verified-build/types.ts';
 import { recordIoEnabled } from './provider.ts';
@@ -105,6 +106,12 @@ export const ATTR = {
   RELIABILITY_DEGRADE_REASON: 'degrade.reason',
   RELIABILITY_DROPPED_AGENT: 'partial_failure.dropped_agent',
   ERROR_TYPE: 'error.type',
+  // Runtime warm/spawn (Slice 26)
+  RUNTIME_KIND: 'runtime.kind',
+  RUNTIME_CONTEXT_CAPABILITY: 'runtime.context.capability',
+  RUNTIME_CONTEXT_REQUESTED: 'runtime.context.requested',
+  RUNTIME_CONTEXT_APPLIED: 'runtime.context.applied',
+  RUNTIME_WARM_OUTCOME: 'runtime.warm.outcome',
 } as const;
 
 export type ModelSelectInfo = {
@@ -647,6 +654,40 @@ export function withBuildArchiveSpan<T>(
       done: (candidates, pruned) => {
         span.setAttribute(ATTR.ARCHIVE_CANDIDATES, candidates);
         span.setAttribute(ATTR.ARCHIVE_PRUNED, pruned);
+      },
+    });
+  });
+}
+
+/** Root span for one runtime warm/spawn call (Slice 26). Mirrors
+ *  withCrewBuildSpan's recorder shape: the body reports the requested vs.
+ *  applied context window, the runtime's context capability, and the warm
+ *  outcome at the end via the returned recorder. `appliedCtx` should be
+ *  `undefined` for `fixed`-capability runtimes (e.g. MLX) so the attribute
+ *  is omitted rather than implying a context change actually happened. */
+export function withRuntimeSpan<T>(
+  kind: RuntimeKind,
+  fn: (rec: {
+    applied: (
+      requestedCtx: number | undefined,
+      appliedCtx: number | undefined,
+      outcome: string,
+      capability: string,
+    ) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('runtime.warm', async (span) => {
+    span.setAttribute(ATTR.RUNTIME_KIND, kind);
+    return fn({
+      applied: (requestedCtx, appliedCtx, outcome, capability) => {
+        span.setAttribute(ATTR.RUNTIME_CONTEXT_CAPABILITY, capability);
+        if (requestedCtx !== undefined) {
+          span.setAttribute(ATTR.RUNTIME_CONTEXT_REQUESTED, requestedCtx);
+        }
+        if (appliedCtx !== undefined) {
+          span.setAttribute(ATTR.RUNTIME_CONTEXT_APPLIED, appliedCtx);
+        }
+        span.setAttribute(ATTR.RUNTIME_WARM_OUTCOME, outcome);
       },
     });
   });

@@ -1,10 +1,16 @@
-import { expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import type {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+} from '@opentelemetry/sdk-trace-base';
 import { RuntimeKind } from '../../src/core/types.ts';
 import {
   createManagedRuntime,
   type RuntimeStrategy,
 } from '../../src/runtime/managed-openai-compatible.ts';
 import type { SpawnFn } from '../../src/runtime/process-supervisor.ts';
+import { ATTR } from '../../src/telemetry/spans.ts';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 const spawn: SpawnFn = () => ({ pid: 1, kill: () => {}, onExit: () => {} });
 const health = (async () =>
@@ -203,4 +209,112 @@ test('control.unload stops the supervised server', async () => {
   await rt.control.warm('m', 4096);
   await rt.control.unload('m');
   expect(killed).toBe(true);
+});
+
+describe('runtime.warm telemetry (Slice 26 Task 8)', () => {
+  let exporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+
+  beforeEach(() => {
+    ({ exporter, provider } = registerTestProvider());
+  });
+
+  afterEach(async () => {
+    await provider.shutdown();
+    exporter.reset();
+  });
+
+  function runtimeWarmSpans() {
+    return exporter.getFinishedSpans().filter((s) => s.name === 'runtime.warm');
+  }
+
+  test('emits outcome=spawned on first warm and outcome=reused on the same (model, ctx)', async () => {
+    const rt = createManagedRuntime(relaunchStrategy([]), {
+      spawn,
+      fetchImpl: health,
+      startTimeoutMs: 2000,
+    });
+    await rt.control.warm('m', 8192);
+    await rt.control.warm('m', 8192);
+    const spans = runtimeWarmSpans();
+    expect(spans.length).toBe(2);
+    expect(spans[0]?.attributes[ATTR.RUNTIME_KIND]).toBe(RuntimeKind.LlamaCpp);
+    expect(spans[0]?.attributes[ATTR.RUNTIME_WARM_OUTCOME]).toBe('spawned');
+    expect(spans[0]?.attributes[ATTR.RUNTIME_CONTEXT_REQUESTED]).toBe(8192);
+    expect(spans[0]?.attributes[ATTR.RUNTIME_CONTEXT_APPLIED]).toBe(8192);
+    expect(spans[1]?.attributes[ATTR.RUNTIME_WARM_OUTCOME]).toBe('reused');
+  });
+
+  test('emits outcome=daemon-loaded for daemon strategies (LM Studio-style)', async () => {
+    const strat: RuntimeStrategy = {
+      kind: RuntimeKind.LmStudio,
+      detect: async () => true,
+      contextCapability: 'reload',
+      defaultPort: 1234,
+      healthPath: '/v1/models',
+      daemonLoad: async (_model, _numCtx) => ({
+        baseUrl: 'http://127.0.0.1:1234/v1',
+      }),
+    };
+    const rt = createManagedRuntime(strat, { fetchImpl: health });
+    await rt.control.warm('m', 4096);
+    const spans = runtimeWarmSpans();
+    expect(spans.length).toBe(1);
+    expect(spans[0]?.attributes[ATTR.RUNTIME_WARM_OUTCOME]).toBe(
+      'daemon-loaded',
+    );
+    expect(spans[0]?.attributes[ATTR.RUNTIME_CONTEXT_CAPABILITY]).toBe(
+      'reload',
+    );
+    expect(spans[0]?.attributes[ATTR.RUNTIME_CONTEXT_APPLIED]).toBe(4096);
+  });
+
+  test('omits RUNTIME_CONTEXT_APPLIED for a fixed-capability strategy (MLX)', async () => {
+    const strat: RuntimeStrategy = {
+      kind: RuntimeKind.MlxServer,
+      detect: async () => true,
+      contextCapability: 'fixed',
+      defaultPort: 8080,
+      healthPath: '/v1/models',
+      launch: (model, _numCtx, port) => ({
+        cmd: 'mlx_lm.server',
+        args: ['--model', model, '--port', String(port)],
+        port,
+      }),
+    };
+    const rt = createManagedRuntime(strat, {
+      spawn,
+      fetchImpl: health,
+      startTimeoutMs: 2000,
+    });
+    await rt.control.warm('m', 8192);
+    const spans = runtimeWarmSpans();
+    expect(spans.length).toBe(1);
+    expect(spans[0]?.attributes[ATTR.RUNTIME_CONTEXT_CAPABILITY]).toBe('fixed');
+    expect(spans[0]?.attributes[ATTR.RUNTIME_CONTEXT_REQUESTED]).toBe(8192);
+    expect(spans[0]?.attributes[ATTR.RUNTIME_CONTEXT_APPLIED]).toBeUndefined();
+    expect(spans[0]?.attributes[ATTR.RUNTIME_WARM_OUTCOME]).toBe('spawned');
+  });
+
+  test('emits outcome=failed and still propagates the error when launch throws', async () => {
+    const strat: RuntimeStrategy = {
+      kind: RuntimeKind.LlamaCpp,
+      detect: async () => true,
+      contextCapability: 'relaunch',
+      defaultPort: 8080,
+      healthPath: '/health',
+      launch: () => {
+        throw new Error('launch failed');
+      },
+    };
+    const rt = createManagedRuntime(strat, {
+      spawn,
+      fetchImpl: health,
+      startTimeoutMs: 2000,
+    });
+    await expect(rt.control.warm('m', 8192)).rejects.toThrow('launch failed');
+    const spans = runtimeWarmSpans();
+    expect(spans.length).toBe(1);
+    expect(spans[0]?.attributes[ATTR.RUNTIME_WARM_OUTCOME]).toBe('failed');
+  });
 });
