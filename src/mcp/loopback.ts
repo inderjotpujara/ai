@@ -19,7 +19,8 @@ function defaultOpenBrowser(url: string): void {
 /** Start a one-shot localhost server on an ephemeral port, build the authorization
  *  URL via `buildAuthUrl(redirectUri)`, open it in the browser, and resolve with the
  *  `{code, state}` captured on the first `/callback` hit — then stop the server.
- *  A `state` mismatch rejects `Error('state mismatch')`; a no-show rejects on
+ *  A `state` mismatch rejects `Error('state mismatch')`; a missing `code` rejects
+ *  `Error('missing code')`; a no-show rejects on
  *  `deps.timeoutMs` (default 180s). The server is stopped on every exit path. */
 export function awaitOAuthRedirect(
   buildAuthUrl: (redirectUri: string) => string,
@@ -48,6 +49,10 @@ export function awaitOAuthRedirect(
               const state = url.searchParams.get('state') ?? '';
               if (state !== expectedState) {
                 reject(new Error('state mismatch'));
+                return new Response('Bad request', { status: 400 });
+              }
+              if (code === '') {
+                reject(new Error('missing code'));
                 return new Response('Bad request', { status: 400 });
               }
               resolve({ code, state, redirectUri });

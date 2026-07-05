@@ -39,3 +39,18 @@ test('rejects on state mismatch and stops the server', async () => {
   );
   await expect(p).rejects.toThrow('state mismatch');
 });
+
+test('rejects on missing code and stops the server', async () => {
+  const p = awaitOAuthRedirect(
+    (redirectUri) =>
+      `https://as.example/auth?redirect_uri=${encodeURIComponent(redirectUri)}`,
+    'expected-state',
+    {
+      openBrowser: (url) => {
+        void fetch(`${redirectUriFrom(url)}?state=expected-state`);
+      },
+      timeoutMs: 5000,
+    },
+  );
+  await expect(p).rejects.toThrow('missing code');
+});
