@@ -46,5 +46,16 @@
     "downloads": 20000,
     "role": "faithfulness judge",
     "capabilities": []
+  },
+  {
+    "provider": "ollama",
+    "model": "qwen2.5vl:7b",
+    "repo": "qwen2.5vl",
+    "params_billions": 7,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 6000000000,
+    "downloads": 0,
+    "role": "vision analysis",
+    "capabilities": ["vision"]
   }
 ]

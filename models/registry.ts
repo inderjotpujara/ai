@@ -1,6 +1,7 @@
 import type { ModelDeclaration } from '../src/core/types.ts';
 import qwenFast from './qwen-fast.ts';
 import qwenRouter from './qwen-router.ts';
+import qwenVision from './qwen-vision.ts';
 
 /**
  * Bootstrap content of a machine-adaptive capability LADDER. The selector is
@@ -8,4 +9,4 @@ import qwenRouter from './qwen-router.ts';
  * not fit. Only rungs verified on this hardware ship here; Slice 6 discovery will
  * replace this static array with a per-machine runtime fetch.
  */
-export const BOOTSTRAP: ModelDeclaration[] = [qwenRouter, qwenFast];
+export const BOOTSTRAP: ModelDeclaration[] = [qwenRouter, qwenFast, qwenVision];
