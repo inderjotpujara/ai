@@ -1,88 +1,38 @@
-### Task 12: Wire the ledger into the run context + CLI surface
+### Task 12: OAuth client provider
 
 **Files:**
-- Modify: `src/cli/with-mcp-run.ts` (add `ledger` to `McpRunContext`; persist on exit)
-- Modify: `src/cli/with-run.ts` (expose a ledger for the non-MCP path if it runs agents) — only if it invokes agent execution; otherwise skip.
-- Modify: `src/cli/chat.ts` (print `formatLedger` after the run)
-- Test: `tests/cli/degradation-ledger.test.ts`
+- Create: `src/mcp/oauth-provider.ts`
+- Test: `tests/mcp/oauth-provider.test.ts`
 
 **Interfaces:**
-- Consumes: `createLedger`, `formatLedger`, `serializeLedger`, `DegradationLedger` (ledger.ts); `writeArtifact` (`src/run/run-store.ts`).
-- Produces: `McpRunContext` gains `ledger: DegradationLedger`. On body completion, if `ledger.events.length > 0`, write `degradation.jsonl` via `writeArtifact(ctx.run, 'degradation.jsonl', serializeLedger(ledger))`.
+- Consumes: Task 10 (token store), Task 11 (loopback), `OAuthClientProvider` type from `@ai-sdk/mcp`.
+- Produces: `createOAuthProvider(serverName: string, opts?: { storePath?: string; scopes?: string[]; clientId?: string; openBrowser?: (u: string) => void }): OAuthClientProvider`.
+- Behavior: implement every required `OAuthClientProvider` member (verbatim contract from the spec): `tokens()` → store; `saveTokens(t)` → store; `redirectToAuthorization(url)` → `awaitOAuthRedirect` (the SDK gives the authorization URL; our provider opens the browser + captures the code — note: the AI SDK provider contract drives the actual code→token exchange, our `redirectToAuthorization` only needs to open the browser and the SDK's transport polls; confirm the exact SDK callback shape at implementation time and adapt — the SDK may instead expect `redirectToAuthorization` to just `open` and a separate `saveCodeVerifier`/`codeVerifier` + a code-provider callback); `saveCodeVerifier`/`codeVerifier` → store; `get redirectUrl()` → the loopback URI; `get clientMetadata()` → `{ client_name: 'ai-local-agent', redirect_uris: [redirectUrl], grant_types: ['authorization_code','refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none', scope: scopes?.join(' ') }`; `clientInformation()` → store's `client` (undefined ⇒ triggers DCR/CIMD in the SDK); `saveClientInformation?` → store.
 
-- [ ] **Step 1: Write the failing test**
+> **Implementer:** the precise wiring of `redirectToAuthorization` vs. the SDK's code-capture differs by `@ai-sdk/mcp` version. Read `node_modules/@ai-sdk/mcp/…/oauth.ts` FIRST and make the provider satisfy the ACTUAL interface. The unit test below pins the store-backed methods (version-independent); the browser/loopback flow is proven live in Task 18.
 
-```ts
-// tests/cli/degradation-ledger.test.ts
-import { describe, expect, it } from 'bun:test';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+- [ ] **Step 1: failing test** (store-backed methods, no network)
+```typescript
+// tests/mcp/oauth-provider.test.ts
+import { expect, test } from 'bun:test';
 import { join } from 'node:path';
-import { withMcpRun } from '../../src/cli/with-mcp-run.ts';
-import { DegradeKind } from '../../src/reliability/ledger.ts';
+import { tmpdir } from 'node:os';
+import { createOAuthProvider } from '../../src/mcp/oauth-provider.ts';
 
-describe('withMcpRun degradation ledger', () => {
-  it('exposes a ledger and persists it when events were recorded', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'runs-'));
-    let runDir = '';
-    await withMcpRun({ runsRoot: root, runId: 'r1', config: { entries: [], dormant: [], warnings: [] } }, async (ctx) => {
-      runDir = ctx.run.dir;
-      ctx.ledger.record({ kind: DegradeKind.AgentDropped, subject: 'a', reason: 'down' });
-    });
-    const text = await readFile(join(runDir, 'degradation.jsonl'), 'utf8');
-    expect(JSON.parse(text.trim()).subject).toBe('a');
-  });
+test('persists + returns tokens and code verifier via the store', async () => {
+  const storePath = join(tmpdir(), `oauth-${Date.now()}.json`);
+  const p = createOAuthProvider('linear', { storePath });
+  await p.saveCodeVerifier('verifier-123');
+  expect(await p.codeVerifier()).toBe('verifier-123');
+  await p.saveTokens({ access_token: 'tok', token_type: 'Bearer' } as never);
+  expect((await p.tokens())?.access_token).toBe('tok');
+  expect(p.clientMetadata.redirect_uris.length).toBeGreaterThan(0);
 });
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/cli/degradation-ledger.test.ts`
-Expected: FAIL — `ctx.ledger` undefined.
-
-- [ ] **Step 3: Implement**
-
-In `src/cli/with-mcp-run.ts`:
-- Import: `import { createLedger, serializeLedger, type DegradationLedger } from '../reliability/ledger.ts';` and `writeArtifact` from `../run/run-store.ts` (add to existing import).
-- Extend the type: `export type McpRunContext = { run: RunHandle; reg: MountedRegistry; config: McpConfig; ledger: DegradationLedger };`
-- In `withMcpRun`, after `createRun`, create `const ledger = createLedger();`, pass it in the `ctx` object, and in the `finally`/after-body block write it out:
-
-```ts
-try {
-  const result = await body({ run, reg, config, ledger });
-  if (ledger.events.length > 0) {
-    await writeArtifact(run, 'degradation.jsonl', serializeLedger(ledger));
-  }
-  return result;
-} finally {
-  await reg.close();
-  await tel.shutdown();
-}
-```
-
-(Adapt to the file's existing control flow — the point is: ledger created, threaded into `ctx`, persisted when non-empty.)
-
-In `src/cli/chat.ts`: after the run completes, print the summary:
-
-```ts
-import { formatLedger } from '../reliability/ledger.ts';
-// after obtaining the result, before returning:
-const summary = formatLedger(ctx.ledger);
-if (summary) console.error(summary);
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun test tests/cli/degradation-ledger.test.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Typecheck, lint, commit**
-
-```bash
-bun run typecheck && bun run lint:file -- "src/cli/with-mcp-run.ts" "src/cli/chat.ts" "tests/cli/degradation-ledger.test.ts"
-git add src/cli/with-mcp-run.ts src/cli/chat.ts tests/cli/degradation-ledger.test.ts
-git commit -m "feat(cli): thread degradation ledger through the run + surface it"
-```
+- [ ] **Step 2: fail**.
+- [ ] **Step 3: implement** against the real SDK interface.
+- [ ] **Step 4: pass**.
+- [ ] **Step 5: commit** (`feat(mcp): live OAuth client provider (store + PKCE + DCR/CIMD)`).
 
 ---
 

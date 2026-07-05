@@ -1,90 +1,47 @@
-### Task 10: Migrate provisioning onto reliability/{retry,timeout}
+### Task 10: OAuth token store (0600 file)
 
 **Files:**
-- Modify: `src/provisioning/supervisor.ts` (re-export from reliability; keep `checkDiskSpace`)
-- Modify: `src/provisioning/providers/ollama.ts` (use shared `defaultDownloadRetry()` + `IdleWatchdog`)
-- Modify: `src/provisioning/providers/hf-fetch.ts` (same)
-- Create: `src/reliability/download-retry.ts` (shared download retry config)
-- Test: `tests/reliability/download-retry.test.ts`; existing `tests/provisioning/supervisor.test.ts` must still pass.
+- Create: `src/mcp/token-store.ts`
+- Test: `tests/mcp/token-store.test.ts`
 
 **Interfaces:**
-- Consumes: `withRetry`, `abortableSleep` (retry.ts); `IdleWatchdog` (timeout.ts).
-- Produces: `defaultDownloadRetry(): { attempts: number; baseMs: number; capMs: number; jitter: () => number }`; `downloadStallMs(): number`.
-- `supervisor.ts` re-exports `withRetry`, `abortableSleep`, and a back-compat `StallWatchdog` alias = `IdleWatchdog` so existing imports keep working.
+- Produces:
+```typescript
+export type StoredTokens = { access_token: string; token_type?: string; refresh_token?: string; expires_at?: number };
+export type ClientRecord = { client_id: string; client_secret?: string };
+export type ServerAuthRecord = { tokens?: StoredTokens; codeVerifier?: string; client?: ClientRecord };
+export function tokenStorePath(): string; // default: $XDG_CONFIG_HOME|~/.config + /ai/mcp-tokens.json
+export function readTokenStore(path?: string): Record<string, ServerAuthRecord>;
+export function writeTokenStore(store: Record<string, ServerAuthRecord>, path?: string): void; // atomic temp+rename, mode 0o600
+export function getServerAuth(server: string, path?: string): ServerAuthRecord;
+export function setServerAuth(server: string, rec: ServerAuthRecord, path?: string): void; // merge + persist
+```
+- Behavior: mirror `consent.ts` atomic write BUT add `{ mode: 0o600 }` on the temp write AND `chmodSync(path, 0o600)` after rename (rename preserves the temp's mode; set on both to be safe). Corrupt/missing file → `{}` (never throw). Create the parent dir (`mkdirSync(dirname, { recursive: true, mode: 0o700 })`).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: failing tests**
+```typescript
+// tests/mcp/token-store.test.ts
+import { expect, test } from 'bun:test';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { setServerAuth, getServerAuth } from '../../src/mcp/token-store.ts';
 
-```ts
-// tests/reliability/download-retry.test.ts
-import { describe, expect, it } from 'bun:test';
-import { defaultDownloadRetry, downloadStallMs } from '../../src/reliability/download-retry.ts';
+test('round-trips tokens per server and writes 0600', () => {
+  const path = join(tmpdir(), `mcp-tokens-${Date.now()}.json`);
+  setServerAuth('linear', { tokens: { access_token: 'abc', token_type: 'Bearer' } }, path);
+  expect(getServerAuth('linear', path).tokens?.access_token).toBe('abc');
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+});
 
-describe('download retry defaults', () => {
-  it('provides positive backoff parameters', () => {
-    const r = defaultDownloadRetry();
-    expect(r.attempts).toBeGreaterThan(0);
-    expect(r.capMs).toBeGreaterThanOrEqual(r.baseMs);
-    expect(typeof r.jitter()).toBe('number');
-    expect(downloadStallMs()).toBeGreaterThan(0);
-  });
+test('missing file reads as empty, never throws', () => {
+  expect(getServerAuth('nope', join(tmpdir(), `absent-${Date.now()}.json`))).toEqual({});
 });
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/reliability/download-retry.test.ts`
-Expected: FAIL — cannot resolve `download-retry.ts`.
-
-- [ ] **Step 3: Write the shared config + migrate**
-
-```ts
-// src/reliability/download-retry.ts
-import { retryBaseMs, retryCapMs } from './config.ts';
-
-/** Shared download retry shape (was duplicated in ollama.ts + hf-fetch.ts). */
-export function defaultDownloadRetry(): {
-  attempts: number;
-  baseMs: number;
-  capMs: number;
-  jitter: () => number;
-} {
-  return {
-    attempts: Number(process.env.AGENT_DOWNLOAD_ATTEMPTS) || 6,
-    baseMs: retryBaseMs(),
-    capMs: retryCapMs(),
-    jitter: () => 0.5 + Math.random() / 2,
-  };
-}
-
-/** Idle/stall timeout for a download with no byte progress. */
-export function downloadStallMs(): number {
-  return Number(process.env.AGENT_DOWNLOAD_STALL_MS) || 90_000;
-}
-```
-
-In `src/provisioning/supervisor.ts`: delete the local `abortableSleep`, `withRetry`, and `StallWatchdog` bodies; replace with re-exports (keep `checkDiskSpace` + `PreflightInput` in place):
-
-```ts
-export { abortableSleep, withRetry } from '../reliability/retry.ts';
-export { IdleWatchdog as StallWatchdog } from '../reliability/timeout.ts';
-```
-
-In `src/provisioning/providers/ollama.ts`: replace the inline `withRetry(..., { attempts: 6, baseMs: 1_000, capMs: 45_000, jitter: ... })` config with `defaultDownloadRetry()` (spread), and the `STALL_MS`/`new StallWatchdog(STALL_MS, ...)` with `downloadStallMs()`/`new IdleWatchdog(downloadStallMs(), ...)`; `beat(bytes)` replaces `beat(bytes)` (signature identical — `progress` is the byte count). Import from `../../reliability/download-retry.ts` and `../../reliability/timeout.ts`.
-
-In `src/provisioning/providers/hf-fetch.ts`: replace the local `DEFAULT_RETRY` constant with `deps.retry ?? defaultDownloadRetry()` (keep the `RetryConfig`-shaped `deps.retry` injection seam by widening its type to the returned shape) and `STALL_MS` with `downloadStallMs()`, `StallWatchdog` with `IdleWatchdog`.
-
-- [ ] **Step 4: Run tests to verify no regression**
-
-Run: `bun test tests/reliability/download-retry.test.ts tests/provisioning/`
-Expected: PASS — the new test plus all existing provisioning tests (supervisor, ollama, hf-fetch) still green.
-
-- [ ] **Step 5: Typecheck, lint, commit**
-
-```bash
-bun run typecheck && bun run lint:file -- "src/reliability/download-retry.ts" "src/provisioning/supervisor.ts" "src/provisioning/providers/ollama.ts" "src/provisioning/providers/hf-fetch.ts"
-git add src/reliability/download-retry.ts src/provisioning/
-git commit -m "refactor(provisioning): migrate retry/stall onto reliability module"
-```
+- [ ] **Step 2: fail**.
+- [ ] **Step 3: implement** per Interfaces.
+- [ ] **Step 4: pass**.
+- [ ] **Step 5: commit** (`feat(mcp): 0600 OAuth token store`).
 
 ---
 

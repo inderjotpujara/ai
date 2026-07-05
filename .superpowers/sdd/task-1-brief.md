@@ -1,132 +1,49 @@
-### Task 1: Reliability config (computed, env-fallback-only knobs)
+### Task 1: Add `RuntimeKind.LlamaCpp` + kind-map wiring
 
 **Files:**
-- Create: `src/reliability/config.ts`
-- Test: `tests/reliability/config.test.ts`
+- Modify: `src/core/types.ts` (RuntimeKind enum + its LmStudio comment)
+- Modify: `src/core/kind-map.ts` (downloadKindFor, runtimeKindFor)
+- Test: `tests/core/kind-map.test.ts` (create if absent; else add cases)
 
 **Interfaces:**
-- Produces: `maxAttempts(): number`, `runTimeoutMs(): number`, `idleTimeoutMs(): number`, `breakerThreshold(): number`, `breakerCooldownMs(): number`, `breakerHalfOpenProbes(): number`, `retryBaseMs(): number`, `retryCapMs(): number`, `probeTimeoutMs(): number`. Each reads an env var, falling back to a default.
+- Produces: `RuntimeKind.LlamaCpp = 'LlamaCpp'`; `downloadKindFor(RuntimeKind.LlamaCpp, 'gguf-file') → ProviderKind.HfGguf`; `runtimeKindFor` unchanged mapping (HfGguf still → Ollama by default — llama.cpp opts in via an explicit declaration, see Task 5 note).
 
 - [ ] **Step 1: Write the failing test**
 
-```ts
-// tests/reliability/config.test.ts
-import { afterEach, describe, expect, it } from 'bun:test';
-import {
-  breakerCooldownMs,
-  breakerThreshold,
-  idleTimeoutMs,
-  maxAttempts,
-  probeTimeoutMs,
-  retryBaseMs,
-  retryCapMs,
-  runTimeoutMs,
-} from '../../src/reliability/config.ts';
+```typescript
+// tests/core/kind-map.test.ts
+import { expect, test } from 'bun:test';
+import { ProviderKind, RuntimeKind } from '../../src/core/types.ts';
+import { downloadKindFor } from '../../src/core/kind-map.ts';
 
-describe('reliability config', () => {
-  const keys = [
-    'AGENT_MAX_ATTEMPTS',
-    'AGENT_RUN_TIMEOUT_MS',
-    'AGENT_IDLE_TIMEOUT_MS',
-    'AGENT_BREAKER_THRESHOLD',
-    'AGENT_BREAKER_COOLDOWN_MS',
-    'AGENT_RETRY_BASE_MS',
-    'AGENT_RETRY_CAP_MS',
-    'AGENT_PROBE_TIMEOUT_MS',
-  ];
-  afterEach(() => {
-    for (const k of keys) delete process.env[k];
-  });
-
-  it('returns sensible positive defaults', () => {
-    expect(maxAttempts()).toBeGreaterThan(0);
-    expect(runTimeoutMs()).toBeGreaterThan(0);
-    expect(idleTimeoutMs()).toBeGreaterThan(0);
-    expect(breakerThreshold()).toBeGreaterThan(0);
-    expect(breakerCooldownMs()).toBeGreaterThan(0);
-    expect(retryBaseMs()).toBeGreaterThan(0);
-    expect(retryCapMs()).toBeGreaterThanOrEqual(retryBaseMs());
-    expect(probeTimeoutMs()).toBeGreaterThan(0);
-  });
-
-  it('env vars override defaults', () => {
-    process.env.AGENT_MAX_ATTEMPTS = '7';
-    process.env.AGENT_BREAKER_THRESHOLD = '3';
-    expect(maxAttempts()).toBe(7);
-    expect(breakerThreshold()).toBe(3);
-  });
-
-  it('ignores non-numeric / zero env and uses the fallback', () => {
-    process.env.AGENT_MAX_ATTEMPTS = 'nope';
-    expect(maxAttempts()).toBeGreaterThan(0);
-  });
+test('llama.cpp GGUF downloads route to the HfGguf provider', () => {
+  expect(downloadKindFor(RuntimeKind.LlamaCpp, 'gguf-file')).toBe(ProviderKind.HfGguf);
+  expect(downloadKindFor(RuntimeKind.LlamaCpp, 'ollama')).toBe(ProviderKind.HfGguf);
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test to verify it fails** — `bun test tests/core/kind-map.test.ts` → FAIL (`LlamaCpp` undefined).
 
-Run: `bun test tests/reliability/config.test.ts`
-Expected: FAIL — cannot resolve `../../src/reliability/config.ts`.
+- [ ] **Step 3: Implement**
 
-- [ ] **Step 3: Write minimal implementation**
+In `src/core/types.ts`, add to `RuntimeKind` (keep existing members):
+```typescript
+  LlamaCpp = 'LlamaCpp', // GGUF via a managed llama.cpp-server (-c dynamic context)
+```
+Update the `LmStudio` comment to drop "download-only in Slice 18" (it becomes a real runtime in Task 6).
 
-```ts
-// src/reliability/config.ts
-/** Reliability knobs. Computed defaults; env vars are fallback-only overrides. */
-
-function envNumber(name: string, fallback: number): number {
-  return Number(process.env[name]) || fallback;
-}
-
-/** Max attempts for a cross-boundary op we own (retry.ts). Not for LLM turns. */
-export function maxAttempts(): number {
-  return envNumber('AGENT_MAX_ATTEMPTS', 4);
-}
-/** Hard wall-clock cap for a single agent turn / step attempt. */
-export function runTimeoutMs(): number {
-  return envNumber('AGENT_RUN_TIMEOUT_MS', 120_000);
-}
-/** Idle cap for a progress-bearing op — resets on observed progress. */
-export function idleTimeoutMs(): number {
-  return envNumber('AGENT_IDLE_TIMEOUT_MS', 90_000);
-}
-/** Consecutive failures before a breaker opens. */
-export function breakerThreshold(): number {
-  return envNumber('AGENT_BREAKER_THRESHOLD', 5);
-}
-/** How long a breaker stays open before allowing a half-open probe. */
-export function breakerCooldownMs(): number {
-  return envNumber('AGENT_BREAKER_COOLDOWN_MS', 60_000);
-}
-/** Successful half-open probes required to close a breaker. */
-export function breakerHalfOpenProbes(): number {
-  return envNumber('AGENT_BREAKER_HALF_OPEN_PROBES', 1);
-}
-/** Base backoff for retry.ts. */
-export function retryBaseMs(): number {
-  return envNumber('AGENT_RETRY_BASE_MS', 1_000);
-}
-/** Backoff cap for retry.ts. */
-export function retryCapMs(): number {
-  return envNumber('AGENT_RETRY_CAP_MS', 45_000);
-}
-/** Liveness-probe timeout (runtime isAvailable / listModels). */
-export function probeTimeoutMs(): number {
-  return envNumber('AGENT_PROBE_TIMEOUT_MS', 1_500);
-}
+In `src/core/kind-map.ts`, in `downloadKindFor`, before the `RuntimeKind.Ollama` fallthrough:
+```typescript
+  if (runtime === RuntimeKind.LlamaCpp) return ProviderKind.HfGguf;
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test to verify it passes** — `bun test tests/core/kind-map.test.ts` → PASS.
 
-Run: `bun test tests/reliability/config.test.ts`
-Expected: PASS (3 tests).
-
-- [ ] **Step 5: Typecheck, lint, commit**
-
+- [ ] **Step 5: typecheck + lint + commit**
 ```bash
-bun run typecheck && bun run lint:file -- "src/reliability/config.ts" "tests/reliability/config.test.ts"
-git add src/reliability/config.ts tests/reliability/config.test.ts
-git commit -m "feat(reliability): computed env-fallback config knobs"
+bun run typecheck && bun run lint:file src/core/types.ts src/core/kind-map.ts tests/core/kind-map.test.ts
+git add src/core/types.ts src/core/kind-map.ts tests/core/kind-map.test.ts
+git commit -m "feat(runtime): add RuntimeKind.LlamaCpp + kind-map routing"
 ```
 
 ---

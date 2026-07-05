@@ -1,194 +1,47 @@
-### Task 6: Circuit breaker + registry
+### Task 6: LM Studio strategy via `@lmstudio/sdk` + register
 
 **Files:**
-- Create: `src/reliability/breaker.ts`
-- Test: `tests/reliability/breaker.test.ts`
+- Modify: `package.json` (add `@lmstudio/sdk` to dependencies — run `bun add @lmstudio/sdk`)
+- Create: `src/runtime/strategies/lmstudio.ts`
+- Modify: `src/runtime/registry.ts` (add `lmStudioRuntime`)
+- Test: `tests/runtime/lmstudio-runtime.test.ts`
 
 **Interfaces:**
-- Consumes: `breakerThreshold`, `breakerCooldownMs`, `breakerHalfOpenProbes` from config; `CircuitOpenError` from errors.
-- Produces:
-  - `enum BreakerState { Closed, Open, HalfOpen }`
-  - `type BreakerOpts = { threshold?: number; cooldownMs?: number; halfOpenProbes?: number; now?: () => number }`
-  - `class CircuitBreaker` with `readonly id: string`, `state(): BreakerState`, `run<T>(fn: () => Promise<T>): Promise<T>`
-  - `breakerFor(id: string, opts?: BreakerOpts): CircuitBreaker` (shared registry)
-  - `resetBreakers(): void` (test seam)
+- Produces: `lmStudioStrategy: RuntimeStrategy` (`kind: LmStudio`, `contextCapability: 'reload'`, `defaultPort: 1234`, `healthPath: '/v1/models'`; NO `launch`; `daemonLoad(model, numCtx)` uses `@lmstudio/sdk` (injectable client via a `deps` seam) to ensure the server is up and `client.llm.load(model, { config: { contextLength: numCtx } })`, returning `{ baseUrl: 'http://127.0.0.1:1234/v1' }`; `daemonUnload(model)` → `client.llm.unload(model)`; `detect()` → SDK client reachable / `lms` present). Wrap the SDK behind a small injectable interface `LmStudioClient = { load(model, ctx?): Promise<void>; unload(model): Promise<void>; listLoaded(): Promise<string[]>; reachable(): Promise<boolean> }` so tests use a fake and the real impl adapts `@lmstudio/sdk`.
+- Consumes: Task 3.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: failing test** (fake `LmStudioClient`)
 
-```ts
-// tests/reliability/breaker.test.ts
-import { beforeEach, describe, expect, it } from 'bun:test';
-import { BreakerState, CircuitBreaker, breakerFor, resetBreakers } from '../../src/reliability/breaker.ts';
-import { CircuitOpenError } from '../../src/reliability/errors.ts';
+```typescript
+// tests/runtime/lmstudio-runtime.test.ts
+import { expect, test } from 'bun:test';
+import { RuntimeKind } from '../../src/core/types.ts';
+import { makeLmStudioStrategy, type LmStudioClient } from '../../src/runtime/strategies/lmstudio.ts';
 
-const fail = () => Promise.reject(new Error('boom'));
-const ok = () => Promise.resolve('ok');
+function fakeClient(log: string[]): LmStudioClient {
+  return {
+    load: async (m, ctx) => { log.push(`load ${m} @ ${ctx}`); },
+    unload: async (m) => { log.push(`unload ${m}`); },
+    listLoaded: async () => ['m'],
+    reachable: async () => true,
+  };
+}
 
-describe('CircuitBreaker', () => {
-  it('opens after threshold consecutive failures', async () => {
-    const b = new CircuitBreaker('t', { threshold: 3, cooldownMs: 1000 });
-    for (let i = 0; i < 3; i++) await b.run(fail).catch(() => {});
-    expect(b.state()).toBe(BreakerState.Open);
-    await expect(b.run(ok)).rejects.toBeInstanceOf(CircuitOpenError);
-  });
-
-  it('half-opens after cooldown and closes on a successful probe', async () => {
-    let clock = 0;
-    const b = new CircuitBreaker('t', { threshold: 1, cooldownMs: 100, halfOpenProbes: 1, now: () => clock });
-    await b.run(fail).catch(() => {});
-    expect(b.state()).toBe(BreakerState.Open);
-    clock = 150; // past cooldown
-    const r = await b.run(ok); // half-open probe succeeds → close
-    expect(r).toBe('ok');
-    expect(b.state()).toBe(BreakerState.Closed);
-  });
-
-  it('a success resets the consecutive-failure count', async () => {
-    const b = new CircuitBreaker('t', { threshold: 3, cooldownMs: 1000 });
-    await b.run(fail).catch(() => {});
-    await b.run(fail).catch(() => {});
-    await b.run(ok);
-    await b.run(fail).catch(() => {});
-    expect(b.state()).toBe(BreakerState.Closed); // count reset by the success
-  });
-});
-
-describe('breakerFor registry', () => {
-  beforeEach(() => resetBreakers());
-  it('returns the same breaker for the same id', () => {
-    expect(breakerFor('mcp:a')).toBe(breakerFor('mcp:a'));
-    expect(breakerFor('mcp:a')).not.toBe(breakerFor('mcp:b'));
-  });
+test('daemonLoad loads the model at the requested context (reload capability)', async () => {
+  const log: string[] = [];
+  const strat = makeLmStudioStrategy(() => fakeClient(log));
+  expect(strat.kind).toBe(RuntimeKind.LmStudio);
+  expect(strat.contextCapability).toBe('reload');
+  const r = await strat.daemonLoad!('m', 8192);
+  expect(r.baseUrl).toBe('http://127.0.0.1:1234/v1');
+  expect(log).toContain('load m @ 8192');
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/reliability/breaker.test.ts`
-Expected: FAIL — cannot resolve `breaker.ts`.
-
-- [ ] **Step 3: Write minimal implementation**
-
-```ts
-// src/reliability/breaker.ts
-import { breakerCooldownMs, breakerHalfOpenProbes, breakerThreshold } from './config.ts';
-import { CircuitOpenError } from './errors.ts';
-
-export enum BreakerState {
-  Closed,
-  Open,
-  HalfOpen,
-}
-
-export type BreakerOpts = {
-  threshold?: number;
-  cooldownMs?: number;
-  halfOpenProbes?: number;
-  now?: () => number;
-};
-
-/**
- * Closed → (≥threshold consecutive failures) → Open →
- * (after cooldownMs) → HalfOpen → (halfOpenProbes successes) → Closed
- *                                → (any failure) → Open
- * Cooldown is checked lazily on run() — no timers.
- */
-export class CircuitBreaker {
-  private failures = 0;
-  private probeSuccesses = 0;
-  private openedAt = 0;
-  private current = BreakerState.Closed;
-  private readonly threshold: number;
-  private readonly cooldownMs: number;
-  private readonly halfOpenProbes: number;
-  private readonly now: () => number;
-
-  constructor(readonly id: string, opts: BreakerOpts = {}) {
-    this.threshold = opts.threshold ?? breakerThreshold();
-    this.cooldownMs = opts.cooldownMs ?? breakerCooldownMs();
-    this.halfOpenProbes = opts.halfOpenProbes ?? breakerHalfOpenProbes();
-    this.now = opts.now ?? (() => Date.now());
-  }
-
-  state(): BreakerState {
-    if (this.current === BreakerState.Open && this.now() - this.openedAt >= this.cooldownMs) {
-      this.current = BreakerState.HalfOpen;
-      this.probeSuccesses = 0;
-    }
-    return this.current;
-  }
-
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.state() === BreakerState.Open) {
-      throw new CircuitOpenError(this.id);
-    }
-    try {
-      const r = await fn();
-      this.onSuccess();
-      return r;
-    } catch (err) {
-      this.onFailure();
-      throw err;
-    }
-  }
-
-  private onSuccess(): void {
-    if (this.current === BreakerState.HalfOpen) {
-      this.probeSuccesses++;
-      if (this.probeSuccesses >= this.halfOpenProbes) {
-        this.current = BreakerState.Closed;
-        this.failures = 0;
-      }
-      return;
-    }
-    this.failures = 0;
-  }
-
-  private onFailure(): void {
-    if (this.current === BreakerState.HalfOpen) {
-      this.trip();
-      return;
-    }
-    this.failures++;
-    if (this.failures >= this.threshold) this.trip();
-  }
-
-  private trip(): void {
-    this.current = BreakerState.Open;
-    this.openedAt = this.now();
-  }
-}
-
-const registry = new Map<string, CircuitBreaker>();
-
-/** Shared breaker for a dependency id (mcp:<name> / tool:<name> / runtime:<kind>). */
-export function breakerFor(id: string, opts?: BreakerOpts): CircuitBreaker {
-  let b = registry.get(id);
-  if (!b) {
-    b = new CircuitBreaker(id, opts);
-    registry.set(id, b);
-  }
-  return b;
-}
-
-/** Test seam: clear the shared registry. */
-export function resetBreakers(): void {
-  registry.clear();
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun test tests/reliability/breaker.test.ts`
-Expected: PASS (all).
-
-- [ ] **Step 5: Typecheck, lint, commit**
-
-```bash
-bun run typecheck && bun run lint:file -- "src/reliability/breaker.ts" "tests/reliability/breaker.test.ts"
-git add src/reliability/breaker.ts tests/reliability/breaker.test.ts
-git commit -m "feat(reliability): hand-rolled circuit breaker + shared registry"
-```
+- [ ] **Step 2: fail**.
+- [ ] **Step 3: implement** `makeLmStudioStrategy(getClient)` + a default `lmStudioStrategy` using the real `@lmstudio/sdk`-backed client + `export const lmStudioRuntime = createManagedRuntime(lmStudioStrategy)`. Append to `RUNTIMES`. The real client's `load` maps to `@lmstudio/sdk`'s `LMStudioClient().llm.model(model, { config: { contextLength } })` per its current API — verify the exact call in the SDK's types at implementation time; keep it isolated in this one file.
+- [ ] **Step 4: pass**.
+- [ ] **Step 5: commit** (`feat(runtime): LM Studio inference runtime via @lmstudio/sdk (reload context)`).
 
 ---
 

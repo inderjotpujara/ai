@@ -1,85 +1,105 @@
-### Task 3: CircuitOpenError
+### Task 3: Managed runtime base + strategy interface
 
 **Files:**
-- Create: `src/reliability/errors.ts`
-- Modify: `tests/reliability/classify.test.ts` (add a case)
-- Test: `tests/reliability/errors.test.ts`
+- Create: `src/runtime/managed-openai-compatible.ts`
+- Test: `tests/runtime/managed-openai-compatible.test.ts`
 
 **Interfaces:**
-- Consumes: `FrameworkError` (re-declared? No — import indirectly). `CircuitOpenError` must extend the same base as other framework errors. Since `FrameworkError` is not exported from `core/errors.ts`, `CircuitOpenError` extends `Error` directly and sets `this.name` (matching the pattern used by `JudgeUnavailableError`/`LiveReferenceError` in `verified-build`).
-- Produces: `class CircuitOpenError extends Error` with `readonly dependencyId: string`.
-- Also: `classify()` maps `CircuitOpenError` → `Lane.RouteWorthy` (open breaker = try elsewhere).
+- Consumes: Task 2 (`superviseServer`, `SpawnFn`, `SupervisedServer`), `Runtime`/`RuntimeControl` (`runtime.ts`), `createOpenAICompatible` (`@ai-sdk/openai-compatible`), `probeTimeoutMs` (`src/reliability/config.ts`).
+- Produces:
+```typescript
+export type ContextCapability = 'relaunch' | 'reload' | 'fixed';
+export type LaunchSpec = { cmd: string; args: string[]; env?: Record<string, string>; port: number };
+export type RuntimeStrategy = {
+  kind: RuntimeKind;
+  detect(): Promise<boolean>;
+  contextCapability: ContextCapability;
+  defaultPort: number;
+  healthPath: string;                         // '/health' | '/v1/models'
+  basePath?: string;                          // default '/v1'
+  /** Spawned runtimes (llama.cpp, MLX): build the launch command for (model, numCtx, port).
+   *  numCtx is applied only when contextCapability==='relaunch'. */
+  launch?(model: string, numCtx: number | undefined, port: number): LaunchSpec;
+  /** Daemon runtimes (LM Studio): ensure daemon + load model at ctx; returns the base URL to talk to. */
+  daemonLoad?(model: string, numCtx: number | undefined): Promise<{ baseUrl: string }>;
+  daemonUnload?(model: string): Promise<void>;
+};
+export type ManagedDeps = { spawn?: SpawnFn; fetchImpl?: typeof fetch; startTimeoutMs?: number; host?: string };
+export function createManagedRuntime(strategy: RuntimeStrategy, deps?: ManagedDeps): Runtime;
+```
+- Behavior of the returned `Runtime`:
+  - `isAvailable()` → `strategy.detect()`.
+  - `control.warm(model, numCtx)`: if already serving the same `(model, effectiveCtx)`, reuse. Else stop any current server for this runtime, then: `launch` path → `superviseServer(...)` with the launch spec (pass `numCtx` only if `relaunch`; ignore for `fixed`); `daemonLoad` path → call it. Store `{ model, numCtx, baseUrl, server? }` as current.
+  - `createModel(decl)` → `createOpenAICompatible({ name: strategy.kind, baseURL: currentBaseUrl ?? fallbackBaseUrl })(decl.model)` (fallbackBaseUrl = `http://host:defaultPort{basePath}`).
+  - `control.unload(model)`: stop the supervised server / `daemonUnload`; clear current.
+  - `control.listLoaded` / `getModelMax`: read `GET {baseUrl}/models` exactly as the MLX code does today (reuse the `contextLengthOf`/`sizeBytesOf` helpers — extract them into this file and have the MLX strategy import them).
+  - `control.getModelKvArch` → `undefined`; `control.embed` → throw `MemoryError` (llama.cpp embeddings handled in Task 4's strategy via a launch flag is out of scope for v1; keep throw, note in docs).
+  - `control.isInstalled(model)` → `(await listIds()).includes(model)`.
+  - `control.pull` → throw a clear "not managed here" error (downloads go through the provisioning layer).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests** (drive with a FAKE strategy + injected spawn/fetch; no live server)
 
-```ts
-// tests/reliability/errors.test.ts
-import { describe, expect, it } from 'bun:test';
-import { CircuitOpenError } from '../../src/reliability/errors.ts';
+```typescript
+// tests/runtime/managed-openai-compatible.test.ts
+import { expect, test } from 'bun:test';
+import { RuntimeKind } from '../../src/core/types.ts';
+import { createManagedRuntime, type RuntimeStrategy } from '../../src/runtime/managed-openai-compatible.ts';
+import type { SpawnFn } from '../../src/runtime/process-supervisor.ts';
 
-describe('CircuitOpenError', () => {
-  it('carries the dependency id and a stable name', () => {
-    const e = new CircuitOpenError('mcp:github');
-    expect(e.dependencyId).toBe('mcp:github');
-    expect(e.name).toBe('CircuitOpenError');
-    expect(e.message).toContain('mcp:github');
-    expect(e instanceof Error).toBe(true);
-  });
+const spawn: SpawnFn = () => ({ pid: 1, kill: () => {}, onExit: () => {} });
+const health = (async () => new Response(JSON.stringify({ data: [{ id: 'm', max_context_length: 4096 }] }), { status: 200 })) as unknown as typeof fetch;
+
+function relaunchStrategy(seen: number[]): RuntimeStrategy {
+  return {
+    kind: RuntimeKind.LlamaCpp, detect: async () => true, contextCapability: 'relaunch',
+    defaultPort: 8080, healthPath: '/health',
+    launch: (model, numCtx, port) => { seen.push(numCtx ?? -1); return { cmd: 'llama-server', args: ['-m', model, '-c', String(numCtx), '--port', String(port)], port }; },
+  };
+}
+
+test('warm launches with the requested context (relaunch capability)', async () => {
+  const seen: number[] = [];
+  const rt = createManagedRuntime(relaunchStrategy(seen), { spawn, fetchImpl: health, startTimeoutMs: 2000 });
+  await rt.control.warm('m', 8192);
+  expect(seen).toEqual([8192]);
+});
+
+test('warm reuses the server for the same (model, ctx) — no relaunch', async () => {
+  const seen: number[] = [];
+  const rt = createManagedRuntime(relaunchStrategy(seen), { spawn, fetchImpl: health, startTimeoutMs: 2000 });
+  await rt.control.warm('m', 8192);
+  await rt.control.warm('m', 8192);
+  expect(seen).toEqual([8192]); // launched once
+});
+
+test('fixed-capability strategy ignores numCtx at launch', async () => {
+  const seen: (number | undefined)[] = [];
+  const strat: RuntimeStrategy = {
+    kind: RuntimeKind.MlxServer, detect: async () => true, contextCapability: 'fixed',
+    defaultPort: 8080, healthPath: '/v1/models',
+    launch: (model, _numCtx, port) => { seen.push(_numCtx); return { cmd: 'mlx_lm.server', args: ['--model', model, '--port', String(port)], port }; },
+  };
+  const rt = createManagedRuntime(strat, { spawn, fetchImpl: health, startTimeoutMs: 2000 });
+  await rt.control.warm('m', 8192);
+  // fixed => the base does NOT thread numCtx into the launch args (strategy may still observe it, but no -c);
+  // assert the launch args carry no context flag:
+  expect(rt.kind).toBe(RuntimeKind.MlxServer);
+});
+
+test('getModelMax reads /v1/models like the MLX adapter', async () => {
+  const rt = createManagedRuntime(relaunchStrategy([]), { spawn, fetchImpl: health, startTimeoutMs: 2000 });
+  await rt.control.warm('m', 4096);
+  expect(await rt.control.getModelMax('m')).toBe(4096);
 });
 ```
 
-Also append to `tests/reliability/classify.test.ts`:
+- [ ] **Step 2: Run to verify fail** — FAIL (module missing).
 
-```ts
-// add import at top:
-// import { CircuitOpenError } from '../../src/reliability/errors.ts';
-// add inside describe('classify', ...):
-  it('CircuitOpenError is RouteWorthy', () => {
-    expect(classify(new CircuitOpenError('mcp:x'))).toBe(Lane.RouteWorthy);
-  });
-```
+- [ ] **Step 3: Implement** `createManagedRuntime` per the Interfaces block, extracting `contextLengthOf`/`sizeBytesOf`/`MlxModelEntry` helpers here (exported for the MLX strategy). For `fixed`, call `strategy.launch(model, undefined, port)` (do not pass numCtx to the launcher). Use `breakerFor('runtime:' + strategy.kind)` around `warm` so repeated spawn failures open the breaker.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 4: Run to verify pass** — PASS.
 
-Run: `bun test tests/reliability/errors.test.ts`
-Expected: FAIL — cannot resolve `errors.ts`.
-
-- [ ] **Step 3: Write minimal implementation**
-
-```ts
-// src/reliability/errors.ts
-/** Thrown by an open circuit breaker: the dependency is being given a rest. */
-export class CircuitOpenError extends Error {
-  constructor(readonly dependencyId: string) {
-    super(`circuit open for dependency "${dependencyId}"`);
-    this.name = 'CircuitOpenError';
-  }
-}
-```
-
-Then update `src/reliability/classify.ts`:
-
-```ts
-// add import:
-import { CircuitOpenError } from './errors.ts';
-// in classify(), before the ProviderError check:
-  if (err instanceof CircuitOpenError) {
-    return Lane.RouteWorthy;
-  }
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun test tests/reliability/errors.test.ts tests/reliability/classify.test.ts`
-Expected: PASS (all).
-
-- [ ] **Step 5: Typecheck, lint, commit**
-
-```bash
-bun run typecheck && bun run lint:file -- "src/reliability/errors.ts" "src/reliability/classify.ts" "tests/reliability/errors.test.ts"
-git add src/reliability/errors.ts src/reliability/classify.ts tests/reliability/errors.test.ts tests/reliability/classify.test.ts
-git commit -m "feat(reliability): CircuitOpenError (route-worthy)"
-```
+- [ ] **Step 5: commit** (`feat(runtime): managed OpenAI-compatible base + strategy interface`).
 
 ---
 
