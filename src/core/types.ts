@@ -10,7 +10,8 @@ export enum ProviderKind {
 export enum RuntimeKind {
   Ollama = 'Ollama', // GGUF via llama.cpp Metal (MLX engine auto on >32GB hosts)
   MlxServer = 'MlxServer', // MLX via a local OpenAI-compatible server (mlx_lm / LM Studio)
-  LmStudio = 'LmStudio', // reserved: LM Studio as an inference runtime (download-only in Slice 18)
+  LmStudio = 'LmStudio', // LM Studio as an inference runtime
+  LlamaCpp = 'LlamaCpp', // GGUF via a managed llama.cpp-server (-c dynamic context)
 }
 
 /** A capability a model advertises and an agent can require. Selector hard-filters on these. */

@@ -9,6 +9,7 @@ export function downloadKindFor(
 ): ProviderKind {
   if (runtime === RuntimeKind.LmStudio) return ProviderKind.LmStudio;
   if (runtime === RuntimeKind.MlxServer) return ProviderKind.HfSnapshot;
+  if (runtime === RuntimeKind.LlamaCpp) return ProviderKind.HfGguf;
   // RuntimeKind.Ollama:
   if (shape === 'gguf-file') return ProviderKind.HfGguf;
   return ProviderKind.Ollama;
