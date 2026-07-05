@@ -1,0 +1,51 @@
+import { expect, test } from 'bun:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ingestMedia } from '../../src/media/ingest.ts';
+import { createMediaStore } from '../../src/media/store.ts';
+
+function freshStore() {
+  return createMediaStore(mkdtempSync(join(tmpdir(), 'ing-')));
+}
+
+test('--image flag stores the file and appends an img marker', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'src-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, new Uint8Array([1]));
+  const res = await ingestMedia(
+    'what is this',
+    { images: [p], audios: [], videos: [], paste: false },
+    freshStore(),
+  );
+  expect(res.prompt).toBe('what is this [img:img_1]');
+  expect(res.items.length).toBe(1);
+});
+
+test('--audio is transcribed to text and spliced into the prompt', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'src-'));
+  const p = join(dir, 'a.wav');
+  writeFileSync(p, new Uint8Array([1]));
+  const res = await ingestMedia(
+    'summarize',
+    { images: [], audios: [p], videos: [], paste: false },
+    freshStore(),
+    {
+      transcribe: async () => 'hello world',
+    },
+  );
+  expect(res.prompt).toContain('Transcript:');
+  expect(res.prompt).toContain('hello world');
+});
+
+test('a dragged-in image path in the prompt is auto-detected', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'src-'));
+  const p = join(dir, 'b.jpg');
+  writeFileSync(p, new Uint8Array([1]));
+  const res = await ingestMedia(
+    `describe ${p}`,
+    { images: [], audios: [], videos: [], paste: false },
+    freshStore(),
+  );
+  expect(res.prompt).toContain('[img:img_1]');
+});
