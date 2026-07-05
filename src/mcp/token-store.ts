@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -61,14 +62,22 @@ export function readTokenStore(
 }
 
 /** Atomic write (temp + rename), mode 0600 on both temp and final file —
- *  this store holds real secrets so a world-readable window is unacceptable. */
+ *  this store holds real secrets so a world-readable window is unacceptable.
+ *  The temp path is predictable (`${path}.tmp`), so a leftover from a prior
+ *  crash could pre-exist with a wider mode (or be a symlink planted by
+ *  another user) — `writeFileSync`'s `mode` option only applies on CREATE,
+ *  not to an existing file. Remove any stale temp first, then re-assert 0600
+ *  after writing, so the temp is 0600 before the rename regardless of what
+ *  was there before. */
 export function writeTokenStore(
   store: Record<string, ServerAuthRecord>,
   path: string = tokenStorePath(),
 ): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.tmp`;
+  rmSync(tmp, { force: true });
   writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  chmodSync(tmp, 0o600); // belt-and-suspenders: assert mode even if tmp pre-existed
   renameSync(tmp, path);
   chmodSync(path, 0o600); // belt-and-suspenders: rename should preserve mode, but verify
 }

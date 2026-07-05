@@ -4,6 +4,7 @@ import type {
   InMemorySpanExporter,
 } from '@opentelemetry/sdk-trace-base';
 import { RuntimeKind } from '../../src/core/types.ts';
+import { resetBreakers } from '../../src/reliability/breaker.ts';
 import {
   createManagedRuntime,
   type RuntimeStrategy,
@@ -11,6 +12,14 @@ import {
 import type { SpawnFn } from '../../src/runtime/process-supervisor.ts';
 import { ATTR } from '../../src/telemetry/spans.ts';
 import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+
+beforeEach(() => {
+  // The breaker registry is a shared module-level Map keyed by
+  // `runtime:<kind>` — without a reset, a breaker tripped/half-opened by an
+  // earlier test (e.g. the "emits outcome=failed" test below) would leak
+  // state into later tests reusing the same RuntimeKind.
+  resetBreakers();
+});
 
 const spawn: SpawnFn = () => ({ pid: 1, kill: () => {}, onExit: () => {} });
 const health = (async () =>
@@ -209,6 +218,134 @@ test('control.unload stops the supervised server', async () => {
   await rt.control.warm('m', 4096);
   await rt.control.unload('m');
   expect(killed).toBe(true);
+});
+
+test('control.unload invokes daemonUnload for daemon-style (reload-capability) strategies', async () => {
+  const unloadedModels: string[] = [];
+  const strat: RuntimeStrategy = {
+    kind: RuntimeKind.LmStudio,
+    detect: async () => true,
+    contextCapability: 'reload',
+    defaultPort: 1234,
+    healthPath: '/v1/models',
+    daemonLoad: async () => ({ baseUrl: 'http://127.0.0.1:1234/v1' }),
+    daemonUnload: async (model) => {
+      unloadedModels.push(model);
+    },
+  };
+  const rt = createManagedRuntime(strat, { fetchImpl: health });
+  await rt.control.warm('m', 4096);
+  await rt.control.unload('m');
+  expect(unloadedModels).toEqual(['m']);
+});
+
+describe('warm concurrency (Slice 26 final review — single-flight)', () => {
+  test('two concurrent warm() calls for the SAME (model, ctx) — spawn/launch invoked exactly once', async () => {
+    let launchCount = 0;
+    const strat: RuntimeStrategy = {
+      kind: RuntimeKind.LlamaCpp,
+      detect: async () => true,
+      contextCapability: 'relaunch',
+      defaultPort: 8080,
+      healthPath: '/health',
+      launch: (model, numCtx, port) => {
+        launchCount++;
+        return {
+          cmd: 'llama-server',
+          args: ['-m', model, '-c', String(numCtx), '--port', String(port)],
+          port,
+        };
+      },
+    };
+    const rt = createManagedRuntime(strat, {
+      spawn,
+      fetchImpl: health,
+      startTimeoutMs: 2000,
+    });
+    await Promise.all([rt.control.warm('m', 4096), rt.control.warm('m', 4096)]);
+    // Without serialization both calls would race past the `current` reuse
+    // check before either sets it, launching twice and orphaning one server.
+    expect(launchCount).toBe(1);
+  });
+
+  test('two concurrent warm() calls for DIFFERENT models — serialized: first is stopped before the second spawns, no orphan', async () => {
+    let nextPid = 1;
+    const killedPids: number[] = [];
+    const spawnTracking: SpawnFn = () => {
+      const pid = nextPid++;
+      return {
+        pid,
+        kill: () => {
+          killedPids.push(pid);
+        },
+        onExit: () => {},
+      };
+    };
+    const launched: string[] = [];
+    const strat: RuntimeStrategy = {
+      kind: RuntimeKind.LlamaCpp,
+      detect: async () => true,
+      contextCapability: 'relaunch',
+      defaultPort: 8080,
+      healthPath: '/health',
+      launch: (model, numCtx, port) => {
+        launched.push(model);
+        return {
+          cmd: 'llama-server',
+          args: ['-m', model, '-c', String(numCtx), '--port', String(port)],
+          port,
+        };
+      },
+    };
+    let nextPort = 30000;
+    const portAlloc = async (): Promise<number> => nextPort++;
+    const rt = createManagedRuntime(strat, {
+      spawn: spawnTracking,
+      fetchImpl: health,
+      startTimeoutMs: 2000,
+      portAlloc,
+    });
+    await Promise.all([
+      rt.control.warm('m1', 4096),
+      rt.control.warm('m2', 4096),
+    ]);
+    // Serialized in call order (single-threaded JS: both warm() calls run
+    // synchronously up to their first await, so the queue order matches
+    // Promise.all's array order) — no interleaving.
+    expect(launched).toEqual(['m1', 'm2']);
+    // Exactly one server (pid 1, the first) was stopped before the second
+    // was spawned — proves the two warms never overlapped mid-flight.
+    expect(killedPids).toEqual([1]);
+  });
+
+  test('a warm() that throws releases the lock — a subsequent warm() still runs', async () => {
+    let calls = 0;
+    const strat: RuntimeStrategy = {
+      kind: RuntimeKind.LlamaCpp,
+      detect: async () => true,
+      contextCapability: 'relaunch',
+      defaultPort: 8080,
+      healthPath: '/health',
+      launch: (model, numCtx, port) => {
+        calls++;
+        if (calls === 1) throw new Error('boom');
+        return {
+          cmd: 'llama-server',
+          args: ['-m', model, '-c', String(numCtx), '--port', String(port)],
+          port,
+        };
+      },
+    };
+    const rt = createManagedRuntime(strat, {
+      spawn,
+      fetchImpl: health,
+      startTimeoutMs: 2000,
+    });
+    await expect(rt.control.warm('m1', 4096)).rejects.toThrow('boom');
+    // If the failed warm wedged the queue, this would hang/never resolve.
+    await rt.control.warm('m2', 4096);
+    expect(calls).toBe(2);
+  });
 });
 
 describe('runtime.warm telemetry (Slice 26 Task 8)', () => {

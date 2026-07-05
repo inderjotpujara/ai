@@ -117,6 +117,26 @@ export function createManagedRuntime(
 
   let current: CurrentServer | undefined;
 
+  // Serializes concurrent `warm` calls on this runtime instance. The workflow
+  // engine warms runtimes from parallel agent-step batches, so without this,
+  // two concurrent warms race on the single `current` slot: same (model,ctx)
+  // both spawn (orphaning a process/port), or different models SIGTERM each
+  // other's just-spawned server mid-request. Each `warm` is chained onto the
+  // tail of the queue so only one doWarm() body (reuse-check → stopCurrent →
+  // portAlloc → spawn → set current) runs at a time. `warmQueue` itself never
+  // rejects — it's a scheduling gate, not a result carrier — so a throwing
+  // warm still releases the queue for the next caller instead of wedging it.
+  let warmQueue: Promise<void> = Promise.resolve();
+
+  function serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const turn = warmQueue.then(fn, fn);
+    warmQueue = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    return turn;
+  }
+
   function effectiveCtx(numCtx: number | undefined): number | undefined {
     return strategy.contextCapability === 'fixed' ? undefined : numCtx;
   }
@@ -221,7 +241,8 @@ export function createManagedRuntime(
           `runtime "${strategy.kind}" does not manage downloads here — use the provisioning layer to pull models`,
         );
       },
-      warm: (model, numCtx) => breaker.run(() => doWarm(model, numCtx)),
+      warm: (model, numCtx) =>
+        breaker.run(() => serialized(() => doWarm(model, numCtx))),
       unload: async () => {
         await stopCurrent();
       },

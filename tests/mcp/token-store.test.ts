@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test';
-import { existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -72,6 +78,23 @@ describe('token-store', () => {
     expect(existsSync(path)).toBe(true);
     expect(statSync(nested).mode & 0o777).toBe(0o700);
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('a stale wider-mode temp file left from a prior crash does not leak — write() re-asserts 0600', () => {
+    const path = join(tmpdir(), `mcp-tokens-stale-tmp-${Date.now()}.json`);
+    const tmp = `${path}.tmp`;
+    // Simulate a leftover temp from a crashed prior write: predictable name,
+    // group/world-readable.
+    writeFileSync(tmp, '{}', { mode: 0o644 });
+    chmodSync(tmp, 0o644);
+    setServerAuth(
+      'linear',
+      { tokens: { access_token: 'abc', token_type: 'Bearer' } },
+      path,
+    );
+    expect(existsSync(tmp)).toBe(false); // renamed away
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(getServerAuth('linear', path).tokens?.access_token).toBe('abc');
   });
 
   it('tokenStorePath defaults under XDG_CONFIG_HOME or ~/.config', () => {
