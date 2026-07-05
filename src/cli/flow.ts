@@ -5,6 +5,7 @@ import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { WorkflowError } from '../core/errors.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
+import type { DegradationLedger } from '../reliability/ledger.ts';
 import { type RunHandle, writeArtifact } from '../run/run-store.ts';
 import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
 import type { VerifyDeps } from '../verification/types.ts';
@@ -31,6 +32,9 @@ export type FlowDeps = {
    *  verify → branch → corrective → abstain sub-graph, mirroring `--verify`
    *  at the CLI (src/crew/engine.ts's analogous crew-wide default). */
   verifyDeps?: VerifyDeps;
+  /** Optional degradation ledger; forwarded to the workflow engine so a tool
+   *  step that succeeds only after retry is recorded (mirrors crew/engine.ts). */
+  ledger?: DegradationLedger;
 };
 
 /** When verification is requested, mark every agent step `verify: true` (a
@@ -72,6 +76,7 @@ export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
     const outcome = await runWorkflow(def, deps.input, {
       runAgentStep: defaultRunAgentStep(deps.agents, deps.onBeforeDelegate),
       tools: deps.tools,
+      ledger: deps.ledger,
     });
     annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
     if (outcome.kind === 'done') {
@@ -145,6 +150,7 @@ async function main(): Promise<void> {
             tools,
             onBeforeDelegate: selection.onBeforeDelegate,
             verifyDeps: verifyRuntime?.verifyDeps,
+            ledger,
           });
           if (outcome.kind === 'done') {
             console.log(lastStepOutputText(def, outcome.output));

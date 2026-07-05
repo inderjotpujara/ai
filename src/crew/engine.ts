@@ -124,6 +124,7 @@ export function runCrew(
         memory: deps.memory,
         persistMemory: deps.persistMemory ?? def.persistMemory,
         recall: deps.recall,
+        ledger: deps.ledger,
       });
       if (outcome.kind === 'done') {
         const unverified = findUnverified(

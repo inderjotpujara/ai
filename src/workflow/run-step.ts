@@ -5,9 +5,14 @@ import { WorkflowError } from '../core/errors.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import { MemoryKind } from '../memory/types.ts';
 import { breakerFor } from '../reliability/breaker.ts';
-import type { DegradationLedger } from '../reliability/ledger.ts';
+import { type DegradationLedger, DegradeKind } from '../reliability/ledger.ts';
 import { withRetry } from '../reliability/retry.ts';
-import { ATTR, annotateStep, withToolSpan } from '../telemetry/spans.ts';
+import {
+  ATTR,
+  annotateStep,
+  recordDegrade,
+  withToolSpan,
+} from '../telemetry/spans.ts';
 import {
   type MapSubStep,
   type Step,
@@ -38,6 +43,9 @@ export type WorkflowDeps = {
   /** Optional re-recall used by Verify corrective ops (rewrite → re-recall →
    *  re-answer). Undefined = corrective retrieval is skipped (re-answer only). */
   recall?: (query: string) => Promise<unknown[]>;
+  /** Optional degradation ledger; when set, a Tool step that retries records a
+   *  Retried event (in addition to the telemetry span event). */
+  ledger?: DegradationLedger;
 };
 
 /** Auto-write a completed step's output to memory, namespaced by workflow id.
@@ -155,7 +163,20 @@ export function runStepByKind(
             callTool(tool, step.input(ctx), step.id),
           ),
         );
-      return step.retry ? withRetry(guarded) : guarded();
+      return step.retry
+        ? withRetry(guarded, {
+            onRetry: (n) => {
+              const event = {
+                kind: DegradeKind.Retried,
+                subject: `tool:${step.tool}`,
+                reason: `retry attempt ${n}`,
+                detail: `step=${step.id}`,
+              };
+              deps.ledger?.record(event);
+              recordDegrade(event);
+            },
+          })
+        : guarded();
     }
     case StepKind.Branch: {
       const taken = step.predicate(ctx) ? 'whenTrue' : 'whenFalse';
