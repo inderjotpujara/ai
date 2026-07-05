@@ -47,7 +47,7 @@ export function createLmStudioProvider(
         if (signal.aborted)
           throw new ProviderError('LM Studio download aborted');
         const st = await fetchImpl(
-          `${baseUrl}/api/v1/models/download/${job.job_id}`,
+          `${baseUrl}/api/v1/models/download/status/${job.job_id}`,
           { signal },
         );
         if (!st.ok)
