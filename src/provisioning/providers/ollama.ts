@@ -1,9 +1,14 @@
 import { ProviderError } from '../../core/errors.ts';
 import { ProviderKind } from '../../core/types.ts';
+import {
+  defaultDownloadRetry,
+  downloadStallMs,
+} from '../../reliability/download-retry.ts';
+import { withRetry } from '../../reliability/retry.ts';
+import { IdleWatchdog } from '../../reliability/timeout.ts';
 import { isModelInstalled } from '../../resource/ollama-control.ts';
 import { OllamaPullAggregator } from '../ollama-pull.ts';
 import { ProgressTracker } from '../progress-tracker.ts';
-import { StallWatchdog, withRetry } from '../supervisor.ts';
 import {
   DownloadPhase,
   type DownloadProgress,
@@ -11,7 +16,6 @@ import {
 } from '../types.ts';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
-const STALL_MS = 90_000; // longer than Ollama's own 30s per-part watchdog
 
 /** Stream one /api/pull attempt, feeding normalized progress until success or error. */
 async function streamPull(
@@ -23,7 +27,7 @@ async function streamPull(
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   outer.addEventListener('abort', onAbort);
-  const watchdog = new StallWatchdog(STALL_MS, () => ctrl.abort());
+  const watchdog = new IdleWatchdog(downloadStallMs(), () => ctrl.abort());
   watchdog.start(5_000);
   try {
     const res = await fetch(`${baseUrl}/api/pull`, {
@@ -71,10 +75,11 @@ export function createOllamaProvider(
     async download(modelRef, { onProgress, signal }) {
       // destDir is ignored: the Ollama daemon owns its own model store on disk.
       await withRetry(() => streamPull(baseUrl, modelRef, onProgress, signal), {
-        attempts: 6,
-        baseMs: 1_000,
-        capMs: 45_000,
-        jitter: () => 0.5 + Math.random() / 2, // full-ish jitter, kind to the registry
+        ...defaultDownloadRetry(),
+        // Downloads retry on ANY failure (bad status, aborted stall, network
+        // blip) — not just the Transient lane — mirroring the pre-migration
+        // local withRetry, which had no classification at all.
+        retryable: () => true,
         signal,
         onRetry: (n) =>
           onProgress({
