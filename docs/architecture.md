@@ -2504,6 +2504,7 @@ the last possible moment (`resolve.ts`, right before the model call).
 | `audio/transcribe.ts` | `transcribe(path, deps)` — spawns the `mlx_whisper` CLI (env-fallback `AGENT_STT_CMD`, model `AGENT_STT_MODEL` ?? `turbo`), reads its JSON output, wrapped in `withTranscribeSpan` |
 | `video/frames.ts` | `sampleFrames(path, store, deps)` — spawns `ffmpeg` to sample frames at a target fps, stores each as an `Image` item, then `store.registerGroup`s them into one `Video` handle; wrapped in `withFrameSampleSpan` |
 | `spawn.ts` | `defaultSpawn` — the one `Bun.spawn` → `ChildHandle` adapter shared by transcribe/frames/generation, so every media subprocess site has the same env-merge/stdout-ignore/kill/onExit shape |
+| `cmd-resolve.ts` | `resolveMediaCmd(tool, venv, deps?)` — resolves a media CLI tool name to its installed venv binary (`enum MediaVenv {Media\|Video}`, env-overridable venv dirs `AGENT_MEDIA_VENV`/`AGENT_MEDIA_VIDEO_VENV`, defaulting to `~/.cache/ai/media-venv` / `~/.cache/ai/media-video-venv`), falling back to the bare tool name (PATH) when the venv binary isn't present; pure + injectable `exists` dep for deterministic tests |
 | `policy.ts` | The uncensored axis, mechanism 1: `uncensoredEnabled(env)` (default **true**; only `AGENT_UNCENSORED=0`/`false` turns it off) and `isUncensoredModel(model)` (a content-policy tag OR a name-pattern class match — `abliterat\|dolphin\|heretic\|josiefied\|pony\|chroma\|uncensored`) |
 | `consent.ts` | `contentPolicyLabel` (telemetry label, observability-only), `requiresCloneConsent`/`affirmCloneConsent`/`defaultCloneConsentAsk` (voice-clone consent — **orthogonal** to the content-policy switch; gates CSM/Dia/XTTS/Fish, not Kokoro), `LEGAL_NOTE` (a **string constant**, not a gate) |
 | `generate/adapter.ts` | The `MediaGenerator` job adapter: `GenStrategy` (`kind`, `execMode`, `buildOneShot?`, `outputPathFor?`, `parseProgress?`, `serverSubmit?`), `runOneShotJob` (spawn → exit → `store.putFile`, cancel-race-safe single-settle, wrapped in `withGenerateSpan`), `runServerJob` (poll → result → `store.putFile`), and `runGenJob` (an `ExecMode`-routing dispatcher with same-`MediaKind` degrade between the one-shot and server lanes, recording `DegradeKind.ModelDegraded`) |
@@ -2580,6 +2581,28 @@ reachable (server), and degrades to the fallback — recording
 default strategy, so the degrade-to-server-lane path it implements is not
 reachable from the actual product surface yet (a wiring gap, not a design
 gap — `runGenJob`'s contract is proven, it just has no caller today).
+
+**Cmd resolution — venv-first, out of the box (`scripts/setup-media.ts` +
+`cmd-resolve.ts`).** Every strategy's default `cmd` used to fall back
+straight to a bare tool name (pure PATH lookup, requiring the user to have
+manually installed/activated the right venv). It now falls back to
+`resolveMediaCmd(tool, venv)` first — which resolves to the matching venv's
+`bin/<tool>` binary when that venv exists, and only then to the bare name —
+so a first-time clone gets working media with **zero manual `AGENT_*_CMD`
+env vars**, as long as `bun run setup:media` has been run once.
+`scripts/setup-media.ts` is the one-command installer: it ensures `ffmpeg`
+(Homebrew on macOS), a **media venv** (`~/.cache/ai/media-venv` by default,
+override `AGENT_MEDIA_VENV`) holding mlx-whisper/mflux/mlx-audio+misaki[en],
+and a **separate, isolated video venv** (`~/.cache/ai/media-video-venv`,
+override `AGENT_MEDIA_VIDEO_VENV`) holding mlx-video with `transformers`
+pinned to `5.5.0` **after** the mlx-video install — order matters, because
+mlx-video's `mlx_vlm` dependency is incompatible with transformers 5.13's
+`register` API, which is exactly why video-gen needs its own venv rather
+than sharing the media venv's (independently resolved) transformers version.
+The script is idempotent (safe to re-run) and only prints — never
+automates — the two steps that must stay manual: `huggingface-cli login` and
+accepting a gated model's license, both needed only if the user opts into a
+gated model variant (the shipped defaults are fully ungated).
 
 Three default strategies, all `OneShot`, selected structurally by
 `MediaKind` (not through the model selector — the three `Capability.*Gen`

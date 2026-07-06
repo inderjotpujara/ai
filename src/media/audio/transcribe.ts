@@ -5,6 +5,7 @@ import { basename, extname, join } from 'node:path';
 import { withWallClock } from '../../reliability/timeout.ts';
 import type { SpawnFn } from '../../runtime/process-supervisor.ts';
 import { ATTR, withTranscribeSpan } from '../../telemetry/spans.ts';
+import { MediaVenv, resolveMediaCmd } from '../cmd-resolve.ts';
 import { defaultSpawn } from '../spawn.ts';
 
 type TranscribeDeps = {
@@ -16,10 +17,11 @@ type TranscribeDeps = {
    *  (AGENT_MEDIA_TIMEOUT_MS); defaults to 10 minutes so a hung engine
    *  fails the turn instead of hanging it forever. */
   timeoutMs?: number;
-  /** The mlx_whisper CLI binary. Env fallback-only (`AGENT_STT_CMD`) so a venv
-   *  install location is configurable; defaults to `mlx_whisper` (on PATH).
-   *  NOTE: `python3 -m mlx_whisper` does NOT work — the package has no
-   *  `__main__`; the CLI entry point is the supported invocation. */
+  /** The mlx_whisper CLI binary. Env fallback-only (`AGENT_STT_CMD`); else
+   *  resolved against the installed media venv (`resolveMediaCmd`), falling
+   *  back further to the bare `mlx_whisper` name (PATH) if the venv isn't
+   *  present. NOTE: `python3 -m mlx_whisper` does NOT work — the package has
+   *  no `__main__`; the CLI entry point is the supported invocation. */
   cmd?: string;
 };
 
@@ -46,7 +48,10 @@ export async function transcribe(
   const createdOutDir = deps.outDir === undefined;
   const outDir = deps.outDir ?? mkdtempSync(join(tmpdir(), 'agent-stt-'));
   const readJson = deps.readJson ?? defaultReadJson;
-  const cmd = deps.cmd ?? process.env.AGENT_STT_CMD ?? 'mlx_whisper';
+  const cmd =
+    deps.cmd ??
+    process.env.AGENT_STT_CMD ??
+    resolveMediaCmd('mlx_whisper', MediaVenv.Media);
   const timeoutMs =
     deps.timeoutMs ?? (Number(process.env.AGENT_MEDIA_TIMEOUT_MS) || 600_000);
 

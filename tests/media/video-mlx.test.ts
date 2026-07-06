@@ -112,7 +112,12 @@ test('buildOneShot cmd uses AGENT_VIDEO_CMD env var when set', () => {
 
 test('buildOneShot cmd defaults to mlx_video.ltx_2.generate', () => {
   const oldEnv = process.env.AGENT_VIDEO_CMD;
+  const oldVideoVenv = process.env.AGENT_MEDIA_VIDEO_VENV;
   delete process.env.AGENT_VIDEO_CMD;
+  // Force the venv-resolution fallback path (bare tool name) so the cmd
+  // assertion is deterministic regardless of whether a video venv actually
+  // exists on the machine running the suite.
+  process.env.AGENT_MEDIA_VIDEO_VENV = '/nonexistent-video-venv-for-tests';
   try {
     const result = ltxStrategy.buildOneShot?.('prompt', '/tmp/out.mp4', {});
     expect(result?.cmd).toBe('mlx_video.ltx_2.generate');
@@ -120,6 +125,8 @@ test('buildOneShot cmd defaults to mlx_video.ltx_2.generate', () => {
     if (oldEnv !== undefined) {
       process.env.AGENT_VIDEO_CMD = oldEnv;
     }
+    if (oldVideoVenv === undefined) delete process.env.AGENT_MEDIA_VIDEO_VENV;
+    else process.env.AGENT_MEDIA_VIDEO_VENV = oldVideoVenv;
   }
 });
 

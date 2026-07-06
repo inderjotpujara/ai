@@ -1,3 +1,4 @@
+import { MediaVenv, resolveMediaCmd } from '../cmd-resolve.ts';
 import { ExecMode, MediaKind } from '../types.ts';
 import type { GenOpts, GenStrategy } from './adapter.ts';
 
@@ -34,9 +35,11 @@ export const mfluxStrategy: GenStrategy = {
     const width = String(opts.width ?? 1024);
 
     return {
-      // Env-configurable binary (mirrors AGENT_STT_CMD/AGENT_TTS_CMD) so a
-      // venv install location works without relying on PATH.
-      cmd: process.env.AGENT_IMAGE_CMD ?? 'mflux-generate',
+      // Env-configurable binary (mirrors AGENT_STT_CMD/AGENT_TTS_CMD); falls
+      // back to the installed media venv's binary, then bare PATH lookup.
+      cmd:
+        process.env.AGENT_IMAGE_CMD ??
+        resolveMediaCmd('mflux-generate', MediaVenv.Media),
       args: [
         '--model',
         model,

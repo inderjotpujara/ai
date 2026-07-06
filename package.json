@@ -14,6 +14,7 @@
     "docs:check": "bun run scripts/docs-check.ts",
     "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
     "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
+    "setup:media": "bun run scripts/setup-media.ts",
     "discover": "bun run src/cli/discover.ts",
     "flow": "bun run src/cli/flow.ts",
     "crew": "bun run src/cli/crew.ts",

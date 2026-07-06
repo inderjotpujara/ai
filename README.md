@@ -265,6 +265,27 @@ bun run runs                                              # list recent runs
 bun run runs <run-id>                                     # render its trace as a timeline
 ```
 
+### Multimodal setup
+
+Working STT, image-gen, and TTS (plus isolated video-gen) with **one command**:
+
+```sh
+bun run setup:media
+```
+
+This installs `ffmpeg` (via Homebrew on macOS) and two Python venvs the
+media engines run in — a "media" venv (mlx-whisper, mflux, mlx-audio +
+misaki[en]) and a separate isolated "video" venv (mlx-video, pinned to a
+compatible `transformers` version). It's idempotent, so it's safe to re-run
+any time. See `scripts/setup-media.ts` and [`docs/architecture.md`](docs/architecture.md)
+§22 for the mechanics.
+
+**Image generation works immediately, no HuggingFace account needed** — the
+default model is an ungated mirror. The only manual, user-only step is for
+**gated model variants**: run `huggingface-cli login` **in your own
+terminal** (never paste an HF token into an AI chat) and accept that model's
+license on huggingface.co.
+
 ---
 
 ## Architecture at a glance
