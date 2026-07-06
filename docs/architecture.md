@@ -213,6 +213,19 @@ graph TD
         mcpjson["mcp.json · registry"]
         manifests["&lt;registry&gt;/.generated.json + &lt;name&gt;.golden.json + archive/ (Slice 20 sidecars)"]
     end
+    subgraph MEDIA["Multimodal · src/media (Slice 27)"]
+        mediastore["store.ts · run-scoped MediaStore (handle hub, both directions)"]
+        mediaingest["ingest.ts · --image/--audio/--video + path/paste auto-detect"]
+        mediaresolve["resolve.ts · handle markers → v6 base64 FileParts"]
+        mediatranscribe["audio/transcribe.ts · mlx_whisper STT (withTranscribeSpan)"]
+        mediaframes["video/frames.ts · ffmpeg frame-sample (withFrameSampleSpan)"]
+        mediaspawn["spawn.ts · shared defaultSpawn (env-merge/kill/onExit)"]
+        mediaadapter["generate/adapter.ts · MediaGenerator (runOneShotJob/runServerJob/runGenJob)"]
+        mediagenstrat["generate/{image-mflux,audio-mlx,video-mlx,comfy-lane}.ts · gen strategies"]
+        mediagentools["generate/tools.ts · createGenerateTools (generate_image/speech/video)"]
+        mediapolicy["policy.ts + generate/safety.ts · uncensored axis (eligibility + checker-disable)"]
+        mediacmd["cmd-resolve.ts · resolveMediaCmd (venv-first, out of the box)"]
+    end
 
     %% Reliability data flow (Slice 21): classify feeds retry/breaker/degrade;
     %% delegation/workflow/crew/mcp/selector wrap cross-boundary ops through it;
@@ -249,6 +262,33 @@ graph TD
     ortime --> relconf
     mlx --> relconf
     relledger --> spans
+
+    %% Multimodal data flow (Slice 27): media-by-reference — chat ingests blobs into a
+    %% run-scoped store and rewrites the prompt with opaque handle markers; the router
+    %% stays text-only (z.string() boundary untouched); only the specialist resolves
+    %% handles to FileParts at the last moment; generation runs as tools on media_creator.
+    chat --> mediaingest
+    mediaingest --> mediastore
+    mediaingest --> mediatranscribe
+    mediaingest --> mediaframes
+    mediaframes --> mediastore
+    agent --> mediaresolve
+    mediaresolve --> mediastore
+    agents --> mediagentools
+    mediagentools --> mediaadapter
+    mediaadapter --> mediagenstrat
+    mediaadapter --> mediastore
+    mediagenstrat --> mediacmd
+    mediatranscribe --> mediaspawn
+    mediaframes --> mediaspawn
+    mediaadapter --> mediaspawn
+    mediaadapter --> reltimeout
+    mediaadapter --> reldegrade
+    selhook --> mediapolicy
+    mediagenstrat --> mediapolicy
+    mediatranscribe --> spans
+    mediaframes --> spans
+    mediaadapter --> spans
 
     chat --> runchat
     chat --> selhook

@@ -43,9 +43,11 @@ Mini.
 > CLI — a full render is disk-bound on the dev Mac (LTX-2 is a 19B model,
 > not enough free disk here), the framework's hardware-adaptive
 > scales-on-a-bigger-box case, not a code gap. (Phase A's one
-> remaining open item is the routing-accuracy eval harness.) Next: **Slice 24**
-> (always-on daemon + secure remote access, Phase E — Slices 22/23 are
-> deferred/held). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> remaining open item is the routing-accuracy eval harness.) Next: **Slice 28**
+> (voice/streaming) or the Slice-27 multimodal-generation follow-ons
+> (hardware-adaptive gen models + wiring `runGenJob` into the gen tools) —
+> **Slices 23/24/25 remain held** on the `ai@7` provider blocker. See
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 > **Status:** Slice 27 complete — **Full multimodal I/O + uncensored** (Phase
 > F, pulled in on demand ahead of the daemon per user direction — the same

@@ -74,11 +74,22 @@ different family than the generator — skipped
 with a `verified: runs` commit when no judge clears the ~24B bar: degrade,
 never block), and only then the registry commit at the earned
 `VerifiedLevel`; plus usage aggregation from run telemetry and a reversible
-`bun run archive [--prune]` for idle near-duplicates. The **product surface**
-is still thin beyond that: 3 built-in agents (`super`, `file-qa`,
-`web-fetch`) plus whatever the agent-builder/crew-builder have grown — but
-what they grow is now behaviorally verified, tracked, and reusable rather
-than write-and-hope.
+`bun run archive [--prune]` for idle near-duplicates. Three more have since
+landed on top of Phase D: **Slice 21's graceful degradation + retries**
+(`src/reliability/` — 3-lane error classification, Transient-only retry,
+wall-clock + idle-stall timeouts, circuit breakers, failure-domain degrade
+chains, a persisted degradation ledger — closing the last Phase-A reliability
+gap); **Slice 26's alternate-runtime + remote-auth completion** (LM Studio and
+llama.cpp raised to full managed inference runtimes under one supervised
+OpenAI-compatible base, plus a real MCP OAuth 2.1 handshake with a 0600 token
+store — both live-verified); and **Slice 27's full multimodal I/O + uncensored**
+(`src/media/` — media-by-reference routing so the text-only delegation boundary
+is untouched, vision/STT/frame-sampling analysis, a `MediaGenerator` adapter
+driving image/speech/video generation, and a default-ON uncensored axis). The
+**product surface** now stands at 5 built-in agents (`super`, `file-qa`,
+`web-fetch`, `vision`, `media_creator`) plus whatever the
+agent-builder/crew-builder have grown — but what they grow is now behaviorally
+verified, tracked, and reusable rather than write-and-hope.
 
 | n8n / CrewAI concept | Our analog | Status |
 |---|---|---|
