@@ -2626,7 +2626,13 @@ yet):
   path the engine actually wrote before `putFile`). **Needs `misaki[en]`
   installed** (a Kokoro G2P dependency) — not bundled, provisioning note only.
 - **Video — LTX via mlx-video** (`video-mlx.ts`): `mlx_video.ltx_2.generate`
-  (env `AGENT_VIDEO_CMD`), `-n <seconds*24 or 97 frames>`, `--width 768`;
+  (env `AGENT_VIDEO_CMD`, resolved by default to the isolated video venv —
+  see below), `--pipeline <AGENT_VIDEO_PIPELINE ?? 'distilled'>`,
+  `--num-frames <seconds*24 or 97 frames>`, `--width 768`, `--height 512`.
+  Live-verifying this strategy against the real CLI's `--help` caught and
+  fixed a real bug: the frame-count flag is `--num-frames`, **not** `-n`,
+  and `--pipeline` is a required flag (the fast `distilled` few-step path is
+  the default; `dev`/`dev-two-stage-hq` are env-overridable alternatives).
   `parseProgress` parses `"step N/M"` stdout lines into a `JobProgress`
   fraction (stdout is not yet threaded into the job's live `progress`
   iterable — `ChildHandle` exposes no stdout stream today, so this parser is
@@ -2726,21 +2732,28 @@ was emitting a raw `Uint8Array` as `FilePart.data`, which Ollama's
 base64-encode, which works across the AI-SDK v6 `FilePart` contract and
 every provider.
 
-**Video *generation* live-verify is explicitly DEFERRED and logged** (the
-same honest-deferral pattern Slice 14 used for non-Ollama runtimes), **not**
-silently skipped: `mlx-video` on PyPI is a 5.1 kB stub with no `ltx_2`
-module; the real implementation lives only in the `Blaizzy/mlx-video` git
-repo (pre-1.0, experimental) and pulls in `mlx_vlm`, which at its current
-version (0.6.3) hard-conflicts with `transformers>=5` (a `transformers`
-`auto_factory.py` registration-API change `mlx_vlm` hasn't caught up to) —
-and `transformers>=5` is itself **required** by the already-live-verified
-mflux/mlx-audio installs in the same venv, so downgrading to unblock
-`mlx_vlm` would break image/speech generation instead. The video-**generation**
-*code* (`ltxStrategy`, the `generate_video` tool, the server-lane + degrade
-dispatcher) is complete, unit-tested, and reviewed — only the "does it
-actually produce a real video on this Mac" pass is deferred, pending either
-an isolated venv for `AGENT_VIDEO_CMD` (the env-configurable-command design
-already supports pointing it elsewhere) or the `mlx-video` ecosystem
-maturing past this dependency conflict. **The ComfyUI/Wan server lane is
-shape-only** (see above) — ComfyUI itself is not installed, so it has never
-been exercised against a real server.
+**Video *generation*: the dependency conflict is RESOLVED, and the CLI is
+live-verified; a full render is disk-bound, not deferred.** The original
+blocker — `mlx-video`'s real implementation living only in the
+`Blaizzy/mlx-video` git repo (PyPI ships a 5.1 kB stub) and pulling in
+`mlx_vlm`, which hard-conflicts with the `transformers>=5` the
+already-live-verified mflux/mlx-audio installs require in the same venv — is
+now resolved via the **isolated video venv** described above
+(`bun run setup:media`, `transformers==5.5.0` pinned after the `mlx-video`
+install). Against that venv, `mlx-video` imports and its real CLI runs.
+Live-verifying the strategy's **arg correctness** against the real
+`mlx_video.ltx_2.generate --help` caught and fixed a real bug — the frame
+flag is `--num-frames`, not `-n`, and a `--pipeline` is required (defaults to
+the fast `distilled` path, env-overridable via `AGENT_VIDEO_PIPELINE`) — see
+`video-mlx.ts` above. What remains is genuinely **hardware-bound, not
+code-bound**: a full end-to-end render was attempted and hit a **disk wall**
+— LTX-2 is a **19B model** (`ltx-2-19b-distilled.safetensors`), the full
+repo is **~100 GB**, and the dev Mac has **~90 GB free**. This is exactly the
+framework's standing hardware-adaptive posture (design is never sized to
+this specific box; a machine with more disk renders it today, unmodified).
+The video-**generation** *code* (`ltxStrategy`, the `generate_video` tool,
+the server-lane + degrade dispatcher) is complete, unit-tested, reviewed,
+and now CLI-arg-verified — only the disk-bound "renders a full clip on this
+box" pass is unavailable here, stated honestly rather than as a code gap.
+**The ComfyUI/Wan server lane is shape-only** (see above) — ComfyUI itself
+is not installed, so it has never been exercised against a real server.
