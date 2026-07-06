@@ -461,7 +461,7 @@ graph TD
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; declarative `mcp.json` registry + per-entry degrade (`config.ts`), consent-gated mounting with spec-hash/tools-hash pinning (`consent.ts`, `mount.ts`), curated 12-entry starter pack (`pack.ts`, Slice 15); mount/consume MCP servers (`client.ts`, `server.ts`, `sqlite-server.ts`); **live remote OAuth (Slice 26, §14)** — `oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (DCR/CIMD, PKCE + CSRF `state`, browser-loopback redirect via `loopback.ts`, AS-metadata persistence) backed by `token-store.ts`'s 0600 atomic on-disk store (`~/.config/ai/mcp-tokens.json`); `client.ts`'s `mountMcpServer` completes the first-time handshake on `UnauthorizedError` | MCP SDK + AI SDK MCP client |
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
 | **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example). Since Slice 17, `agents/index.ts` is a small **registry** rather than pure data — `AGENTS: Record<name, AgentFactory>` + `agentNames()`, with `// AGENT-BUILDER:IMPORTS`/`:ENTRIES` marker comments the agent-builder's `write.ts` inserts new generated entries at; `super.ts`/`chat.ts`/`flow.ts` all build their agent set by iterating `agentNames()` instead of importing each factory by hand | nothing beyond the `Agent`/`AgentFactory` types (pure data + one lookup) |
-| **Media** | `src/media/` | Foundational type definitions for multimodal I/O and job orchestration (Slice 27): media types (`types.ts` — `enum MediaKind {Image\|Audio\|Video}`, `MediaHandle`, `MediaItem`, `MediaFilePart`, `ResolvedMedia`, `FileHandle` for file metadata), execution modes and job lifecycle (`enum ExecMode {OneShot\|Server}`, `enum JobStatus {Submitted\|Working\|Completed\|Failed\|Cancelled}`, `JobProgress`, `JobHandle` with async iteration + cancellation) | nothing (pure foundational types) |
+| **Media** | `src/media/` | Full multimodal I/O subsystem (Slice 27 — see §22 for the full narrative): run-scoped `MediaStore` (`store.ts`) as the hub for both input and generated media; handle-marker ingest/resolve (`ingest.ts`, `resolve.ts`) turning CLI flags/drag-in paths/clipboard paste into `[img:h]`/`[audio:h]`/`[video:h]` markers and back into AI-SDK v6 `FilePart`s; STT (`audio/transcribe.ts`, mlx-whisper) and video frame-sampling (`video/frames.ts`, ffmpeg); a shared subprocess adapter (`spawn.ts`); generation (`generate/`) — the `MediaGenerator` `ExecMode.OneShot\|Server` job adapter (`adapter.ts`), the mflux image / Kokoro TTS / LTX video strategies, a shape-only ComfyUI/Wan server lane (`comfy-lane.ts`), and the `generate_image`/`generate_speech`/`generate_video` tools (`tools.ts`); the uncensored content-policy axis (`policy.ts`, `generate/safety.ts`) and voice-clone consent (`consent.ts`) | `reliability/` (timeouts, degrade ledger), `telemetry/spans.ts`, `runtime/process-supervisor.ts` (`SpawnFn` type), `core/types.ts` (`Capability`/`ContentPolicy`) |
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — both `main()`s now run their whole scope inside `withMcpRun` (`with-mcp-run.ts`, Slice 16, §14), which owns `createRun` → `initRunTelemetry` → mount before handing the run body a `run: RunHandle`: `runCrewCli` → `writeArtifact('result.txt'\|'failed.txt')`, with `shutdown()` happening in `withMcpRun`'s `finally`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
@@ -645,10 +645,10 @@ Global type via `AGENT_KV_CACHE_TYPE` (default `q8_0`) + `OLLAMA_FLASH_ATTENTION
 ### Four axes (`src/core/types.ts`)
 | Axis | Values | Enum |
 |---|---|---|
-| Capability / modality | Tools, Vision, Audio, Video | `Capability` |
+| Capability / modality | Tools, Vision, Audio, Video, ImageGen, SpeechGen, VideoGen *(the three `*Gen` values added Slice 27 — see §22; they type the taxonomy but no model declaration/`ModelReq` uses them yet, since generation is routed structurally by `MediaKind` to a fixed CLI strategy, not through the selector)* | `Capability` |
 | Inference runtime | Ollama, MlxServer, LmStudio, LlamaCpp *(all four are full inference runtimes as of Slice 26)* | `RuntimeKind` |
 | Download provider | Ollama, HfGguf, HfSnapshot, LmStudio | `ProviderKind` |
-| Content policy | Default, Uncensored *(seam)* | `ContentPolicy` |
+| Content policy | Default, Uncensored *(wired + default-ON as of Slice 27 — see §22; no longer just a seam)* | `ContentPolicy` |
 | Source | hf-gguf, hf-mlx | `CatalogSource.name` |
 
 ---
@@ -2477,3 +2477,247 @@ delegated agent whose model call fails returns a structured error instead of
 crashing the run, recording `AgentDropped`; (4) a real `withMcpRun` writes
 `runs/<id>/degradation.jsonl` and a `reliability.degrade` span event to
 `spans.jsonl`. Full suite: **827 pass / 10 skip / 0 fail**.
+
+---
+
+## 22. Multimodal I/O (Slice 27)
+
+Full multimodal I/O — vision/audio/video **input** (analysis) and text→image/
+speech/video **generation** — plus a cross-cutting **uncensored** content-policy
+axis, all under a new `src/media/` subsystem. The design principle carried
+through every piece: **media-by-reference, not media-by-value**. Raw bytes
+never travel through the router, the delegation boundary, or a prompt string;
+a short opaque **handle** (`img_1`, `aud_1`, `vid_1`) does, embedded in the
+task text as a `[img:h]`/`[audio:h]`/`[video:h]` marker, and only the
+specialist that actually needs the bytes resolves the handle back to them at
+the last possible moment (`resolve.ts`, right before the model call).
+
+### Module map (`src/media/`)
+
+| File | Responsibility |
+|---|---|
+| `types.ts` | `enum MediaKind {Image\|Audio\|Video}`, `MediaHandle` (opaque string id), `MediaItem` (handle/kind/path/mediaType + optional `frames?: MediaHandle[]` for a video frame-group), `MediaFilePart` (AI-SDK v6 `{type:'file', mediaType, data: base64 string}` — **must** be base64, not a raw `Uint8Array`, see the live-verify finding below), `ResolvedMedia`, `FileHandle` (generated-file metadata: uri/mediaType/sizeBytes), `enum ExecMode {OneShot\|Server}`, `enum JobStatus {Submitted\|Working\|Completed\|Failed\|Cancelled}`, `JobProgress`, `JobHandle` (async-iterable progress + `result()`/`cancel()`) |
+| `store.ts` | `createMediaStore(runDir)` → `MediaStore` — the **hub for both directions**: `put`/`putFile` (ingest bytes/a file, mint a per-kind monotonic handle `img_N`/`aud_N`/`vid_N`, write under `runDir/media/`), `get` (handle → `MediaItem`), `resolveBytes` (handle → file bytes), `toFileHandle` (→ `file://` URI + `statSync` size, used by generation), `registerGroup` (child image handles + a placeholder dir → one `vid_N` frame-group item, `mediaType: 'video/x-frames'`, no file of its own) |
+| `resolve.ts` | `MARKER_RE` + `extractHandles` (order-preserving marker scan) and `resolveAttachments(task, store)` → `MediaFilePart[]`: resolves `img`/`video` markers (audio is never a resolvable attachment — see below), base64-encodes bytes, and expands a video frame-group into one `FilePart` per child frame (skipping a group with zero frames rather than `readFile`-ing its placeholder directory) |
+| `ingest.ts` | `ingestMedia(rawPrompt, flags, store, deps)` — CLI-facing entry: `--image`/`--audio`/`--video` flags (repeatable) + prompt-embedded path auto-detection (any whitespace-delimited token that `existsSync`s and has a recognized extension) + `--paste` (macOS clipboard image), each handled **independently with per-item try/catch** so one bad path degrades (skip + `warnings[]`) rather than aborting the whole ingest |
+| `clipboard.ts` | `captureClipboardImage()` — macOS-only (`osascript`/`pngpaste`), returns `undefined` off-darwin or on failure, never throws |
+| `audio/transcribe.ts` | `transcribe(path, deps)` — spawns the `mlx_whisper` CLI (env-fallback `AGENT_STT_CMD`, model `AGENT_STT_MODEL` ?? `turbo`), reads its JSON output, wrapped in `withTranscribeSpan` |
+| `video/frames.ts` | `sampleFrames(path, store, deps)` — spawns `ffmpeg` to sample frames at a target fps, stores each as an `Image` item, then `store.registerGroup`s them into one `Video` handle; wrapped in `withFrameSampleSpan` |
+| `spawn.ts` | `defaultSpawn` — the one `Bun.spawn` → `ChildHandle` adapter shared by transcribe/frames/generation, so every media subprocess site has the same env-merge/stdout-ignore/kill/onExit shape |
+| `policy.ts` | The uncensored axis, mechanism 1: `uncensoredEnabled(env)` (default **true**; only `AGENT_UNCENSORED=0`/`false` turns it off) and `isUncensoredModel(model)` (a content-policy tag OR a name-pattern class match — `abliterat\|dolphin\|heretic\|josiefied\|pony\|chroma\|uncensored`) |
+| `consent.ts` | `contentPolicyLabel` (telemetry label, observability-only), `requiresCloneConsent`/`affirmCloneConsent`/`defaultCloneConsentAsk` (voice-clone consent — **orthogonal** to the content-policy switch; gates CSM/Dia/XTTS/Fish, not Kokoro), `LEGAL_NOTE` (a **string constant**, not a gate) |
+| `generate/adapter.ts` | The `MediaGenerator` job adapter: `GenStrategy` (`kind`, `execMode`, `buildOneShot?`, `outputPathFor?`, `parseProgress?`, `serverSubmit?`), `runOneShotJob` (spawn → exit → `store.putFile`, cancel-race-safe single-settle, wrapped in `withGenerateSpan`), `runServerJob` (poll → result → `store.putFile`), and `runGenJob` (an `ExecMode`-routing dispatcher with same-`MediaKind` degrade between the one-shot and server lanes, recording `DegradeKind.ModelDegraded`) |
+| `generate/image-mflux.ts`, `generate/audio-mlx.ts`, `generate/video-mlx.ts` | The three default `GenStrategy` implementations: mflux (image), Kokoro via mlx-audio (speech), LTX via mlx-video (video) — see below |
+| `generate/safety.ts` | The uncensored axis, mechanism 2: `buildDiffusersFlags` — the Diffusers/ComfyUI-lane safety-checker disable flag, defaulting from `uncensoredEnabled()` |
+| `generate/comfy-lane.ts` | `wanComfyStrategy` — a **shape-only** ComfyUI/Wan text-to-video `Server`-lane strategy (see the honest gap below) |
+| `generate/tools.ts` | `createGenerateTools(store, deps)` → `{generate_image, generate_speech, generate_video}` AI-SDK tools, each calling `runOneShotJob` directly against its default strategy and returning a text summary (`"Generated image: file://..."`) — **never** raw bytes |
+
+### Input: ingest → handle markers → threaded to specialist → resolve
+
+`ingestMedia` (CLI: `chat.ts`'s `parseMediaArgs`) turns `--image`/`--audio`/
+`--video`/`--paste` and any dragged-in path embedded in the prompt into
+stored `MediaItem`s and a **rewritten prompt string** carrying
+`[img:h]`/`[video:h]` markers. **Audio is the one exception**: it is
+transcribed immediately and spliced into the prompt as literal text
+(`"\n\nTranscript:\n<text>"`, no marker, not in `items[]`) — audio is
+"resolved" once, at ingest time, rather than carried by reference, since
+there is no per-turn benefit to re-resolving it later and no model in this
+framework takes raw audio bytes as input.
+
+The rewritten prompt (with its handle markers) threads through the **existing**
+plumbing completely unchanged in shape: `chat.ts` → `createOrchestrator` →
+`asDelegateTool` → `runGuardedAgent` → the specialist's `runDefinedAgent`. The
+delegation boundary's `z.string()` tool-input schema is untouched — a marker
+is just more string content to the router and to every layer above the
+specialist. Only `runDefinedAgent` is media-aware: given an (optional)
+`mediaStore`, it calls `resolveAttachments(task, store)` to turn markers back
+into `MediaFilePart[]`, then `core/agent.ts`'s `buildCallInput(prompt,
+attachments)` decides the AI-SDK v6 call shape — `{prompt}` (byte-for-byte
+unchanged) when there are no attachments, or `{messages:[{role:'user',
+content:[{type:'text',text},...attachments]}]}` when there are. **The router
+itself never receives a `mediaStore`** (`agents/super.ts`'s own
+`runDefinedAgent` call omits it) — it routes on the marker text, never
+rehydrates bytes, so media-by-reference is preserved end to end: only the
+specialist that ultimately handles the request pays the resolve cost.
+
+A video handle expands specially: `resolveAttachments` treats a `Video`
+`MediaItem` as a frame-group placeholder (its own `path` is a directory, never
+`readFile`d directly) and emits one `FilePart` per child frame handle instead.
+
+### Vision, STT, and frame-sampling (analysis / input)
+
+- **Vision** — `agents/vision.ts` (mirrors `file-qa`) declares `requires:
+  [Capability.Vision]`, `prefer: LargestThatFits`; `models/qwen-vision.ts`
+  declares `qwen2.5vl:7b` (`capabilities: [Vision, Tools]`, no other model
+  currently carries `Vision`, so selection is unambiguous). This flows through
+  the **existing** hardware-fit selector exactly like every other specialist —
+  vision is a normal model-selection capability, not a special case.
+- **STT** — `audio/transcribe.ts` spawns the `mlx_whisper` CLI (not `python3
+  -m mlx_whisper` — see the live-verify bug below) and reads its JSON output.
+- **Video → frames** — `video/frames.ts` spawns `ffmpeg` to sample frames at a
+  target fps into a temp dir, stores each frame as an `Image` item, and groups
+  them into one `Video` handle via `store.registerGroup`.
+
+### Generation (`generate/`) — the `MediaGenerator` adapter
+
+`runOneShotJob` is the shared lifecycle for every `ExecMode.OneShot` strategy:
+allocate a scratch output path → `strategy.buildOneShot(prompt, outPath,
+opts)` → spawn → on a clean exit, `store.putFile` the result and resolve;
+on a non-zero exit, reject; `cancel()` sends `SIGTERM` and settles
+`Cancelled`. Settlement is guarded against a resolve/cancel race (a `settled`
+flag makes every terminal transition idempotent) and every job is wrapped in
+`withGenerateSpan` for `media.generate` telemetry (fire-and-forget, never
+altering the settle logic it observes). `runServerJob` mirrors this for a
+`Server`-lane strategy's `submit → poll → result` shape. `runGenJob` sits on
+top as an `ExecMode`-aware dispatcher: given a primary strategy and an
+optional same-`MediaKind` fallback in the *other* exec mode, it probes
+whether the primary's engine binary is on `PATH` (one-shot) or its server is
+reachable (server), and degrades to the fallback — recording
+`DegradeKind.ModelDegraded` on the reliability ledger — when it isn't.
+**Honest gap:** `runGenJob` is unit-tested but **not yet wired into
+`createGenerateTools`** — the live `generate_image`/`generate_speech`/
+`generate_video` tools call `runOneShotJob` directly against their fixed
+default strategy, so the degrade-to-server-lane path it implements is not
+reachable from the actual product surface yet (a wiring gap, not a design
+gap — `runGenJob`'s contract is proven, it just has no caller today).
+
+Three default strategies, all `OneShot`, selected structurally by
+`MediaKind` (not through the model selector — the three `Capability.*Gen`
+enum values added this slice type the taxonomy for a future selector-routed
+generation model but are not consumed by any `ModelDeclaration`/`ModelReq`
+yet):
+
+- **Image — mflux** (`image-mflux.ts`): `mflux-generate` (env `AGENT_IMAGE_CMD`).
+  Default model is **`dhairyashil/FLUX.1-schnell-mflux-4bit`**, an ungated,
+  pre-quantized mirror — live-verify found the obvious default
+  (`--model schnell` → `black-forest-labs/FLUX.1-schnell`) is
+  **HuggingFace-gated and 401s** without a token; the mirror downloads and
+  generates unauthenticated, so image-gen works out of the box. Setting
+  `AGENT_IMAGE_MODEL` to `schnell`/`dev` requires accepting the gated FLUX
+  license + configuring an HF token first.
+- **Speech — Kokoro via mlx-audio** (`audio-mlx.ts`): `mlx_audio.tts.generate`
+  (env `AGENT_TTS_CMD`), model `AGENT_VOICE_MODEL` ?? `mlx-community/Kokoro-82M-bf16`,
+  voice `AGENT_VOICE` ?? `af_heart`. Kokoro's CLI ignores an exact output
+  path and instead writes `<file_prefix>_000.wav` — a live-verify bug fixed
+  via `GenStrategy.outputPathFor` (maps the allocated scratch path to the
+  path the engine actually wrote before `putFile`). **Needs `misaki[en]`
+  installed** (a Kokoro G2P dependency) — not bundled, provisioning note only.
+- **Video — LTX via mlx-video** (`video-mlx.ts`): `mlx_video.ltx_2.generate`
+  (env `AGENT_VIDEO_CMD`), `-n <seconds*24 or 97 frames>`, `--width 768`;
+  `parseProgress` parses `"step N/M"` stdout lines into a `JobProgress`
+  fraction (stdout is not yet threaded into the job's live `progress`
+  iterable — `ChildHandle` exposes no stdout stream today, so this parser is
+  unused in practice, a disclosed gap).
+- **`generate/comfy-lane.ts`'s `wanComfyStrategy`** (`Server`-lane, Wan
+  text-to-video via ComfyUI's `/prompt`/`/history`/`/view` API) is
+  **shape-only**: ComfyUI is **not installed** in this environment, the node
+  graph has never been exercised against a live server, and (per the gap
+  above) it isn't even reachable from `createGenerateTools` today. It exists
+  as a documented, unit-tested-against-a-fake-server starting point for a
+  future server-lane video backend, not a working default.
+
+`createGenerateTools` binds the three tools to a `MediaStore` and is merged
+into the **`media_creator`** specialist's tool set at runtime
+(`agents/super.ts`: `if (name === 'media_creator' && mediaStore) tools =
+{...agent.tools, ...createGenerateTools(mediaStore)}`) — the same
+store-threading pattern the vision path uses for input. `generate_speech`
+additionally gates on `requiresCloneConsent(resolveVoiceModel({}))` before
+running: Kokoro (the default) never triggers it; pointing `AGENT_VOICE_MODEL`
+at a CSM/Dia/XTTS/Fish voice-cloning model does, via `affirmCloneConsent`.
+
+### Uncensored — a cross-cutting, default-ON axis (two orthogonal mechanisms)
+
+"Uncensored" is not a single switch but **two independent mechanisms** that
+happen to share one enable flag (`AGENT_UNCENSORED`, default **on**):
+
+1. **Model eligibility** (`policy.ts`) — `select-hook.ts`'s
+   `allowUncensored = agent.modelReq.allowUncensored ?? uncensoredEnabled()`
+   (an agent can explicitly override the default; the selector's own
+   `ModelDeclaration`/hard-filter/degrade logic is otherwise byte-identical).
+   Two catalog entries exercise this: `JOSIEFIED-Qwen3:8b` (tools) and
+   `huihui_ai/qwen3-vl-abliterated:8b` (vision) — both classified
+   `isUncensoredModel === true` by the name-pattern predicate.
+2. **Safety-checker disable** (`generate/safety.ts`) — the Diffusers/ComfyUI
+   lane's checker is the **only** place a safety checker exists in this
+   subsystem (mflux/mlx-audio/mlx-video are filter-free by construction —
+   there is nothing to disable, documented as a no-op on each strategy);
+   `buildDiffusersFlags` defaults `disableSafetyChecker` from
+   `uncensoredEnabled()` and is wired into `comfy-lane.ts`'s workflow builder
+   (omits the checker node entirely when disabled, rather than adding one and
+   configuring it off).
+
+Orthogonal to both: **voice-clone consent** (`consent.ts`) — a real,
+fail-safe TTY prompt gating cloning-capable TTS models regardless of the
+content-policy setting (declines, never hangs, when non-interactive); and
+`LEGAL_NOTE`, a **string constant surfaced at pull/label time**, not a
+classifier or refusal path — it states that removing content filters does
+not remove legal exposure (CSAM/NCII generation remains illegal regardless of
+any setting here).
+
+Every run's root span already carries `ATTR.CONTENT_POLICY` = the label from
+`contentPolicyLabel(uncensoredEnabled())` (`withRunSpan`, `telemetry/spans.ts`)
+— content policy is observable on every run, not just multimodal ones.
+
+### Telemetry
+
+New attributes (`telemetry/spans.ts`): `ATTR.INPUT_MODALITY`
+(`gen_ai.input.modality`, set to `'audio'`/`'video'` on the respective spans)
+and `ATTR.CONTENT_POLICY` (`content.policy`, on every run's root span). New
+spans: `withTranscribeSpan` (`media.transcribe` — model, audio-seconds
+[unpopulated, no duration-probe yet], duration, outcome), `withFrameSampleSpan`
+(`media.frames` — fps, frames sampled, duration), and `withGenerateSpan`
+(`media.generate` — kind, engine, model, exec mode, duration, size bytes,
+outcome). All three follow the existing no-op-safe `inSpan` pattern (never
+throw when no exporter is configured) and are wired live into their
+respective modules (not just declared).
+
+### Configuration (env fallback-only, per this repo's rule — never hardcoded)
+
+Engine commands: `AGENT_STT_CMD` (mlx_whisper), `AGENT_TTS_CMD`
+(mlx_audio.tts.generate), `AGENT_IMAGE_CMD` (mflux-generate), `AGENT_VIDEO_CMD`
+(mlx_video.ltx_2.generate). Model pins: `AGENT_STT_MODEL`, `AGENT_VOICE_MODEL`,
+`AGENT_VOICE`, `AGENT_IMAGE_MODEL`. Timeouts: `AGENT_MEDIA_TIMEOUT_MS`
+(default 600 000 ms / 10 min — generous because video generation can
+legitimately take minutes; wraps every media subprocess spawn/poll wait so a
+hung engine fails the job instead of hanging the turn). Content policy:
+`AGENT_UNCENSORED` (default on; `0`/`false` disables). ComfyUI lane (unused
+today, see above): `AGENT_COMFY_HOST`/`AGENT_COMFY_PORT`.
+
+### Testing + live-verify (honest status)
+
+**Live-verified on this Mac** (`MULTIMODAL_LIVE=1`,
+`tests/integration/multimodal.live.test.ts`): **vision** (real `qwen2.5vl`
+via the vision specialist path, described a real image), **STT** (real
+`mlx-whisper`, transcribed real speech), **video frame-sampling** (real
+`ffmpeg`, testsrc clip → frame-group), **image generation** (real `mflux`
+via the ungated FLUX-schnell mirror → a real 384×384 PNG, controller-viewed),
+**speech generation** (real Kokoro via mlx-audio, needs `misaki[en]`
+installed → a real .wav), and **uncensored** (pulled and ran
+`goekdenizguelmez/JOSIEFIED-Qwen3:8b` for real — the abliterated persona
+responded; eligibility/safety-checker/consent/telemetry gates are unit-tested).
+Live-verify caught and fixed two real bugs mocks missed: `transcribe.ts` was
+spawning `python3 -m mlx_whisper` (the package has no `__main__`, fails at
+runtime) instead of the `mlx_whisper` CLI directly; and `resolveAttachments`
+was emitting a raw `Uint8Array` as `FilePart.data`, which Ollama's
+`images[]` field rejects (JSON-serializes to an object → 400) — fixed to
+base64-encode, which works across the AI-SDK v6 `FilePart` contract and
+every provider.
+
+**Video *generation* live-verify is explicitly DEFERRED and logged** (the
+same honest-deferral pattern Slice 14 used for non-Ollama runtimes), **not**
+silently skipped: `mlx-video` on PyPI is a 5.1 kB stub with no `ltx_2`
+module; the real implementation lives only in the `Blaizzy/mlx-video` git
+repo (pre-1.0, experimental) and pulls in `mlx_vlm`, which at its current
+version (0.6.3) hard-conflicts with `transformers>=5` (a `transformers`
+`auto_factory.py` registration-API change `mlx_vlm` hasn't caught up to) —
+and `transformers>=5` is itself **required** by the already-live-verified
+mflux/mlx-audio installs in the same venv, so downgrading to unblock
+`mlx_vlm` would break image/speech generation instead. The video-**generation**
+*code* (`ltxStrategy`, the `generate_video` tool, the server-lane + degrade
+dispatcher) is complete, unit-tested, and reviewed — only the "does it
+actually produce a real video on this Mac" pass is deferred, pending either
+an isolated venv for `AGENT_VIDEO_CMD` (the env-configurable-command design
+already supports pointing it elsewhere) or the `mlx-video` ecosystem
+maturing past this dependency conflict. **The ComfyUI/Wan server lane is
+shape-only** (see above) — ComfyUI itself is not installed, so it has never
+been exercised against a real server.

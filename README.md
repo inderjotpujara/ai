@@ -25,66 +25,86 @@ Mini.
 > landed, **completing Phase D (self-extension)**, **graceful degradation
 > + retries** (Slice 21) fills Phase A's last **reliability** gap — a dead
 > MCP server, model, or tool no longer sinks a run; it degrades and tells the
-> user — and **alternate runtimes + remote-auth completion** (Slice 26)
+> user — **alternate runtimes + remote-auth completion** (Slice 26)
 > raises **LM Studio and llama.cpp to full inference runtimes** alongside
 > Ollama and MLX (a shared managed-runtime base with per-runtime
 > relaunch/reload/fixed context handling) and completes **live remote MCP
 > OAuth** (DCR, browser handshake, on-disk token persistence) plus a
-> verified **GitHub-PAT** remote server. (Phase A's one remaining open item
-> is the routing-accuracy eval harness.) Next: **Slice 24** (always-on
-> daemon + secure remote access, Phase E — Slices 22/23 are deferred/held).
-> See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> verified **GitHub-PAT** remote server — and **full multimodal I/O +
+> uncensored** (Slice 27, Phase F, pulled in on demand) adds vision/audio/video
+> **input** (describe an image, transcribe speech, sample+describe video
+> frames — all media-by-reference, never raw bytes through the router),
+> text→image/speech/video **generation** (a new `media_creator` specialist),
+> and a default-**on** uncensored content-policy axis (model eligibility +
+> safety-checker disable). Vision/STT/frames/image-gen/speech-gen/uncensored
+> are all live-verified on real hardware; **video generation is code-complete
+> but its live-verify is deferred** (an `mlx-video` ↔ `transformers` dependency
+> conflict in the ecosystem, not a product limitation). (Phase A's one
+> remaining open item is the routing-accuracy eval harness.) Next: **Slice 24**
+> (always-on daemon + secure remote access, Phase E — Slices 22/23 are
+> deferred/held). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 26 complete — **Alternate runtimes + remote-auth
-> completion** (debt slice, gated on installing those runtimes / having
-> creds — landed out of sequence per that gate). **Phase A — full inference
-> runtimes:** `src/runtime/managed-openai-compatible.ts`'s
-> `createManagedRuntime(strategy)` is now the one control-surface
-> implementation shared by **llama.cpp**, **LM Studio**, and (rewritten
-> onto it) **MLX** — spawn/health-poll/kill-on-timeout via
-> `process-supervisor.ts` (fresh free port per relaunch, a
-> `breakerFor('runtime:'+kind)` circuit breaker), reading the runtime's own
-> `GET /v1/models` for `listLoaded`/`getModelMax` (degrade-safe: never
-> throws). Each runtime's `contextCapability` says how its context window is
-> (re)configured: llama.cpp **relaunches** `llama-server -c <numCtx>`, LM
-> Studio (new dep `@lmstudio/sdk`) **reloads** via
-> `client.llm.load(model,{config:{contextLength}})`, and MLX's window is
-> **fixed** — `mlx_lm.server` has no context flag, so a requested context is
-> honestly never applied (observable via telemetry, not silently dropped).
-> `select-hook.ts` now calls `rt.control.warm(model, numCtx)` for every
-> non-Ollama runtime so this actually takes effect at load time. New
-> `RUNTIME_KIND`/`RUNTIME_CONTEXT_CAPABILITY`/`RUNTIME_CONTEXT_REQUESTED`/
-> `RUNTIME_CONTEXT_APPLIED`/`RUNTIME_WARM_OUTCOME` telemetry. The LM Studio
-> download adapter's job-status poll URL was also fixed (wrong since
-> Slice 18, caught by live-verify). **Phase B — live remote MCP OAuth:**
-> `src/mcp/oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp`
-> `OAuthClientProvider` — Dynamic Client Registration (no preconfigured
-> client id), PKCE + CSRF `state`, a browser-loopback redirect capture
-> (`loopback.ts`), and authorization-server metadata persistence (needed so
-> the code-exchange call doesn't throw on a fresh process). Tokens/client
-> registration/AS metadata persist to `src/mcp/token-store.ts` — an atomic,
-> **0600** `~/.config/ai/mcp-tokens.json` (encryption-at-rest deferred to
-> Slice 35). `with-mcp-run.ts` now actually builds an `authProvider` per
-> `auth.kind: oauth` config entry (previously it was **never populated**, so
-> OAuth always silently degraded to unauthenticated); `mcp/client.ts`'s
-> `mountMcpServer` completes the first-time handshake on the SDK's
-> `UnauthorizedError`. New `mcp.auth.*` telemetry (`MCP_AUTH_OUTCOME`/
-> `MCP_AUTH_KIND`, never a secret value). **Live-verified on this Mac:** all
-> three managed runtimes end to end (llama.cpp `/props` reports
-> `n_ctx=8192`, LM Studio loads at `ctx=4096`, MLX confirmed fixed), both
-> download adapters, a **GitHub-PAT** remote-HTTP server, and a full
-> **Linear OAuth** handshake (DCR → browser → code exchange → 47 tools),
-> with token-store reuse on a second run producing **no browser prompt**.
-> That live pass caught 3 real defects (the LM Studio poll URL; the OAuth
-> handshake never actually completing; AS metadata not persisted across the
-> exchange) — all fixed in-slice. Deterministic OAuth coverage:
-> `tests/mcp/oauth-flow.test.ts` (mock AS); gated live suites:
-> `tests/integration/altruntime*.live.test.ts` (`ALTRUNTIME_LIVE`),
-> `tests/integration/linear-oauth.live.test.ts` (`MCP_OAUTH_LIVE`),
-> `tests/integration/github-mcp.live.test.ts` (`GITHUB_PAT`). See
-> [`docs/architecture.md`](docs/architecture.md) §5 / §14.
+> **Status:** Slice 27 complete — **Full multimodal I/O + uncensored** (Phase
+> F, pulled in on demand ahead of the daemon per user direction — the same
+> out-of-numeric-sequence pattern Slice 26 used). A new `src/media/`
+> subsystem, built on one design principle throughout: **media-by-reference,
+> not media-by-value** — a run-scoped `MediaStore` mints a short opaque handle
+> (`img_1`/`aud_1`/`vid_1`) for every piece of media, and only a
+> `[img:h]`/`[audio:h]`/`[video:h]` marker travels through the router and the
+> delegation boundary (`z.string()` untouched); the specialist that actually
+> needs the bytes resolves the handle at the last moment, right before the
+> model call. **Input (analysis):** `--image`/`--audio`/`--video` CLI flags
+> (repeatable) + prompt-embedded path auto-detection + macOS `--paste`, each
+> degrading independently (a bad path is skipped + warned, never aborts the
+> turn); audio is transcribed immediately via `mlx-whisper` and spliced into
+> the prompt as text; video is frame-sampled via `ffmpeg` into a handle-group;
+> images and video frames resolve to AI-SDK v6 `FilePart`s (base64, per a
+> live-verify finding that Ollama's `images[]` rejects a raw `Uint8Array`) for
+> the new **`vision`** specialist (`qwen2.5vl:7b`, selected through the
+> existing hardware-fit selector like any other capability). **Generation:**
+> a `MediaGenerator` job adapter (`ExecMode.OneShot|Server`, cancel-race-safe,
+> wall-clock-timeout-guarded) backs three default engines — **mflux** (image,
+> via an ungated FLUX-schnell mirror since the obvious default is
+> HuggingFace-gated), **Kokoro/mlx-audio** (speech), **LTX/mlx-video**
+> (video) — exposed as `generate_image`/`generate_speech`/`generate_video`
+> tools on a new **`media_creator`** specialist; a ComfyUI/Wan server-lane
+> strategy exists but is shape-only (ComfyUI isn't installed). **Uncensored**
+> is a cross-cutting axis, shipped **default-ON**: two orthogonal mechanisms —
+> a model-eligibility predicate (an agent/env can still opt out) and a
+> Diffusers/ComfyUI-lane safety-checker disable (a no-op on the filter-free
+> mflux/mlx-audio/mlx-video engines) — plus `content_policy` telemetry on
+> every run and a fail-safe voice-clone consent gate (orthogonal, for
+> cloning-capable TTS models only). New `Capability.ImageGen/SpeechGen/VideoGen`
+> type the taxonomy for future selector-routed generation (not yet consumed —
+> generation is currently routed structurally by media kind, not the
+> selector). New `INPUT_MODALITY`/`CONTENT_POLICY` telemetry attrs +
+> `media.transcribe`/`media.frames`/`media.generate` spans. **Live-verified on
+> this Mac:** vision (real `qwen2.5vl`), STT (real `mlx-whisper`), video
+> frame-sampling (real `ffmpeg`), image generation (real `mflux`, a
+> controller-viewed PNG), speech generation (real Kokoro, needs `misaki[en]`),
+> and uncensored (pulled and ran a real abliterated model). **Honest gap:**
+> **video *generation* live-verify is deferred** (`mlx-video`'s real
+> implementation is git-only/experimental and its `mlx_vlm` dependency
+> hard-conflicts with the `transformers>=5` the already-live-verified
+> image/speech engines require in the same environment) — the code
+> (`ltxStrategy`, the tool, the server-lane degrade path) is complete,
+> unit-tested, and reviewed, exactly the Slice-14 non-Ollama-runtime pattern:
+> logged, not silently skipped. See [`docs/architecture.md`](docs/architecture.md)
+> §22.
 
-> **Previously:** Slice 21 — **Graceful degradation + retries** (fills
+> **Previously:** Slice 26 — **Alternate runtimes + remote-auth completion**
+> (debt slice, gated on installing those runtimes / having creds — landed out
+> of sequence per that gate). Stood up **LM Studio and llama.cpp as full
+> inference runtimes** alongside Ollama and MLX via a shared managed-runtime
+> base (`createManagedRuntime(strategy)`, spawn/health-poll/kill-on-timeout,
+> per-runtime relaunch/reload/fixed context handling) and completed **live
+> remote MCP OAuth** (DCR, browser handshake, on-disk token persistence) plus
+> a verified **GitHub-PAT** remote server; live-verified on this Mac across
+> all three managed runtimes, both download adapters, GitHub-PAT, and a full
+> Linear OAuth handshake. See [`docs/architecture.md`](docs/architecture.md)
+> §5 / §14.
+
+> Also previously: Slice 21 — **Graceful degradation + retries** (fills
 > Phase A's last reliability gap; the routing-accuracy eval harness remains
 > open). One canonical `src/reliability/` layer — a three-lane
 > error taxonomy (`Lane.Transient/RouteWorthy/Terminal`), retry with
@@ -197,6 +217,8 @@ No manual steps. No API keys. Everything runs locally.
 **Verified "works out of the box" (Slice 20, Phase D — closes the phase).** Generation used to be write-then-return: a proposal/IR passed structural (and, since Slice 19, semantic-judge) validation and landed in the registry without ever being run. `src/verified-build/` turns every agent-builder/crew-builder write into **stage → verify → commit** through one shared, cheapest-first gate (`verifyAndCommit`). Before anything is generated, a **reuse check** distills the need into a capability signature, embeds it, and cosine-compares it against a per-registry **manifest sidecar** (`<registry>/.generated.json` — which now persists each generated artifact's original need, signature+vector, verified level, golden path, and usage counters): **≥0.85 → ask to reuse** the existing artifact (accept → nothing is generated; decline → generate), **0.75–0.85 → offer** the close match and ask reuse-or-build, **<0.75 → generate**; the non-interactive `--yes` policy auto-reuses a Reuse hit but declines an Offer hit. After consent, the artifact is **staged** (a def file on disk, never the registry index), re-checked structurally, then **actually executed** against a benign read-only representative task (`dry-run.ts` — every run is `withWallClock`-raced; the agent path additionally aborts in flight via a new `runAgent` `abortSignal` seam, while crew/workflow runs are wall-clock-raced only since `runCrew`/`runWorkflow` take no signal yet), with a bounded **self-repair loop** (≤2 attempts, the real runtime error fed back into a fresh regeneration — the agent-builder re-drafts with the error as retry feedback, the crew-builder re-plans with it appended — keeping the consented name/id). A **golden-eval** then auto-decomposes the need into 3–7 binary cases and judges each artifact output with the **largest installed model (~26–30b), preferring a different family than the generator** (falling back to same-family/largest); each case requires a unanimous yes over 3 judge runs, with grounded-kind cases routed through the verification layer's `checkClaim`; if no installed model clears the ~24B-parameter judge bar, the behavioral eval is **skipped and the commit is marked `verified: runs`** — degrade, never block, never an unconsented pull. Only a passing (or explicitly `--force`d/`verify.force`d, marked `unverified` with a WARNING) gate reaches **commit**: the registry-index splice, a `<name>.golden.json`, and the manifest upsert; a failed gate registers nothing and the staged file is discarded. On top of the manifest: **usage aggregation** derived from every run's `spans.jsonl` (no new bookkeeping) and a **reversible archive** flow — `bun run archive [--prune]` reports (and, per-candidate consent, archives to `<registry>/archive/`) artifacts that are idle *and* have a more-used near-duplicate — plus an informational reuse hint on chat's gap offers. `build.verify` / `build.archive` telemetry spans. See [`docs/architecture.md`](docs/architecture.md) §20.
 
 **Alternate runtimes + remote-auth completion (Slice 26).** Declaring `runtime: RuntimeKind.LlamaCpp` or `RuntimeKind.LmStudio` on a model now runs real inference, not just a download: `src/runtime/managed-openai-compatible.ts`'s `createManagedRuntime(strategy)` is the shared implementation behind both, plus a rewritten `mlx-server.ts`. llama.cpp **relaunches** `llama-server -c <numCtx>` to change context (or `-hf <org/repo>` when the model looks like an HF repo id rather than a local path); LM Studio **reloads** the model via `@lmstudio/sdk`'s `client.llm.load(model,{config:{contextLength}})` against its always-on daemon; MLX's context is **fixed** (`mlx_lm.server` has no context flag) — a requested window is honestly never applied rather than silently ignored. All three are spawn/health-polled/kill-on-timeout-supervised by `process-supervisor.ts` (a fresh free port every relaunch) and circuit-breaker-wrapped per runtime kind. `select-hook.ts` now calls `rt.control.warm(model, numCtx)` for every non-Ollama runtime so a resolved context actually reaches the process. Separately, MCP OAuth is now **live**, not contract-tested-only: `src/mcp/oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (Dynamic Client Registration, PKCE, a CSRF `state` nonce, a browser-loopback redirect capture, and authorization-server metadata persistence), backed by a `token-store.ts` atomic **0600** on-disk store; `with-mcp-run.ts` now actually constructs one per `auth.kind: oauth` config entry (previously always empty, so OAuth silently degraded every time), and `mcp/client.ts`'s `mountMcpServer` completes the handshake the first time a server is used. Live-verified on real hardware: llama.cpp, LM Studio, and MLX all serving inference; a GitHub-PAT remote server; and a full Linear OAuth handshake (DCR → browser → token exchange → 47 tools, with silent token-reuse on a second run). See [`docs/architecture.md`](docs/architecture.md) §5 / §14.
+
+**Full multimodal I/O + uncensored (Slice 27).** `src/media/` adds vision/audio/video **input** and text→image/speech/video **generation**, all **media-by-reference**: a run-scoped `MediaStore` mints a short handle (`img_1`/`aud_1`/`vid_1`) for every piece of media, and only a `[img:h]`/`[audio:h]`/`[video:h]` marker travels through the router and the delegation boundary — the specialist that needs the bytes resolves the handle at the last moment. **Input:** `bun run src/cli/chat.ts "..." --image path.png` (also `--audio`/`--video`, repeatable, plus prompt-embedded path auto-detection and macOS `--paste`); audio is transcribed via `mlx-whisper` and spliced into the prompt as text, video is frame-sampled via `ffmpeg` into a handle-group, and images/frames resolve to real AI-SDK v6 attachments for the new **`vision`** specialist (`qwen2.5vl:7b`). **Generation:** a new **`media_creator`** specialist calls `generate_image`/`generate_speech`/`generate_video` tools backed by mflux (image), Kokoro/mlx-audio (speech), and LTX/mlx-video (video) — each a subprocess behind a shared `MediaGenerator` job adapter (`ExecMode.OneShot|Server`, cancel-safe, wall-clock-timeout-guarded). **Uncensored is a default-ON, cross-cutting axis** (`AGENT_UNCENSORED=0` to opt out): a model-eligibility predicate plus a Diffusers/ComfyUI-lane safety-checker disable (a no-op on the filter-free default engines), with `content_policy` telemetry on every run and a fail-safe voice-clone consent gate. **Live-verified on real hardware:** vision, STT, video frame-sampling, image generation (real `mflux` PNG), speech generation (real Kokoro wav), and uncensored (a real abliterated model, pulled and run). **Honest gap — video *generation* live-verify is deferred**, not silently skipped: `mlx-video`'s real implementation is git-only/experimental and its `mlx_vlm` dependency hard-conflicts with the `transformers>=5` the already-live-verified image/speech engines need in the same environment; the code (strategy, tool, server-lane degrade) is complete, unit-tested, and reviewed. See [`docs/architecture.md`](docs/architecture.md) §22.
 
 ---
 
@@ -359,7 +381,8 @@ higher concurrency via vMLX) can slot in the same way later. See
 | **20** | **Verified "works out of the box"** (Phase D — closes the phase) — `src/verified-build/`: builder writes become **stage → verify → commit** via a shared cheapest-first gate — pre-generation **reuse check** (capability-signature embedding vs a per-registry `.generated.json` manifest; ≥0.85 confirm-gated reuse · 0.75–0.85 offer, ask reuse-or-build · <0.75 generate; `--yes` auto-reuses Reuse, declines Offer) → stage (never the index) → structural → **execution dry-run** (`withWallClock`-raced; the agent path additionally aborts in flight via a new `runAgent` `abortSignal` seam — crew/workflow are wall-clock-raced only; ≤2 self-repair attempts feeding the runtime error back into a regeneration) → **golden-eval** (3–7 auto-generated binary cases, largest-installed judge preferring cross-family, unanimous over 3 runs; no judge ≥ ~24B ⇒ skip + commit `verified: runs` — degrade, never block) → commit (index + `<name>.golden.json` + manifest) at the earned `VerifiedLevel`; failed gate registers nothing and the staged file is discarded (`--force`/`verify.force` ⇒ `unverified` + WARNING). Plus usage aggregation from `spans.jsonl` + reversible archive (`bun run archive [--prune]`, live-reference-protected cross-registry) + a chat reuse hint; `build.verify`/`build.archive` telemetry. **Live-verified on Ollama** — a real build committed at `verified: runs` (judge-degrade path) and a re-run of the same need hit reuse at 89% | ✅ Done |
 | **21** | **Graceful degradation + retries** (Phase A — fills the last reliability gap; the routing-accuracy eval harness remains the one open Phase-A item) — `src/reliability/`: a three-lane error taxonomy (`classify.ts` — `Lane.Transient/RouteWorthy/Terminal`, pure, unknown→Terminal); retry with full-jitter backoff + attempt-cap + `Retry-After` respect, Transient-only (`retry.ts`); run wall-clock + idle-stall timeouts (`timeout.ts`); a hand-rolled circuit breaker with a shared per-dependency registry (`breaker.ts`); a failure-domain-aware model-degradation chain (`degrade.ts`); a user-facing `DegradationLedger` (`ledger.ts`) persisted to `run.dir/degradation.jsonl` and printed as a run summary. Wired into delegation (drop/degrade + record), the workflow engine + crews (per-step retry/timeout, breaker-wrapped Tool/MCP steps), MCP tool calls (`wrapToolsWithBreaker`), and the model selector (`degradeChain`). Per **D5**, the LLM turn itself is never double-retried (AI SDK v6 already retries transport errors) — only cross-boundary ops the framework owns get `withRetry`. Migrated the pre-existing provisioning stall/retry guards and the verified-build wall-clock primitive onto the same layer. **Live-verified on real Ollama** (4 scenarios, `tests/integration/reliability-live.test.ts`, `RELIABILITY_LIVE=1`) — MLX-unreachable degrades to a real Ollama fallback that generates, a failing-then-succeeding Tool step retries to completion, a delegated agent whose model call fails returns a structured error without crashing, and a real `withMcpRun` persists `degradation.jsonl` + a `reliability.degrade` span event. See [`docs/architecture.md`](docs/architecture.md) §21 | ✅ Done |
 | **26** | **Alternate runtimes + remote-auth completion** (debt — gated on installing those runtimes/having creds, landed out of numeric sequence once both existed) — **Phase A:** `src/runtime/managed-openai-compatible.ts`'s `createManagedRuntime(strategy)` is the one control-surface implementation shared by **llama.cpp** (`strategies/llamacpp.ts`, `contextCapability:'relaunch'` — kills+respawns `llama-server -c <numCtx>`), **LM Studio** (`strategies/lmstudio.ts`, `'reload'` — `@lmstudio/sdk`'s `client.llm.load(model,{config:{contextLength}})` against the always-on daemon), and **MLX** (`strategies/mlx.ts`, `'fixed'` — `mlx_lm.server` has no context flag, so a requested context is honestly never applied); `process-supervisor.ts` owns spawn/health-poll/kill-on-timeout (fresh free port per relaunch, `breakerFor('runtime:'+kind)`); `mlx-server.ts` rewritten onto this base while preserving its external-baseUrl no-spawn compat path; `select-hook.ts` now calls `rt.control.warm(model, numCtx)` for every non-Ollama runtime; new `RUNTIME_*` telemetry (`telemetry/spans.ts`'s `withRuntimeSpan`); the LM Studio download adapter's job-status poll URL fixed (wrong since Slice 18). **Phase B:** `src/mcp/oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (DCR/CIMD, PKCE + CSRF `state`, browser-loopback via `loopback.ts`, authorization-server metadata persistence) backed by `token-store.ts`'s atomic **0600** `~/.config/ai/mcp-tokens.json`; `with-mcp-run.ts` now actually builds an `authProvider` per OAuth config entry (previously never populated — OAuth always silently degraded); `mcp/client.ts`'s `mountMcpServer` completes the first-time handshake on `UnauthorizedError`; new `mcp.auth.*` telemetry. **Live-verified on real hardware:** all 3 managed runtimes end to end (llama.cpp `n_ctx=8192`, LM Studio `ctx=4096`, MLX fixed), both download adapters, a GitHub-PAT remote server, and a full Linear OAuth handshake (DCR→browser→exchange→47 tools; token-reuse with no browser on a second run) — this pass caught 3 real defects (poll URL, incomplete handshake, missing AS-metadata persistence), all fixed in-slice. New dep `@lmstudio/sdk`. See [`docs/architecture.md`](docs/architecture.md) §5 / §14 | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) → **F** breadth on-demand (vision · audio · video · uncensored · voice · UI) — Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38); dependency major-upgrade (23) held on ecosystem | Planned |
+| **27** | **Full multimodal I/O + uncensored** (Phase F, pulled in on demand ahead of the daemon) — new `src/media/` subsystem, media-by-reference throughout (a run-scoped `MediaStore` mints `img_N`/`aud_N`/`vid_N` handles; `[img:h]`/`[audio:h]`/`[video:h]` markers travel through the router/delegation boundary, never raw bytes). **Input:** `ingest.ts` (`--image`/`--audio`/`--video`/`--paste` + prompt-embedded path auto-detection, per-item graceful degrade), `audio/transcribe.ts` (`mlx-whisper` STT), `video/frames.ts` (`ffmpeg` frame-sampling → a frame-group handle), `resolve.ts` (handles → base64 AI-SDK v6 `FilePart`s); new **`vision`** specialist (`qwen2.5vl:7b`, `Capability.Vision`, selector-routed like any other specialist). **Generation:** `generate/adapter.ts`'s `MediaGenerator` (`ExecMode.OneShot|Server`, cancel-race-safe, wall-clock-timeout-guarded, `runGenJob` same-kind degrade dispatcher) backs mflux (image, via an ungated FLUX-schnell mirror), Kokoro/mlx-audio (speech), and LTX/mlx-video (video) strategies + a shape-only ComfyUI/Wan server lane; `generate_image`/`generate_speech`/`generate_video` tools on a new **`media_creator`** specialist. New `Capability.ImageGen/SpeechGen/VideoGen` type the taxonomy (not yet selector-consumed). **Uncensored** ships **default-ON**, two orthogonal mechanisms: model-eligibility (`policy.ts`, `select-hook.ts`'s `allowUncensored`) + Diffusers/ComfyUI safety-checker disable (`generate/safety.ts`, no-op on the filter-free default engines), plus `content_policy` run telemetry and a fail-safe voice-clone consent gate (`consent.ts`, orthogonal, cloning models only) and a `LEGAL_NOTE` string constant. New `INPUT_MODALITY`/`CONTENT_POLICY` attrs + `media.transcribe`/`media.frames`/`media.generate` spans. **Live-verified on real hardware:** vision, STT, video frame-sampling, image generation (real `mflux` PNG), speech generation (real Kokoro wav, needs `misaki[en]`), and uncensored (a real pulled-and-run abliterated model). **Honest gap — video *generation* live-verify deferred** (logged, Slice-14 pattern): `mlx-video`'s real implementation is git-only/experimental and its `mlx_vlm` dependency hard-conflicts with the `transformers>=5` the live-verified image/speech engines require in the same environment; the generation code itself is complete, unit-tested, and reviewed. ComfyUI/Wan server lane is shape-only (ComfyUI not installed). See [`docs/architecture.md`](docs/architecture.md) §22 | ✅ Done |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) → **F** remaining breadth on-demand (voice in/out · streaming CLI · TUI/local web UI) — Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38); dependency major-upgrade (23) held on ecosystem | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:
