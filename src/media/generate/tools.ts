@@ -32,23 +32,6 @@ function videoFallbackFor(primary: GenStrategy): GenStrategy {
   return primary === ltxStrategy ? wanComfyStrategy : ltxStrategy;
 }
 
-/** Probe whether a local ComfyUI server is reachable (server-lane engine).
- *  Best-effort; a failed/absent probe means "unreachable" → degrade. Not yet
- *  wired into `runGenJob`'s synchronous `serverReachable` seam (see the note
- *  below) — kept for the live-verify task to wire up. */
-async function _comfyReachable(): Promise<boolean> {
-  const host = process.env.AGENT_COMFY_HOST ?? '127.0.0.1';
-  const port = process.env.AGENT_COMFY_PORT ?? '8188';
-  try {
-    const res = await fetch(`http://${host}:${port}/system_stats`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 /** Builds the media-generation tools (`generate_image`, `generate_speech`,
  *  `generate_video`) bound to a `MediaStore`, so a live agent can actually
  *  produce a file rather than just describing one. Each tool fit-selects a

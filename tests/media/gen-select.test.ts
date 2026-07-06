@@ -94,4 +94,63 @@ describe('selectGenModel', () => {
     });
     expect(chosen?.repo).toBe('big-uninstalled');
   });
+
+  test('env pin picks the matching engine, not the first catalog entry (video spans two engines)', async () => {
+    // ComfyWan (server) entry listed FIRST — reproduces the first-match bug —
+    // followed by the real mlx-video (one-shot) entry the pin targets.
+    const catalog: GenModelCandidate[] = [
+      {
+        kind: MediaKind.Video,
+        repo: 'city96/LTX-Video-0.9.6-distilled-gguf',
+        engine: GenEngine.ComfyWan,
+        venv: MediaVenv.Video,
+        execMode: ExecMode.Server,
+        footprint: { approxParamsBillions: 2, bytesPerWeight: 2.0 },
+        label: 'LTX-Video 0.9.6 distilled GGUF (ComfyUI)',
+      },
+      {
+        kind: MediaKind.Video,
+        repo: 'dgrauet/ltx-2.3-mlx-q4',
+        engine: GenEngine.MlxVideo,
+        venv: MediaVenv.Video,
+        execMode: ExecMode.OneShot,
+        footprint: { approxParamsBillions: 22, bytesPerWeight: 0.55 },
+        label: 'LTX-2.3 int4 (mlx-video)',
+      },
+    ];
+    const chosen = await selectGenModel(MediaKind.Video, {
+      env: { AGENT_VIDEO_MODEL: 'dgrauet/ltx-2.3-mlx-q4' },
+      catalog,
+    });
+    expect(chosen?.engine).toBe(GenEngine.MlxVideo);
+    expect(chosen?.execMode).toBe(ExecMode.OneShot);
+  });
+
+  test("env pin to an unknown repo falls to the kind's one-shot default, not the first entry", async () => {
+    const catalog: GenModelCandidate[] = [
+      {
+        kind: MediaKind.Video,
+        repo: 'city96/LTX-Video-0.9.6-distilled-gguf',
+        engine: GenEngine.ComfyWan,
+        venv: MediaVenv.Video,
+        execMode: ExecMode.Server,
+        footprint: { approxParamsBillions: 2, bytesPerWeight: 2.0 },
+        label: 'LTX-Video 0.9.6 distilled GGUF (ComfyUI)',
+      },
+      {
+        kind: MediaKind.Video,
+        repo: 'dgrauet/ltx-2.3-mlx-q4',
+        engine: GenEngine.MlxVideo,
+        venv: MediaVenv.Video,
+        execMode: ExecMode.OneShot,
+        footprint: { approxParamsBillions: 22, bytesPerWeight: 0.55 },
+        label: 'LTX-2.3 int4 (mlx-video)',
+      },
+    ];
+    const chosen = await selectGenModel(MediaKind.Video, {
+      env: { AGENT_VIDEO_MODEL: 'some/unknown-repo' },
+      catalog,
+    });
+    expect(chosen?.execMode).toBe(ExecMode.OneShot);
+  });
 });

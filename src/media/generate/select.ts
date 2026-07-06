@@ -65,7 +65,14 @@ export async function selectGenModel(
   // 1. Env pin is authoritative — bypass ranking + consent entirely.
   const pinned = env[ENV_PIN[kind]];
   if (pinned) {
-    const base = catalog.find((c) => c.kind === kind);
+    // Base entry to copy engine/venv/execMode from: prefer an exact repo
+    // match, else the kind's default one-shot engine, else any entry of
+    // that kind — never just the first catalog entry (a kind can span
+    // multiple engines, e.g. video's ComfyWan/server + mlx-video/one-shot).
+    const base =
+      catalog.find((c) => c.kind === kind && c.repo === pinned) ??
+      catalog.find((c) => c.kind === kind && c.execMode === ExecMode.OneShot) ??
+      catalog.find((c) => c.kind === kind);
     const candidate: GenModelCandidate = base
       ? { ...base, repo: pinned, label: `${pinned} (env-pinned)` }
       : {
