@@ -1,8 +1,4 @@
-import type { ExecMode, MediaKind } from '../types.ts';
-import {
-  ExecMode as ExecModeEnum,
-  MediaKind as MediaKindEnum,
-} from '../types.ts';
+import { ExecMode, MediaKind } from '../types.ts';
 import type { GenOpts, GenStrategy } from './adapter.ts';
 
 /** mflux image generation strategy: builds a one-shot command invocation.
@@ -21,8 +17,8 @@ import type { GenOpts, GenStrategy } from './adapter.ts';
  *  passed — quantizing an already-quantized model would be wrong.
  *  Note: mflux has no safety checker, so disableSafetyChecker is a documented no-op. */
 export const mfluxStrategy: GenStrategy = {
-  kind: MediaKindEnum.Image as MediaKind,
-  execMode: ExecModeEnum.OneShot as ExecMode,
+  kind: MediaKind.Image,
+  execMode: ExecMode.OneShot,
   buildOneShot(prompt: string, outPath: string, opts: GenOpts) {
     const model =
       opts.model ??
@@ -33,7 +29,9 @@ export const mfluxStrategy: GenStrategy = {
     const width = String(opts.width ?? 1024);
 
     return {
-      cmd: 'mflux-generate',
+      // Env-configurable binary (mirrors AGENT_STT_CMD/AGENT_TTS_CMD) so a
+      // venv install location works without relying on PATH.
+      cmd: process.env.AGENT_IMAGE_CMD ?? 'mflux-generate',
       args: [
         '--model',
         model,

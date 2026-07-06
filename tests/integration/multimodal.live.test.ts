@@ -14,6 +14,9 @@ import { join } from 'node:path';
 import { createVisionAgent } from '../../agents/vision.ts';
 import { runDefinedAgent } from '../../src/core/agent-def.ts';
 import { transcribe } from '../../src/media/audio/transcribe.ts';
+import { runOneShotJob } from '../../src/media/generate/adapter.ts';
+import { kokoroStrategy } from '../../src/media/generate/audio-mlx.ts';
+import { mfluxStrategy } from '../../src/media/generate/image-mflux.ts';
 import { createMediaStore } from '../../src/media/store.ts';
 import { MediaKind } from '../../src/media/types.ts';
 import { sampleFrames } from '../../src/media/video/frames.ts';
@@ -103,5 +106,33 @@ suite('Slice 27 Phase A — multimodal analysis (live)', () => {
       store,
     );
     expect(res.text.trim().length).toBeGreaterThan(10);
+  }, 180_000);
+
+  test('image-gen: real mflux (ungated mirror) produces a PNG via the generator', async () => {
+    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-imggen-')));
+    const job = runOneShotJob(
+      mfluxStrategy,
+      'a red circle on a white background',
+      store,
+      'image/png',
+      { steps: 2, width: 384, height: 384 },
+    );
+    const fh = await job.result();
+    expect(fh.mediaType).toBe('image/png');
+    expect(fh.sizeBytes).toBeGreaterThan(1000);
+  }, 300_000);
+
+  test('audio-gen: real Kokoro TTS produces a wav via the generator', async () => {
+    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-ttsgen-')));
+    const job = runOneShotJob(
+      kokoroStrategy,
+      'hello from slice twenty seven',
+      store,
+      'audio/wav',
+      {},
+    );
+    const fh = await job.result();
+    expect(fh.mediaType).toBe('audio/wav');
+    expect(fh.sizeBytes).toBeGreaterThan(1000);
   }, 180_000);
 });
