@@ -10,6 +10,8 @@ import type { GenOpts, GenStrategy } from './adapter.ts';
  *  - width: opts.width takes precedence, then defaults to 768
  *  - seconds: opts.seconds converted to frames (24 fps), defaults to 97 frames (~4s)
  *  - image: optional image conditioning input
+ *  - model: opts.model adds --model <repo> (from the gen-fit selector);
+ *    omitted → the mlx-video default repo.
  *  Note: mlx-video has no safety checker, so disableSafetyChecker is a
  *  documented no-op here (filter-free by construction, nothing to disable). */
 export const ltxStrategy: GenStrategy = {
@@ -32,6 +34,7 @@ export const ltxStrategy: GenStrategy = {
       args: [
         '--prompt',
         prompt,
+        ...(opts.model ? ['--model', opts.model] : []),
         '--pipeline',
         pipeline,
         ...(opts.image ? ['--image', opts.image] : []),
