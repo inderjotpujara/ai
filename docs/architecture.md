@@ -2504,6 +2504,7 @@ the last possible moment (`resolve.ts`, right before the model call).
 | `audio/transcribe.ts` | `transcribe(path, deps)` — spawns the `mlx_whisper` CLI (env-fallback `AGENT_STT_CMD`, model `AGENT_STT_MODEL` ?? `turbo`), reads its JSON output, wrapped in `withTranscribeSpan` |
 | `video/frames.ts` | `sampleFrames(path, store, deps)` — spawns `ffmpeg` to sample frames at a target fps, stores each as an `Image` item, then `store.registerGroup`s them into one `Video` handle; wrapped in `withFrameSampleSpan` |
 | `spawn.ts` | `defaultSpawn` — the one `Bun.spawn` → `ChildHandle` adapter shared by transcribe/frames/generation, so every media subprocess site has the same env-merge/stdout-ignore/kill/onExit shape |
+| `cmd-resolve.ts` | `resolveMediaCmd(tool, venv, deps?)` — resolves a media CLI tool name to its installed venv binary (`enum MediaVenv {Media\|Video}`, env-overridable venv dirs `AGENT_MEDIA_VENV`/`AGENT_MEDIA_VIDEO_VENV`, defaulting to `~/.cache/ai/media-venv` / `~/.cache/ai/media-video-venv`), falling back to the bare tool name (PATH) when the venv binary isn't present; pure + injectable `exists` dep for deterministic tests |
 | `policy.ts` | The uncensored axis, mechanism 1: `uncensoredEnabled(env)` (default **true**; only `AGENT_UNCENSORED=0`/`false` turns it off) and `isUncensoredModel(model)` (a content-policy tag OR a name-pattern class match — `abliterat\|dolphin\|heretic\|josiefied\|pony\|chroma\|uncensored`) |
 | `consent.ts` | `contentPolicyLabel` (telemetry label, observability-only), `requiresCloneConsent`/`affirmCloneConsent`/`defaultCloneConsentAsk` (voice-clone consent — **orthogonal** to the content-policy switch; gates CSM/Dia/XTTS/Fish, not Kokoro), `LEGAL_NOTE` (a **string constant**, not a gate) |
 | `generate/adapter.ts` | The `MediaGenerator` job adapter: `GenStrategy` (`kind`, `execMode`, `buildOneShot?`, `outputPathFor?`, `parseProgress?`, `serverSubmit?`), `runOneShotJob` (spawn → exit → `store.putFile`, cancel-race-safe single-settle, wrapped in `withGenerateSpan`), `runServerJob` (poll → result → `store.putFile`), and `runGenJob` (an `ExecMode`-routing dispatcher with same-`MediaKind` degrade between the one-shot and server lanes, recording `DegradeKind.ModelDegraded`) |
@@ -2581,6 +2582,28 @@ default strategy, so the degrade-to-server-lane path it implements is not
 reachable from the actual product surface yet (a wiring gap, not a design
 gap — `runGenJob`'s contract is proven, it just has no caller today).
 
+**Cmd resolution — venv-first, out of the box (`scripts/setup-media.ts` +
+`cmd-resolve.ts`).** Every strategy's default `cmd` used to fall back
+straight to a bare tool name (pure PATH lookup, requiring the user to have
+manually installed/activated the right venv). It now falls back to
+`resolveMediaCmd(tool, venv)` first — which resolves to the matching venv's
+`bin/<tool>` binary when that venv exists, and only then to the bare name —
+so a first-time clone gets working media with **zero manual `AGENT_*_CMD`
+env vars**, as long as `bun run setup:media` has been run once.
+`scripts/setup-media.ts` is the one-command installer: it ensures `ffmpeg`
+(Homebrew on macOS), a **media venv** (`~/.cache/ai/media-venv` by default,
+override `AGENT_MEDIA_VENV`) holding mlx-whisper/mflux/mlx-audio+misaki[en],
+and a **separate, isolated video venv** (`~/.cache/ai/media-video-venv`,
+override `AGENT_MEDIA_VIDEO_VENV`) holding mlx-video with `transformers`
+pinned to `5.5.0` **after** the mlx-video install — order matters, because
+mlx-video's `mlx_vlm` dependency is incompatible with transformers 5.13's
+`register` API, which is exactly why video-gen needs its own venv rather
+than sharing the media venv's (independently resolved) transformers version.
+The script is idempotent (safe to re-run) and only prints — never
+automates — the two steps that must stay manual: `huggingface-cli login` and
+accepting a gated model's license, both needed only if the user opts into a
+gated model variant (the shipped defaults are fully ungated).
+
 Three default strategies, all `OneShot`, selected structurally by
 `MediaKind` (not through the model selector — the three `Capability.*Gen`
 enum values added this slice type the taxonomy for a future selector-routed
@@ -2603,7 +2626,13 @@ yet):
   path the engine actually wrote before `putFile`). **Needs `misaki[en]`
   installed** (a Kokoro G2P dependency) — not bundled, provisioning note only.
 - **Video — LTX via mlx-video** (`video-mlx.ts`): `mlx_video.ltx_2.generate`
-  (env `AGENT_VIDEO_CMD`), `-n <seconds*24 or 97 frames>`, `--width 768`;
+  (env `AGENT_VIDEO_CMD`, resolved by default to the isolated video venv —
+  see below), `--pipeline <AGENT_VIDEO_PIPELINE ?? 'distilled'>`,
+  `--num-frames <seconds*24 or 97 frames>`, `--width 768`, `--height 512`.
+  Live-verifying this strategy against the real CLI's `--help` caught and
+  fixed a real bug: the frame-count flag is `--num-frames`, **not** `-n`,
+  and `--pipeline` is a required flag (the fast `distilled` few-step path is
+  the default; `dev`/`dev-two-stage-hq` are env-overridable alternatives).
   `parseProgress` parses `"step N/M"` stdout lines into a `JobProgress`
   fraction (stdout is not yet threaded into the job's live `progress`
   iterable — `ChildHandle` exposes no stdout stream today, so this parser is
@@ -2703,21 +2732,28 @@ was emitting a raw `Uint8Array` as `FilePart.data`, which Ollama's
 base64-encode, which works across the AI-SDK v6 `FilePart` contract and
 every provider.
 
-**Video *generation* live-verify is explicitly DEFERRED and logged** (the
-same honest-deferral pattern Slice 14 used for non-Ollama runtimes), **not**
-silently skipped: `mlx-video` on PyPI is a 5.1 kB stub with no `ltx_2`
-module; the real implementation lives only in the `Blaizzy/mlx-video` git
-repo (pre-1.0, experimental) and pulls in `mlx_vlm`, which at its current
-version (0.6.3) hard-conflicts with `transformers>=5` (a `transformers`
-`auto_factory.py` registration-API change `mlx_vlm` hasn't caught up to) —
-and `transformers>=5` is itself **required** by the already-live-verified
-mflux/mlx-audio installs in the same venv, so downgrading to unblock
-`mlx_vlm` would break image/speech generation instead. The video-**generation**
-*code* (`ltxStrategy`, the `generate_video` tool, the server-lane + degrade
-dispatcher) is complete, unit-tested, and reviewed — only the "does it
-actually produce a real video on this Mac" pass is deferred, pending either
-an isolated venv for `AGENT_VIDEO_CMD` (the env-configurable-command design
-already supports pointing it elsewhere) or the `mlx-video` ecosystem
-maturing past this dependency conflict. **The ComfyUI/Wan server lane is
-shape-only** (see above) — ComfyUI itself is not installed, so it has never
-been exercised against a real server.
+**Video *generation*: the dependency conflict is RESOLVED, and the CLI is
+live-verified; a full render is disk-bound, not deferred.** The original
+blocker — `mlx-video`'s real implementation living only in the
+`Blaizzy/mlx-video` git repo (PyPI ships a 5.1 kB stub) and pulling in
+`mlx_vlm`, which hard-conflicts with the `transformers>=5` the
+already-live-verified mflux/mlx-audio installs require in the same venv — is
+now resolved via the **isolated video venv** described above
+(`bun run setup:media`, `transformers==5.5.0` pinned after the `mlx-video`
+install). Against that venv, `mlx-video` imports and its real CLI runs.
+Live-verifying the strategy's **arg correctness** against the real
+`mlx_video.ltx_2.generate --help` caught and fixed a real bug — the frame
+flag is `--num-frames`, not `-n`, and a `--pipeline` is required (defaults to
+the fast `distilled` path, env-overridable via `AGENT_VIDEO_PIPELINE`) — see
+`video-mlx.ts` above. What remains is genuinely **hardware-bound, not
+code-bound**: a full end-to-end render was attempted and hit a **disk wall**
+— LTX-2 is a **19B model** (`ltx-2-19b-distilled.safetensors`), the full
+repo is **~100 GB**, and the dev Mac has **~90 GB free**. This is exactly the
+framework's standing hardware-adaptive posture (design is never sized to
+this specific box; a machine with more disk renders it today, unmodified).
+The video-**generation** *code* (`ltxStrategy`, the `generate_video` tool,
+the server-lane + degrade dispatcher) is complete, unit-tested, reviewed,
+and now CLI-arg-verified — only the disk-bound "renders a full clip on this
+box" pass is unavailable here, stated honestly rather than as a code gap.
+**The ComfyUI/Wan server lane is shape-only** (see above) — ComfyUI itself
+is not installed, so it has never been exercised against a real server.

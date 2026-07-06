@@ -17,6 +17,7 @@ import { transcribe } from '../../src/media/audio/transcribe.ts';
 import { runOneShotJob } from '../../src/media/generate/adapter.ts';
 import { kokoroStrategy } from '../../src/media/generate/audio-mlx.ts';
 import { mfluxStrategy } from '../../src/media/generate/image-mflux.ts';
+import { ltxStrategy } from '../../src/media/generate/video-mlx.ts';
 import { createMediaStore } from '../../src/media/store.ts';
 import { MediaKind } from '../../src/media/types.ts';
 import { sampleFrames } from '../../src/media/video/frames.ts';
@@ -135,4 +136,20 @@ suite('Slice 27 Phase A — multimodal analysis (live)', () => {
     expect(fh.mediaType).toBe('audio/wav');
     expect(fh.sizeBytes).toBeGreaterThan(1000);
   }, 180_000);
+
+  // Requires AGENT_VIDEO_CMD pointing at the isolated mlx-video venv
+  // (transformers pinned <5.13), e.g. /tmp/mlxvideovenv/bin/mlx_video.ltx_2.generate.
+  test('video-gen: real LTX (mlx-video) produces an mp4 via the generator', async () => {
+    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-vidgen-')));
+    const job = runOneShotJob(
+      ltxStrategy,
+      'a red ball bouncing on a white floor',
+      store,
+      'video/mp4',
+      { seconds: 1, width: 384, height: 256, steps: 8 },
+    );
+    const fh = await job.result();
+    expect(fh.mediaType).toBe('video/mp4');
+    expect(fh.sizeBytes).toBeGreaterThan(1000);
+  }, 900_000);
 });

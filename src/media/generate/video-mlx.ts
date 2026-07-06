@@ -1,10 +1,12 @@
+import { MediaVenv, resolveMediaCmd } from '../cmd-resolve.ts';
 import type { JobProgress } from '../types.ts';
 import { ExecMode, MediaKind } from '../types.ts';
 import type { GenOpts, GenStrategy } from './adapter.ts';
 
 /** LTX video generation strategy via mlx-video: builds a one-shot command invocation.
  *  Configuration follows env-pin semantics:
- *  - cmd: AGENT_VIDEO_CMD env var, falls back to 'mlx_video.ltx_2.generate'
+ *  - cmd: AGENT_VIDEO_CMD env var, falls back to the isolated video venv's
+ *    binary, then bare 'mlx_video.ltx_2.generate' (PATH)
  *  - width: opts.width takes precedence, then defaults to 768
  *  - seconds: opts.seconds converted to frames (24 fps), defaults to 97 frames (~4s)
  *  - image: optional image conditioning input
@@ -14,20 +16,32 @@ export const ltxStrategy: GenStrategy = {
   kind: MediaKind.Video,
   execMode: ExecMode.OneShot,
   buildOneShot(prompt: string, outPath: string, opts: GenOpts) {
-    const cmd = process.env.AGENT_VIDEO_CMD ?? 'mlx_video.ltx_2.generate';
+    const cmd =
+      process.env.AGENT_VIDEO_CMD ??
+      resolveMediaCmd('mlx_video.ltx_2.generate', MediaVenv.Video);
     const frames = opts.seconds ? opts.seconds * 24 : 97;
     const width = opts.width ?? 768;
+    const height = opts.height ?? 512;
+    // The `distilled` pipeline is the fast few-step path; env-overridable for
+    // dev/dev-two-stage-hq. Live-verify confirmed the real CLI arg is
+    // `--num-frames` (NOT `-n`) and requires a `--pipeline`.
+    const pipeline = process.env.AGENT_VIDEO_PIPELINE ?? 'distilled';
 
     return {
       cmd,
       args: [
         '--prompt',
         prompt,
+        '--pipeline',
+        pipeline,
         ...(opts.image ? ['--image', opts.image] : []),
-        '-n',
+        '--num-frames',
         String(frames),
         '--width',
         String(width),
+        '--height',
+        String(height),
+        ...(opts.steps ? ['--steps', String(opts.steps)] : []),
         '--output-path',
         outPath,
       ],

@@ -4,8 +4,15 @@ import { mfluxStrategy } from '../../src/media/generate/image-mflux.ts';
 test('mflux args carry prompt, output, and default ungated schnell mirror model', () => {
   const savedImageModel = process.env.AGENT_IMAGE_MODEL;
   const savedBaseModel = process.env.AGENT_IMAGE_BASE_MODEL;
+  const savedImageCmd = process.env.AGENT_IMAGE_CMD;
+  const savedMediaVenv = process.env.AGENT_MEDIA_VENV;
   delete process.env.AGENT_IMAGE_MODEL;
   delete process.env.AGENT_IMAGE_BASE_MODEL;
+  delete process.env.AGENT_IMAGE_CMD;
+  // Force the venv-resolution fallback path (bare tool name) so the cmd
+  // assertion is deterministic regardless of whether a media venv actually
+  // exists on the machine running the suite.
+  process.env.AGENT_MEDIA_VENV = '/nonexistent-media-venv-for-tests';
 
   try {
     const buildOneShot = mfluxStrategy.buildOneShot;
@@ -28,6 +35,10 @@ test('mflux args carry prompt, output, and default ungated schnell mirror model'
     else process.env.AGENT_IMAGE_MODEL = savedImageModel;
     if (savedBaseModel === undefined) delete process.env.AGENT_IMAGE_BASE_MODEL;
     else process.env.AGENT_IMAGE_BASE_MODEL = savedBaseModel;
+    if (savedImageCmd === undefined) delete process.env.AGENT_IMAGE_CMD;
+    else process.env.AGENT_IMAGE_CMD = savedImageCmd;
+    if (savedMediaVenv === undefined) delete process.env.AGENT_MEDIA_VENV;
+    else process.env.AGENT_MEDIA_VENV = savedMediaVenv;
   }
 });
 

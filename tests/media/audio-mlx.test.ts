@@ -6,10 +6,15 @@ test('kokoro args carry text, file_prefix, default model and default voice', () 
     AGENT_VOICE_MODEL: process.env.AGENT_VOICE_MODEL,
     AGENT_VOICE: process.env.AGENT_VOICE,
     AGENT_TTS_CMD: process.env.AGENT_TTS_CMD,
+    AGENT_MEDIA_VENV: process.env.AGENT_MEDIA_VENV,
   };
   delete process.env.AGENT_VOICE_MODEL;
   delete process.env.AGENT_VOICE;
   delete process.env.AGENT_TTS_CMD;
+  // Force the venv-resolution fallback path (bare tool name) so the cmd
+  // assertion is deterministic regardless of whether a media venv actually
+  // exists on the machine running the suite.
+  process.env.AGENT_MEDIA_VENV = '/nonexistent-media-venv-for-tests';
   try {
     const buildOneShot = kokoroStrategy.buildOneShot;
     if (!buildOneShot) {
