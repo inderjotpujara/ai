@@ -17,17 +17,27 @@ export const ltxStrategy: GenStrategy = {
     const cmd = process.env.AGENT_VIDEO_CMD ?? 'mlx_video.ltx_2.generate';
     const frames = opts.seconds ? opts.seconds * 24 : 97;
     const width = opts.width ?? 768;
+    const height = opts.height ?? 512;
+    // The `distilled` pipeline is the fast few-step path; env-overridable for
+    // dev/dev-two-stage-hq. Live-verify confirmed the real CLI arg is
+    // `--num-frames` (NOT `-n`) and requires a `--pipeline`.
+    const pipeline = process.env.AGENT_VIDEO_PIPELINE ?? 'distilled';
 
     return {
       cmd,
       args: [
         '--prompt',
         prompt,
+        '--pipeline',
+        pipeline,
         ...(opts.image ? ['--image', opts.image] : []),
-        '-n',
+        '--num-frames',
         String(frames),
         '--width',
         String(width),
+        '--height',
+        String(height),
+        ...(opts.steps ? ['--steps', String(opts.steps)] : []),
         '--output-path',
         outPath,
       ],

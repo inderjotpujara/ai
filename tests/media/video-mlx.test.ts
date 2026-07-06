@@ -31,24 +31,24 @@ test('buildOneShot includes --output-path with outPath', () => {
   }
 });
 
-test('buildOneShot -n defaults to 97 frames', () => {
+test('buildOneShot --num-frames defaults to 97 frames', () => {
   const result = ltxStrategy.buildOneShot?.('prompt', '/tmp/out.mp4', {});
   expect(result).toBeDefined();
   if (result) {
-    expect(result.args).toContain('-n');
-    const nIdx = result.args.indexOf('-n');
+    expect(result.args).toContain('--num-frames');
+    const nIdx = result.args.indexOf('--num-frames');
     expect(result.args[nIdx + 1]).toBe('97');
   }
 });
 
-test('buildOneShot -n computes frames from seconds (24 fps)', () => {
+test('buildOneShot --num-frames computes frames from seconds (24 fps)', () => {
   const result = ltxStrategy.buildOneShot?.('prompt', '/tmp/out.mp4', {
     seconds: 2,
   });
   expect(result).toBeDefined();
   if (result) {
-    expect(result.args).toContain('-n');
-    const nIdx = result.args.indexOf('-n');
+    expect(result.args).toContain('--num-frames');
+    const nIdx = result.args.indexOf('--num-frames');
     expect(result.args[nIdx + 1]).toBe('48'); // 2 * 24 = 48
   }
 });
