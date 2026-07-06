@@ -31,7 +31,7 @@ function comfyBaseUrl(): string {
  * `MULTIMODAL_LIVE=1`) is the point where node wiring gets corrected against
  * a real workflow export if it doesn't match.
  */
-function buildWanWorkflow(
+export function buildWanWorkflow(
   prompt: string,
   opts: GenOpts,
 ): Record<string, unknown> {
@@ -80,6 +80,15 @@ function buildWanWorkflow(
     workflow['9'] = {
       class_type: 'SafetyChecker',
       inputs: {},
+    };
+  }
+
+  // Checkpoint from the gen-fit-selected repo (opts.model). Shape-only until
+  // live-verify against a real ComfyUI export corrects the exact node wiring.
+  if (opts.model) {
+    workflow['10'] = {
+      class_type: 'CheckpointLoaderSimple',
+      inputs: { ckpt_name: opts.model },
     };
   }
 
