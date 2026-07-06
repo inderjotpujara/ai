@@ -12,6 +12,8 @@ import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
+import { type IngestFlags, ingestMedia } from '../media/ingest.ts';
+import { createMediaStore } from '../media/store.ts';
 import { makeEmbedder } from '../memory/embed.ts';
 import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
 import { detectMissing } from '../provisioning/detect-missing.ts';
@@ -118,10 +120,55 @@ export async function reuseHintText(
   return `💡 An existing ${best.match} looks similar (${pct}%) — you may not need a new one.`;
 }
 
+/** Split value-taking media flags (`--image/--audio/--video <path>`,
+ *  repeatable) and the boolean `--paste` out of the positional args, mirroring
+ *  crew.ts's `parseArgs`. Everything else stays positional (joined back into
+ *  the raw prompt by the caller). */
+export function parseMediaArgs(argv: string[]): {
+  positional: string[];
+  flags: IngestFlags;
+} {
+  const positional: string[] = [];
+  const flags: IngestFlags = {
+    images: [],
+    audios: [],
+    videos: [],
+    paste: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--image' || arg === '--audio' || arg === '--video') {
+      const value = argv[i + 1];
+      i += 1;
+      if (value === undefined) continue;
+      if (arg === '--image') flags.images.push(value);
+      else if (arg === '--audio') flags.audios.push(value);
+      else flags.videos.push(value);
+    } else if (arg === '--paste') {
+      flags.paste = true;
+    } else if (arg !== undefined) {
+      positional.push(arg);
+    }
+  }
+  return { positional, flags };
+}
+
+function hasMediaFlags(flags: IngestFlags): boolean {
+  return (
+    flags.images.length > 0 ||
+    flags.audios.length > 0 ||
+    flags.videos.length > 0 ||
+    flags.paste
+  );
+}
+
 async function main(): Promise<void> {
-  const task = process.argv.slice(2).join(' ').trim();
-  if (task.length === 0) {
-    console.error('Usage: bun run src/cli/chat.ts "<your request>"');
+  const { positional, flags } = parseMediaArgs(process.argv.slice(2));
+  const rawPrompt = positional.join(' ').trim();
+  if (rawPrompt.length === 0 && !hasMediaFlags(flags)) {
+    console.error(
+      'Usage: bun run src/cli/chat.ts "<your request>" [--image path] [--audio path] [--video path] [--paste]',
+    );
     process.exit(1);
   }
 
@@ -189,10 +236,20 @@ async function main(): Promise<void> {
         });
         try {
           warnUnknownChatAgents(config);
+          const store = createMediaStore(run.dir);
+          const { prompt: task, warnings } = await ingestMedia(
+            rawPrompt,
+            flags,
+            store,
+          );
+          for (const warning of warnings) {
+            console.error(`media: ${warning}`);
+          }
           const orchestrator = createSuperAgent(
             (name) => reg.forAgent(name),
             onBeforeDelegate,
             ledger,
+            store,
           );
           const result = await runChat({
             orchestrator,

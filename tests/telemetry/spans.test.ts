@@ -4,6 +4,8 @@ import type {
   InMemorySpanExporter,
 } from '@opentelemetry/sdk-trace-base';
 import { runInDelegationContext } from '../../src/core/guardrails.ts';
+import { contentPolicyLabel } from '../../src/media/consent.ts';
+import { uncensoredEnabled } from '../../src/media/policy.ts';
 import {
   ATTR,
   recordEvict,
@@ -41,6 +43,16 @@ test('delegation span nests under the run span (Bun ALS context propagation)', a
   expect(run?.attributes[ATTR.OUTCOME]).toBe('answer');
   expect(del?.attributes[ATTR.DELEGATION_TARGET]).toBe('file_qa');
   expect(del?.events.find((e) => e.name === 'agent.model.evict')).toBeDefined();
+});
+
+test('withRunSpan tags the run span with the active content-policy label', async () => {
+  await withRunSpan('run-policy', 'do a thing', async () => {
+    setRunOutcome({ kind: 'answer' });
+  });
+  const run = exporter.getFinishedSpans().find((s) => s.name === 'agent.run');
+  expect(run?.attributes[ATTR.CONTENT_POLICY]).toBe(
+    contentPolicyLabel(uncensoredEnabled()),
+  );
 });
 
 test('resource outcome sets ERROR status on the run span', async () => {

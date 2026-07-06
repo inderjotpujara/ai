@@ -20,9 +20,13 @@ export enum Capability {
   Vision = 'vision', // image input (Slice 8)
   Audio = 'audio', // speech in/out (Slice 9)
   Video = 'video', // frames/clips (Slice 10)
+  ImageGen = 'image_gen', // text->image generation (Slice 27)
+  SpeechGen = 'speech_gen', // text->speech generation (Slice 27)
+  VideoGen = 'video_gen', // text/image->video generation (Slice 27)
 }
 
-/** Content moderation posture. Uncensored is gated behind a future mode (Slice 11). */
+/** Content moderation posture. Uncensored is wired and default-ON as of
+ *  Slice 27 (see `src/media/policy.ts`). */
 export enum ContentPolicy {
   Default = 'default',
   Uncensored = 'uncensored',

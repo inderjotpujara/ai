@@ -46,5 +46,38 @@
     "downloads": 20000,
     "role": "faithfulness judge",
     "capabilities": []
+  },
+  {
+    "provider": "Ollama",
+    "model": "qwen2.5vl:7b",
+    "repo": "qwen2.5vl",
+    "params_billions": 7,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 6000000000,
+    "downloads": 0,
+    "role": "vision analysis",
+    "capabilities": ["vision"]
+  },
+  {
+    "provider": "Ollama",
+    "model": "goekdenizguelmez/JOSIEFIED-Qwen3:8b",
+    "repo": "goekdenizguelmez/JOSIEFIED-Qwen3",
+    "params_billions": 8,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 5000000000,
+    "downloads": 0,
+    "role": "uncensored general reasoning + tool use",
+    "capabilities": ["tools"]
+  },
+  {
+    "provider": "Ollama",
+    "model": "huihui_ai/qwen3-vl-abliterated:8b",
+    "repo": "huihui_ai/qwen3-vl-abliterated",
+    "params_billions": 8,
+    "bytes_per_weight": 0.6,
+    "file_size_bytes": 6100000000,
+    "downloads": 0,
+    "role": "uncensored vision analysis",
+    "capabilities": ["vision"]
   }
 ]

@@ -1,5 +1,7 @@
 import type { ProviderOptions } from '@ai-sdk/provider-utils';
 import type { LanguageModel, ToolSet } from 'ai';
+import { resolveAttachments } from '../media/resolve.ts';
+import type { MediaStore } from '../media/store.ts';
 import { runAgent } from './agent.ts';
 import type { ModelDeclaration, ModelRequirement } from './types.ts';
 
@@ -26,19 +28,30 @@ export function ollamaCtxOptions(numCtx?: number): ProviderOptions | undefined {
 /** Run an agent definition against a task, optionally at a chosen context
  *  size and model, and optionally bounded by an AbortSignal (the verify
  *  gate's dry-run/golden-eval calls pass `AbortSignal.timeout(dryRunMs())`
- *  so a hung model call aborts instead of hanging the build). */
-export function runDefinedAgent(
+ *  so a hung model call aborts instead of hanging the build). When a
+ *  `mediaStore` is supplied, media handles referenced in `task` (e.g.
+ *  `[img:img_1]`) are rehydrated into attachments so images/frames reach
+ *  the model — the router→specialist boundary stays a plain string
+ *  (media-by-reference) while the specialist does the rehydration. */
+export async function runDefinedAgent(
   agent: Agent,
   task: string,
   numCtx?: number,
   modelOverride?: LanguageModel,
   abortSignal?: AbortSignal,
+  mediaStore?: MediaStore,
+  deps?: { runAgentImpl?: typeof runAgent },
 ): ReturnType<typeof runAgent> {
-  return runAgent({
+  const runAgentImpl = deps?.runAgentImpl ?? runAgent;
+  const attachments = mediaStore
+    ? await resolveAttachments(task, mediaStore)
+    : undefined;
+  return runAgentImpl({
     model: modelOverride ?? agent.model,
     systemPrompt: agent.systemPrompt,
     prompt: task,
     tools: agent.tools,
+    attachments,
     providerOptions: ollamaCtxOptions(numCtx),
     functionId: agent.name,
     abortSignal,

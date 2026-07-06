@@ -1,6 +1,7 @@
 import type { LanguageModel } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import type { MediaStore } from '../media/store.ts';
 import { classify } from '../reliability/classify.ts';
 import { CircuitOpenError } from '../reliability/errors.ts';
 import { type DegradationLedger, DegradeKind } from '../reliability/ledger.ts';
@@ -36,13 +37,16 @@ export type BeforeDelegate = (
  *  delegation span · depth guard · before-delegate hook · context wrap · return cap.
  *  Shared by the orchestrator's delegate tool and the workflow engine's agent
  *  step. `abortSignal` (optional) is threaded down to the underlying
- *  generateText so a caller can wall-clock-bound the run (verify gate). */
+ *  generateText so a caller can wall-clock-bound the run (verify gate).
+ *  `mediaStore` (optional) is forwarded to `runDefinedAgent` so a specialist
+ *  can resolve `[img:h]`/`[video:h]` markers in `task` (media-by-reference). */
 export function runGuardedAgent(
   agent: Agent,
   task: string,
   onBeforeDelegate?: BeforeDelegate,
   abortSignal?: AbortSignal,
   ledger?: DegradationLedger,
+  mediaStore?: MediaStore,
 ): Promise<{ text: string } | { error: string }> {
   return withDelegationSpan(agent.name, async () => {
     const check = checkDelegation(agent.name);
@@ -60,7 +64,14 @@ export function runGuardedAgent(
         agent.name,
         pre?.numCtx,
         () =>
-          runDefinedAgent(agent, task, pre?.numCtx, pre?.model, abortSignal),
+          runDefinedAgent(
+            agent,
+            task,
+            pre?.numCtx,
+            pre?.model,
+            abortSignal,
+            mediaStore,
+          ),
       );
       return { text: concise(text, callerNumCtx) };
     } catch (cause) {
@@ -92,6 +103,7 @@ export function asDelegateTool(
   agent: Agent,
   onBeforeDelegate?: BeforeDelegate,
   ledger?: DegradationLedger,
+  mediaStore?: MediaStore,
 ) {
   return tool({
     description: agent.description,
@@ -105,6 +117,7 @@ export function asDelegateTool(
         onBeforeDelegate,
         options?.abortSignal,
         ledger,
+        mediaStore,
       ),
   });
 }

@@ -1,4 +1,5 @@
 import type { LanguageModel, ToolSet } from 'ai';
+import type { MediaStore } from '../media/store.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
 import {
@@ -50,6 +51,11 @@ export function createOrchestrator(opts: {
   /** Optional degradation ledger; forwarded to each delegate tool so a
    *  dropped sub-agent (or a tripped circuit) is recorded. */
   ledger?: DegradationLedger;
+  /** Optional run-scoped media store; forwarded to each delegate tool so a
+   *  specialist's `runDefinedAgent` can resolve `[img:h]`/`[video:h]`
+   *  markers in its task (media-by-reference — the orchestrator itself
+   *  never rehydrates attachments). */
+  mediaStore?: MediaStore;
 }): Agent {
   const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
   for (const agent of opts.agents) {
@@ -57,6 +63,7 @@ export function createOrchestrator(opts: {
       agent,
       opts.onBeforeDelegate,
       opts.ledger,
+      opts.mediaStore,
     );
   }
   return {

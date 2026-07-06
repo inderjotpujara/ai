@@ -4,7 +4,7 @@ import { Capability } from '../../src/core/types.ts';
 
 test('registry contains the two verified rungs, both tool-capable', () => {
   const names = BOOTSTRAP.map((d) => d.model).sort();
-  expect(names).toEqual(['qwen3.5:4b', 'qwen3.5:9b']);
+  expect(names).toEqual(['qwen2.5vl:7b', 'qwen3.5:4b', 'qwen3.5:9b']);
   for (const d of BOOTSTRAP) {
     expect(d.capabilities ?? []).toContain(Capability.Tools);
   }
