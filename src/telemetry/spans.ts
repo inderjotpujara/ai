@@ -133,6 +133,11 @@ export const ATTR = {
   MEDIA_GENERATE_DURATION_MS: 'media.generate.duration_ms',
   MEDIA_GENERATE_SIZE_BYTES: 'media.generate.size_bytes',
   MEDIA_GENERATE_OUTCOME: 'media.generate.outcome',
+  GEN_FIT_CHOSEN: 'media.gen_fit.chosen',
+  GEN_FIT_FITS: 'media.gen_fit.fits',
+  GEN_FIT_BUDGET_BYTES: 'media.gen_fit.budget_bytes',
+  GEN_FIT_MODEL_BYTES: 'media.gen_fit.model_bytes',
+  GEN_FIT_CANDIDATES: 'media.gen_fit.candidates',
 } as const;
 
 export type ModelSelectInfo = {
@@ -320,6 +325,30 @@ export function recordDegrade(event: DegradeEvent): void {
       : {}),
     ...(event.kind === DegradeKind.CircuitOpen
       ? { [ATTR.RELIABILITY_BREAKER_STATE]: 'Open' }
+      : {}),
+  });
+}
+
+/** Record the gen-fit selection decision on the active span (mirrors
+ *  recordDegrade). No-op when there is no active span. */
+export function recordGenFit(info: {
+  kind: string;
+  chosen?: string;
+  fits: boolean;
+  budgetBytes: number;
+  modelBytes?: number;
+  candidates: number;
+}): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  span.addEvent('media.gen_fit', {
+    [ATTR.MEDIA_GENERATE_KIND]: info.kind,
+    [ATTR.GEN_FIT_FITS]: info.fits,
+    [ATTR.GEN_FIT_BUDGET_BYTES]: info.budgetBytes,
+    [ATTR.GEN_FIT_CANDIDATES]: info.candidates,
+    ...(info.chosen ? { [ATTR.GEN_FIT_CHOSEN]: info.chosen } : {}),
+    ...(info.modelBytes !== undefined
+      ? { [ATTR.GEN_FIT_MODEL_BYTES]: info.modelBytes }
       : {}),
   });
 }
