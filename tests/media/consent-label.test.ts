@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   affirmCloneConsent,
   contentPolicyLabel,
+  defaultCloneConsentAsk,
   LEGAL_NOTE,
   requiresCloneConsent,
 } from '../../src/media/consent.ts';
@@ -33,6 +34,16 @@ test('requiresCloneConsent is false for Kokoro (preset voices only, no cloning)'
 test('affirmCloneConsent returns the ask() answer', async () => {
   expect(await affirmCloneConsent({ ask: async () => false })).toBe(false);
   expect(await affirmCloneConsent({ ask: async () => true })).toBe(true);
+});
+
+test('defaultCloneConsentAsk fails safe (declines) when stdin/stderr are not both TTYs, instead of hanging on a read', async () => {
+  // The test runner's stdin/stderr are not an interactive TTY pair, so this
+  // exercises the real non-interactive path (daemon / MCP tool call / remote
+  // invocation): no human to answer -> consent must be DECLINED, not a hang
+  // waiting on a stdin read that will never resolve.
+  const ask = defaultCloneConsentAsk();
+  const answer = await ask('This voice model can clone a voice. Consent?');
+  expect(answer).toBe(false);
 });
 
 test('LEGAL_NOTE is a non-empty string constant about legal obligations surviving filter removal', () => {

@@ -1,4 +1,8 @@
-import { askYesNo, stdinInput } from '../provisioning/ui/prompt.ts';
+import {
+  askYesNo,
+  interactiveTTY,
+  stdinInput,
+} from '../provisioning/ui/prompt.ts';
 
 /** Labels the active content policy for telemetry/output — 'uncensored' when
  *  the uncensored axis is enabled (the default), 'default' otherwise. This is
@@ -50,10 +54,20 @@ export async function affirmCloneConsent(deps: {
 
 /** Default `ask` for `affirmCloneConsent`: a real TTY yes/no prompt, mirroring
  *  the provisioning consent gate (`askYesNo` + `stdinInput`, stderr-only, no
- *  `console.log`). Never auto-yes — voice-clone consent is always asked. */
+ *  `console.log`). Never auto-yes — voice-clone consent is always asked.
+ *
+ *  Gated on `interactiveTTY()` first, exactly like every other prompt call
+ *  site in this repo (`src/mcp/mount.ts`, `src/cli/chat.ts`,
+ *  `maybeAutoProvision`): when stdin/stderr aren't both TTYs (daemon, MCP
+ *  tool call, remote invocation), there is no human to answer, so consent
+ *  fails safe — DECLINED — instead of hanging the process on a read from a
+ *  pipe that will never produce a line. */
 export function defaultCloneConsentAsk(): (
   question: string,
 ) => Promise<boolean> {
   const input = stdinInput();
-  return (question: string) => askYesNo(question, { input, autoYes: false });
+  return async (question: string) => {
+    if (!interactiveTTY()) return false;
+    return askYesNo(question, { input, autoYes: false });
+  };
 }
