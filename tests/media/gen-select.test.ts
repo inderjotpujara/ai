@@ -82,4 +82,16 @@ describe('selectGenModel', () => {
     });
     expect(chosen?.repo).toBe('small-installed');
   });
+
+  test('consent-gates a pull: granting picks the not-installed candidate that fits', async () => {
+    const catalog = [img('big-uninstalled', 20)];
+    const chosen = await selectGenModel(MediaKind.Image, {
+      env: {},
+      budgetBytes: 50 * GB,
+      isInstalled: () => false,
+      askConsent: async () => true, // grant the download
+      catalog,
+    });
+    expect(chosen?.repo).toBe('big-uninstalled');
+  });
 });

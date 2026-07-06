@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import { weightsBytes } from '../../resource/footprint.ts';
 import { fitsBudget, liveBudgetBytes } from '../../resource/hardware.ts';
 import { recordGenFit } from '../../telemetry/spans.ts';
+import { MediaVenv } from '../cmd-resolve.ts';
 import { isUncensoredModel, uncensoredEnabled } from '../policy.ts';
-import { MediaKind } from '../types.ts';
+import { ExecMode, MediaKind } from '../types.ts';
 import type { GenModelCandidate } from './catalog.ts';
-import { GEN_CATALOG } from './catalog.ts';
+import { GEN_CATALOG, GenEngine } from './catalog.ts';
 
 /** Per-kind env pin var name — the authoritative manual override. */
 const ENV_PIN: Record<MediaKind, string> = {
@@ -26,10 +27,18 @@ export type SelectGenDeps = {
 };
 
 /** Default installed-check: the model's HF snapshot dir exists in the cache.
- *  Repo `org/name` maps to `~/.cache/huggingface/hub/models--org--name`. */
-export function isGenModelInstalled(repo: string): boolean {
+ *  Repo `org/name` maps to `models--org--name` under the HF hub cache root —
+ *  `$HF_HOME/hub` when `HF_HOME` is set (see `provisioning/dest-dir.ts` for
+ *  the same env-override convention), else `~/.cache/huggingface/hub`. */
+export function isGenModelInstalled(
+  repo: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
   const dir = `models--${repo.replace(/\//g, '--')}`;
-  return existsSync(join(homedir(), '.cache', 'huggingface', 'hub', dir));
+  const hubRoot = env.HF_HOME
+    ? join(env.HF_HOME, 'hub')
+    : join(homedir(), '.cache', 'huggingface', 'hub');
+  return existsSync(join(hubRoot, dir));
 }
 
 /** Default pull-consent: decline in a non-interactive context (fail-safe —
@@ -62,12 +71,9 @@ export async function selectGenModel(
       : {
           kind,
           repo: pinned,
-          engine:
-            catalog[0]?.engine ?? ('mflux' as GenModelCandidate['engine']),
-          venv: catalog[0]?.venv ?? ('Media' as GenModelCandidate['venv']),
-          execMode:
-            catalog[0]?.execMode ??
-            ('OneShot' as GenModelCandidate['execMode']),
+          engine: catalog[0]?.engine ?? GenEngine.Mflux,
+          venv: catalog[0]?.venv ?? MediaVenv.Media,
+          execMode: catalog[0]?.execMode ?? ExecMode.OneShot,
           footprint: { approxParamsBillions: 0, bytesPerWeight: 0 },
           label: `${pinned} (env-pinned)`,
         };
@@ -107,7 +113,8 @@ export async function selectGenModel(
     );
 
   // 4. Walk best→worst: installed → pick; not installed → consent → pick/skip.
-  const isInstalled = deps.isInstalled ?? ((c) => isGenModelInstalled(c.repo));
+  const isInstalled =
+    deps.isInstalled ?? ((c) => isGenModelInstalled(c.repo, env));
   const askConsent = deps.askConsent ?? defaultAskConsent;
   for (const { c, bytes } of fitting) {
     if (await isInstalled(c)) {
