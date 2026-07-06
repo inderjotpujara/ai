@@ -25,8 +25,9 @@ test('generate_image writes a file and returns a text summary with a .png path',
 test('generate_speech writes a file and returns a text summary with a .wav path', async () => {
   const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-tools-')));
   const spawn: SpawnFn = (_cmd, args) => {
-    const outPath = args[args.indexOf('--output_path') + 1] ?? '';
-    writeFileSync(outPath, new Uint8Array([9]));
+    const prefix = args[args.indexOf('--file_prefix') + 1] ?? '';
+    // Mimic Kokoro: writes `<prefix>_000.wav`, not the exact allocated path.
+    writeFileSync(`${prefix}_000.wav`, new Uint8Array([9]));
     return { pid: 2, kill() {}, onExit: (cb) => cb(0) };
   };
   const tools = createGenerateTools(store, { spawn });

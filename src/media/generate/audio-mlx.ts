@@ -22,6 +22,7 @@ export const kokoroStrategy: GenStrategy = {
       process.env.AGENT_VOICE_MODEL ??
       'mlx-community/Kokoro-82M-bf16';
     const voice = opts.voice ?? process.env.AGENT_VOICE ?? 'af_heart';
+    const base = outPath.replace(/\.wav$/, '');
 
     return {
       cmd,
@@ -32,9 +33,12 @@ export const kokoroStrategy: GenStrategy = {
         text,
         '--voice',
         voice,
-        '--output_path',
-        outPath,
+        '--file_prefix',
+        base,
       ],
     };
+  },
+  outputPathFor(outPath: string): string {
+    return `${outPath.replace(/\.wav$/, '')}_000.wav`;
   },
 };

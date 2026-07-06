@@ -50,6 +50,36 @@ test('one-shot job writes output, resolves a file handle, completes', async () =
   expect(fh.sizeBytes).toBe(2);
 });
 
+test('strategy with outputPathFor: putFile reads the mapped path, not the allocated outPath', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
+  const spawn: SpawnFn = (_cmd, args) => {
+    const outPath = args[args.indexOf('--file_prefix') + 1] ?? '';
+    // Mimic Kokoro: writes `<prefix>_000.wav` instead of the exact path.
+    writeFileSync(`${outPath}_000.wav`, new Uint8Array([1, 2, 3]));
+    return { pid: 7, kill() {}, onExit: (cb) => cb(0) };
+  };
+  const strategy = {
+    kind: MediaKind.Audio,
+    execMode: ExecMode.OneShot,
+    buildOneShot: (_p: string, out: string) => ({
+      cmd: 'mlx_audio.tts.generate',
+      args: ['--file_prefix', out.replace(/\.wav$/, '')],
+    }),
+    outputPathFor: (out: string) => `${out.replace(/\.wav$/, '')}_000.wav`,
+  };
+  const job = runOneShotJob(
+    strategy,
+    'hello',
+    store,
+    'audio/wav',
+    {},
+    { spawn },
+  );
+  const fh = await job.result();
+  expect(job.status()).toBe(JobStatus.Completed);
+  expect(fh.sizeBytes).toBe(3);
+});
+
 test('non-zero exit -> Failed and result rejects', async () => {
   const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
   const spawn: SpawnFn = () => ({ pid: 7, kill() {}, onExit: (cb) => cb(1) });

@@ -31,6 +31,11 @@ export type GenStrategy = {
     outPath: string,
     opts: GenOpts,
   ): { cmd: string; args: string[]; env?: Record<string, string> };
+  /** Maps the allocated `outPath` to the path the engine actually wrote,
+   *  for engines that don't honor an exact output path (e.g. mlx-audio's
+   *  Kokoro CLI writes `<file_prefix>_000.wav` instead of the given path).
+   *  Omit when the strategy's CLI writes exactly `outPath`. */
+  outputPathFor?(outPath: string): string;
   /** Parses a single stdout line into a progress event. Wiring stdout into
    *  the job's `progress` iterable is deferred to a later (video) task —
    *  `ChildHandle` currently exposes no stdout stream to read from. */
@@ -206,8 +211,11 @@ export function runOneShotJob(
       return;
     }
     if (code === 0) {
+      const actualOut = strategy.outputPathFor
+        ? strategy.outputPathFor(outPath)
+        : outPath;
       store
-        .putFile(strategy.kind, outPath, mediaType)
+        .putFile(strategy.kind, actualOut, mediaType)
         .then((item) => {
           if (settled) return;
           currentStatus = JobStatus.Completed;
