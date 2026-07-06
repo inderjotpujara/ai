@@ -12,12 +12,13 @@ test('agentNames includes media_creator', () => {
   expect(agentNames()).toContain('media_creator');
 });
 
-test('createMediaCreatorAgent, built with the generate tools, exposes generate_image and generate_speech', () => {
+test('createMediaCreatorAgent, built with the generate tools, exposes generate_image, generate_speech, and generate_video', () => {
   const store = createMediaStore(mkdtempSync(join(tmpdir(), 'media-creator-')));
   const agent = createMediaCreatorAgent(createGenerateTools(store));
   expect(agent.name).toBe('media_creator');
   expect(Object.keys(agent.tools)).toContain('generate_image');
   expect(Object.keys(agent.tools)).toContain('generate_speech');
+  expect(Object.keys(agent.tools)).toContain('generate_video');
 });
 
 test('createSuperAgent wires a delegate tool for media_creator when a mediaStore is supplied', () => {

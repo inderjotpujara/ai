@@ -39,6 +39,22 @@ test('generate_speech writes a file and returns a text summary with a .wav path'
   expect(result as string).toMatch(/\.wav$/);
 });
 
+test('generate_video writes a file and returns a text summary with a .mp4 path', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-tools-')));
+  const spawn: SpawnFn = (_cmd, args) => {
+    const outPath = args[args.indexOf('--output-path') + 1] ?? '';
+    writeFileSync(outPath, new Uint8Array([4, 5, 6]));
+    return { pid: 4, kill() {}, onExit: (cb) => cb(0) };
+  };
+  const tools = createGenerateTools(store, { spawn });
+  const result = await tools.generate_video?.execute?.(
+    { prompt: 'a drone flying over mountains' },
+    {} as never,
+  );
+  expect(typeof result).toBe('string');
+  expect(result as string).toMatch(/\.mp4$/);
+});
+
 test('generate tools never return raw bytes, only a text summary', async () => {
   const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-tools-')));
   const spawn: SpawnFn = (_cmd, args) => {
