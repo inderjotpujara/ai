@@ -67,15 +67,24 @@ type GenModelCandidate = {
 };
 ```
 
-Seeded ladders per kind (**footprints/repos web-validated before locking** —
-`prefers-latest-methodology`):
+Seeded ladders per kind (**footprints/repos web-validated 2026-07-06** —
+`reference-gen-model-catalog-2026`, `prefers-latest-methodology`):
 
-- **Image:** `FLUX.1-schnell-mflux-4bit` (small, ungated) → optional larger
-  SDXL / FLUX-dev tier.
-- **Speech:** `Kokoro-82M-bf16` (tiny) → optional cloning-capable tier (behind
-  the existing clone-consent gate).
-- **Video (ladder, degrades gracefully):** LTX `2B`/distilled → Wan2.2
-  `TI2V-5B` → full `LTX-2 19B`.
+- **Image (mflux):** `dhairyashil/FLUX.1-schnell-mflux-4bit` (12B, ~9GB, 4bit,
+  ungated) → `...-mflux-8bit` (~18GB) → Qwen-Image 20B / FLUX.2 tiers. Wide
+  headroom on any box. (SD family needs DiffusionKit not mflux — out of scope.)
+- **Speech (mlx-audio):** `mlx-community/Kokoro-82M-bf16` (327MB, ungated, no
+  clone) → clone tiers behind the existing clone-consent gate:
+  `mlx-community/csm-1b`, `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit`.
+- **Video (ladder spans BOTH engines — validates the runGenJob split):**
+  `dgrauet/ltx-2.3-mlx-q4` (int4 LTX-2.3, ~18.5GB, **mlx-video one-shot** —
+  fits this box, expected to render live) → `city96/LTX-Video-0.9.6-distilled-gguf`
+  (2B, ~8–12GB, **ComfyUI-GGUF server lane**) → `QuantStack/Wan2.2-TI2V-5B-GGUF`
+  (~3.4–5.4GB, ComfyUI) → full LTX-2 (fp8 27GB / bf16 43GB checkpoint) at top.
+  **Correction to the Slice-27 belief:** "LTX-2 19B ~100GB, higher-box only"
+  conflated the whole multi-variant *repo* (~100GB) with a single *checkpoint*
+  (27–43GB). Fitting quantized video models exist today, so video is now
+  **expected to auto-fit and render on this box**, not merely degrade.
 
 ### 2. Gen-fit selector — `src/media/generate/select.ts`
 
@@ -142,9 +151,11 @@ selector-consumed *by design* (gen uses its own fit path).
 ## Non-goals (YAGNI / deferred)
 
 - **Not** unifying gen into the main model selector / `Runtime` contract.
-- **Not** a full local video render on this box — the ladder degrades here;
-  full render on a higher-disk/RAM box remains the separate "scales on a bigger
-  box" track.
+- **Not** a max-quality full-19B video render on this box — the top ladder rung
+  (full LTX-2) still scales on a bigger box. The *quantized* rungs
+  (`ltx-2.3-mlx-q4`, LTX-0.9.6-distilled) fit and render here, so video is
+  in-scope and live-verifiable this slice (the graceful no-fit path stays as
+  the safety net, but is no longer the expected outcome).
 - **Not** a refine-loop / iterative generation UX (future).
 - **Not** a per-run `--model` CLI flag (framework has none; env pin + auto-fit
   only, mirroring every other flow).
@@ -156,10 +167,11 @@ selector-consumed *by design* (gen uses its own fit path).
   `runGenJob` wired with the video fallback; video `--model` plumb; degrade
   message + ledger entry on no-fit.
 - **Live-verify (this box, `MULTIMODAL_LIVE=1`):** image auto-fits →
-  mflux-4bit renders; speech auto-fits → Kokoro renders; video either auto-fits
-  a ladder tier + renders **or** degrades with the clear message — **both are
-  valid outcomes proving the mechanism** (graceful-degrade choice). Edge cases
-  post-review.
+  mflux-4bit renders; speech auto-fits → Kokoro renders; video auto-fits a
+  quantized ladder rung (`ltx-2.3-mlx-q4` one-shot, or LTX-0.9.6-distilled via
+  ComfyUI) + renders. The no-fit graceful-degrade path is exercised via a
+  forced-tiny-budget unit test rather than relying on nothing fitting. Edge
+  cases post-review.
 
 ## Numbering
 
