@@ -3,6 +3,7 @@ import type { BeforeDelegate } from '../core/delegate.ts';
 import { ResourceError } from '../core/errors.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import { type ModelDeclaration, RuntimeKind } from '../core/types.ts';
+import { uncensoredEnabled } from '../media/policy.ts';
 import { type DegradationLedger, DegradeKind } from '../reliability/ledger.ts';
 import type { EnsureOpts } from '../resource/model-manager.ts';
 import type { LoadedModel } from '../resource/ollama-control.ts';
@@ -37,8 +38,12 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
   return async (agent: Agent) => {
     if (!agent.modelReq) return {};
     try {
+      const modelReq = {
+        ...agent.modelReq,
+        allowUncensored: agent.modelReq.allowUncensored ?? uncensoredEnabled(),
+      };
       const { decl, numCtx } = await resolveModel(
-        agent.modelReq,
+        modelReq,
         deps.registry,
         {
           ensureReady: deps.ensureReady,
