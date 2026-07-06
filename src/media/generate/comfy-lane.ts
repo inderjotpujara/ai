@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { JobProgress } from '../types.ts';
 import { ExecMode, MediaKind } from '../types.ts';
 import type { GenOpts, GenStrategy } from './adapter.ts';
+import { buildDiffusersFlags } from './safety.ts';
 
 type ComfyQueueResponse = { prompt_id: string };
 
@@ -38,7 +39,7 @@ function buildWanWorkflow(
   const height = opts.height ?? 480;
   const steps = opts.steps ?? 20;
   const frames = (opts.seconds ?? 4) * 16;
-  return {
+  const workflow: Record<string, unknown> = {
     '3': {
       class_type: 'KSampler',
       inputs: {
@@ -62,6 +63,27 @@ function buildWanWorkflow(
       inputs: {},
     },
   };
+
+  // Safety-checker disable (D4): this is the only strategy a Diffusers/
+  // ComfyUI safety checker exists for, and `opts` isn't threaded through
+  // from a tool caller anywhere yet — so this is the single place
+  // `disableSafetyChecker` gets its `uncensoredEnabled()` default applied
+  // (see `buildDiffusersFlags`). When the checker is disabled, no checker
+  // node is added to the graph at all (rather than adding a node and
+  // configuring it off) — `safety_checker=None` is the equivalent flag for
+  // callers that build a Diffusers pipeline directly instead of a ComfyUI
+  // graph.
+  const disableSafetyChecker = buildDiffusersFlags(opts).includes(
+    'safety_checker=None',
+  );
+  if (!disableSafetyChecker) {
+    workflow['9'] = {
+      class_type: 'SafetyChecker',
+      inputs: {},
+    };
+  }
+
+  return workflow;
 }
 
 async function fetchHistory(

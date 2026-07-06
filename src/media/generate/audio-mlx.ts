@@ -11,7 +11,9 @@ import type { GenOpts, GenStrategy } from './adapter.ts';
  *  - model: opts.model takes precedence, then AGENT_VOICE_MODEL env var,
  *           then hardcoded default 'mlx-community/Kokoro-82M-bf16'
  *  - voice: opts.voice takes precedence, then AGENT_VOICE env var,
- *           then hardcoded default 'af_heart' */
+ *           then hardcoded default 'af_heart'
+ *  Note: mlx-audio has no safety checker, so disableSafetyChecker is a
+ *  documented no-op here (filter-free by construction, nothing to disable). */
 export const kokoroStrategy: GenStrategy = {
   kind: MediaKindEnum.Audio as MediaKind,
   execMode: ExecModeEnum.OneShot as ExecMode,

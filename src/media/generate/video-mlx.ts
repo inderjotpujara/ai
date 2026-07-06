@@ -7,7 +7,9 @@ import type { GenOpts, GenStrategy } from './adapter.ts';
  *  - cmd: AGENT_VIDEO_CMD env var, falls back to 'mlx_video.ltx_2.generate'
  *  - width: opts.width takes precedence, then defaults to 768
  *  - seconds: opts.seconds converted to frames (24 fps), defaults to 97 frames (~4s)
- *  - image: optional image conditioning input */
+ *  - image: optional image conditioning input
+ *  Note: mlx-video has no safety checker, so disableSafetyChecker is a
+ *  documented no-op here (filter-free by construction, nothing to disable). */
 export const ltxStrategy: GenStrategy = {
   kind: MediaKind.Video,
   execMode: ExecMode.OneShot,
