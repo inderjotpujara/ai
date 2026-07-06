@@ -17,6 +17,7 @@ export type GenOpts = {
   model?: string;
   width?: number;
   height?: number;
+  steps?: number;
   seconds?: number;
   image?: string;
   voice?: string;
