@@ -39,7 +39,10 @@ export const ltxStrategy: GenStrategy = {
     const total = match?.[2];
     if (current === undefined || total === undefined) return undefined;
 
-    const fraction = parseInt(current, 10) / parseInt(total, 10);
+    const totalSteps = parseInt(total, 10);
+    if (!Number.isFinite(totalSteps) || totalSteps === 0) return undefined;
+
+    const fraction = parseInt(current, 10) / totalSteps;
 
     return {
       fraction,

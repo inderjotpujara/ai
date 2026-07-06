@@ -147,6 +147,39 @@ test('cancel kills the child, sets Cancelled, and rejects result', async () => {
   await expect(job.result()).rejects.toThrow('job cancelled');
 });
 
+test('a never-exiting engine is killed and the job fails within the injected timeout', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
+  let killed: NodeJS.Signals | undefined;
+  const spawn: SpawnFn = () => ({
+    pid: 5,
+    kill: (sig) => {
+      killed = sig;
+    },
+    onExit: () => {
+      // never exits — simulates a hung engine
+    },
+  });
+  const strategy = {
+    kind: MediaKind.Image,
+    execMode: ExecMode.OneShot,
+    buildOneShot: (_p: string, out: string) => ({
+      cmd: 'mflux',
+      args: ['--output', out],
+    }),
+  };
+  const job = runOneShotJob(
+    strategy,
+    'x',
+    store,
+    'image/png',
+    {},
+    { spawn, timeoutMs: 20 },
+  );
+  await expect(job.result()).rejects.toThrow('timed out');
+  expect(killed).toBe('SIGTERM');
+  expect(job.status()).toBe(JobStatus.Failed);
+});
+
 test('cancel during in-flight putFile does not resurrect status to Completed', async () => {
   const deferred = createDeferred<MediaItem>();
   const fakeStore: MediaStore = {

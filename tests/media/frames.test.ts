@@ -49,3 +49,25 @@ test('sampleFrames rejects when ffmpeg exits non-zero', async () => {
     sampleFrames('/in.mp4', store, { spawn, listFrames: () => [] }),
   ).rejects.toThrow('frame sampling failed');
 });
+
+test('a never-exiting ffmpeg is killed and the call rejects within the injected timeout', async () => {
+  let killedWith: NodeJS.Signals | undefined;
+  const spawn: SpawnFn = () => ({
+    pid: 1,
+    kill: (sig) => {
+      killedWith = sig;
+    },
+    onExit: () => {
+      // never calls back — simulates a hung ffmpeg process
+    },
+  });
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mediastore-')));
+  await expect(
+    sampleFrames('/in.mp4', store, {
+      spawn,
+      listFrames: () => [],
+      timeoutMs: 20,
+    }),
+  ).rejects.toThrow('timeout');
+  expect(killedWith).toBe('SIGTERM');
+});

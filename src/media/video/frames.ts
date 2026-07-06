@@ -1,9 +1,11 @@
 import { mkdtempSync, readdirSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { withWallClock } from '../../reliability/timeout.ts';
 import type { SpawnFn } from '../../runtime/process-supervisor.ts';
 import { ATTR, withFrameSampleSpan } from '../../telemetry/spans.ts';
+import { defaultSpawn } from '../spawn.ts';
 import type { MediaStore } from '../store.ts';
 import { type MediaHandle, type MediaItem, MediaKind } from '../types.ts';
 
@@ -13,20 +15,10 @@ type SampleFramesDeps = {
   fps?: number;
   maxFrames?: number;
   longEdge?: number;
-};
-
-const defaultSpawn: SpawnFn = (cmd, args) => {
-  const proc = Bun.spawn([cmd, ...args], {
-    stdout: 'ignore',
-    stderr: 'ignore',
-  });
-  return {
-    pid: proc.pid,
-    kill: (sig) => proc.kill(sig as never),
-    onExit: (cb) => {
-      proc.exited.then((code) => cb(code));
-    },
-  };
+  /** Wall-clock cap on the ffmpeg subprocess. Env fallback-only
+   *  (AGENT_MEDIA_TIMEOUT_MS); defaults to 10 minutes so a hung engine
+   *  fails the turn instead of hanging it forever. */
+  timeoutMs?: number;
 };
 
 function defaultListFrames(dir: string): string[] {
@@ -69,6 +61,8 @@ export async function sampleFrames(
   const fps = deps.fps ?? 1;
   const maxFrames = deps.maxFrames ?? 30;
   const longEdge = deps.longEdge ?? 768;
+  const timeoutMs =
+    deps.timeoutMs ?? (Number(process.env.AGENT_MEDIA_TIMEOUT_MS) || 600_000);
 
   const dir = mkdtempSync(join(tmpdir(), 'agent-frames-'));
   const outPattern = join(dir, 'frame_%04d.jpg');
@@ -80,21 +74,38 @@ export async function sampleFrames(
 
   return withFrameSampleSpan({ fps }, async (span) => {
     const startedAt = Date.now();
-    const item = await new Promise<MediaItem>((resolve, reject) => {
-      const child = spawn('ffmpeg', args);
-      child.onExit((code) => {
-        if (code !== 0) {
-          reject(new Error(`frame sampling failed (exit ${code})`));
-          return;
-        }
-        storeFrames(store, listFrames(dir), dir).then(resolve).catch(reject);
+    const child = spawn('ffmpeg', args);
+    try {
+      const item = await withWallClock(
+        timeoutMs,
+        () =>
+          new Promise<MediaItem>((resolve, reject) => {
+            child.onExit((code) => {
+              if (code !== 0) {
+                reject(new Error(`frame sampling failed (exit ${code})`));
+                return;
+              }
+              storeFrames(store, listFrames(dir), dir)
+                .then(resolve)
+                .catch(reject);
+            });
+          }),
+      );
+      span.setAttributes({
+        [ATTR.MEDIA_FRAMES_DURATION_MS]: Date.now() - startedAt,
+        [ATTR.MEDIA_FRAMES_SAMPLED]: item.frames?.length ?? 0,
       });
-    });
-    span.setAttributes({
-      [ATTR.MEDIA_FRAMES_DURATION_MS]: Date.now() - startedAt,
-      [ATTR.MEDIA_FRAMES_SAMPLED]: item.frames?.length ?? 0,
-    });
-    return item;
+      return item;
+    } catch (err) {
+      if (err instanceof Error && err.message === 'timeout') {
+        child.kill('SIGTERM');
+      }
+      throw err;
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {
+        // best-effort cleanup; a leftover temp dir is not fatal
+      });
+    }
   });
 }
 

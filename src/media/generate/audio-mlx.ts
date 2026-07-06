@@ -1,8 +1,4 @@
-import type { ExecMode, MediaKind } from '../types.ts';
-import {
-  ExecMode as ExecModeEnum,
-  MediaKind as MediaKindEnum,
-} from '../types.ts';
+import { ExecMode, MediaKind } from '../types.ts';
 import type { GenOpts, GenStrategy } from './adapter.ts';
 
 /** Default Kokoro TTS model id — the only voice engine with NO cloning
@@ -28,8 +24,8 @@ export function resolveVoiceModel(opts: GenOpts): string {
  *  Note: mlx-audio has no safety checker, so disableSafetyChecker is a
  *  documented no-op here (filter-free by construction, nothing to disable). */
 export const kokoroStrategy: GenStrategy = {
-  kind: MediaKindEnum.Audio as MediaKind,
-  execMode: ExecModeEnum.OneShot as ExecMode,
+  kind: MediaKind.Audio,
+  execMode: ExecMode.OneShot,
   buildOneShot(text: string, outPath: string, opts: GenOpts) {
     const cmd = process.env.AGENT_TTS_CMD ?? 'mlx_audio.tts.generate';
     const model = resolveVoiceModel(opts);

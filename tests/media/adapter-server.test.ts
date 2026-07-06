@@ -85,6 +85,38 @@ test('server job cancel rejects result and stops polling', async () => {
   expect(pollCount).toBeGreaterThan(0);
 });
 
+test('a poll loop that never completes fails the job within the injected timeout', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
+  let pollCount = 0;
+  const strategy: GenStrategy = {
+    kind: MediaKind.Video,
+    execMode: ExecMode.Server,
+    async serverSubmit() {
+      return {
+        async poll() {
+          pollCount += 1;
+          return { fraction: 0.5, message: 'still running' };
+        },
+        async result() {
+          throw new Error('should never be called — poll never completes');
+        },
+      };
+    },
+  };
+
+  const job = runServerJob(
+    strategy,
+    'x',
+    store,
+    'video/mp4',
+    {},
+    { pollIntervalMs: 0, timeoutMs: 20 },
+  );
+  await expect(job.result()).rejects.toThrow('timed out');
+  expect(job.status()).toBe(JobStatus.Failed);
+  expect(pollCount).toBeGreaterThan(0);
+});
+
 test('runGenJob degrades from a missing one-shot binary to the server fallback lane', async () => {
   const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
   const outDir = mkdtempSync(join(tmpdir(), 'gen-out-'));

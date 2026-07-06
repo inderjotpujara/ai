@@ -6,8 +6,10 @@ import type {
   DegradeEvent,
 } from '../../reliability/ledger.ts';
 import { DegradeKind } from '../../reliability/ledger.ts';
+import { withWallClock } from '../../reliability/timeout.ts';
 import type { SpawnFn } from '../../runtime/process-supervisor.ts';
 import { recordDegrade, withGenerateSpan } from '../../telemetry/spans.ts';
+import { defaultSpawn } from '../spawn.ts';
 import type { MediaStore } from '../store.ts';
 import type {
   FileHandle,
@@ -16,6 +18,13 @@ import type {
   MediaKind,
 } from '../types.ts';
 import { ExecMode, JobStatus } from '../types.ts';
+
+/** Env fallback-only wall-clock default for media subprocess/poll waits — a
+ *  hung engine fails the job instead of hanging the turn forever. Generous
+ *  because video generation can legitimately take minutes. */
+function defaultMediaTimeoutMs(): number {
+  return Number(process.env.AGENT_MEDIA_TIMEOUT_MS) || 600_000;
+}
 
 export type GenOpts = {
   model?: string;
@@ -53,21 +62,9 @@ export type GenStrategy = {
 
 type RunOneShotDeps = {
   spawn?: SpawnFn;
-};
-
-const defaultSpawn: SpawnFn = (cmd, args, opts) => {
-  const proc = Bun.spawn([cmd, ...args], {
-    env: { ...process.env, ...opts?.env },
-    stdout: 'ignore',
-    stderr: 'ignore',
-  });
-  return {
-    pid: proc.pid,
-    kill: (sig) => proc.kill(sig as never),
-    onExit: (cb) => {
-      proc.exited.then((code) => cb(code));
-    },
-  };
+  /** Wall-clock cap on the spawned engine's exit wait. Env fallback-only
+   *  (AGENT_MEDIA_TIMEOUT_MS); defaults to 10 minutes. */
+  timeoutMs?: number;
 };
 
 /** Best-effort file extension for a scratch output path; the store re-derives
@@ -142,6 +139,7 @@ export function runOneShotJob(
     throw new Error(`strategy for kind "${strategy.kind}" has no buildOneShot`);
   }
   const spawn = deps.spawn ?? defaultSpawn;
+  const timeoutMs = deps.timeoutMs ?? defaultMediaTimeoutMs();
 
   const jobId = randomUUID();
   let currentStatus: JobStatus = JobStatus.Submitted;
@@ -210,9 +208,21 @@ export function runOneShotJob(
     // callers to observe success/failure.
   });
 
+  // `exitPromise` resolves once the onExit callback chain below has fully
+  // run its course (success store+settle, failure settle, or the cancel
+  // early-return) — it never rejects. `withWallClock` races it against a
+  // wall-clock timer so a hung engine (onExit never firing) is just another
+  // terminal path, guarded by the same `settled` single-settle flag as
+  // cancel/exit so it can never clobber an already-settled outcome.
+  let markExitHandled!: () => void;
+  const exitHandledPromise = new Promise<void>((resolve) => {
+    markExitHandled = resolve;
+  });
+
   child.onExit((code) => {
     if (currentStatus === JobStatus.Cancelled) {
       end();
+      markExitHandled();
       return;
     }
     if (code === 0) {
@@ -231,11 +241,23 @@ export function runOneShotJob(
           currentStatus = JobStatus.Failed;
           settleReject(err instanceof Error ? err : new Error(String(err)));
         })
-        .finally(() => end());
+        .finally(() => {
+          end();
+          markExitHandled();
+        });
       return;
     }
     currentStatus = JobStatus.Failed;
     settleReject(new Error(`generation failed (exit ${code})`));
+    end();
+    markExitHandled();
+  });
+
+  withWallClock(timeoutMs, () => exitHandledPromise).catch(() => {
+    if (settled) return;
+    currentStatus = JobStatus.Failed;
+    child.kill('SIGTERM');
+    settleReject(new Error(`media job timed out after ${timeoutMs}ms`));
     end();
   });
 
@@ -267,6 +289,10 @@ type RunServerDeps = {
   /** Delay between `poll()` calls. 0 in tests; a real server lane keeps a
    *  small default so it doesn't hammer the server every microtask. */
   pollIntervalMs?: number;
+  /** Wall-clock cap on the whole submit→poll→result lifecycle (previously
+   *  unbounded — the loop polled until `cancel()`). Env fallback-only
+   *  (AGENT_MEDIA_TIMEOUT_MS); defaults to 10 minutes. */
+  timeoutMs?: number;
 };
 
 /**
@@ -292,6 +318,7 @@ export function runServerJob(
     throw new Error(`strategy for kind "${strategy.kind}" has no serverSubmit`);
   }
   const pollIntervalMs = deps.pollIntervalMs ?? 500;
+  const timeoutMs = deps.timeoutMs ?? defaultMediaTimeoutMs();
 
   const jobId = randomUUID();
   let currentStatus: JobStatus = JobStatus.Submitted;
@@ -346,7 +373,7 @@ export function runServerJob(
     // callers to observe success/failure.
   });
 
-  (async () => {
+  const runJob = async (): Promise<void> => {
     try {
       const submission = await serverSubmit(prompt, opts);
       while (!cancelled && !settled) {
@@ -369,10 +396,22 @@ export function runServerJob(
       if (settled) return;
       currentStatus = JobStatus.Failed;
       settleReject(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      end();
     }
-  })();
+  };
+
+  // The poll loop was previously unbounded (ran until `cancel()`); a
+  // wall-clock cap makes a hung/never-completing server job just another
+  // terminal path, guarded by the same `settled` flag so it can never
+  // clobber an already-settled outcome (`runJob` itself never rejects — all
+  // its errors are caught and settled internally — so this `.catch` only
+  // ever fires on timeout).
+  withWallClock(timeoutMs, runJob)
+    .catch(() => {
+      if (settled) return;
+      currentStatus = JobStatus.Failed;
+      settleReject(new Error(`media job timed out after ${timeoutMs}ms`));
+    })
+    .finally(() => end());
 
   return {
     jobId,

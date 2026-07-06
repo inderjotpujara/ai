@@ -193,5 +193,8 @@ export async function ingestMedia(
   );
   const flagSuffix = await ingestFlags(flags, store, resolved, items, warnings);
 
-  return { prompt: withAutoDetect + flagSuffix, items, warnings };
+  // A media-only prompt (no text, just `--image`/`--video` flags) yields a
+  // leading space before the first `[img:h]`/`[video:h]` marker since
+  // `flagSuffix` always starts with a space; trim it off.
+  return { prompt: (withAutoDetect + flagSuffix).trim(), items, warnings };
 }

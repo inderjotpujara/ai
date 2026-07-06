@@ -23,11 +23,12 @@ export async function resolveAttachments(
     const item = store.get(handle);
     if (!item) continue;
     if (!RESOLVABLE_KINDS.has(item.kind)) continue;
-    if (
-      item.kind === MediaKind.Video &&
-      item.frames &&
-      item.frames.length > 0
-    ) {
+    if (item.kind === MediaKind.Video) {
+      // A video item's own `path` is a frame-group placeholder directory,
+      // not a real file — it must never be `readFile`d directly (EISDIR).
+      // With no resolvable frames there is nothing to attach; skip the item
+      // entirely rather than falling through to the generic resolve below.
+      if (!item.frames || item.frames.length === 0) continue;
       for (const frameHandle of item.frames) {
         const frameItem = store.get(frameHandle);
         if (!frameItem) continue;

@@ -22,6 +22,18 @@ test('--image flag stores the file and appends an img marker', async () => {
   expect(res.items.length).toBe(1);
 });
 
+test('a media-only prompt (no text) has no leading space before the marker', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'src-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, new Uint8Array([1]));
+  const res = await ingestMedia(
+    '',
+    { images: [p], audios: [], videos: [], paste: false },
+    freshStore(),
+  );
+  expect(res.prompt).toBe('[img:img_1]');
+});
+
 test('--audio is transcribed to text and spliced into the prompt', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'src-'));
   const p = join(dir, 'a.wav');

@@ -52,3 +52,24 @@ test('rejects when the process exits non-zero', async () => {
     transcribe('/tmp/a.wav', { spawn, readJson: async () => ({ text: '' }) }),
   ).rejects.toThrow('transcription failed');
 });
+
+test('a never-exiting process is killed and the call rejects within the injected timeout', async () => {
+  let killedWith: NodeJS.Signals | undefined;
+  const spawn: SpawnFn = () => ({
+    pid: 1,
+    kill: (sig) => {
+      killedWith = sig;
+    },
+    onExit: () => {
+      // never calls back — simulates a hung whisper process
+    },
+  });
+  await expect(
+    transcribe('/tmp/a.wav', {
+      spawn,
+      readJson: async () => ({ text: '' }),
+      timeoutMs: 20,
+    }),
+  ).rejects.toThrow('timeout');
+  expect(killedWith).toBe('SIGTERM');
+});

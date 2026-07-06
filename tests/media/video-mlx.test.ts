@@ -136,6 +136,10 @@ test('parseProgress returns undefined for non-matching lines', () => {
   expect(ltxStrategy.parseProgress?.('step 1')).toBeUndefined();
 });
 
+test('parseProgress guards against a step 0/0 line (divide-by-zero -> NaN)', () => {
+  expect(ltxStrategy.parseProgress?.('step 0/0')).toBeUndefined();
+});
+
 test('parseProgress handles various step patterns', () => {
   const cases = [
     { input: 'step 1/100', expected: 0.01 },

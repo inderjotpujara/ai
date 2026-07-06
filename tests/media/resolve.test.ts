@@ -60,3 +60,38 @@ test('resolveAttachments expands a video frame-group into multiple parts', async
   expect(parts.length).toBe(3);
   expect(parts.every((p) => p.mediaType === 'image/jpeg')).toBe(true);
 });
+
+test('resolveAttachments skips a Video item with no frames instead of reading its directory path', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'res-')));
+  const group = store.registerGroup([], '/tmp/empty-frames-dir');
+
+  // Must not throw EISDIR from `readFile`ing the group's directory `path`.
+  const parts = await resolveAttachments(
+    `describe [video:${group.handle}]`,
+    store,
+  );
+  expect(parts).toEqual([]);
+});
+
+test('resolveAttachments does not resolve an audio handle to a part', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'res-')));
+  const item = await store.put(
+    MediaKind.Audio,
+    new Uint8Array([1]),
+    'audio/wav',
+  );
+  const parts = await resolveAttachments(
+    `summarize [audio:${item.handle}]`,
+    store,
+  );
+  expect(parts).toEqual([]);
+});
+
+test('resolveAttachments skips a marker whose handle is absent from the store, without throwing', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'res-')));
+  const parts = await resolveAttachments(
+    'describe [img:does_not_exist]',
+    store,
+  );
+  expect(parts).toEqual([]);
+});
