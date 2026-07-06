@@ -6,6 +6,8 @@ import {
 } from '@opentelemetry/api';
 import { currentDelegationContext } from '../core/guardrails.ts';
 import type { RuntimeKind } from '../core/types.ts';
+import { contentPolicyLabel } from '../media/consent.ts';
+import { uncensoredEnabled } from '../media/policy.ts';
 import { type DegradeEvent, DegradeKind } from '../reliability/ledger.ts';
 import type { ArtifactKind, VerifiedLevel } from '../verified-build/types.ts';
 import { recordIoEnabled } from './provider.ts';
@@ -183,6 +185,10 @@ export function withRunSpan<T>(
 ): Promise<T> {
   return inSpan('agent.run', async (span) => {
     span.setAttribute(ATTR.RUN_ID, runId);
+    span.setAttribute(
+      ATTR.CONTENT_POLICY,
+      contentPolicyLabel(uncensoredEnabled()),
+    );
     if (recordIoEnabled()) span.setAttribute(ATTR.TASK, task);
     return fn();
   });

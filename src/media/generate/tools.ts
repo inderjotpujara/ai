@@ -2,19 +2,33 @@ import type { ToolSet } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { SpawnFn } from '../../runtime/process-supervisor.ts';
+import {
+  affirmCloneConsent,
+  defaultCloneConsentAsk,
+  requiresCloneConsent,
+} from '../consent.ts';
 import type { MediaStore } from '../store.ts';
 import { runOneShotJob } from './adapter.ts';
-import { kokoroStrategy } from './audio-mlx.ts';
+import { kokoroStrategy, resolveVoiceModel } from './audio-mlx.ts';
 import { mfluxStrategy } from './image-mflux.ts';
 import { ltxStrategy } from './video-mlx.ts';
 
 /** Builds the media-generation tools (`generate_image`, `generate_speech`,
  *  `generate_video`) bound to a `MediaStore`, so a live agent can actually
  *  produce a file rather than just describing one. Each tool returns a text
- *  summary including the output file's URI — never raw bytes. */
+ *  summary including the output file's URI — never raw bytes.
+ *
+ *  `askCloneConsent` is injectable so tests (and non-TTY hosts) can script
+ *  the voice-clone consent answer instead of hitting a real stdin prompt; it
+ *  defaults to a real TTY yes/no prompt (`defaultCloneConsentAsk`). This gate
+ *  is orthogonal to the content-policy switch — it only fires for
+ *  voice-cloning models (see `requiresCloneConsent`), never for Kokoro. */
 export function createGenerateTools(
   store: MediaStore,
-  deps?: { spawn?: SpawnFn },
+  deps?: {
+    spawn?: SpawnFn;
+    askCloneConsent?: (question: string) => Promise<boolean>;
+  },
 ): ToolSet {
   const generate_image = tool({
     description: 'Generates an image from a text prompt and saves it to disk.',
@@ -43,6 +57,14 @@ export function createGenerateTools(
       prompt: z.string().describe('The text to speak'),
     }),
     execute: async ({ prompt }) => {
+      const model = resolveVoiceModel({});
+      if (requiresCloneConsent(model)) {
+        const ask = deps?.askCloneConsent ?? defaultCloneConsentAsk();
+        const consented = await affirmCloneConsent({ ask });
+        if (!consented) {
+          return `Voice-clone consent declined for model "${model}" — speech was not generated.`;
+        }
+      }
       const job = runOneShotJob(
         kokoroStrategy,
         prompt,
