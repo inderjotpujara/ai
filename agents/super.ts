@@ -9,8 +9,10 @@ import { createOllamaModel } from '../src/providers/ollama.ts';
 import type { DegradationLedger } from '../src/reliability/ledger.ts';
 import { AGENTS, agentNames } from './index.ts';
 
-const BASE_PROMPT =
-  'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.';
+const BASE_PROMPT = [
+  'You are an orchestrator. You do not perform tasks yourself; you route them to specialized agents.',
+  "If the user's request contains a media marker like [img:...], [audio:...], or [video:...], copy that marker VERBATIM into the task you pass to the specialist — never omit, rename, or paraphrase it; the specialist needs it to load the media.",
+].join(' ');
 
 /** Build the super-agent (orchestrator) with every registered specialist.
  *  `toolsFor(name)` supplies each agent's MCP-scoped tool set (reg.forAgent).

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -242,6 +243,12 @@ export function runOneShotJob(
           settleReject(err instanceof Error ? err : new Error(String(err)));
         })
         .finally(() => {
+          // Best-effort cleanup of the scratch file `putFile` just copied
+          // into the run store — a leftover temp file is not fatal, so
+          // unlink errors (already-removed, permissions) are swallowed.
+          unlink(actualOut).catch(() => {
+            // best-effort cleanup; a leftover scratch file is not fatal
+          });
           end();
           markExitHandled();
         });

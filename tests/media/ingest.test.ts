@@ -62,6 +62,22 @@ test('a dragged-in image path in the prompt is auto-detected', async () => {
   expect(res.prompt).toContain('[img:img_1]');
 });
 
+test('an auto-detected audio token blanked from the prompt leaves no double space', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'src-'));
+  const p = join(dir, 'd.wav');
+  writeFileSync(p, new Uint8Array([1]));
+  const res = await ingestMedia(
+    `summarize ${p} please`,
+    { images: [], audios: [], videos: [], paste: false },
+    freshStore(),
+    {
+      transcribe: async () => 'hello world',
+    },
+  );
+  expect(res.prompt).not.toContain('  ');
+  expect(res.prompt.startsWith('summarize please')).toBe(true);
+});
+
 test('a failing audio transcription degrades per-item instead of aborting the turn', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'src-'));
   const imgPath = join(dir, 'c.png');

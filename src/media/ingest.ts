@@ -195,6 +195,15 @@ export async function ingestMedia(
 
   // A media-only prompt (no text, just `--image`/`--video` flags) yields a
   // leading space before the first `[img:h]`/`[video:h]` marker since
-  // `flagSuffix` always starts with a space; trim it off.
-  return { prompt: (withAutoDetect + flagSuffix).trim(), items, warnings };
+  // `flagSuffix` always starts with a space; trim it off. An auto-detected
+  // AUDIO token also leaves a run of consecutive spaces where it was blanked
+  // out of the token list (its surrounding whitespace tokens are untouched);
+  // collapse those runs to a single space. This only targets the space
+  // character, not newlines, so the `\n\n`-separated transcript blocks below
+  // keep their intentional formatting.
+  return {
+    prompt: (withAutoDetect + flagSuffix).trim().replace(/ {2,}/g, ' '),
+    items,
+    warnings,
+  };
 }

@@ -18,3 +18,11 @@ test('super agent uses the small router model', () => {
   // model is a resolved LanguageModel for qwen3:4b
   expect((sup.model as { modelId?: string }).modelId).toBe(qwenRouter.model);
 });
+
+test('super agent system prompt instructs verbatim media-marker preservation', () => {
+  const sup = createSuperAgent(() => ({ read_file: {} }) as never);
+  expect(sup.systemPrompt).toContain('[img:...]');
+  expect(sup.systemPrompt).toContain('[audio:...]');
+  expect(sup.systemPrompt).toContain('[video:...]');
+  expect(sup.systemPrompt.toLowerCase()).toContain('verbatim');
+});

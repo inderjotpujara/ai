@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOneShotJob } from '../../src/media/generate/adapter.ts';
@@ -48,6 +48,68 @@ test('one-shot job writes output, resolves a file handle, completes', async () =
   const fh = await job.result();
   expect(job.status()).toBe(JobStatus.Completed);
   expect(fh.sizeBytes).toBe(2);
+});
+
+test('scratch output file is removed after putFile stores it', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
+  let capturedOutPath = '';
+  const spawn: SpawnFn = (_cmd, args) => {
+    const outPath = args[args.indexOf('--output') + 1] ?? '';
+    capturedOutPath = outPath;
+    writeFileSync(outPath, new Uint8Array([1, 2]));
+    return { pid: 7, kill() {}, onExit: (cb) => cb(0) };
+  };
+  const strategy = {
+    kind: MediaKind.Image,
+    execMode: ExecMode.OneShot,
+    buildOneShot: (_p: string, out: string) => ({
+      cmd: 'mflux',
+      args: ['--output', out],
+    }),
+  };
+  const job = runOneShotJob(
+    strategy,
+    'a fox',
+    store,
+    'image/png',
+    {},
+    { spawn },
+  );
+  await job.result();
+  // Flush the cleanup `.finally` microtask chain.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(existsSync(capturedOutPath)).toBe(false);
+});
+
+test('scratch output file is removed via outputPathFor mapping (Kokoro-style)', async () => {
+  const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
+  let capturedActualOut = '';
+  const spawn: SpawnFn = (_cmd, args) => {
+    const outPath = args[args.indexOf('--file_prefix') + 1] ?? '';
+    capturedActualOut = `${outPath}_000.wav`;
+    writeFileSync(capturedActualOut, new Uint8Array([1, 2, 3]));
+    return { pid: 7, kill() {}, onExit: (cb) => cb(0) };
+  };
+  const strategy = {
+    kind: MediaKind.Audio,
+    execMode: ExecMode.OneShot,
+    buildOneShot: (_p: string, out: string) => ({
+      cmd: 'mlx_audio.tts.generate',
+      args: ['--file_prefix', out.replace(/\.wav$/, '')],
+    }),
+    outputPathFor: (out: string) => `${out.replace(/\.wav$/, '')}_000.wav`,
+  };
+  const job = runOneShotJob(
+    strategy,
+    'hello',
+    store,
+    'audio/wav',
+    {},
+    { spawn },
+  );
+  await job.result();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(existsSync(capturedActualOut)).toBe(false);
 });
 
 test('strategy with outputPathFor: putFile reads the mapped path, not the allocated outPath', async () => {

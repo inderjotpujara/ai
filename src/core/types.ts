@@ -25,7 +25,8 @@ export enum Capability {
   VideoGen = 'video_gen', // text/image->video generation (Slice 27)
 }
 
-/** Content moderation posture. Uncensored is gated behind a future mode (Slice 11). */
+/** Content moderation posture. Uncensored is wired and default-ON as of
+ *  Slice 27 (see `src/media/policy.ts`). */
 export enum ContentPolicy {
   Default = 'default',
   Uncensored = 'uncensored',
