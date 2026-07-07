@@ -27,7 +27,7 @@ the `docs-check` guard fails otherwise.
 | [`../README.md`](../README.md) | Product overview, quick start, the pointer hub for everything below. |
 | [`architecture.md`](architecture.md) | **Living technical map** — module/dependency graph + runtime data-flow + every subsystem and mechanism. The source of truth for *how the system is wired*. (Interactive snapshot rendered as an Artifact on request.) |
 | [`ROADMAP.md`](ROADMAP.md) | Long-range plan — North Star (local-first n8n × CrewAI), phases A–F, the engine line, cross-cutting principles. |
-| [`../agents/README.md`](../agents/README.md) | The current agents (super / file-qa / web-fetch) and the capability-requirement pattern. |
+| [`../agents/README.md`](../agents/README.md) | The current agents (super / file-qa / web-fetch / vision / media_creator) and the capability-requirement pattern. |
 | [`../model-images/README.md`](../model-images/README.md) | The local model store (git-ignored), per-machine model blobs, Ollama integration. |
 
 ## Historical artifacts — immutable, not "maintained"

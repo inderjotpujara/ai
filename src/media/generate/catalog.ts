@@ -1,64 +1,4 @@
-### Task 1: Gen candidate catalog
-
-**Files:**
-- Create: `src/media/generate/catalog.ts`
-- Test: `tests/media/gen-catalog.test.ts`
-
-**Interfaces:**
-- Consumes: `MediaKind`, `ExecMode` from `src/media/types.ts`; `MediaVenv` from `src/media/cmd-resolve.ts`; `ContentPolicy` from `src/core/types.ts`.
-- Produces: `GenEngine`, `GenModelCandidate`, `GEN_CATALOG` (see locked interfaces above).
-
-- [ ] **Step 1: Write the failing test**
-
-```ts
-// tests/media/gen-catalog.test.ts
-import { describe, expect, test } from 'bun:test';
-import { MediaKind } from '../../src/media/types.ts';
-import { GEN_CATALOG, GenEngine } from '../../src/media/generate/catalog.ts';
-
-describe('GEN_CATALOG', () => {
-  test('covers all three generation kinds', () => {
-    const kinds = new Set(GEN_CATALOG.map((c) => c.kind));
-    expect(kinds.has(MediaKind.Image)).toBe(true);
-    expect(kinds.has(MediaKind.Audio)).toBe(true);
-    expect(kinds.has(MediaKind.Video)).toBe(true);
-  });
-
-  test('every candidate is well-formed (positive footprint, non-empty repo/label)', () => {
-    for (const c of GEN_CATALOG) {
-      expect(c.repo.length).toBeGreaterThan(0);
-      expect(c.label.length).toBeGreaterThan(0);
-      expect(c.footprint.approxParamsBillions).toBeGreaterThan(0);
-      expect(c.footprint.bytesPerWeight).toBeGreaterThan(0);
-      expect(Object.values(GenEngine)).toContain(c.engine);
-    }
-  });
-
-  test('the video ladder spans both engines (mlx-video one-shot + comfy-wan server)', () => {
-    const videoEngines = new Set(
-      GEN_CATALOG.filter((c) => c.kind === MediaKind.Video).map((c) => c.engine),
-    );
-    expect(videoEngines.has(GenEngine.MlxVideo)).toBe(true);
-    expect(videoEngines.has(GenEngine.ComfyWan)).toBe(true);
-  });
-
-  test('the image anchor is the ungated pre-quantized FLUX mirror', () => {
-    const image = GEN_CATALOG.filter((c) => c.kind === MediaKind.Image);
-    expect(image.some((c) => c.repo === 'dhairyashil/FLUX.1-schnell-mflux-4bit')).toBe(true);
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun run test:file -- "tests/media/gen-catalog.test.ts"`
-Expected: FAIL — cannot find module `catalog.ts`.
-
-- [ ] **Step 3: Write minimal implementation**
-
-```ts
-// src/media/generate/catalog.ts
-import { ContentPolicy } from '../../core/types.ts';
+import type { ContentPolicy } from '../../core/types.ts';
 import { MediaVenv } from '../cmd-resolve.ts';
 import { ExecMode, MediaKind } from '../types.ts';
 
@@ -161,20 +101,3 @@ export const GEN_CATALOG: GenModelCandidate[] = [
     label: 'Wan2.2 TI2V-5B GGUF (ComfyUI)',
   },
 ];
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun run test:file -- "tests/media/gen-catalog.test.ts"`
-Expected: PASS (4 tests).
-
-- [ ] **Step 5: Typecheck + commit**
-
-Run: `bun run typecheck`
-```bash
-git add src/media/generate/catalog.ts tests/media/gen-catalog.test.ts
-git commit -m "feat(media): gen model candidate catalog (image/speech/video ladders)"
-```
-
----
-

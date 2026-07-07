@@ -1,31 +1,37 @@
-### Task 8: Runtime telemetry (`RUNTIME_*` attrs + `withRuntimeSpan`)
+### Task 8: Live-verify (real models on this box)
 
 **Files:**
-- Modify: `src/telemetry/spans.ts` (ATTR keys + `withRuntimeSpan`)
-- Modify: `src/runtime/managed-openai-compatible.ts` (emit spawn/warm span)
-- Test: `tests/telemetry/runtime-span.test.ts`
+- Modify: `tests/integration/multimodal.live.test.ts` (add gen-fit cases, gated `MULTIMODAL_LIVE=1`)
 
 **Interfaces:**
-- Produces: `ATTR.RUNTIME_KIND='runtime.kind'`, `RUNTIME_CONTEXT_CAPABILITY='runtime.context.capability'`, `RUNTIME_CONTEXT_REQUESTED='runtime.context.requested'`, `RUNTIME_CONTEXT_APPLIED='runtime.context.applied'`, `RUNTIME_WARM_OUTCOME='runtime.warm.outcome'`. `withRuntimeSpan(kind, fn)` mirroring `withToolSpan` (span name `runtime.warm`), exposing a recorder to set capability/requested/applied/outcome.
-- Behavior: `control.warm` wraps its work in `withRuntimeSpan`; sets `RUNTIME_CONTEXT_APPLIED` = numCtx for `relaunch`/`reload`, and `-1`/omitted for `fixed` (so the MLX fixed-context limitation is observable). Outcome `spawned` | `reused` | `daemon-loaded` | `failed`.
+- Consumes: the full wired path (Tasks 1–7); `bun run setup:media` venvs (`~/.cache/ai/media-venv`, `~/.cache/ai/media-video-venv`); Ollama for the `media_creator` chat model.
 
-- [ ] **Step 1: failing test** — export a `withRuntimeSpan` and assert it exists + sets attributes without throwing (mirror how other span helpers are unit-tested; if the suite has a span-capture harness use it, else assert the function runs the body and returns its value).
-```typescript
-// tests/telemetry/runtime-span.test.ts
-import { expect, test } from 'bun:test';
-import { withRuntimeSpan, ATTR } from '../../src/telemetry/spans.ts';
-import { RuntimeKind } from '../../src/core/types.ts';
+- [ ] **Step 1: Add gated live tests**
 
-test('withRuntimeSpan runs the body and exposes a recorder', async () => {
-  const out = await withRuntimeSpan(RuntimeKind.LlamaCpp, async (rec) => { rec.applied(8192, 8192, 'spawned', 'relaunch'); return 7; });
-  expect(out).toBe(7);
-  expect(ATTR.RUNTIME_CONTEXT_APPLIED).toBe('runtime.context.applied');
-});
+Add cases (skipped unless `MULTIMODAL_LIVE=1`):
+- **Image auto-fit renders:** call `createGenerateTools(store).generate_image.execute({prompt:'a red cube on a table'})`; assert the returned URI file exists and is non-empty; assert `selectGenModel(Image)` chose `dhairyashil/FLUX.1-schnell-mflux-4bit` (installed anchor).
+- **Speech auto-fit renders:** `generate_speech.execute({prompt:'hello world'})`; assert a non-empty `.wav`; chosen model = Kokoro.
+- **Video auto-fit renders OR degrades:** `selectGenModel(Video)` returns the largest installed-and-fitting rung; if it returns a candidate, run `generate_video` and assert a non-empty `.mp4`; if `undefined`, assert the graceful no-fit message. Log which path ran.
+- **Forced-tiny-budget degrade (deterministic, NOT gated):** `selectGenModel(MediaKind.Video, { budgetBytes: 1, isInstalled: () => true })` → `undefined` (already covered in Task 3, but assert the tool returns the "higher-memory/disk box" message here too).
+
+- [ ] **Step 2: Run live-verify**
+
+Run:
+```bash
+MULTIMODAL_LIVE=1 \
+AGENT_IMAGE_CMD=$HOME/.cache/ai/media-venv/bin/mflux-generate \
+AGENT_TTS_CMD=$HOME/.cache/ai/media-venv/bin/mlx_audio.tts.generate \
+AGENT_VIDEO_CMD=$HOME/.cache/ai/media-video-venv/bin/mlx_video.ltx_2.generate \
+bun run test:file -- "tests/integration/multimodal.live.test.ts"
 ```
-- [ ] **Step 2: fail**.
-- [ ] **Step 3: implement** the ATTR keys + `withRuntimeSpan` (mirror `withCrewBuildSpan`'s recorder shape), and wire it into `managed-openai-compatible.ts` `warm`.
-- [ ] **Step 4: pass**.
-- [ ] **Step 5: commit** (`feat(telemetry): runtime warm/spawn spans + RUNTIME_* attrs`).
+Expected: image + speech render; video renders or degrades with a clear message. **Fix any real bugs live-verify surfaces** (e.g. the exact `--model` flag name for mlx-video, the LTX-2.3-mlx-q4 repo download path) and re-run — this is where integration bugs the unit tests missed get caught.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/integration/multimodal.live.test.ts
+git commit -m "test(media): gated live-verify for gen-fit (image/speech render, video render-or-degrade)"
+```
 
 ---
 

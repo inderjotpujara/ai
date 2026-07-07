@@ -529,7 +529,14 @@ export function runGenJob(
         primary.kind,
         `engine binary "${cmd}" not found on PATH`,
       );
-      return runServerJob(fallback, prompt, store, mediaType, opts, deps);
+      return runServerJob(
+        fallback,
+        prompt,
+        store,
+        mediaType,
+        { ...opts, model: undefined },
+        deps,
+      );
     }
     return runOneShotJob(primary, prompt, store, mediaType, opts, deps);
   }
@@ -548,7 +555,14 @@ export function runGenJob(
       primary.kind,
       'server engine unreachable',
     );
-    return runOneShotJob(fallback, prompt, store, mediaType, opts, deps);
+    return runOneShotJob(
+      fallback,
+      prompt,
+      store,
+      mediaType,
+      { ...opts, model: undefined },
+      deps,
+    );
   }
   return runServerJob(primary, prompt, store, mediaType, opts, deps);
 }

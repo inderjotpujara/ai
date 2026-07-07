@@ -1,51 +1,87 @@
-# Task 3 report — managed OpenAI-compatible runtime base
+# Task 3 report — Gen-fit selector
 
 ## Status: DONE
 
-## What was built
+## Commit
+- `5165630` — feat(media): gen-fit selector — largest-that-fits, env-pin, uncensored, consent-gated
+- Branch: `slice-28-hardware-adaptive-gen`
 
-`src/runtime/managed-openai-compatible.ts` — `createManagedRuntime(strategy, deps?)` returning a `Runtime`. It is the single owner of:
+## What was done
+Followed the brief verbatim (TDD):
+1. Wrote the failing test `tests/media/gen-select.test.ts` (5 cases: largest-fits, no-fit→undefined, env-pin authoritative, uncensored filtering, consent-gated pull with decline-then-fallback).
+2. Confirmed it failed with "Cannot find module select.ts".
+3. Wrote `src/media/generate/select.ts` verbatim from the brief:
+   - `selectGenModel(kind, deps)` — env-pin authoritative (bypasses ranking/consent) → filter by kind + uncensored eligibility (`uncensoredEnabled` / `isUncensoredModel`) → rank fitting candidates largest-params-first via `weightsBytes` + `fitsBudget` against `liveBudgetBytes()` (or injected `budgetBytes` test seam) → walk best→worst: installed → pick, else `askConsent` → pick on yes else continue → no pickable candidate → `recordGenFit({fits:false})`, return `undefined`.
+   - `SelectGenDeps` type (env, budgetBytes, isInstalled, askConsent, catalog — all optional, defaults to live env/GEN_CATALOG/liveBudgetBytes/HF-cache-check/decline).
+   - `isGenModelInstalled(repo)` — checks `~/.cache/huggingface/hub/models--org--name` existence.
+   - `defaultAskConsent` — declines by default (fail-safe, never speculative pull); matches the "consent before model pull" standing rule.
+4. Verified all imports resolved cleanly against existing code: `GEN_CATALOG`/`GenModelCandidate`/`GenEngine` (`src/media/generate/catalog.ts`, Task 1), `weightsBytes` (`src/resource/footprint.ts`), `fitsBudget`/`liveBudgetBytes` (`src/resource/hardware.ts`), `uncensoredEnabled`/`isUncensoredModel` (`src/media/policy.ts`), `recordGenFit` (`src/telemetry/spans.ts`, Task 2, signature `{kind, chosen?, fits, budgetBytes, modelBytes?, candidates}`), `MediaKind`/`ExecMode` (`src/media/types.ts`), `MediaVenv` (`src/media/cmd-resolve.ts`), `ContentPolicy` (`src/core/types.ts`).
+5. Test run: 5 pass / 0 fail / 5 expect() calls.
+6. `bun run lint:file --write` auto-fixed import ordering (type-only imports grouped/sorted, alphabetized) in both files — no logic changes. Re-ran tests after the auto-fix: still 5 pass.
+7. `bun run typecheck` — clean (`tsc --noEmit`, no output/errors).
+8. Committed both files. Pre-commit hook ran `docs-check` — passed (no new `src/<subsystem>` directory was introduced; `src/media/generate/` already documented from Task 1).
 
-- spawn-and-poll lifecycle via `superviseServer` from Task 2 (`process-supervisor.ts`)
-- daemon-load lifecycle (calls `strategy.daemonLoad`/`daemonUnload` directly, no process spawn)
-- `warm(model, numCtx)` idempotency: reuses the current server if `(model, effectiveCtx)` is unchanged; otherwise stops the current server/daemon load and (re)launches
-- fresh-port allocation on every (re)launch via an injectable `portAlloc?: () => Promise<number>` (defaults to a real `freePort()` that binds port 0, reads the OS-assigned port, and closes) — addresses the port-collision risk from Task 2's fire-and-forget `stop()`
-- `fixed` capability: calls `strategy.launch(model, undefined, port)` — numCtx is never threaded to the launcher. Strengthened the brief's weak test (`fixed-capability strategy does not thread numCtx into the launcher`) to assert on what the strategy actually received (`seen` array), not just `rt.kind`
-- `breakerFor('runtime:' + strategy.kind)` wraps `warm` only, per the cross-task decision
-- `createModel` builds `createOpenAICompatible({ name: strategy.kind, baseURL: current?.baseUrl ?? fallbackBaseUrl })(decl.model)`, re-resolving the baseURL on each call so it always reflects the live warm state
-- `control.isInstalled`/`listLoaded`/`getModelMax` reuse the `/models` introspection exactly as `mlx-server.ts` does today
-- `control.getModelKvArch` → `undefined`; `control.embed` → throws `MemoryError`; `control.pull` → throws (downloads are provisioning-layer only)
+## Notes / no scope added
+- No deviation from the brief's prescribed code — used verbatim except for the biome-imposed import reordering (mechanical, non-semantic).
+- No new architecture-doc changes needed for this task specifically (Task 1 already covers `src/media/generate/`); the slice-level architecture.md update is presumably handled at slice close per the SDD ledger process, not per-task.
 
-Extracted and **exported** `MlxModelEntry`, `contextLengthOf`, `sizeBytesOf` into this new file verbatim from `src/runtime/mlx-server.ts` (that file is untouched — Task 5's MLX-strategy rewrite is expected to import from here and retire its own copies).
+## Blocking concerns
+None.
 
-## Tests
+## Fix commit (review follow-up)
 
-`tests/runtime/managed-openai-compatible.test.ts` — 12 tests, all passing:
-1. warm launches with the requested context (relaunch capability)
-2. warm reuses the server for the same (model, ctx) — no relaunch
-3. **added:** warm relaunches on a fresh port when model/ctx changes (proves the port-collision fix — two relaunches get two distinct ports from an injected `portAlloc`)
-4. **strengthened:** fixed-capability strategy does not thread numCtx into the launcher (asserts the strategy's `launch` received `undefined`, not just `rt.kind`)
-5. getModelMax reads /v1/models like the MLX adapter
-6. **added:** daemonLoad path (LM Studio-style) warms without spawning a process
-7. **added:** isAvailable delegates to strategy.detect
-8. **added:** control.isInstalled reflects the runtime model list
-9. **added:** control.pull throws — downloads are not managed here
-10. **added:** control.embed throws MemoryError
-11. **added:** control.getModelKvArch is undefined
-12. **added:** control.unload stops the supervised server
+### Status: DONE
 
-All tests use a fake strategy + injected `spawn`/`fetchImpl` — no live server, no real port binding in the default path (relaunch/no-relaunch tests never trigger `freePort()` since they warm once or reuse).
+Three review findings applied on top of `5165630`:
 
-## Verification run
+1. **[Important] Real enum members, not string casts** — the env-pin fallback
+   synthetic candidate (`src/media/generate/select.ts`, ~lines 60–72) used
+   `'mflux' as GenModelCandidate['engine']`, `'Media' as ...['venv']`,
+   `'OneShot' as ...['execMode']` — casts that hid a runtime-value mismatch
+   (`MediaVenv.Media === 'media'`, `ExecMode.OneShot === 'one_shot'`), which
+   would have misrouted `adapter.ts`'s `primary.execMode === ExecMode.OneShot`
+   check. Replaced with the real enum members: imported `GenEngine` from
+   `./catalog.ts`, `MediaVenv` from `../cmd-resolve.ts`, `ExecMode` from
+   `../types.ts`, and used `GenEngine.Mflux`, `MediaVenv.Media`,
+   `ExecMode.OneShot` directly as fallback defaults.
 
-- `bun test tests/runtime/managed-openai-compatible.test.ts` → 12 pass, 0 fail
-- `bun test tests/runtime/` (full directory, incl. `mlx-server.test.ts`, `process-supervisor.test.ts`, `registry.test.ts`) → 26 pass, 0 fail — confirms `mlx-server.ts` wasn't disturbed
-- `bun run typecheck` → clean
-- `bun run lint:file src/runtime/managed-openai-compatible.ts tests/runtime/managed-openai-compatible.test.ts` → clean (after `biome check --write` reordered/reformatted imports)
-- `bun run docs:check` → passes (no new subsystem directory added; `runtime/` already documented — the doc-surface update is deferred to slice landing per the multi-task SDD flow)
+2. **[Minor] Honor `HF_HOME` in `isGenModelInstalled`** — it hardcoded
+   `~/.cache/huggingface/hub/...`. Matched the env-override convention from
+   `src/provisioning/dest-dir.ts` (`HF_HOME` first, fallback-only). Added an
+   optional injectable `env` parameter (defaults to `process.env`, matching
+   the `SelectGenDeps.env` pattern already in the file); when `HF_HOME` is
+   set, looks under `$HF_HOME/hub/models--org--name`, else falls back to
+   `~/.cache/huggingface/hub/models--org--name`. Stays pure/never-throw
+   (`existsSync` doesn't throw). Wired the default `isInstalled` walker to
+   pass the resolved `env` through.
 
-## Concerns / notes for downstream tasks
+3. **[Minor] Test the consent-GRANTED pick path** — added
+   `tests/media/gen-select.test.ts` test `'consent-gates a pull: granting
+   picks the not-installed candidate that fits'`: a single not-installed,
+   fitting candidate with `askConsent: async () => true` asserts
+   `selectGenModel` returns that candidate. Previously only the decline path
+   was covered.
 
-- Task 4/5/6 strategies that use `launch` (spawned processes) will get a **new** free port on every relaunch, not the strategy's `defaultPort`. `defaultPort` is only used for `fallbackBaseUrl` before any successful warm. This is intentional per the port-collision cross-task decision but worth flagging since it means `-c`/`--port` args baked into `launch()` must use the `port` argument passed in, not a hardcoded default.
-- `contextCapability: 'reload'` (LM Studio) isn't given bespoke handling beyond "not fixed" — the base always does stop-then-daemonLoad on any (model, ctx) change, which matches the brief's literal instructions ("stop any current server... then daemonLoad path → call it"). If Task 6 wants a true in-place reload without a stop/unload round-trip, that will need a small base change at that point — flagging now so it isn't a surprise.
-- `control.unload(model)`/`control.pull(model)` ignore the `model` argument structurally (there's only one "current" server per strategy instance) — matches `RuntimeControl`'s type via JS's fewer-params assignability; typecheck confirmed this is sound.
+Covering test file: `tests/media/gen-select.test.ts` (now 6 tests: the
+original 5 + the new consent-grant case).
+
+Command run: `bun run test:file -- "tests/media/gen-select.test.ts"`
+Output:
+```
+bun test tests/media/gen-select.test.ts
+bun test v1.3.11 (af24e281)
+
+ 6 pass
+ 0 fail
+ 6 expect() calls
+Ran 6 tests across 1 file. [98.00ms]
+```
+
+Lint: `bun run lint:file --write -- "src/media/generate/select.ts" "tests/media/gen-select.test.ts"` → `Checked 2 files in 7ms. No fixes applied.`
+Typecheck: `bun run typecheck` → `tsc --noEmit` clean, no errors.
+
+Fix commit: see `git log` on branch `slice-28-hardware-adaptive-gen`,
+message `fix(media): gen-fit selector — real enum fallbacks, HF_HOME cache, consent-grant test`.
+
+### Blocking concerns
+None.

@@ -8,19 +8,27 @@
 // Requires: ffmpeg + macOS `say` on PATH; mlx_whisper CLI (AGENT_STT_CMD or PATH);
 // Ollama up with qwen2.5vl:7b pulled.
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createVisionAgent } from '../../agents/vision.ts';
 import { runDefinedAgent } from '../../src/core/agent-def.ts';
 import { transcribe } from '../../src/media/audio/transcribe.ts';
 import { runOneShotJob } from '../../src/media/generate/adapter.ts';
 import { kokoroStrategy } from '../../src/media/generate/audio-mlx.ts';
 import { mfluxStrategy } from '../../src/media/generate/image-mflux.ts';
+import { selectGenModel } from '../../src/media/generate/select.ts';
+import { createGenerateTools } from '../../src/media/generate/tools.ts';
 import { ltxStrategy } from '../../src/media/generate/video-mlx.ts';
 import { createMediaStore } from '../../src/media/store.ts';
 import { MediaKind } from '../../src/media/types.ts';
 import { sampleFrames } from '../../src/media/video/frames.ts';
+
+/** Extracts the local path from a `file://` URI returned by a generate tool. */
+function uriToPath(uri: string): string {
+  return fileURLToPath(uri);
+}
 
 const LIVE = process.env.MULTIMODAL_LIVE === '1';
 const suite = LIVE ? describe : describe.skip;
@@ -33,6 +41,17 @@ function run(cmd: string, args: string[]): Promise<void> {
   return proc.exited.then((code) => {
     if (code !== 0) throw new Error(`${cmd} exited ${code}`);
   });
+}
+
+/** True when the mlx-video LTX CLI is actually installed (AGENT_VIDEO_CMD path
+ *  exists, or the bare binary is on PATH). The direct video render test is
+ *  gated on this so the suite skips cleanly on a box without the isolated
+ *  video venv rather than ENOENT-ing — the hardware-adaptive "renders when the
+ *  engine/model is present, degrades otherwise" case (Slice 28 gen-fit). */
+function videoEngineAvailable(): boolean {
+  const cmd = process.env.AGENT_VIDEO_CMD;
+  if (cmd) return existsSync(cmd);
+  return Bun.which('mlx_video.ltx_2.generate') !== null;
 }
 
 suite('Slice 27 Phase A — multimodal analysis (live)', () => {
@@ -139,17 +158,97 @@ suite('Slice 27 Phase A — multimodal analysis (live)', () => {
 
   // Requires AGENT_VIDEO_CMD pointing at the isolated mlx-video venv
   // (transformers pinned <5.13), e.g. /tmp/mlxvideovenv/bin/mlx_video.ltx_2.generate.
-  test('video-gen: real LTX (mlx-video) produces an mp4 via the generator', async () => {
-    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-vidgen-')));
-    const job = runOneShotJob(
-      ltxStrategy,
-      'a red ball bouncing on a white floor',
-      store,
-      'video/mp4',
-      { seconds: 1, width: 384, height: 256, steps: 8 },
+  // Skips cleanly when that engine isn't installed (degrade case).
+  test.skipIf(!videoEngineAvailable())(
+    'video-gen: real LTX (mlx-video) produces an mp4 via the generator',
+    async () => {
+      const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-vidgen-')));
+      const job = runOneShotJob(
+        ltxStrategy,
+        'a red ball bouncing on a white floor',
+        store,
+        'video/mp4',
+        { seconds: 1, width: 384, height: 256, steps: 8 },
+      );
+      const fh = await job.result();
+      expect(fh.mediaType).toBe('video/mp4');
+      expect(fh.sizeBytes).toBeGreaterThan(1000);
+    },
+    900_000,
+  );
+
+  // Slice 28: hardware-adaptive gen-fit, driven through the actual tool
+  // surface (createGenerateTools) rather than the strategy directly, so the
+  // fit-selection + tool wiring is what's under test, not just the engine.
+  test('gen-fit: image auto-fit selects the installed anchor and renders (or degrades under memory pressure)', async () => {
+    // Live hardware-adaptive selection: when the live budget fits the anchor,
+    // the selector picks it and the tool renders a real PNG. Under transient
+    // memory pressure the budget can dip below the ~8GB FLUX estimate, in which
+    // case the selector correctly returns undefined and the tool degrades
+    // gracefully — both outcomes are the mechanism working, so assert whichever
+    // path ran rather than flaking on live memory state.
+    const chosen = await selectGenModel(MediaKind.Image);
+    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-fit-img-')));
+    const result = await createGenerateTools(store).generate_image?.execute?.(
+      { prompt: 'a red cube on a wooden table' },
+      { toolCallId: 'test-image', messages: [] },
     );
-    const fh = await job.result();
-    expect(fh.mediaType).toBe('video/mp4');
-    expect(fh.sizeBytes).toBeGreaterThan(1000);
-  }, 900_000);
+    const text = String(result);
+    if (chosen) {
+      expect(chosen.repo).toBe('dhairyashil/FLUX.1-schnell-mflux-4bit');
+      expect(text).toContain('file://');
+      const path = uriToPath(text.match(/file:\/\/\S+/)?.[0] ?? '');
+      expect(existsSync(path)).toBe(true);
+      expect(statSync(path).size).toBeGreaterThan(0);
+    } else {
+      expect(text.toLowerCase()).toContain('no image');
+      expect(text.toLowerCase()).toContain('not generated');
+    }
+  }, 300_000);
+
+  test('gen-fit: speech auto-fit selects Kokoro and renders', async () => {
+    const chosen = await selectGenModel(MediaKind.Audio);
+    expect(chosen?.repo).toBe('mlx-community/Kokoro-82M-bf16');
+
+    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-fit-tts-')));
+    const result = await createGenerateTools(store).generate_speech?.execute?.(
+      { prompt: 'hello from the local agent' },
+      { toolCallId: 'test-speech', messages: [] },
+    );
+    const text = String(result);
+    expect(text).toContain('file://');
+    const match = text.match(/file:\/\/\S+/);
+    expect(match).not.toBeNull();
+    const path = uriToPath(match?.[0] ?? '');
+    expect(path.endsWith('.wav')).toBe(true);
+    expect(existsSync(path)).toBe(true);
+    expect(statSync(path).size).toBeGreaterThan(0);
+  }, 180_000);
+});
+
+// Deterministic (NOT gated behind MULTIMODAL_LIVE): the no-fit degrade paths
+// never touch a real model, so they run unconditionally on every `bun test`.
+describe('Slice 28 — gen-fit graceful degradation (deterministic)', () => {
+  test('video tool degrades gracefully when no model fits', async () => {
+    const store = createMediaStore(
+      mkdtempSync(join(tmpdir(), 'mm-nofit-vid-')),
+    );
+    const result = await createGenerateTools(store, {
+      selectModel: async () => undefined,
+    }).generate_video?.execute?.(
+      { prompt: 'x' },
+      { toolCallId: 'test-video-nofit', messages: [] },
+    );
+    const text = String(result).toLowerCase();
+    expect(text).toContain('no video');
+    expect(text).toContain('not generated');
+  });
+
+  test('selectGenModel returns undefined under a forced-tiny budget', async () => {
+    const chosen = await selectGenModel(MediaKind.Video, {
+      budgetBytes: 1,
+      isInstalled: () => true,
+    });
+    expect(chosen).toBeUndefined();
+  });
 });

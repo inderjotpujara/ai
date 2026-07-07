@@ -213,6 +213,21 @@ graph TD
         mcpjson["mcp.json · registry"]
         manifests["&lt;registry&gt;/.generated.json + &lt;name&gt;.golden.json + archive/ (Slice 20 sidecars)"]
     end
+    subgraph MEDIA["Multimodal · src/media (Slice 27)"]
+        mediastore["store.ts · run-scoped MediaStore (handle hub, both directions)"]
+        mediaingest["ingest.ts · --image/--audio/--video + path/paste auto-detect"]
+        mediaresolve["resolve.ts · handle markers → v6 base64 FileParts"]
+        mediatranscribe["audio/transcribe.ts · mlx_whisper STT (withTranscribeSpan)"]
+        mediaframes["video/frames.ts · ffmpeg frame-sample (withFrameSampleSpan)"]
+        mediaspawn["spawn.ts · shared defaultSpawn (env-merge/kill/onExit)"]
+        mediaadapter["generate/adapter.ts · MediaGenerator (runOneShotJob/runServerJob/runGenJob)"]
+        mediagenstrat["generate/{image-mflux,audio-mlx,video-mlx,comfy-lane}.ts · gen strategies"]
+        mediagentools["generate/tools.ts · createGenerateTools (generate_image/speech/video)"]
+        mediapolicy["policy.ts + generate/safety.ts · uncensored axis (eligibility + checker-disable)"]
+        mediacmd["cmd-resolve.ts · resolveMediaCmd (venv-first, out of the box)"]
+        mediaselect["generate/select.ts · selectGenModel (largest-that-fits, env-pin, consent)"]
+        mediacatalog["generate/catalog.ts · GenModelCandidate ladders (Slice 28)"]
+    end
 
     %% Reliability data flow (Slice 21): classify feeds retry/breaker/degrade;
     %% delegation/workflow/crew/mcp/selector wrap cross-boundary ops through it;
@@ -249,6 +264,38 @@ graph TD
     ortime --> relconf
     mlx --> relconf
     relledger --> spans
+
+    %% Multimodal data flow (Slice 27): media-by-reference — chat ingests blobs into a
+    %% run-scoped store and rewrites the prompt with opaque handle markers; the router
+    %% stays text-only (z.string() boundary untouched); only the specialist resolves
+    %% handles to FileParts at the last moment; generation runs as tools on media_creator.
+    chat --> mediaingest
+    mediaingest --> mediastore
+    mediaingest --> mediatranscribe
+    mediaingest --> mediaframes
+    mediaframes --> mediastore
+    agent --> mediaresolve
+    mediaresolve --> mediastore
+    agents --> mediagentools
+    mediagentools --> mediaselect
+    mediaselect --> mediacatalog
+    mediaselect --> mediapolicy
+    mediaselect --> hw
+    mediaselect --> spans
+    mediagentools --> mediaadapter
+    mediaadapter --> mediagenstrat
+    mediaadapter --> mediastore
+    mediagenstrat --> mediacmd
+    mediatranscribe --> mediaspawn
+    mediaframes --> mediaspawn
+    mediaadapter --> mediaspawn
+    mediaadapter --> reltimeout
+    mediaadapter --> reldegrade
+    selhook --> mediapolicy
+    mediagenstrat --> mediapolicy
+    mediatranscribe --> spans
+    mediaframes --> spans
+    mediaadapter --> spans
 
     chat --> runchat
     chat --> selhook
@@ -2510,8 +2557,10 @@ the last possible moment (`resolve.ts`, right before the model call).
 | `generate/adapter.ts` | The `MediaGenerator` job adapter: `GenStrategy` (`kind`, `execMode`, `buildOneShot?`, `outputPathFor?`, `parseProgress?`, `serverSubmit?`), `runOneShotJob` (spawn → exit → `store.putFile`, cancel-race-safe single-settle, wrapped in `withGenerateSpan`), `runServerJob` (poll → result → `store.putFile`), and `runGenJob` (an `ExecMode`-routing dispatcher with same-`MediaKind` degrade between the one-shot and server lanes, recording `DegradeKind.ModelDegraded`) |
 | `generate/image-mflux.ts`, `generate/audio-mlx.ts`, `generate/video-mlx.ts` | The three default `GenStrategy` implementations: mflux (image), Kokoro via mlx-audio (speech), LTX via mlx-video (video) — see below |
 | `generate/safety.ts` | The uncensored axis, mechanism 2: `buildDiffusersFlags` — the Diffusers/ComfyUI-lane safety-checker disable flag, defaulting from `uncensoredEnabled()` |
-| `generate/comfy-lane.ts` | `wanComfyStrategy` — a **shape-only** ComfyUI/Wan text-to-video `Server`-lane strategy (see the honest gap below) |
-| `generate/tools.ts` | `createGenerateTools(store, deps)` → `{generate_image, generate_speech, generate_video}` AI-SDK tools, each calling `runOneShotJob` directly against its default strategy and returning a text summary (`"Generated image: file://..."`) — **never** raw bytes |
+| `generate/comfy-lane.ts` | `wanComfyStrategy` — a **shape-only** ComfyUI/Wan text-to-video `Server`-lane strategy (see the honest gap below); `buildWanWorkflow` takes its checkpoint from `opts.model` (Slice 28) |
+| `generate/catalog.ts` (Slice 28) | `GenEngine` enum + `GenModelCandidate` type + `GEN_CATALOG` — the per-`MediaKind` small→large candidate ladders (image mflux, speech mlx-audio, video spanning mlx-video one-shot + ComfyUI/Wan server), each with a footprint for fit-ranking. **Not** a `ModelDeclaration` (gen has no runtime/`LanguageModel`) |
+| `generate/select.ts` (Slice 28) | `selectGenModel(kind, deps)` — the **parallel gen-fit selector**: env-pin authoritative (`AGENT_{IMAGE,VOICE,VIDEO}_MODEL`) → uncensored filter (`policy.ts`) → **largest-that-fits** by footprint (`weightsBytes` vs `liveBudgetBytes`) → installed/consent walk (`isGenModelInstalled` honors `HF_HOME`; consent-gate a pull, decline → next-installed) → `recordGenFit`; returns `undefined` on no-fit (caller degrades, never crashes) |
+| `generate/tools.ts` | `createGenerateTools(store, deps)` → `{generate_image, generate_speech, generate_video}` AI-SDK tools. Each **fit-selects** a model via `selectGenModel(kind)` (Slice 28), maps `candidate.engine`→strategy (`STRATEGY_FOR_ENGINE`), sets `opts.model = candidate.repo`, and runs via `runGenJob` (video passes the other-engine strategy as `fallback` + a `serverReachable` probe); a `undefined` selection returns a graceful "no model fits" text. Returns a text summary (`"Generated image: file://..."`) — **never** raw bytes |
 
 ### Input: ingest → handle markers → threaded to specialist → resolve
 
@@ -2575,12 +2624,17 @@ optional same-`MediaKind` fallback in the *other* exec mode, it probes
 whether the primary's engine binary is on `PATH` (one-shot) or its server is
 reachable (server), and degrades to the fallback — recording
 `DegradeKind.ModelDegraded` on the reliability ledger — when it isn't.
-**Honest gap:** `runGenJob` is unit-tested but **not yet wired into
-`createGenerateTools`** — the live `generate_image`/`generate_speech`/
-`generate_video` tools call `runOneShotJob` directly against their fixed
-default strategy, so the degrade-to-server-lane path it implements is not
-reachable from the actual product surface yet (a wiring gap, not a design
-gap — `runGenJob`'s contract is proven, it just has no caller today).
+**Wired in Slice 28:** `createGenerateTools` now calls `runGenJob` (not
+`runOneShotJob` directly), so the one-shot↔server degrade + the ComfyUI/Wan
+server lane are reachable from the product surface. `generate_video` passes
+the other-engine video strategy as `fallback` + a `serverReachable` probe.
+**Remaining disclosed gap:** the `serverReachable` argument is a synchronous
+seam, so only the *one-shot-primary → server-fallback* direction is exercised
+today (via the real `Bun.which` PATH check); a fully-async ComfyUI reachability
+probe for the *server-primary → one-shot-fallback* direction is a follow-on —
+low-impact in practice because the gen-fit selector only auto-selects a
+server-lane (ComfyUI) candidate when its weights are installed, and ComfyUI
+isn't installed in this environment.
 
 **Cmd resolution — venv-first, out of the box (`scripts/setup-media.ts` +
 `cmd-resolve.ts`).** Every strategy's default `cmd` used to fall back
@@ -2604,11 +2658,15 @@ automates — the two steps that must stay manual: `huggingface-cli login` and
 accepting a gated model's license, both needed only if the user opts into a
 gated model variant (the shipped defaults are fully ungated).
 
-Three default strategies, all `OneShot`, selected structurally by
-`MediaKind` (not through the model selector — the three `Capability.*Gen`
-enum values added this slice type the taxonomy for a future selector-routed
-generation model but are not consumed by any `ModelDeclaration`/`ModelReq`
-yet):
+Each tool's **model** is now chosen by the Slice-28 gen-fit selector
+(`selectGenModel`, above) — largest-that-fits from `GEN_CATALOG` against the
+live hardware budget, injected as `opts.model` — and its **engine/strategy** by
+`STRATEGY_FOR_ENGINE[candidate.engine]`. (The `Capability.{ImageGen,SpeechGen,
+VideoGen}` enum values remain typed-but-not-`ModelDeclaration`-consumed **by
+design**: gen rides this *parallel* fit path, not the main model selector's
+`resolveModel`/`createModel`, because a gen engine spawns a CLI that writes a
+file rather than being warmed into a runtime as a `LanguageModel` — see
+`reference-gen-fit-impedance-mismatch`.) The strategies themselves:
 
 - **Image — mflux** (`image-mflux.ts`): `mflux-generate` (env `AGENT_IMAGE_CMD`).
   Default model is **`dhairyashil/FLUX.1-schnell-mflux-4bit`**, an ungated,

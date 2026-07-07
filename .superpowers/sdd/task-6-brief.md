@@ -1,47 +1,107 @@
-### Task 6: LM Studio strategy via `@lmstudio/sdk` + register
+### Task 6: runGenJob clears model on cross-engine degrade
 
 **Files:**
-- Modify: `package.json` (add `@lmstudio/sdk` to dependencies — run `bun add @lmstudio/sdk`)
-- Create: `src/runtime/strategies/lmstudio.ts`
-- Modify: `src/runtime/registry.ts` (add `lmStudioRuntime`)
-- Test: `tests/runtime/lmstudio-runtime.test.ts`
+- Modify: `src/media/generate/adapter.ts:507-554` (`runGenJob`)
+- Test: `tests/media/gen-job-degrade-model.test.ts`
 
 **Interfaces:**
-- Produces: `lmStudioStrategy: RuntimeStrategy` (`kind: LmStudio`, `contextCapability: 'reload'`, `defaultPort: 1234`, `healthPath: '/v1/models'`; NO `launch`; `daemonLoad(model, numCtx)` uses `@lmstudio/sdk` (injectable client via a `deps` seam) to ensure the server is up and `client.llm.load(model, { config: { contextLength: numCtx } })`, returning `{ baseUrl: 'http://127.0.0.1:1234/v1' }`; `daemonUnload(model)` → `client.llm.unload(model)`; `detect()` → SDK client reachable / `lms` present). Wrap the SDK behind a small injectable interface `LmStudioClient = { load(model, ctx?): Promise<void>; unload(model): Promise<void>; listLoaded(): Promise<string[]>; reachable(): Promise<boolean> }` so tests use a fake and the real impl adapts `@lmstudio/sdk`.
-- Consumes: Task 3.
+- Consumes: `runGenJob`, `GenStrategy` (existing).
+- Produces: on a degrade to a different-`engine` fallback, `runGenJob` passes `{ ...opts, model: undefined }` so the fallback strategy uses its own default repo (a repo is engine-specific and must not leak across engines). Same-engine degrades keep `opts.model`.
 
-- [ ] **Step 1: failing test** (fake `LmStudioClient`)
+Note: the `GenStrategy` type has no `engine` field. Use `execMode` difference as the proxy is insufficient (both video strategies differ by execMode but also by engine/repo). Instead, ALWAYS clear `opts.model` when running the fallback — the fallback is always a *different* strategy with its own default. Both degrade branches (`runServerJob(fallback,...)` and `runOneShotJob(fallback,...)`) get `{ ...opts, model: undefined }`.
 
-```typescript
-// tests/runtime/lmstudio-runtime.test.ts
-import { expect, test } from 'bun:test';
-import { RuntimeKind } from '../../src/core/types.ts';
-import { makeLmStudioStrategy, type LmStudioClient } from '../../src/runtime/strategies/lmstudio.ts';
+- [ ] **Step 1: Write the failing test**
 
-function fakeClient(log: string[]): LmStudioClient {
-  return {
-    load: async (m, ctx) => { log.push(`load ${m} @ ${ctx}`); },
-    unload: async (m) => { log.push(`unload ${m}`); },
-    listLoaded: async () => ['m'],
-    reachable: async () => true,
-  };
-}
+```ts
+// tests/media/gen-job-degrade-model.test.ts
+import { describe, expect, test } from 'bun:test';
+import { runGenJob } from '../../src/media/generate/adapter.ts';
+import type { GenStrategy } from '../../src/media/generate/adapter.ts';
+import { ExecMode, MediaKind } from '../../src/media/types.ts';
+import { createMediaStore } from '../../src/media/store.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-test('daemonLoad loads the model at the requested context (reload capability)', async () => {
-  const log: string[] = [];
-  const strat = makeLmStudioStrategy(() => fakeClient(log));
-  expect(strat.kind).toBe(RuntimeKind.LmStudio);
-  expect(strat.contextCapability).toBe('reload');
-  const r = await strat.daemonLoad!('m', 8192);
-  expect(r.baseUrl).toBe('http://127.0.0.1:1234/v1');
-  expect(log).toContain('load m @ 8192');
+describe('runGenJob cross-engine degrade drops the model repo', () => {
+  test('fallback strategy is invoked without opts.model', async () => {
+    let fallbackModel: string | undefined = 'UNSET';
+    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
+    const primary: GenStrategy = {
+      kind: MediaKind.Video,
+      execMode: ExecMode.OneShot,
+      buildOneShot: () => ({ cmd: 'definitely-not-installed-xyz', args: [] }),
+    };
+    const fallback: GenStrategy = {
+      kind: MediaKind.Video,
+      execMode: ExecMode.Server,
+      serverSubmit: async (_p, opts) => {
+        fallbackModel = opts.model;
+        return {
+          poll: async () => ({ fraction: 1 }),
+          result: async () => '/tmp/never.mp4', // putFile will fail; we only assert the model
+        };
+      },
+    };
+    const job = runGenJob(primary, 'a cat', store, 'video/mp4', { model: 'mlx/repo' }, {
+      fallback,
+      which: () => null, // force the "primary binary missing" degrade
+    });
+    await job.result().catch(() => {}); // result may reject on the fake path; irrelevant
+    expect(fallbackModel).toBeUndefined();
+  });
 });
 ```
 
-- [ ] **Step 2: fail**.
-- [ ] **Step 3: implement** `makeLmStudioStrategy(getClient)` + a default `lmStudioStrategy` using the real `@lmstudio/sdk`-backed client + `export const lmStudioRuntime = createManagedRuntime(lmStudioStrategy)`. Append to `RUNTIMES`. The real client's `load` maps to `@lmstudio/sdk`'s `LMStudioClient().llm.model(model, { config: { contextLength } })` per its current API — verify the exact call in the SDK's types at implementation time; keep it isolated in this one file.
-- [ ] **Step 4: pass**.
-- [ ] **Step 5: commit** (`feat(runtime): LM Studio inference runtime via @lmstudio/sdk (reload context)`).
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `bun run test:file -- "tests/media/gen-job-degrade-model.test.ts"`
+Expected: FAIL — `fallbackModel` is `'mlx/repo'` (opts.model leaked into the fallback).
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/media/generate/adapter.ts`, in `runGenJob`, change the two fallback invocations to strip the model repo:
+
+```ts
+    if (fallback) {
+      recordExecModeDegrade(
+        deps,
+        ExecMode.OneShot,
+        ExecMode.Server,
+        primary.kind,
+        `engine binary "${cmd}" not found on PATH`,
+      );
+      return runServerJob(fallback, prompt, store, mediaType, { ...opts, model: undefined }, deps);
+    }
+```
+
+and
+
+```ts
+  if (fallback) {
+    recordExecModeDegrade(
+      deps,
+      ExecMode.Server,
+      ExecMode.OneShot,
+      primary.kind,
+      'server engine unreachable',
+    );
+    return runOneShotJob(fallback, prompt, store, mediaType, { ...opts, model: undefined }, deps);
+  }
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bun run test:file -- "tests/media/gen-job-degrade-model.test.ts"`
+Expected: PASS. Also re-run the existing adapter tests: `bun run test:file -- "tests/media/*adapter*"` — Expected: still PASS (same-strategy non-degrade paths unchanged).
+
+- [ ] **Step 5: Typecheck + commit**
+
+Run: `bun run typecheck`
+```bash
+git add src/media/generate/adapter.ts tests/media/gen-job-degrade-model.test.ts
+git commit -m "fix(media): runGenJob drops engine-specific model repo when degrading to a fallback"
+```
 
 ---
 

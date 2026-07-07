@@ -1,101 +1,73 @@
-# Task 5 Report: MLX strategy + rewrite `mlx-server.ts` onto the managed base
+# Task 5 report: Wan checkpoint from opts.model
 
 ## Status
-COMPLETE — implementation, tests, typecheck, and lint were already committed on this
-branch (`4491fe8`) before this session started. This session re-verified the work
-end-to-end against the task-5 brief and found it correct and complete; this report
-replaces a stale `task-5-report.md` left over from an earlier slice's unrelated
-"Timeouts" task (same filename, different slice — confirmed via
-`git log -- .superpowers/sdd/task-5-report.md`, last touched at `68c4ae4`).
+DONE
+
+## Note on this file
+This report overwrites a stale `task-5-report.md` left over from an earlier
+slice's unrelated "MLX strategy + rewrite mlx-server.ts" task (same filename,
+different slice/task numbering — that content is preserved in git history at
+the commit before this one, and in `.superpowers/sdd/progress.md` if it was
+ledgered there).
 
 ## What shipped
 
-### `src/runtime/strategies/mlx.ts` (new)
-- `createMlxStrategy(deps?: { which? })` returns a `RuntimeStrategy`:
-  - `kind: RuntimeKind.MlxServer`
-  - `contextCapability: 'fixed'` — `mlx_lm.server` has no context-length flag,
-    so `numCtx` is never threaded through.
-  - `defaultPort: 1234`, `healthPath: '/v1/models'`, `basePath: '/v1'`
-  - `launch(model, _numCtx, port)` → `{ cmd: 'mlx_lm.server', args: ['--model', model, '--host', '127.0.0.1', '--port', String(port)], port }` — uses the passed `port`, never hardcodes it.
-  - `detect()` — probes the configured `MLX_BASE_URL` (default `http://localhost:1234/v1`) `/models` endpoint first (preserves the pre-existing env-based reachability check); falls back to `Bun.which('mlx_lm.server') != null` (injectable via `deps.which` for tests).
-- `mlxStrategy` — the default-constructed singleton export.
+### `src/media/generate/comfy-lane.ts`
+- `buildWanWorkflow` changed from a module-private `function` to an
+  `export function`, making it directly testable.
+- Before `return workflow;`, added a guarded block: when `opts.model` is set,
+  adds `workflow['10'] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: opts.model } }`.
+  When `opts.model` is unset, no such node is added — existing behavior for
+  callers that don't pass a model is unchanged. Kept the brief's comment
+  noting this is shape-only pending live-verify against a real ComfyUI export
+  (ComfyUI/Wan is not installed in this environment).
 
-### `src/runtime/mlx-server.ts` (rewritten)
-- No longer builds its own `createOpenAICompatible` provider or duplicates
-  `MlxModelEntry` / `contextLengthOf` / `sizeBytesOf` — those now live solely in
-  `managed-openai-compatible.ts` (imported there, not re-declared here).
-- `createMlxServerRuntime(deps: MlxServerDeps = {})`:
-  - If `deps.baseUrl` (or `MLX_BASE_URL` env) is set: builds an
-    `externalServerStrategy` — a copy of `mlxStrategy` with `defaultPort`/`basePath`
-    derived from the URL, `detect()` re-pointed at the injected `fetchImpl`, and
-    `daemonLoad()` returning `{ baseUrl }` directly (no spawn). This is the
-    exact "server already running" compat path the existing tests depend on.
-  - Otherwise: delegates straight to `createManagedRuntime(mlxStrategy, { fetchImpl, spawn })` — spawn-on-warm only happens in this branch.
-  - `MlxServerDeps` extended with optional `spawn?: SpawnFn` (in addition to the
-    pre-existing `baseUrl?` / `fetchImpl?`).
-- `mlxServerRuntime = createMlxServerRuntime()` — unchanged export shape.
-- `embed` continues to throw `MemoryError` — now sourced from the shared base
-  (`managed-openai-compatible.ts` line ~214), not duplicated locally.
-
-### `src/runtime/registry.ts`
-- No change needed — `mlxServerRuntime` was already the single registered
-  entry; MLX now happens to be backed by the managed base under the hood.
-
-### `tests/runtime/mlx-server.test.ts`
-- All 7 pre-existing tests kept **verbatim, unchanged, and passing**:
-  1. `mlx runtime has the right kind and builds a model`
-  2. `isInstalled reads /v1/models`
-  3. `getModelMax returns the exposed context length when present`
-  4. `listLoaded maps ids and reports sizes when present`
-  5. `isInstalled works against the injected fetch`
-  6. `a metadata fetch failure degrades to undefined/[] instead of throwing`
-  7. `a non-ok /models response degrades to undefined/[] instead of throwing`
-- One new test added per the brief's Step 1:
-  8. `mlx warm spawns mlx_lm.server when no external base url is set` — injects
-     a fake `spawn` and a healthy fetch, calls `createMlxServerRuntime({ spawn, fetchImpl: health })` (no `baseUrl`), calls `rt.control.warm('m', 8192)`, asserts `spawn` was invoked with `'mlx_lm.server'`.
+### `tests/media/wan-checkpoint.test.ts` (new)
+Two tests, per the brief verbatim:
+1. `adds a checkpoint loader from opts.model when set` — asserts the
+   `CheckpointLoaderSimple` node's `inputs.ckpt_name` equals the passed
+   `opts.model` value.
+2. `omits the checkpoint loader when opts.model is unset` — asserts no node
+   with `class_type === 'CheckpointLoaderSimple'` exists in the returned graph.
 
 ## TDD sequence (as run this session)
-1. Baseline: `bun test tests/runtime/mlx-server.test.ts` → **8 pass** (the spawn
-   test was already present in the file and the implementation from the prior
-   commit already satisfies it — no red step was observed this session since
-   the work predates it; re-verified the compat contract line-by-line against
-   the diff in `4491fe8` instead).
-2. Reviewed `git show 4491fe8 -- src/runtime/mlx-server.ts` to confirm the
-   before/after: old code built its own `createOpenAICompatible` provider and
-   duplicated the model-entry parsing helpers; new code has neither — it's a
-   thin strategy + compat shim over `createManagedRuntime`.
-3. Confirmed `embed`/`MemoryError`, `createModel`, and `kind` are all supplied
-   centrally by `managed-openai-compatible.ts`, not re-implemented in
-   `mlx-server.ts`.
+1. Wrote `tests/media/wan-checkpoint.test.ts` first.
+2. Ran `bun run test:file -- "tests/media/wan-checkpoint.test.ts"` → **failed**
+   as expected: `SyntaxError: Export named 'buildWanWorkflow' not found in
+   module '.../src/media/generate/comfy-lane.ts'`.
+3. Applied the two-part implementation change (export + guarded checkpoint
+   node) to `comfy-lane.ts`.
+4. Re-ran the same test → **2 pass, 0 fail, 2 expect() calls**.
 
-## Checks (this session, on branch `slice-26-altruntime-remote-auth`, HEAD `4491fe8`)
-- `bun test tests/runtime/mlx-server.test.ts` → **8 pass, 0 fail, 18 expect() calls** — **every pre-existing assertion passes unchanged**, plus the new spawn test.
-- `bun test tests/runtime/` (whole dir) → **34 pass, 0 fail, 62 expect() calls** across 5 files.
+## Checks (this session, branch `slice-28-hardware-adaptive-gen`)
+- `bun run test:file -- "tests/media/wan-checkpoint.test.ts"` → 2 pass, 0 fail,
+  2 expect() calls (both before and after the lint autofix pass).
+- `bun run lint:file --write -- "src/media/generate/comfy-lane.ts" "tests/media/wan-checkpoint.test.ts"`
+  → `biome check`, checked 2 files, fixed 1 (reformatted line wraps in the new
+  test file only — no logic change).
 - `bun run typecheck` → clean, no errors.
-- `bun run lint:file src/runtime/mlx-server.ts src/runtime/strategies/mlx.ts tests/runtime/mlx-server.test.ts` → `biome check` — no issues, no fixes applied.
+- Pre-commit hook (`bun run scripts/docs-check.ts`) passed on commit — no
+  `docs/architecture.md` update was required since this is a small internal
+  wiring change on an already-documented subsystem (`src/media`), not a new
+  subsystem or a change to documented data flow.
 
-## Compat contract verification (explicit)
-- `deps.baseUrl` set (or `MLX_BASE_URL` env) → `externalServerStrategy` is used,
-  `daemonLoad()` returns `{ baseUrl }` with **no spawn call** — matches
-  "server already running, warm is a no-op reachability path" exactly as
-  before the rewrite.
-- No `baseUrl`/env → `createManagedRuntime(mlxStrategy, { fetchImpl, spawn })`
-  is used, so `warm` goes through the base's real spawn-and-supervise path,
-  calling `mlx_lm.server` with the strategy's `launch()` — verified by the new
-  test.
-- `contextCapability: 'fixed'` means `numCtx` is accepted by `warm()` but never
-  turned into a CLI flag (`launch` ignores `_numCtx`).
+## Commit
+- `483a840` — `feat(media): Wan workflow takes checkpoint from opts.model (gen-fit injection)`
+  on branch `slice-28-hardware-adaptive-gen`. Files: `src/media/generate/comfy-lane.ts`
+  (modified), `tests/media/wan-checkpoint.test.ts` (new).
 
-## Commits
-- `4491fe8` — `refactor(runtime): rewrite MLX onto the managed base (fixed-context, supervised)` (contains all three file changes: `mlx-server.ts`, `strategies/mlx.ts`, `mlx-server.test.ts`).
-
-No additional commits were needed this session — the implementation, its tests,
-typecheck, and lint were already correct and complete. This report and the
-`.superpowers/sdd/progress.md` ledger entry are the only artifacts produced
-this session.
+Only these two files were staged and committed. Other unstaged changes present
+in the working tree at commit time (from other in-flight Slice 28 tasks/
+sessions, e.g. `.superpowers/sdd/task-1..4-*`, `.remember/*`) were left
+untouched.
 
 ## Concerns / follow-ups
-- None outstanding for this task. The stale `task-5-report.md` mismatch
-  (leftover from a different slice's task numbering) is now corrected; worth a
-  quick sanity check on `task-1..4` briefs/reports too if a future audit finds
-  more cross-slice filename collisions.
+- None blocking. As the brief and code comment both note, the exact
+  `CheckpointLoaderSimple` node wiring (id `'10'`, input key `ckpt_name`) is
+  shape-only and has not been exercised against a live ComfyUI server —
+  correcting it against a real Wan workflow export is deferred to the
+  Slice 27 Phase C live-verify gate (`MULTIMODAL_LIVE=1`), consistent with how
+  the rest of `comfy-lane.ts` is already flagged.
+- Worth a follow-up audit of `task-1..4-report.md` for similar cross-slice
+  filename collisions, per the note already left in this same file by the
+  prior task's session.
