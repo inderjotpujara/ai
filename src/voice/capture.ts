@@ -8,12 +8,18 @@ export type CaptureDeps = {
 
 async function defaultSpawn(cmd: string[]) {
   const p = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe' });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).bytes(),
+  // `.arrayBuffer()` + wrap, NOT `.bytes()`: live-verify (Task 13) found
+  // `.bytes()` on this Bun runtime hands back an object that fails
+  // `instanceof Uint8Array` and has no numeric `.length`, so a later
+  // `Uint8Array.prototype.set(bytes)` silently copies zero elements —
+  // every capture decoded to an all-zero buffer (empty transcript, no
+  // error). `.arrayBuffer()` is unambiguous and gives a real Uint8Array.
+  const [stdoutBuf, stderr, code] = await Promise.all([
+    new Response(p.stdout).arrayBuffer(),
     new Response(p.stderr).text(),
     p.exited,
   ]);
-  return { code, stdout, stderr };
+  return { code, stdout: new Uint8Array(stdoutBuf), stderr };
 }
 
 /** Reinterprets a byte buffer of little-endian Float32 as a Float32Array (copy for alignment). */
