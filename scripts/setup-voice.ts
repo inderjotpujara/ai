@@ -10,7 +10,7 @@
  * after extraction, so a partial / stalled download on a retry is skipped.
  */
 import { existsSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DEFAULT_VOICE_MODEL, voiceCacheDir } from '../src/voice/model.ts';
 
@@ -80,6 +80,13 @@ async function main(): Promise<void> {
   if (tarCode !== 0) {
     console.error('Extraction failed.');
     return;
+  }
+  try {
+    // Best-effort housekeeping: the ~100MB archive is no longer needed once
+    // extracted, so don't leave it sitting in the cache dir.
+    await rm(archive, { force: true });
+  } catch (err) {
+    console.error(`Could not delete archive ${archive}: ${err}`);
   }
   console.error(
     isModelReady(dir) ? `Voice model ready: ${dir}` : 'Extraction incomplete.',

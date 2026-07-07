@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { join, sep } from 'node:path';
 import { withWallClock } from '../reliability/timeout.ts';
 import { ATTR, withVoiceTranscribeSpan } from '../telemetry/spans.ts';
 import {
@@ -10,15 +11,38 @@ import {
   VoiceOutcome,
 } from './types.ts';
 
+const require = createRequire(import.meta.url);
+
+/**
+ * Resolves the sherpa-onnx dylib directories from the addon's INSTALLED
+ * location (via `require.resolve`), never from `process.cwd()`. cwd-relative
+ * resolution would (a) load an attacker-controlled dylib if voice is ever run
+ * from an untrusted cwd that happens to contain its own
+ * `node_modules/sherpa-onnx-darwin-arm64`, and (b) break voice outright
+ * whenever the process launches from anywhere other than the repo root.
+ */
+function resolveSherpaDyldDirs(): string[] {
+  const resolved = require.resolve('sherpa-onnx-node');
+  const marker = `${sep}node_modules${sep}sherpa-onnx-node${sep}`;
+  const idx = resolved.indexOf(marker);
+  if (idx === -1) {
+    throw new Error(
+      `could not locate the sherpa-onnx-node install root from ${resolved}`,
+    );
+  }
+  const nodeModulesRoot = resolved.slice(0, idx + `${sep}node_modules`.length);
+  return [
+    join(nodeModulesRoot, 'sherpa-onnx-node'),
+    join(nodeModulesRoot, 'sherpa-onnx-darwin-arm64'),
+  ];
+}
+
 /** Sets the dyld path the addon needs, then loads it (default loader). */
 function defaultLoadSherpa(): unknown {
-  const root = join(process.cwd(), 'node_modules');
   process.env.DYLD_LIBRARY_PATH = [
-    join(root, 'sherpa-onnx-node'),
-    join(root, 'sherpa-onnx-darwin-arm64'),
+    ...resolveSherpaDyldDirs(),
     process.env.DYLD_LIBRARY_PATH ?? '',
   ].join(':');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   return require('sherpa-onnx-node');
 }
 
@@ -193,7 +217,13 @@ export function createSubprocessTranscriber(
             span.setAttribute(ATTR.VOICE_OUTCOME, VoiceOutcome.Ok);
             return text;
           } catch (err) {
-            if (err instanceof Error && err.message === 'timeout') kill();
+            if (err instanceof Error && err.message === 'timeout') {
+              kill();
+              // withWallClock already lost the race against `done`; a later
+              // rejection/resolution from the killed subprocess must not
+              // become an unhandled rejection.
+              done.catch(() => {});
+            }
             span.setAttribute(
               ATTR.VOICE_AUDIO_SECONDS,
               frames.samples.length / frames.sampleRate,

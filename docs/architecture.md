@@ -2968,14 +2968,17 @@ a chat session).
 
 New span `voice.transcribe` (`withVoiceTranscribeSpan`,
 `telemetry/spans.ts`) wraps every transcribe call (both execution-seam
-branches) with `ATTR.VOICE_STT_MODEL` (`voice.stt.model`),
-`ATTR.VOICE_CAPTURE_SOURCE` (`voice.capture.source`, `CaptureSource`),
-`ATTR.VOICE_AUDIO_SECONDS` (`voice.audio.seconds`, samples ÷ sample rate),
-`ATTR.VOICE_DURATION_MS` (`voice.duration.ms`, wall-clock), and
-`ATTR.VOICE_OUTCOME` (`voice.outcome`, `VoiceOutcome`) — all four are set
-on both the success and failure paths (a timeout is distinguished from a
-generic failure by the outcome value), following the same no-op-safe
-`inSpan` pattern as every other subsystem's spans.
+branches). `withVoiceTranscribeSpan` itself sets `ATTR.VOICE_STT_MODEL`
+(`voice.stt.model`), `ATTR.VOICE_CAPTURE_SOURCE` (`voice.capture.source`,
+`CaptureSource`), and `ATTR.INPUT_MODALITY` (`gen_ai.input.modality` =
+`'audio'`) once up-front, before the transcriber runs. Three further
+attributes — `ATTR.VOICE_AUDIO_SECONDS` (`voice.audio.seconds`, samples ÷
+sample rate), `ATTR.VOICE_DURATION_MS` (`voice.duration.ms`, wall-clock), and
+`ATTR.VOICE_OUTCOME` (`voice.outcome`, `VoiceOutcome`) — are set inside each
+transcriber implementation itself, on **both** the success and failure paths
+(a timeout is distinguished from a generic failure by the outcome value),
+following the same no-op-safe `inSpan` pattern as every other subsystem's
+spans.
 
 ### Why sherpa-onnx (browser-reuse rationale)
 
@@ -2999,6 +3002,14 @@ against a fake `MicIo` covering start/stop/cancel/error/max-length paths),
 `ingest.ts` (degrade-never-crash across file/mic/both, ledger recording).
 **Not** unit-tested: `cli-io.ts` (real ffmpeg/TTY glue, by design — see
 above) and `scripts/setup-voice.ts`'s actual network download. Live-verify
-against a real microphone, a real `ffmpeg avfoundation` capture, and the
-real `sherpa-onnx-node` addon is **Task 13**, gated (not run as part of the
-default suite) exactly like the multimodal live-verify pass in §22.
+against the real `sherpa-onnx-node` addon, the real downloaded moonshine-tiny
+model, and real `ffmpeg` — **Task 13**, gated behind `VOICE_LIVE=1` (not run
+as part of the default suite), exactly like the multimodal live-verify pass
+in §22 — **ran and passed**: a macOS `say`-generated speech clip transcribed
+correctly through both execution-seam branches (in-process and
+`AGENT_VOICE_EXEC=subprocess`), and the pass caught a real bug (the
+`.bytes()`-vs-`.arrayBuffer()` all-zero-buffer issue noted in `capture.ts`
+above). Only interactive real-microphone capture (`captureFromMic`'s actual
+`avfoundation` tap-to-toggle flow) remains a manual, human-in-the-loop
+verification step — it can't be automated the way `say` automates the file
+path.

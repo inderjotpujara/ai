@@ -5,7 +5,7 @@
  *  brittle); exercised end-to-end at live-verify (Task 13). */
 import type { DegradationLedger } from '../reliability/ledger.ts';
 import type { MicIo, MicSession } from './capture.ts';
-import { bytesToFloat32, captureFromFile, captureFromMic } from './capture.ts';
+import { captureFromFile, captureFromMic, carryPcmChunk } from './capture.ts';
 import type { VoiceIngestDeps } from './ingest.ts';
 import { ffmpegCmd, resolveVoiceModel } from './model.ts';
 import { createTranscriber } from './transcribe.ts';
@@ -120,11 +120,19 @@ function createMicIo(cfg: VoiceConfig, env: Env): MicIo {
 
       async function* frames(): AsyncIterable<Float32Array> {
         const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+        // A pipe read is not guaranteed 4-byte aligned. Carry any leftover
+        // 1-3 bytes from the previous chunk forward so a misaligned split
+        // never drops a partial sample or desyncs the byte-phase of the
+        // chunks that follow (see carryPcmChunk in capture.ts). Any <4-byte
+        // remainder at stream end is correctly discarded (never consumed).
+        let leftover: Uint8Array = new Uint8Array(0);
         try {
           for (;;) {
             const { done, value } = await reader.read();
             if (done) return;
-            if (value.length >= 4) yield bytesToFloat32(value);
+            const result = carryPcmChunk(leftover, value);
+            leftover = result.leftover;
+            if (result.floats.length > 0) yield result.floats;
           }
         } finally {
           reader.releaseLock();
@@ -158,9 +166,10 @@ function createMicIo(cfg: VoiceConfig, env: Env): MicIo {
       };
       stdin.on('data', onData);
       let unsubscribed = false;
-      return () => {
+      const restore = () => {
         // Idempotent: safe to call more than once (e.g. a caller unsubscribes
-        // in both a success and a finally path).
+        // in both a success and a finally path, or the exit backstop below
+        // fires after a normal unsubscribe already ran).
         if (unsubscribed) return;
         unsubscribed = true;
         stdin.off('data', onData);
@@ -170,6 +179,15 @@ function createMicIo(cfg: VoiceConfig, env: Env): MicIo {
         // askYesNo prompts in chat's main()) would otherwise be silently
         // dropped. Pause so stdin sits idle until the next reader resumes it.
         stdin.pause();
+      };
+      // Backstop: an unexpected process exit mid-capture (uncaught
+      // exception, unhandled rejection, signal) must not leave the terminal
+      // stuck in raw mode for the user's shell. `restore` is idempotent, so
+      // this is harmless if the normal unsubscribe path already ran.
+      process.once('exit', restore);
+      return () => {
+        process.removeListener('exit', restore);
+        restore();
       };
     },
     print(msg) {

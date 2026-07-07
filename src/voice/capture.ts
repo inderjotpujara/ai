@@ -1,9 +1,12 @@
+import { existsSync } from 'node:fs';
 import { type VoiceConfig, VoiceError, type VoiceFrames } from './types.ts';
 
 export type CaptureDeps = {
   spawn?: (
     cmd: string[],
   ) => Promise<{ code: number; stdout: Uint8Array; stderr: string }>;
+  /** Injectable for tests; defaults to a real filesystem check. */
+  exists?: (path: string) => boolean;
 };
 
 async function defaultSpawn(cmd: string[]) {
@@ -29,12 +32,48 @@ export function bytesToFloat32(bytes: Uint8Array): Float32Array {
   return new Float32Array(copy.buffer, 0, Math.floor(copy.byteLength / 4));
 }
 
+/**
+ * Merges leftover bytes from a previous PCM chunk with a new chunk, splits at
+ * the last 4-byte-aligned boundary, and returns the aligned samples plus the
+ * (0-3 byte) remainder to carry into the next call. A raw pipe/stream read is
+ * not guaranteed to land on a 4-byte boundary, so converting each chunk
+ * independently (via `bytesToFloat32` alone) silently drops the trailing
+ * partial sample of a misaligned chunk AND desyncs the byte-phase of every
+ * chunk after it — garbled waveform, wrong/empty transcript. Pure + hermetic
+ * so it's unit-testable independent of the real ffmpeg pipe (`cli-io.ts`).
+ */
+export function carryPcmChunk(
+  leftover: Uint8Array,
+  chunk: Uint8Array,
+): { floats: Float32Array; leftover: Uint8Array } {
+  const combined = new Uint8Array(leftover.byteLength + chunk.byteLength);
+  combined.set(leftover);
+  combined.set(chunk, leftover.byteLength);
+  const whole = Math.floor(combined.byteLength / 4) * 4;
+  return {
+    floats:
+      whole > 0
+        ? bytesToFloat32(combined.subarray(0, whole))
+        : new Float32Array(0),
+    leftover: combined.subarray(whole),
+  };
+}
+
+const MIC_SAMPLE_RATE = 16000;
+/** Hard cap on a single capture so the buffer JSON-serialized to the STT worker can't grow unbounded. Shared by the mic and file-decode paths. */
+const MAX_CAPTURE_SECONDS = 60;
+export const MAX_CAPTURE_SAMPLES = MAX_CAPTURE_SECONDS * MIC_SAMPLE_RATE;
+
 /** Decodes any audio file to mono 16 kHz Float32 via ffmpeg. */
 export async function captureFromFile(
   path: string,
   cfg: VoiceConfig,
   deps: CaptureDeps = {},
 ): Promise<VoiceFrames> {
+  const exists = deps.exists ?? existsSync;
+  if (!exists(path)) {
+    throw new VoiceError(`audio file not found: ${path}`);
+  }
   const spawn = deps.spawn ?? defaultSpawn;
   const { code, stdout, stderr } = await spawn([
     cfg.ffmpeg,
@@ -52,15 +91,17 @@ export async function captureFromFile(
     'pipe:1',
   ]);
   if (code !== 0) throw new VoiceError(`ffmpeg decode failed: ${stderr}`);
-  const samples = bytesToFloat32(stdout);
+  let samples = bytesToFloat32(stdout);
   if (samples.length === 0) throw new VoiceError('no audio decoded from file');
+  if (samples.length > MAX_CAPTURE_SAMPLES) {
+    console.error(
+      `voice: input file decodes to ${samples.length} samples, ` +
+        `exceeding the ${MAX_CAPTURE_SECONDS}s cap — truncating to ${MAX_CAPTURE_SAMPLES}`,
+    );
+    samples = samples.subarray(0, MAX_CAPTURE_SAMPLES);
+  }
   return { samples, sampleRate: 16000 };
 }
-
-const MIC_SAMPLE_RATE = 16000;
-/** Hard cap on a single mic capture so the buffer JSON-serialized to the STT worker can't grow unbounded. */
-const MAX_CAPTURE_SECONDS = 60;
-export const MAX_CAPTURE_SAMPLES = MAX_CAPTURE_SECONDS * MIC_SAMPLE_RATE;
 
 export type MicSession = {
   frames: AsyncIterable<Float32Array>;

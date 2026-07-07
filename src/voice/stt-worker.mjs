@@ -3,15 +3,35 @@
 // and exits. Robust fallback for platforms where the addon can't load
 // in-process under Bun (see Task-1 spike / createInProcessTranscriber).
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 const require = createRequire(import.meta.url);
 
+// Resolves the sherpa-onnx dylib dirs from the addon's INSTALLED location
+// (via require.resolve), never from process.cwd() — cwd-relative resolution
+// would (a) load an attacker-controlled dylib if this worker is ever spawned
+// against an untrusted cwd containing its own
+// node_modules/sherpa-onnx-darwin-arm64, and (b) break voice whenever chat
+// is launched from anywhere other than the repo root.
+function resolveSherpaDyldDirs() {
+  const resolved = require.resolve('sherpa-onnx-node');
+  const marker = `${sep}node_modules${sep}sherpa-onnx-node${sep}`;
+  const idx = resolved.indexOf(marker);
+  if (idx === -1) {
+    throw new Error(
+      `could not locate the sherpa-onnx-node install root from ${resolved}`,
+    );
+  }
+  const nodeModulesRoot = resolved.slice(0, idx + `${sep}node_modules`.length);
+  return [
+    join(nodeModulesRoot, 'sherpa-onnx-node'),
+    join(nodeModulesRoot, 'sherpa-onnx-darwin-arm64'),
+  ];
+}
+
 function loadSherpa() {
-  const root = join(process.cwd(), 'node_modules');
   process.env.DYLD_LIBRARY_PATH = [
-    join(root, 'sherpa-onnx-node'),
-    join(root, 'sherpa-onnx-darwin-arm64'),
+    ...resolveSherpaDyldDirs(),
     process.env.DYLD_LIBRARY_PATH ?? '',
   ].join(':');
   return require('sherpa-onnx-node');
