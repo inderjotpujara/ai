@@ -23,7 +23,7 @@ import {
   interactiveTTY,
   stdinInput,
 } from '../provisioning/ui/prompt.ts';
-import { formatLedger } from '../reliability/ledger.ts';
+import { DegradeKind, formatLedger } from '../reliability/ledger.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
 import {
   effectiveKvBytesPerToken,
@@ -259,8 +259,17 @@ async function main(): Promise<void> {
           // pay for.
           let promptWithVoice = rawPrompt;
           if (flags.voice || flags.voiceIn.length > 0) {
-            const voiceDeps = createCliVoiceDeps(ledger);
+            // Deps construction AND ingestVoice share one try/catch: building
+            // real deps synchronously loads the sherpa-onnx addon and
+            // constructs its recognizer (createCliVoiceDeps -> createTranscriber
+            // -> createInProcessTranscriber), which throws before ingestVoice's
+            // own internal degrade-to-warning logic ever runs — e.g. the voice
+            // model hasn't been downloaded yet, or the addon fails to load.
+            // Any failure here must degrade to the original (non-voice) prompt
+            // rather than aborting the whole chat turn.
+            let voiceDeps: ReturnType<typeof createCliVoiceDeps> | undefined;
             try {
+              voiceDeps = createCliVoiceDeps(ledger);
               const voiceResult = await ingestVoice(
                 rawPrompt,
                 flags,
@@ -271,8 +280,18 @@ async function main(): Promise<void> {
               for (const warning of voiceResult.warnings) {
                 console.error(warning);
               }
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              console.error(
+                `voice: unavailable (${message}) — run 'bun run setup:voice' to install the model`,
+              );
+              ledger?.record({
+                kind: DegradeKind.ToolSkipped,
+                subject: 'voice',
+                reason: message,
+              });
             } finally {
-              await voiceDeps.transcriber.close();
+              await voiceDeps?.transcriber.close();
             }
           }
 

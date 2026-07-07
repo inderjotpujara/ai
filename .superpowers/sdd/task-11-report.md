@@ -59,3 +59,29 @@ Inside the `withMcpRun` callback, right after `createMediaStore(run.dir)` and be
 - `bun run lint:file` on all 5 touched/created files → clean (after one `biome check --write` pass for import order + line wrapping).
 - Checked for import cycles: `src/voice/*` does not import anything from `src/cli/*`; `chat.ts` imports `voice/cli-io.ts` and `voice/ingest.ts` one-way. No cycle.
 - `src/voice/capture.ts`'s only change is exporting an already-existing private helper (`bytesToFloat32`) — no behavior change; its existing tests (`capture-file.test.ts`, `capture-mic.test.ts`) still pass.
+
+## Review-findings fixes (post-DONE_WITH_CONCERNS pass)
+
+### Important: voice-deps construction now inside the never-crash boundary (`src/cli/chat.ts`)
+`createCliVoiceDeps(ledger)` was being called *outside* the `try` that wraps `ingestVoice`. `createCliVoiceDeps` → `createTranscriber` → `createInProcessTranscriber` synchronously `require`s the sherpa-onnx native addon and constructs `new sherpa.OfflineRecognizer(moonshineConfig(cfg.modelDir))` — on the common first-run case (voice model not yet downloaded via `bun run setup:voice`, or the addon failing to load on the platform) this throws *before* `ingestVoice`'s own internal degrade-to-warning logic ever gets a chance to run, propagating up through `main().catch` → `process.exit(1)` and aborting the entire chat turn instead of degrading to text-only.
+
+Fix: `voiceDeps` is now declared outside the `try` (typed `ReturnType<typeof createCliVoiceDeps> | undefined`) and both the construction and `ingestVoice` call live inside one `try`:
+- **Success path:** unchanged — `promptWithVoice` gets `ingestVoice`'s returned prompt, its warnings print via `console.error` (already `voice: `-prefixed), transcriber closes in `finally`.
+- **Failure path (deps construction or, defensively, ingestVoice itself throwing):** `catch` prints `` voice: unavailable (<error message>) — run 'bun run setup:voice' to install the model `` to stderr, records `ledger?.record({ kind: DegradeKind.ToolSkipped, subject: 'voice', reason: message })`, and lets execution fall through with `promptWithVoice` still equal to `rawPrompt` (never reassigned) — the chat turn proceeds text-only. `DegradeKind` is now imported alongside `formatLedger` from `../reliability/ledger.ts`.
+- **`finally`:** `await voiceDeps?.transcriber.close()` — optional-chained so it's a no-op when construction never got far enough to produce a `transcriber` (the "only if it was constructed" requirement).
+- The pre-existing no-voice path (neither `flags.voice` nor `flags.voiceIn.length`) is untouched — voice deps are still never constructed when no voice flag is present.
+
+### Minor 1: raw-TTY now paused on `onKey` unsubscribe (`src/voice/cli-io.ts`, real `MicIo.onKey`)
+The returned unsubscribe removed the `'data'` listener and restored raw mode but never `stdin.pause()`d, leaving stdin flowing with no consumer — a keystroke arriving before the next readline prompt (e.g. `askYesNo` later in chat's `main()`) could be silently dropped. Fixed: unsubscribe now calls `stdin.pause()` after removing the listener and restoring cooked mode, and is guarded by an `unsubscribed` flag so raw-mode-restore + pause only fire once even if the caller invokes the returned function more than once.
+
+### Minor 2: silencedetect stderr reader now releases its lock (`src/voice/cli-io.ts`, real `MicIo.start`)
+The stderr-watching IIFE resolved `silenceSignaled` on the `silence_start`-after-`silence_end` branch without releasing the reader's lock, unlike `frames()` which already cleans up in a `finally`. Added a matching `finally { reader.releaseLock(); }` around the stderr read loop so every exit path (stream `done`, silence resolved, or an error) releases the lock consistently.
+
+## Commands + output (this pass)
+- `bun test tests/voice/` → 32 pass / 0 fail across 10 files.
+- `bun test tests/cli/chat.test.ts tests/cli/run-chat.test.ts` → 8 pass / 0 fail.
+- `bun run typecheck` → clean.
+- `bun run lint:file -- "src/cli/chat.ts" "src/voice/cli-io.ts"` → clean, no fixes needed.
+
+## Seam-test feasibility (deps-construction-throws case)
+Considered adding a hermetic unit test at the chat-wiring seam for "voice deps construction throws → degrades to text-only." Not feasible without a broader refactor: `main()` in `src/cli/chat.ts` is a single unexported function that calls `createCliVoiceDeps` directly by import (no injectable factory), and it also drives `withMcpRun`, `buildRegistry`, runtime discovery, and model-manager wiring inline — mocking just `createCliVoiceDeps` via `bun:test`'s `mock.module` while leaving those other real subsystems live would not be hermetic, and stubbing all of them just to reach the voice branch is out of scope for this fix. `ingestVoice`'s own degrade path (capture/transcribe failures) is already covered by `tests/voice/ingest.test.ts`, which is untouched. Noting this gap for Task 13 (live-verify), where the no-model / addon-load-failure case can be exercised for real (e.g. running `--voice` before `bun run setup:voice`).

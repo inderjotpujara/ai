@@ -109,6 +109,11 @@ function createMicIo(cfg: VoiceConfig, env: Env): MicIo {
           } catch {
             // stderr closed/errored — leave silenceSignaled unresolved; the
             // manual-stop / max-length paths in captureFromMic still apply.
+          } finally {
+            // Mirror frames()'s cleanup: release the lock on every exit path
+            // (done, silence resolved, or errored) so nothing else holding a
+            // reference to child.stderr is left with a dangling lock.
+            reader.releaseLock();
           }
         })();
       });
@@ -152,9 +157,19 @@ function createMicIo(cfg: VoiceConfig, env: Env): MicIo {
         }
       };
       stdin.on('data', onData);
+      let unsubscribed = false;
       return () => {
+        // Idempotent: safe to call more than once (e.g. a caller unsubscribes
+        // in both a success and a finally path).
+        if (unsubscribed) return;
+        unsubscribed = true;
         stdin.off('data', onData);
         if (stdin.isTTY && wasRaw !== undefined) stdin.setRawMode(wasRaw);
+        // Restoring cooked mode alone leaves stdin flowing with no consumer —
+        // a keystroke arriving before the next readline prompt (e.g. the
+        // askYesNo prompts in chat's main()) would otherwise be silently
+        // dropped. Pause so stdin sits idle until the next reader resumes it.
+        stdin.pause();
       };
     },
     print(msg) {
