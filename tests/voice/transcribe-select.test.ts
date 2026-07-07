@@ -23,7 +23,10 @@ describe('createTranscriber selection', () => {
 describe('createSubprocessTranscriber', () => {
   it('returns the text from the worker stdout on success', async () => {
     const t = createSubprocessTranscriber(cfg, {
-      spawn: async () => ({ code: 0, stdout: '{"text":"hi"}', stderr: '' }),
+      spawn: () => ({
+        kill: () => {},
+        done: Promise.resolve({ code: 0, stdout: '{"text":"hi"}', stderr: '' }),
+      }),
     });
     const text = await t.transcribe({
       samples: new Float32Array(16000),
@@ -34,7 +37,10 @@ describe('createSubprocessTranscriber', () => {
   });
   it('throws VoiceError with stderr on non-zero exit', async () => {
     const t = createSubprocessTranscriber(cfg, {
-      spawn: async () => ({ code: 1, stdout: '', stderr: 'boom' }),
+      spawn: () => ({
+        kill: () => {},
+        done: Promise.resolve({ code: 1, stdout: '', stderr: 'boom' }),
+      }),
     });
     await expect(
       t.transcribe({ samples: new Float32Array(16000), sampleRate: 16000 }),
@@ -43,14 +49,37 @@ describe('createSubprocessTranscriber', () => {
   it('throws VoiceError before spawning on empty samples', async () => {
     let spawned = false;
     const t = createSubprocessTranscriber(cfg, {
-      spawn: async () => {
+      spawn: () => {
         spawned = true;
-        return { code: 0, stdout: '{"text":""}', stderr: '' };
+        return {
+          kill: () => {},
+          done: Promise.resolve({ code: 0, stdout: '{"text":""}', stderr: '' }),
+        };
       },
     });
     await expect(
       t.transcribe({ samples: new Float32Array(0), sampleRate: 16000 }),
     ).rejects.toThrow(/no audio/i);
     expect(spawned).toBe(false);
+  });
+  it('kills the child and rejects with timeout when the worker hangs', async () => {
+    let killed = false;
+    const t = createSubprocessTranscriber(
+      { ...cfg, timeoutMs: 20 },
+      {
+        spawn: () => ({
+          kill: () => {
+            killed = true;
+          },
+          done: new Promise(() => {
+            // never resolves — simulates a hung `node` worker.
+          }),
+        }),
+      },
+    );
+    await expect(
+      t.transcribe({ samples: new Float32Array(16000), sampleRate: 16000 }),
+    ).rejects.toThrow(/timeout/i);
+    expect(killed).toBe(true);
   });
 });

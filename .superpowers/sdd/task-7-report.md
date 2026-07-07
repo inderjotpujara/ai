@@ -126,3 +126,95 @@ tests verbatim, plus three added subprocess tests (hermetic, injected
 
 ## Concerns
 None blocking. Full-suite run confirms no regressions elsewhere.
+
+## Post-review fixes (2026-07-07) — two Important findings
+
+### Finding 1: subprocess telemetry asymmetry
+`createInProcessTranscriber` set `ATTR.VOICE_AUDIO_SECONDS`,
+`ATTR.VOICE_DURATION_MS`, and `ATTR.VOICE_OUTCOME` on both its success and
+catch paths, then rethrew on failure. `createSubprocessTranscriber`'s
+callback didn't even take the `span` argument from `withVoiceTranscribeSpan`,
+so none of those three attributes were ever recorded for the subprocess
+path — an observability gap between the two transcriber impls.
+
+Fix: `createSubprocessTranscriber.transcribe` now passes an `async (span) =>
+{...}` callback to `withVoiceTranscribeSpan`, mirroring the in-process
+impl's exact pattern:
+- records `startedAt = Date.now()` before the spawn/await;
+- on success, sets `VOICE_AUDIO_SECONDS` (`frames.samples.length /
+  frames.sampleRate`), `VOICE_DURATION_MS` (`Date.now() - startedAt`), and
+  `VOICE_OUTCOME = VoiceOutcome.Ok`, then returns the trimmed text;
+- on catch, sets the same three attributes, with `VOICE_OUTCOME` set to
+  `VoiceOutcome.Timeout` when `err.message === 'timeout'`, else
+  `VoiceOutcome.Failed`, then rethrows (never swallowed).
+
+### Finding 2: orphaned child process on timeout
+`withWallClock(ms, fn)` only races the promise — it never kills the loser.
+`defaultNodeSpawn`'s `Bun.spawn`ed child previously had no way to be killed
+from the caller, so a hung `node` worker leaked as an orphaned process past
+the wall-clock timeout. `src/runtime/process-supervisor.ts` (~line 87-92)
+already has the correct pattern: `child.kill('SIGTERM')` in the timeout
+catch.
+
+Fix — new spawn contract:
+```ts
+export type SpawnHandle = {
+  kill(): void;
+  done: Promise<{ code: number; stdout: string; stderr: string }>;
+};
+export type SpawnFn = (cmd: string[], stdin: string) => SpawnHandle;
+```
+`spawn` now returns synchronously with a `kill()` and a `done` promise
+(previously `spawn` itself was `async` and returned the settled result).
+`defaultNodeSpawn` retains the real `Bun.Subprocess` (`proc`), starts the
+stdin-write/collect work as a background async IIFE assigned to `done`, and
+exposes `kill: () => proc.kill('SIGTERM')`.
+
+`createSubprocessTranscriber.transcribe` now does:
+```ts
+const { kill, done } = spawn(['node', worker], payload);
+try {
+  const { code, stdout, stderr } = await withWallClock(cfg.timeoutMs, () => done);
+  if (code !== 0) throw new VoiceError(`stt worker failed: ${stderr}`);
+  // ...success telemetry + return text
+} catch (err) {
+  if (err instanceof Error && err.message === 'timeout') kill();
+  // ...failure telemetry
+  throw err;
+}
+```
+The non-zero-exit path (`VoiceError('stt worker failed: ...')`) and the
+empty-samples-before-spawn guard (`VoiceError('no audio captured', ...)`,
+thrown before `spawn` is ever called) are both unchanged and still covered
+by existing tests.
+
+### Test changes — `tests/voice/transcribe-select.test.ts`
+Updated the fake `spawn` in all three existing subprocess tests to the new
+shape (`() => ({ kill: () => {...}, done: Promise.resolve({code, stdout,
+stderr}) })` — synchronous return, no longer `async`). All three assertions
+(success text, non-zero-exit `VoiceError`, empty-samples short-circuit)
+kept their original expectations.
+
+Added a fourth test, `'kills the child and rejects with timeout when the
+worker hangs'`:
+- config `{...cfg, timeoutMs: 20}`;
+- fake `spawn` returns `{ kill: () => { killed = true }, done: new
+  Promise(() => {}) }` — a `done` that never settles, simulating a hung
+  worker;
+- asserts `transcribe(...)` rejects with `/timeout/i` **and** that `killed
+  === true`, proving the fix actually invokes `kill()` on timeout rather
+  than just detecting it.
+
+### Verification run
+- `bun test tests/voice/transcribe-select.test.ts` → 6 pass, 0 fail, 9
+  `expect()` calls (was 5 pass/7 expects before; +1 test, +2 expects for
+  the new timeout-kill test).
+- `bun run typecheck` → clean (`tsc --noEmit`, no output).
+- `bun test tests/voice/` (full voice suite) → 19 pass, 0 fail across 6
+  files — no regressions in Tasks 1–6 or the other Task 7 tests.
+
+### Scope discipline
+Only `src/voice/transcribe.ts` (subprocess transcriber + its `SpawnFn`
+type) and `tests/voice/transcribe-select.test.ts` were touched, per the
+review brief. `createInProcessTranscriber` and `src/voice/stt-worker.mjs`
+(the worker) were not modified.

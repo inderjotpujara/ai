@@ -112,24 +112,35 @@ export function createInProcessTranscriber(
   };
 }
 
+export type SpawnHandle = {
+  kill(): void;
+  done: Promise<{ code: number; stdout: string; stderr: string }>;
+};
+
+export type SpawnFn = (cmd: string[], stdin: string) => SpawnHandle;
+
 export type SubprocessDeps = {
-  spawn?: (
-    cmd: string[],
-    stdin: string,
-  ) => Promise<{ code: number; stdout: string; stderr: string }>;
+  spawn?: SpawnFn;
   source?: CaptureSource;
 };
 
-async function defaultNodeSpawn(cmd: string[], stdin: string) {
-  const p = Bun.spawn(cmd, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
-  p.stdin.write(stdin);
-  await p.stdin.end();
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+function defaultNodeSpawn(cmd: string[], stdin: string): SpawnHandle {
+  const proc = Bun.spawn(cmd, {
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const done = (async () => {
+    proc.stdin.write(stdin);
+    await proc.stdin.end();
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr };
+  })();
+  return { kill: () => proc.kill('SIGTERM'), done };
 }
 
 /** Transcribes by shelling out to a `node` worker running the sherpa-onnx
@@ -150,22 +161,48 @@ export function createSubprocessTranscriber(
           'check the microphone / input file',
         );
       }
-      return withVoiceTranscribeSpan({ model: cfg.modelDir, source }, () =>
-        withWallClock(cfg.timeoutMs, async () => {
+      return withVoiceTranscribeSpan(
+        { model: cfg.modelDir, source },
+        async (span) => {
+          const startedAt = Date.now();
           const payload = JSON.stringify({
             modelDir: cfg.modelDir,
             sampleRate: frames.sampleRate,
             samples: Array.from(frames.samples),
           });
-          const { code, stdout, stderr } = await spawn(
-            ['node', worker],
-            payload,
-          );
-          if (code !== 0) {
-            throw new VoiceError(`stt worker failed: ${stderr}`);
+          const { kill, done } = spawn(['node', worker], payload);
+          try {
+            const { code, stdout, stderr } = await withWallClock(
+              cfg.timeoutMs,
+              () => done,
+            );
+            if (code !== 0) {
+              throw new VoiceError(`stt worker failed: ${stderr}`);
+            }
+            const text = String(JSON.parse(stdout).text ?? '').trim();
+            span.setAttribute(
+              ATTR.VOICE_AUDIO_SECONDS,
+              frames.samples.length / frames.sampleRate,
+            );
+            span.setAttribute(ATTR.VOICE_DURATION_MS, Date.now() - startedAt);
+            span.setAttribute(ATTR.VOICE_OUTCOME, VoiceOutcome.Ok);
+            return text;
+          } catch (err) {
+            if (err instanceof Error && err.message === 'timeout') kill();
+            span.setAttribute(
+              ATTR.VOICE_AUDIO_SECONDS,
+              frames.samples.length / frames.sampleRate,
+            );
+            span.setAttribute(ATTR.VOICE_DURATION_MS, Date.now() - startedAt);
+            span.setAttribute(
+              ATTR.VOICE_OUTCOME,
+              (err as Error).message === 'timeout'
+                ? VoiceOutcome.Timeout
+                : VoiceOutcome.Failed,
+            );
+            throw err;
           }
-          return String(JSON.parse(stdout).text ?? '').trim();
-        }),
+        },
       );
     },
     async close() {},
