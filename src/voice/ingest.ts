@@ -27,7 +27,11 @@ export async function ingestVoice(
     try {
       const frames = await get();
       const text = (await deps.transcriber.transcribe(frames)).trim();
-      if (text) transcripts.push(text);
+      if (text) {
+        transcripts.push(text);
+      } else {
+        warnings.push('voice: no speech detected in the audio');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const hint =

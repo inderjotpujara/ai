@@ -178,3 +178,52 @@ must be exercised by a human; it cannot be scripted in this environment.
   pass, 0 fail.
 - Full suite `bun run test` — 1077 pass / 36 skip / 0 fail (voice.live skipped without
   `VOICE_LIVE=1`, as designed) — no regressions from the capture.ts fix.
+
+## 11. Closeout — two small fixes surfaced by live-verify
+
+### Change 1 — docs-accuracy: document the in-process timeout limitation
+
+Live-verify (this task) established that `recognizer.decode()` in
+`createInProcessTranscriber` (`src/voice/transcribe.ts`) is a **synchronous native call** that
+blocks the JS event loop. `withWallClock(cfg.timeoutMs, ...)` races a `setTimeout` against the
+work — but since the event loop is blocked for the whole `decode()` call, the timer callback
+cannot run until `decode()` itself returns, i.e. the timeout is a no-op on this path. The
+**subprocess** path (`AGENT_VOICE_EXEC=subprocess`) does not have this problem: `decode()` runs
+in a separate `node` worker process, so the parent's `withWallClock` timer fires on schedule and
+`kill()` terminates the worker.
+
+The existing docs (§23 of `docs/architecture.md`) described both paths as wrapped in "the
+identical `withWallClock` shape" without noting this asymmetry — which could mislead a reader
+into thinking the in-process timeout is enforced. Fixed by adding a "Known limitation" paragraph
+immediately after the execution-seam description (before "### Auto-stop"), and a one-line code
+comment in `src/voice/transcribe.ts` directly above the in-process `withWallClock` call.
+
+### Change 2 — minor UX: warn on an empty --voice-in transcript
+
+`ingestVoice`'s `collect()` helper (`src/voice/ingest.ts`) previously did `if (text)
+transcripts.push(text)` — a successful capture+transcribe that yields an empty string (e.g. a
+silent `--voice-in` file) was silently dropped with zero user feedback. Fixed: the success path
+now pushes an informational warning `voice: no speech detected in the audio` when the trimmed
+transcript is empty, without recording a ledger degrade (this isn't a failure — it's empty
+input) and without throwing. The existing throw-path (capture/transcribe throws) is untouched.
+
+Added a new test in `tests/voice/ingest.test.ts`:
+`warns (no throw) when capture+transcribe succeed but yield no speech` — asserts the prompt is
+unchanged and `warnings` equals exactly `['voice: no speech detected in the audio']`.
+
+### Files changed
+
+- `docs/architecture.md` — §23 "Known limitation" paragraph.
+- `src/voice/transcribe.ts` — one-line comment above the in-process `withWallClock` call.
+- `src/voice/ingest.ts` — empty-transcript-success now warns instead of silently dropping.
+- `tests/voice/ingest.test.ts` — new test for the empty-transcript-success case.
+
+### Verification run
+
+- `bun test tests/voice/ingest.test.ts` — 4 pass, 0 fail, 8 expect() calls.
+- `bun test tests/voice/` — 33 pass, 0 fail, 56 expect() calls (no regressions).
+- `bun run typecheck` — clean.
+- `bun run docs:check` — `✔ docs-check: living docs present + linked; every src subsystem
+  documented.`
+- `bun run lint:file -- "src/voice/ingest.ts" "src/voice/transcribe.ts"
+  "tests/voice/ingest.test.ts" "docs/architecture.md"` — clean, no fixes applied.

@@ -55,6 +55,25 @@ describe('ingestVoice', () => {
     expect(prompt).toBe('base');
     expect(warnings.join(' ')).toMatch(/grant Microphone access/);
   });
+  it('warns (no throw) when capture+transcribe succeed but yield no speech', async () => {
+    const { prompt, warnings } = await ingestVoice(
+      'base',
+      flags({ voiceIn: ['silent.wav'] }),
+      {
+        captureFile: async () => ({
+          samples: new Float32Array(10),
+          sampleRate: 16000,
+        }),
+        captureMic: async () => ({
+          samples: new Float32Array(0),
+          sampleRate: 16000,
+        }),
+        transcriber: { transcribe: async () => '', close: async () => {} },
+      },
+    );
+    expect(prompt).toBe('base');
+    expect(warnings).toEqual(['voice: no speech detected in the audio']);
+  });
   it('returns the prompt unchanged when no voice flag is set', async () => {
     const { prompt } = await ingestVoice('base', flags(), {
       captureFile: async () => ({

@@ -69,6 +69,11 @@ export function createInProcessTranscriber(
         async (span) => {
           const startedAt = Date.now();
           try {
+            // NOTE: recognizer.decode() below is a synchronous native call
+            // that blocks the JS event loop, so this withWallClock timer
+            // cannot fire until decode returns — the timeout is NOT
+            // enforced on this path. Use AGENT_VOICE_EXEC=subprocess when
+            // an enforceable timeout matters (see docs/architecture.md §23).
             const text = await withWallClock(cfg.timeoutMs, async () => {
               const stream = recognizer.createStream();
               try {

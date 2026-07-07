@@ -2921,6 +2921,16 @@ identical `withWallClock` + `voice.transcribe` span shape, so switching the
 seam changes nothing observable except which process actually runs the
 model.
 
+**Known limitation — the in-process timeout is not actually enforced.**
+`recognizer.decode()` is a synchronous native call that blocks the JS event
+loop for its full duration, so the `withWallClock(cfg.timeoutMs, ...)` timer
+wrapping it in `createInProcessTranscriber` never gets a chance to fire
+before `decode()` returns on its own — a pathological hang inside the
+in-process recognizer is not interruptible. The subprocess path does not
+have this problem: the worker runs `decode()` out-of-process, so the parent's
+`withWallClock` timer fires on schedule and the process is killed. Set
+`AGENT_VOICE_EXEC=subprocess` when an enforceable transcribe timeout matters.
+
 ### Auto-stop: ffmpeg `silencedetect`, not a real-time VAD model
 
 **Honest refinement note:** the original Slice-29 re-scope discussion
