@@ -105,13 +105,20 @@ export async function captureFromMic(
     }
   }
 
+  /** Normalizes a thrown value into a display string for logging + VoiceError hints. */
+  function errMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     let stopped = false;
     let recording = false;
 
     const off = io.onKey((key) => {
-      void handleKey(key);
+      void handleKey(key).catch((err: unknown) => {
+        fail('mic key handler failed', err);
+      });
     });
 
     function settleOk() {
@@ -126,11 +133,19 @@ export async function captureFromMic(
       off();
       reject(err);
     }
-    /** Idempotent: stop() may legitimately be requested from more than one trigger. */
+    /**
+     * Idempotent: stop() may legitimately be requested from more than one
+     * trigger. A stop failure (e.g. ESRCH killing an already-dead process)
+     * must never block settling or crash the process.
+     */
     async function stopSession() {
       if (stopped) return;
       stopped = true;
-      await session?.stop();
+      try {
+        await session?.stop();
+      } catch (err) {
+        io.print(`mic stop failed: ${errMessage(err)}`);
+      }
     }
     /** Any "we're done recording" trigger funnels here — safe to call more than once. */
     async function finish() {
@@ -138,6 +153,12 @@ export async function captureFromMic(
       await stopSession();
       await framesDone;
       settleOk();
+    }
+    /** Routes a genuine capture failure to settleErr with the real cause (never the empty/no-energy hint). */
+    function fail(context: string, err: unknown) {
+      const message = errMessage(err);
+      io.print(`${context}: ${message}`);
+      settleErr(new VoiceError('microphone capture failed', message));
     }
 
     async function handleKey(key: 'space' | 'enter' | 'ctrl-c'): Promise<void> {
@@ -159,8 +180,12 @@ export async function captureFromMic(
         }
         session = started;
         framesDone = pumpFrames(started);
-        started.silenceSignaled.then(finish).catch(() => {});
-        framesDone.then(finish).catch(() => {});
+        started.silenceSignaled
+          .then(finish)
+          .catch((err: unknown) => fail('silence detection failed', err));
+        framesDone
+          .then(finish)
+          .catch((err: unknown) => fail('frame capture failed', err));
         return;
       }
       if (recording && (key === 'space' || key === 'enter')) {
@@ -181,5 +206,5 @@ export async function captureFromMic(
       'grant Microphone access to your terminal app in System Settings → Privacy & Security → Microphone',
     );
   }
-  return { samples, sampleRate: 16000 };
+  return { samples, sampleRate: MIC_SAMPLE_RATE };
 }

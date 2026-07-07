@@ -182,3 +182,145 @@ bun run docs:check                         # passes unchanged
 ## Commit
 
 - See parent report — commit SHA and subject reported by the calling task.
+
+---
+
+## Review-fix pass (2026-07-07): hardened mic-capture error paths
+
+The self-review's own "Concerns / follow-ups" flagged exactly what this pass fixed: the
+bare `.catch(() => {})` swallows and the unguarded `stopSession()` were confirmed as real
+gaps by an adversarial review ahead of Task 11 (real ffmpeg wiring). Two Important
+findings + two Minors, all fixed in `src/voice/capture.ts` (`captureFromMic` only —
+`captureFromFile` untouched).
+
+### Important 1 — `stopSession()` had no error handling
+
+**Failure scenario:** once Task 11 wires a real ffmpeg-backed `MicSession`, `session.stop()`
+killing an already-exited process can throw (e.g. `ESRCH`). That rejection would propagate
+out of `stopSession()` → out of `finish()` (called from the silence/frames/manual-stop
+paths) and out of the `ctrl-c` branch of `handleKey`. Since `handleKey` was invoked as
+`void handleKey(key)` with no `.catch`, that became an **unhandled promise rejection**
+(can crash the process) and — because the rejection happened before `settleOk`/`settleErr`
+ran — the outer control promise never settles, hanging `captureFromMic` forever.
+
+**Fix:** wrapped `await session?.stop()` inside `stopSession()` in try/catch. A stop
+failure is now logged via `io.print(\`mic stop failed: ${errMessage(err)}\`)` and
+swallowed — `stopSession()` always resolves normally, so every caller (`finish()`, the
+`ctrl-c` branch) can rely on it never throwing.
+
+**Single-resolve preserved:** `stopSession()` no longer throws at all, so it can't
+interfere with the `settled`/`stopped` guards; `stopped = true` is still set exactly once
+inside the function before the try, so `session.stop()` is still called at most once no
+matter how many triggers race.
+
+### Important 2 — `.catch(() => {})` on `silenceSignaled`/`framesDone` masked real errors
+
+**Failure scenario:** if the real frame async-iterator throws mid-stream (device
+disconnected, ffmpeg not found, bad device) — a genuine capture error — the old bare
+`.catch(() => {})` on both `started.silenceSignaled.then(finish).catch(...)` and
+`framesDone.then(finish).catch(...)` silently dropped it. Because `finish()` was never
+called (the `.then` is skipped when the awaited promise rejects) the outer promise then
+hung forever; if it somehow later reached the empty/no-energy check, the caller would see
+the misleading "grant Microphone access" hint instead of the actual cause (e.g. "device
+disconnected").
+
+**Fix:** added a shared `fail(context, err)` helper (guarded through `settleErr`, which is
+itself guarded by the `settled` flag) that logs `` `${context}: ${message}` `` via
+`io.print` and calls
+`settleErr(new VoiceError('microphone capture failed', errMessage(err)))` — the real error
+message lands in `VoiceError.hint`, distinct from the empty/no-energy hint text. Wired to
+both chains:
+- `started.silenceSignaled.then(finish).catch((err) => fail('silence detection failed', err))`
+- `framesDone.then(finish).catch((err) => fail('frame capture failed', err))`
+
+Also added a `.catch` to the `io.onKey` dispatch — previously `void handleKey(key)`
+discarded the returned promise with no error path at all. Now:
+```ts
+const off = io.onKey((key) => {
+  void handleKey(key).catch((err: unknown) => {
+    fail('mic key handler failed', err);
+  });
+});
+```
+This is the safety net for the one remaining throw path: if a user manually presses a
+second space/enter while `framesDone` has *already* rejected, `finish()`'s
+`await framesDone` re-throws inside `handleKey`, which now routes to `fail` instead of
+becoming an unhandled rejection.
+
+**Single-resolve preserved:** `fail()` always terminates in `settleErr`, which is a no-op
+once `settled` is true. In the race above, by the time the manual keypress's `finish()`
+call reaches its `await framesDone`, the `framesDone.then(finish).catch(fail)` chain has
+almost always already fired `fail` → `settleErr` first (settling the promise), so the
+second `fail` call from the `handleKey` dispatch catch is already a no-op. Even in the
+theoretical tightest race, both paths funnel through the same idempotent `settleErr`, so
+the control promise still resolves/rejects exactly once.
+
+Confirmed the empty/no-energy path is unchanged and still correct: that check only runs
+*after* the control promise resolves via `settleOk()` (silence auto-stop, cap reached, or
+manual stop with zero/silent samples) — it's not reachable from any of the new `fail()`
+paths, which always reject via `settleErr` instead.
+
+### Minor — hardcoded `16000` → `MIC_SAMPLE_RATE`
+
+The mic capture's final `return { samples, sampleRate: 16000 }` now reads
+`return { samples, sampleRate: MIC_SAMPLE_RATE }`, reusing the existing module constant.
+(`captureFromFile`'s own `sampleRate: 16000` was left untouched per the review's explicit
+scope — that function wasn't part of this pass.)
+
+### New tests (`tests/voice/capture-mic.test.ts`)
+
+Extended the fake-io helpers (kept hermetic — no real ffmpeg/mic/TTY):
+- `fakeIo` gained a generic `pressKey(k)` alongside the existing `pressSpace()`.
+- New `liveFakeIo(chunks)`: a frame generator that yields the given chunks then blocks on
+  an internal deferred promise, which only resolves when `session.stop()` is called (and
+  `silenceSignaled` never resolves) — simulating a real ffmpeg pipe that only ends when the
+  process is killed, so only a manual stop can conclude the capture. This was necessary
+  because the original `fakeIo`'s finite in-memory generator completes on its own,
+  which would make a "manual stop" test indistinguishable from the frames-drain path.
+- New `throwingFakeIo(firstChunk, errorMessage)`: yields one chunk then throws inside the
+  async generator, to exercise Important 2's fix.
+
+Three new tests added:
+1. **`ctrl-c cancels the capture with a VoiceError`** — fires `ctrl-c` with no prior
+   `space`; asserts the returned promise rejects with a `VoiceError` matching `/cancelled/i`.
+2. **`a manual second space stops capture and returns the accumulated samples`** — uses
+   `liveFakeIo`; presses space to start, yields a microtask so `pumpFrames` starts draining
+   the live stream, then presses space again to manually stop; asserts the resolved
+   `frames.samples.length` equals the pushed chunk's length (800), proving `stopSession()`
+   → generator-close → `framesDone` → `settleOk()` all still complete correctly through the
+   fixed code path.
+3. **`surfaces the real error (not the mic-permission hint) when the frame stream throws
+   mid-iteration`** — uses `throwingFakeIo` with message `'device disconnected'`; asserts
+   the rejection is a `VoiceError` whose `.hint` contains `'device disconnected'` and does
+   **not** match `/grant Microphone access/i`, directly proving Important 2's fix routes the
+   real cause instead of masking it with the permission hint.
+
+### Verification commands (all green)
+
+```
+bun test tests/voice/capture-mic.test.ts
+# bun test v1.3.11
+#  6 pass
+#  0 fail
+#  10 expect() calls
+# Ran 6 tests across 1 file. [28.00ms]
+
+bun test tests/voice/
+# bun test v1.3.11
+#  27 pass
+#  0 fail
+#  44 expect() calls
+# Ran 27 tests across 8 files. [119.00ms]
+
+bun run typecheck
+# $ tsc --noEmit
+# (clean, no output)
+```
+
+### Files changed in this pass
+
+- `src/voice/capture.ts` — `stopSession()` try/catch, new `errMessage()`/`fail()` helpers,
+  `.catch` wiring on `silenceSignaled`/`framesDone`/`handleKey` dispatch,
+  `MIC_SAMPLE_RATE` reuse in the mic return statement. `captureFromFile` untouched.
+- `tests/voice/capture-mic.test.ts` — `pressKey` added to `fakeIo`, new `liveFakeIo` and
+  `throwingFakeIo` helpers, 3 new tests (6 total, up from 3).
