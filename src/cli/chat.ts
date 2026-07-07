@@ -120,10 +120,10 @@ export async function reuseHintText(
   return `💡 An existing ${best.match} looks similar (${pct}%) — you may not need a new one.`;
 }
 
-/** Split value-taking media flags (`--image/--audio/--video <path>`,
- *  repeatable) and the boolean `--paste` out of the positional args, mirroring
- *  crew.ts's `parseArgs`. Everything else stays positional (joined back into
- *  the raw prompt by the caller). */
+/** Split value-taking media flags (`--image/--audio/--video/--voice-in <path>`,
+ *  repeatable) and the boolean flags `--paste`/`--voice` out of the positional
+ *  args, mirroring crew.ts's `parseArgs`. Everything else stays positional
+ *  (joined back into the raw prompt by the caller). */
 export function parseMediaArgs(argv: string[]): {
   positional: string[];
   flags: IngestFlags;
@@ -134,6 +134,8 @@ export function parseMediaArgs(argv: string[]): {
     audios: [],
     videos: [],
     paste: false,
+    voice: false,
+    voiceIn: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -144,6 +146,12 @@ export function parseMediaArgs(argv: string[]): {
       if (arg === '--image') flags.images.push(value);
       else if (arg === '--audio') flags.audios.push(value);
       else flags.videos.push(value);
+    } else if (arg === '--voice-in') {
+      const value = argv[i + 1];
+      i += 1;
+      if (value !== undefined) flags.voiceIn.push(value);
+    } else if (arg === '--voice') {
+      flags.voice = true;
     } else if (arg === '--paste') {
       flags.paste = true;
     } else if (arg !== undefined) {
@@ -158,7 +166,9 @@ function hasMediaFlags(flags: IngestFlags): boolean {
     flags.images.length > 0 ||
     flags.audios.length > 0 ||
     flags.videos.length > 0 ||
-    flags.paste
+    flags.paste ||
+    flags.voice ||
+    flags.voiceIn.length > 0
   );
 }
 
@@ -167,7 +177,7 @@ async function main(): Promise<void> {
   const rawPrompt = positional.join(' ').trim();
   if (rawPrompt.length === 0 && !hasMediaFlags(flags)) {
     console.error(
-      'Usage: bun run src/cli/chat.ts "<your request>" [--image path] [--audio path] [--video path] [--paste]',
+      'Usage: bun run src/cli/chat.ts "<your request>" [--image path] [--audio path] [--video path] [--paste] [--voice] [--voice-in path]',
     );
     process.exit(1);
   }
