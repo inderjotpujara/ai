@@ -1,75 +1,83 @@
-### Task 5: Wan checkpoint from opts.model
+### Task 5: Telemetry — `voice.transcribe` span
 
 **Files:**
-- Modify: `src/media/generate/comfy-lane.ts:34-87` (`buildWanWorkflow`)
-- Test: extend `tests/media/*` — add `tests/media/wan-checkpoint.test.ts`
+- Modify: `src/telemetry/spans.ts` (add `VOICE_*` attrs near the Slice-27 block ~line 119-135; add `withVoiceTranscribeSpan` near `withTranscribeSpan` ~line 773)
+- Test: `tests/voice/spans.test.ts`
 
 **Interfaces:**
-- Consumes: `wanComfyStrategy` (its internal `buildWanWorkflow` is not exported — test through the public seam by exporting `buildWanWorkflow`).
-- Produces: `buildWanWorkflow` exported; adds a `CheckpointLoaderSimple` node whose `ckpt_name` is `opts.model` when set.
+- Consumes: `CaptureSource`, `VoiceOutcome` (Task 2).
+- Produces: `withVoiceTranscribeSpan(info, fn)` where `info: { model: string; source: CaptureSource }`; sets outcome/duration on the span at settle.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/media/wan-checkpoint.test.ts
-import { describe, expect, test } from 'bun:test';
-import { buildWanWorkflow } from '../../src/media/generate/comfy-lane.ts';
+// tests/voice/spans.test.ts
+import { describe, expect, it } from 'bun:test';
+import { ATTR, withVoiceTranscribeSpan } from '../../src/telemetry/spans.ts';
+import { CaptureSource } from '../../src/voice/types.ts';
 
-describe('buildWanWorkflow checkpoint', () => {
-  test('adds a checkpoint loader from opts.model when set', () => {
-    const wf = buildWanWorkflow('a dog running', {
-      model: 'city96/LTX-Video-0.9.6-distilled-gguf',
-    }) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
-    const loader = Object.values(wf).find(
-      (n) => n.class_type === 'CheckpointLoaderSimple',
-    );
-    expect(loader?.inputs.ckpt_name).toBe('city96/LTX-Video-0.9.6-distilled-gguf');
+describe('withVoiceTranscribeSpan', () => {
+  it('exposes VOICE_* attribute keys', () => {
+    expect(ATTR.VOICE_STT_MODEL).toBe('voice.stt.model');
+    expect(ATTR.VOICE_CAPTURE_SOURCE).toBe('voice.capture.source');
+    expect(ATTR.VOICE_OUTCOME).toBe('voice.outcome');
   });
-
-  test('omits the checkpoint loader when opts.model is unset', () => {
-    const wf = buildWanWorkflow('a dog running', {}) as Record<
-      string,
-      { class_type: string }
-    >;
-    const hasLoader = Object.values(wf).some(
-      (n) => n.class_type === 'CheckpointLoaderSimple',
+  it('runs the fn and returns its value', async () => {
+    const out = await withVoiceTranscribeSpan(
+      { model: 'tiny', source: CaptureSource.File },
+      async () => 'hi',
     );
-    expect(hasLoader).toBe(false);
+    expect(out).toBe('hi');
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun run test:file -- "tests/media/wan-checkpoint.test.ts"`
-Expected: FAIL — `buildWanWorkflow` not exported / no loader node.
+Run: `bun test tests/voice/spans.test.ts`
+Expected: FAIL — `ATTR.VOICE_STT_MODEL` undefined / `withVoiceTranscribeSpan` not exported.
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/media/generate/comfy-lane.ts`: change `function buildWanWorkflow(` to `export function buildWanWorkflow(`. Before the `return workflow;` line, add:
-
+In `src/telemetry/spans.ts`, add to the frozen `ATTR` object (near the multimodal block):
 ```ts
-  // Checkpoint from the gen-fit-selected repo (opts.model). Shape-only until
-  // live-verify against a real ComfyUI export corrects the exact node wiring.
-  if (opts.model) {
-    workflow['10'] = {
-      class_type: 'CheckpointLoaderSimple',
-      inputs: { ckpt_name: opts.model },
-    };
-  }
+  VOICE_STT_MODEL: 'voice.stt.model',
+  VOICE_CAPTURE_SOURCE: 'voice.capture.source',
+  VOICE_AUDIO_SECONDS: 'voice.audio.seconds',
+  VOICE_DURATION_MS: 'voice.duration.ms',
+  VOICE_OUTCOME: 'voice.outcome',
+```
+
+Then add the helper (mirroring `withTranscribeSpan`), importing `CaptureSource` at top:
+```ts
+import { CaptureSource } from '../voice/types.ts';
+
+export type VoiceSpanInfo = { model: string; source: CaptureSource };
+
+/** Wraps a voice transcription in a `voice.transcribe` span. */
+export function withVoiceTranscribeSpan<T>(
+  info: VoiceSpanInfo,
+  fn: (span: Span) => Promise<T>,
+): Promise<T> {
+  return inSpan('voice.transcribe', async (span) => {
+    span.setAttribute(ATTR.VOICE_STT_MODEL, info.model);
+    span.setAttribute(ATTR.VOICE_CAPTURE_SOURCE, info.source);
+    span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
+    return fn(span);
+  });
+}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `bun run test:file -- "tests/media/wan-checkpoint.test.ts"`
-Expected: PASS (2 tests).
+Run: `bun test tests/voice/spans.test.ts`
+Expected: PASS (2 tests). Also run `bun run typecheck` (the new import must not create a cycle — `types.ts` imports nothing from telemetry, so it's safe).
 
-- [ ] **Step 5: Typecheck + commit**
+- [ ] **Step 5: Commit**
 
-Run: `bun run typecheck`
 ```bash
-git add src/media/generate/comfy-lane.ts tests/media/wan-checkpoint.test.ts
-git commit -m "feat(media): Wan workflow takes checkpoint from opts.model (gen-fit injection)"
+git add src/telemetry/spans.ts tests/voice/spans.test.ts
+git commit -m "feat(voice): voice.transcribe span + VOICE_* attributes"
 ```
 
 ---

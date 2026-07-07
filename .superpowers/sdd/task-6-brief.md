@@ -1,106 +1,152 @@
-### Task 6: runGenJob clears model on cross-engine degrade
+### Task 6: In-process transcriber (sherpa-onnx addon)
 
 **Files:**
-- Modify: `src/media/generate/adapter.ts:507-554` (`runGenJob`)
-- Test: `tests/media/gen-job-degrade-model.test.ts`
+- Create: `src/voice/transcribe.ts`
+- Test: `tests/voice/transcribe.test.ts`
 
 **Interfaces:**
-- Consumes: `runGenJob`, `GenStrategy` (existing).
-- Produces: on a degrade to a different-`engine` fallback, `runGenJob` passes `{ ...opts, model: undefined }` so the fallback strategy uses its own default repo (a repo is engine-specific and must not leak across engines). Same-engine degrades keep `opts.model`.
-
-Note: the `GenStrategy` type has no `engine` field. Use `execMode` difference as the proxy is insufficient (both video strategies differ by execMode but also by engine/repo). Instead, ALWAYS clear `opts.model` when running the fallback — the fallback is always a *different* strategy with its own default. Both degrade branches (`runServerJob(fallback,...)` and `runOneShotJob(fallback,...)`) get `{ ...opts, model: undefined }`.
+- Consumes: `VoiceFrames`, `VoiceConfig`, `Transcriber`, `VoiceError` (Task 2); `withVoiceTranscribeSpan` (Task 5); `withWallClock` from `src/reliability/timeout.ts`; `CaptureSource`.
+- Produces: `createInProcessTranscriber(cfg, deps?): Transcriber`, where `deps.loadSherpa?: () => SherpaModule` is injectable for tests. `SherpaModule` shape: `{ OfflineRecognizer: new (config) => { createStream(): Stream; decode(s): void; getResult(s): { text: string }; }, ... }`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/media/gen-job-degrade-model.test.ts
-import { describe, expect, test } from 'bun:test';
-import { runGenJob } from '../../src/media/generate/adapter.ts';
-import type { GenStrategy } from '../../src/media/generate/adapter.ts';
-import { ExecMode, MediaKind } from '../../src/media/types.ts';
-import { createMediaStore } from '../../src/media/store.ts';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+// tests/voice/transcribe.test.ts
+import { describe, expect, it } from 'bun:test';
+import { createInProcessTranscriber } from '../../src/voice/transcribe.ts';
+import { CaptureSource } from '../../src/voice/types.ts';
 
-describe('runGenJob cross-engine degrade drops the model repo', () => {
-  test('fallback strategy is invoked without opts.model', async () => {
-    let fallbackModel: string | undefined = 'UNSET';
-    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
-    const primary: GenStrategy = {
-      kind: MediaKind.Video,
-      execMode: ExecMode.OneShot,
-      buildOneShot: () => ({ cmd: 'definitely-not-installed-xyz', args: [] }),
-    };
-    const fallback: GenStrategy = {
-      kind: MediaKind.Video,
-      execMode: ExecMode.Server,
-      serverSubmit: async (_p, opts) => {
-        fallbackModel = opts.model;
-        return {
-          poll: async () => ({ fraction: 1 }),
-          result: async () => '/tmp/never.mp4', // putFile will fail; we only assert the model
-        };
-      },
-    };
-    const job = runGenJob(primary, 'a cat', store, 'video/mp4', { model: 'mlx/repo' }, {
-      fallback,
-      which: () => null, // force the "primary binary missing" degrade
+function fakeSherpa(text: string) {
+  return () => ({
+    OfflineRecognizer: class {
+      createStream() {
+        return { free() {} };
+      }
+      acceptWaveform() {}
+      decode() {}
+      getResult() {
+        return { text };
+      }
+    },
+  });
+}
+
+const cfg = { modelDir: '/m', ffmpeg: 'ffmpeg', timeoutMs: 5000 };
+
+describe('createInProcessTranscriber', () => {
+  it('returns recognized text for a buffer', async () => {
+    const t = createInProcessTranscriber(cfg, {
+      loadSherpa: fakeSherpa('hello world'),
+      source: CaptureSource.File,
     });
-    await job.result().catch(() => {}); // result may reject on the fake path; irrelevant
-    expect(fallbackModel).toBeUndefined();
+    const text = await t.transcribe({ samples: new Float32Array(16000), sampleRate: 16000 });
+    expect(text).toBe('hello world');
+    await t.close();
+  });
+  it('throws VoiceError with a hint on empty samples', async () => {
+    const t = createInProcessTranscriber(cfg, {
+      loadSherpa: fakeSherpa(''),
+      source: CaptureSource.Mic,
+    });
+    await expect(
+      t.transcribe({ samples: new Float32Array(0), sampleRate: 16000 }),
+    ).rejects.toThrow(/no audio/i);
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun run test:file -- "tests/media/gen-job-degrade-model.test.ts"`
-Expected: FAIL — `fallbackModel` is `'mlx/repo'` (opts.model leaked into the fallback).
+Run: `bun test tests/voice/transcribe.test.ts`
+Expected: FAIL — module not found.
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/media/generate/adapter.ts`, in `runGenJob`, change the two fallback invocations to strip the model repo:
+> NOTE: the sherpa-onnx `OfflineRecognizer` config nesting (`modelConfig.moonshine.{preprocessor,encoder,uncachedDecoder,cachedDecoder}`, `modelConfig.tokens`) must be confirmed against the installed `node_modules/sherpa-onnx-node` examples at implementation time — set the paths from `cfg.modelDir`.
 
 ```ts
-    if (fallback) {
-      recordExecModeDegrade(
-        deps,
-        ExecMode.OneShot,
-        ExecMode.Server,
-        primary.kind,
-        `engine binary "${cmd}" not found on PATH`,
+// src/voice/transcribe.ts
+import { join } from 'node:path';
+import { withWallClock } from '../reliability/timeout.ts';
+import { withVoiceTranscribeSpan } from '../telemetry/spans.ts';
+import { CaptureSource, type Transcriber, type VoiceConfig, VoiceError, type VoiceFrames } from './types.ts';
+
+/** Sets the dyld path the addon needs, then loads it (default loader). */
+function defaultLoadSherpa(): unknown {
+  const root = join(process.cwd(), 'node_modules');
+  process.env.DYLD_LIBRARY_PATH = [
+    join(root, 'sherpa-onnx-node'),
+    join(root, 'sherpa-onnx-darwin-arm64'),
+    process.env.DYLD_LIBRARY_PATH ?? '',
+  ].join(':');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return require('sherpa-onnx-node');
+}
+
+export type InProcessDeps = {
+  loadSherpa?: () => unknown;
+  source?: CaptureSource;
+};
+
+/** Builds an OfflineRecognizer config from a moonshine model directory. */
+function moonshineConfig(modelDir: string) {
+  return {
+    modelConfig: {
+      moonshine: {
+        preprocessor: join(modelDir, 'preprocess.onnx'),
+        encoder: join(modelDir, 'encode.int8.onnx'),
+        uncachedDecoder: join(modelDir, 'uncached_decode.int8.onnx'),
+        cachedDecoder: join(modelDir, 'cached_decode.int8.onnx'),
+      },
+      tokens: join(modelDir, 'tokens.txt'),
+      numThreads: 2,
+      provider: 'cpu',
+    },
+  };
+}
+
+export function createInProcessTranscriber(cfg: VoiceConfig, deps: InProcessDeps = {}): Transcriber {
+  const load = deps.loadSherpa ?? defaultLoadSherpa;
+  const source = deps.source ?? CaptureSource.Mic;
+  // biome-ignore lint/suspicious/noExplicitAny: addon has no types
+  const sherpa = load() as any;
+  const recognizer = new sherpa.OfflineRecognizer(moonshineConfig(cfg.modelDir));
+
+  return {
+    async transcribe(frames: VoiceFrames): Promise<string> {
+      if (frames.samples.length === 0) {
+        throw new VoiceError('no audio captured', 'check the microphone / input file');
+      }
+      return withVoiceTranscribeSpan({ model: cfg.modelDir, source }, () =>
+        withWallClock(cfg.timeoutMs, async () => {
+          const stream = recognizer.createStream();
+          try {
+            stream.acceptWaveform({ sampleRate: frames.sampleRate, samples: frames.samples });
+            recognizer.decode(stream);
+            return String(recognizer.getResult(stream).text ?? '').trim();
+          } finally {
+            stream.free?.();
+          }
+        }),
       );
-      return runServerJob(fallback, prompt, store, mediaType, { ...opts, model: undefined }, deps);
-    }
-```
-
-and
-
-```ts
-  if (fallback) {
-    recordExecModeDegrade(
-      deps,
-      ExecMode.Server,
-      ExecMode.OneShot,
-      primary.kind,
-      'server engine unreachable',
-    );
-    return runOneShotJob(fallback, prompt, store, mediaType, { ...opts, model: undefined }, deps);
-  }
+    },
+    async close() {
+      recognizer.free?.();
+    },
+  };
+}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `bun run test:file -- "tests/media/gen-job-degrade-model.test.ts"`
-Expected: PASS. Also re-run the existing adapter tests: `bun run test:file -- "tests/media/*adapter*"` — Expected: still PASS (same-strategy non-degrade paths unchanged).
+Run: `bun test tests/voice/transcribe.test.ts`
+Expected: PASS (2 tests).
 
-- [ ] **Step 5: Typecheck + commit**
+- [ ] **Step 5: Commit**
 
-Run: `bun run typecheck`
 ```bash
-git add src/media/generate/adapter.ts tests/media/gen-job-degrade-model.test.ts
-git commit -m "fix(media): runGenJob drops engine-specific model repo when degrading to a fallback"
+git add src/voice/transcribe.ts tests/voice/transcribe.test.ts
+git commit -m "feat(voice): in-process sherpa-onnx transcriber (buffer to text)"
 ```
 
 ---

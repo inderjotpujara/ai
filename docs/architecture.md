@@ -228,6 +228,16 @@ graph TD
         mediaselect["generate/select.ts · selectGenModel (largest-that-fits, env-pin, consent)"]
         mediacatalog["generate/catalog.ts · GenModelCandidate ladders (Slice 28)"]
     end
+    subgraph VOICE["Voice input (STT) · src/voice (Slice 29)"]
+        voicetypes["types.ts · VoiceFrames/CaptureSource/VoiceOutcome/VoiceError/VoiceConfig/Transcriber"]
+        voicemodel["model.ts · voiceCacheDir/resolveVoiceModel/ffmpegCmd (env overrides)"]
+        voicecapture["capture.ts · captureFromFile (ffmpeg decode) + captureFromMic (tap-to-toggle + silencedetect)"]
+        voicetranscribe["transcribe.ts · createTranscriber (in-process sherpa-onnx | subprocess worker)"]
+        voiceworker["stt-worker.mjs · node-subprocess sherpa-onnx worker"]
+        voiceingest["ingest.ts · ingestVoice (splice transcript, degrade-never-crash)"]
+        voicecliio["cli-io.ts · createCliVoiceDeps (real ffmpeg MicIo + raw-TTY keys)"]
+        voicescript["scripts/setup-voice.ts · setup:voice (moonshine model download + ffmpeg check)"]
+    end
 
     %% Reliability data flow (Slice 21): classify feeds retry/breaker/degrade;
     %% delegation/workflow/crew/mcp/selector wrap cross-boundary ops through it;
@@ -297,6 +307,25 @@ graph TD
     mediaframes --> spans
     mediaadapter --> spans
 
+    %% Voice-input data flow (Slice 29): chat builds real deps (cli-io.ts) then
+    %% calls ingestVoice BEFORE media ingest, so a transcript splices into the
+    %% raw prompt that --image/--audio/--video ingest then sees; capture and
+    %% transcribe sit behind two independent execution seams (mic-vs-file,
+    %% in-process-vs-subprocess) so ingest.ts never depends on either directly.
+    chat --> voiceingest
+    chat --> voicecliio
+    voicecliio --> voicecapture
+    voicecliio --> voicetranscribe
+    voicecliio --> voicemodel
+    voiceingest --> voicecapture
+    voiceingest --> voicetranscribe
+    voiceingest --> voicetypes
+    voicecapture --> voicetypes
+    voicetranscribe --> voicetypes
+    voicetranscribe --> voiceworker
+    voicetranscribe --> reltimeout
+    voicetranscribe --> spans
+    voiceingest --> relledger
     chat --> runchat
     chat --> selhook
     chat --> buildreg
@@ -509,6 +538,7 @@ graph TD
 | **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`) | filesystem |
 | **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example). Since Slice 17, `agents/index.ts` is a small **registry** rather than pure data — `AGENTS: Record<name, AgentFactory>` + `agentNames()`, with `// AGENT-BUILDER:IMPORTS`/`:ENTRIES` marker comments the agent-builder's `write.ts` inserts new generated entries at; `super.ts`/`chat.ts`/`flow.ts` all build their agent set by iterating `agentNames()` instead of importing each factory by hand | nothing beyond the `Agent`/`AgentFactory` types (pure data + one lookup) |
 | **Media** | `src/media/` | Full multimodal I/O subsystem (Slice 27 — see §22 for the full narrative): run-scoped `MediaStore` (`store.ts`) as the hub for both input and generated media; handle-marker ingest/resolve (`ingest.ts`, `resolve.ts`) turning CLI flags/drag-in paths/clipboard paste into `[img:h]`/`[audio:h]`/`[video:h]` markers and back into AI-SDK v6 `FilePart`s; STT (`audio/transcribe.ts`, mlx-whisper) and video frame-sampling (`video/frames.ts`, ffmpeg); a shared subprocess adapter (`spawn.ts`); generation (`generate/`) — the `MediaGenerator` `ExecMode.OneShot\|Server` job adapter (`adapter.ts`), the mflux image / Kokoro TTS / LTX video strategies, a shape-only ComfyUI/Wan server lane (`comfy-lane.ts`), and the `generate_image`/`generate_speech`/`generate_video` tools (`tools.ts`); the uncensored content-policy axis (`policy.ts`, `generate/safety.ts`) and voice-clone consent (`consent.ts`) | `reliability/` (timeouts, degrade ledger), `telemetry/spans.ts`, `runtime/process-supervisor.ts` (`SpawnFn` type), `core/types.ts` (`Capability`/`ContentPolicy`) |
+| **Voice** | `src/voice/` | CLI voice **input** — speech-to-text feeding the `chat` prompt (Slice 29 — see §23 for the full narrative): typed core (`types.ts` — `VoiceFrames`, `CaptureSource`, `VoiceOutcome`, `VoiceError` with an actionable `hint`, `VoiceConfig`, `Transcriber`); env-fallback model/ffmpeg resolution (`model.ts` — `voiceCacheDir`/`resolveVoiceModel`/`ffmpegCmd`); capture (`capture.ts` — `captureFromFile` via ffmpeg decode, `captureFromMic` tap-to-toggle with ffmpeg-`silencedetect` auto-stop); transcription behind an execution seam (`transcribe.ts` — `createTranscriber` picks in-process `sherpa-onnx-node` [default] or a `stt-worker.mjs` node subprocess via `AGENT_VOICE_EXEC=subprocess`); prompt splicing (`ingest.ts` — `ingestVoice`, degrade-never-crash); real CLI adapters (`cli-io.ts` — ffmpeg `avfoundation` `MicIo` + raw-TTY key handling); `scripts/setup-voice.ts` (`bun run setup:voice`, downloads the moonshine-tiny model + checks ffmpeg) | `reliability/timeout.ts` (`withWallClock`), `reliability/ledger.ts` (`DegradeKind.ToolSkipped`), `telemetry/spans.ts` (`withVoiceTranscribeSpan`), `media/ingest.ts` (`IngestFlags` — shares the `--voice`/`--voice-in` flag object) |
 | **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
 | **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — both `main()`s now run their whole scope inside `withMcpRun` (`with-mcp-run.ts`, Slice 16, §14), which owns `createRun` → `initRunTelemetry` → mount before handing the run body a `run: RunHandle`: `runCrewCli` → `writeArtifact('result.txt'\|'failed.txt')`, with `shutdown()` happening in `withMcpRun`'s `finally`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) |
@@ -2815,3 +2845,171 @@ and now CLI-arg-verified — only the disk-bound "renders a full clip on this
 box" pass is unavailable here, stated honestly rather than as a code gap.
 **The ComfyUI/Wan server lane is shape-only** (see above) — ComfyUI itself
 is not installed, so it has never been exercised against a real server.
+
+## 23. Voice input (STT) (Slice 29)
+
+CLI voice **input** — speech-to-text feeding the `chat` prompt — under a new
+`src/voice/` subsystem. Scope is deliberately narrow: this slice is a
+**re-scope** of the original "voice in/out + streaming CLI" plan, which was
+built, hit real terminal limitations (self-echo with no acoustic echo
+cancellation, TTS reading markdown aloud), and was **reset** — that
+hand-rolled pipeline is archived, unmerged, on branch
+`slice-29-voice-streaming-cli`. Slice 29 ships **input only**: a mature OSS
+STT library transcribes an utterance (mic or file) and splices the text into
+the prompt, exactly like `--audio` already does for a media file (§22).
+Voice-**out**, barge-in, streaming, and true hold-to-talk (terminals have no
+key-release event) are explicitly out of scope here — they belong to
+**Slice 30's browser UI**, where `getUserMedia({audio:{echoCancellation:
+true}})` gives real AEC and `keydown`/`keyup` give a real hold-to-talk
+gesture, essentially for free.
+
+### Module map (`src/voice/`)
+
+| File | Responsibility |
+|---|---|
+| `types.ts` | `VoiceFrames` (mono `Float32Array` at a fixed 16 kHz `sampleRate`), `enum CaptureSource {Mic\|File}`, `enum VoiceOutcome {Ok\|Empty\|Failed\|Timeout}`, `VoiceError` (an `Error` subclass carrying an optional **actionable** `hint`, e.g. "check the microphone / input file" or the mic-permission steps below), `VoiceConfig` (`modelDir`/`ffmpeg`/`timeoutMs`), `Transcriber` (`transcribe(frames)`/`close()`) |
+| `model.ts` | `voiceCacheDir(env)` (`AGENT_VOICE_DIR` ?? `~/.cache/ai/voice`), `resolveVoiceModel(env)` (`AGENT_VOICE_STT_MODEL` absolute path ?? `<cacheDir>/sherpa-onnx-moonshine-tiny-en-int8`), `ffmpegCmd(env)` (`AGENT_FFMPEG_CMD` ?? bare `ffmpeg` on `PATH`) — pure env-fallback resolution, no I/O |
+| `capture.ts` | `captureFromFile(path, cfg)` — spawns `ffmpeg` to decode any input file to mono 16 kHz `f32le` PCM on stdout, reinterpreted as a `Float32Array` (`bytesToFloat32`, byte-alignment-safe copy); `captureFromMic(cfg, io)` — an interactive **tap-to-toggle** capture state machine (tap `[space]` to start; ffmpeg `silencedetect` on stderr auto-stops on the first pause *after* speech was heard, or `[space]`/`[enter]` stops manually, `[ctrl-c]` cancels), hard-capped at `MAX_CAPTURE_SECONDS=60` so the buffer JSON-serialized to a subprocess worker can't grow unbounded; a captured buffer with no perceptible energy (`hasEnergy`, peak amplitude > 0.005) throws a `VoiceError` with a mic-permission hint rather than silently transcribing silence |
+| `transcribe.ts` | `createInProcessTranscriber` (loads the `sherpa-onnx-node` N-API addon directly, setting `DYLD_LIBRARY_PATH` for its prebuilt `sherpa-onnx-darwin-arm64` binary, and drives an `OfflineRecognizer` configured for the moonshine model family) and `createSubprocessTranscriber` (shells out to `stt-worker.mjs` over `node`, JSON stdin/stdout) both implement `Transcriber`; `createTranscriber(cfg, env)` selects between them — **in-process is the default** (the Task-1 day-1 spike confirmed the addon loads fine under Bun), `AGENT_VOICE_EXEC=subprocess` forces the node-worker fallback. Both paths wrap the actual decode in `withWallClock(cfg.timeoutMs)` and a `voice.transcribe` span, and both reject empty (`frames.samples.length === 0`) input with a `VoiceError` before ever touching the recognizer |
+| `stt-worker.mjs` | The node-subprocess worker `createSubprocessTranscriber` spawns: reads a `{modelDir, sampleRate, samples}` JSON payload on stdin, runs the same `sherpa-onnx-node` `OfflineRecognizer` moonshine path as `transcribe.ts`'s in-process branch, writes `{text}` JSON on stdout. Exists so a platform/Bun-version combination where the addon can't load in-process still has a working transcriber one flag away |
+| `ingest.ts` | `ingestVoice(rawPrompt, flags, deps)` — the CLI-facing entry: transcribes every `--voice-in <path>` file then (if `--voice`) one mic capture, and splices the resulting transcript(s) onto the prompt (`"\n\n"`-joined, like `--audio`'s text-splice in §22). **Degrade-never-crash**: each source's capture+transcribe runs in its own try/catch — a failure becomes a `voice: <message>[ — <hint>]` warning plus a `DegradeKind.ToolSkipped` ledger entry, and that source is simply skipped rather than aborting the turn |
+| `cli-io.ts` | The real (non-test) platform glue `ingestVoice` runs against in production: `resolveVoiceConfig(env)` assembles a `VoiceConfig` with a voice-specific 30 s default timeout (`AGENT_MEDIA_TIMEOUT_MS`-overridable — the same env knob as media, not a separate voice-only variable, since a single interactive capture/transcribe turn should fail fast rather than inherit media's 10-minute generous default); `createMicIo(cfg, env)` builds a real `MicIo` — spawns `ffmpeg -f avfoundation` (mic index `AGENT_MIC_INDEX` ?? `0`) streaming `f32le` PCM on stdout with a `silencedetect=noise=-35dB:d=0.8` filter on stderr for the auto-stop signal, plus raw-TTY stdin key handling (space/enter/ctrl-c) that idempotently restores cooked mode and pauses stdin on unsubscribe so no stray keystroke leaks into the next `readline` prompt; `createCliVoiceDeps(ledger, env)` wires it all into a `VoiceIngestDeps` for `ingestVoice`. Deliberately **not unit-tested** (spawning real ffmpeg / raw stdin is brittle) — exercised at live-verify (Task 13) instead |
+| `scripts/setup-voice.ts` | `bun run setup:voice` — idempotent provisioning: checks/installs `ffmpeg` (Homebrew on macOS, degrade-log elsewhere), then downloads+extracts the default `sherpa-onnx-moonshine-tiny-en-int8` model from the `k2-fsa/sherpa-onnx` GitHub release into `voiceCacheDir()` (skips if `tokens.txt` already marks it ready); network/extraction failures are logged, never thrown |
+
+### Data flow: mic/file → capture → transcribe → splice
+
+`chat.ts` runs voice **before** media ingest (§22) so a transcript is part of
+the raw prompt by the time `--image`/`--audio`/`--video`/prompt-embedded-path
+detection runs: `createCliVoiceDeps(ledger)` builds real deps (constructing
+the `Transcriber` up front, which is also where an unavailable addon/model
+first throws), then `ingestVoice(rawPrompt, flags, deps)` runs `--voice-in`
+file(s) through `captureFromFile` → `transcriber.transcribe`, then (if
+`--voice`) one `captureFromMic` → `transcriber.transcribe` pass, splicing
+every non-empty transcript onto the prompt. The whole voice step — deps
+construction **and** `ingestVoice` — sits in one try/catch in `chat.ts`:
+deps construction throws *before* `ingestVoice`'s own internal
+degrade-to-warning logic can run (e.g. the addon/model genuinely isn't
+installed), so that outer catch degrades to the **original, non-voice
+prompt** with a `"run 'bun run setup:voice'"` hint and a ledger entry,
+instead of exiting the process. The transcriber is always `close()`d in a
+`finally`, since the in-process path holds a live `OfflineRecognizer`.
+
+### Two-layer design: capture adapter ⟷ transcribe core, behind an execution seam
+
+The subsystem is deliberately split into two independently-swappable halves:
+
+1. **Capture** (`capture.ts`) turns a source — a file on disk, or a live
+   microphone via the injected `MicIo` — into a plain `VoiceFrames` (mono
+   16 kHz `Float32Array`). It knows nothing about the STT engine.
+2. **Transcribe** (`transcribe.ts`) turns `VoiceFrames` into text. It knows
+   nothing about where the frames came from.
+
+`ingest.ts` composes the two through `VoiceIngestDeps`, so unit tests inject
+fakes for both halves independently, while `cli-io.ts` is the one place real
+ffmpeg/sherpa/TTY adapters are assembled for production.
+
+**The transcribe half additionally sits behind its own execution seam** —
+in-process (`sherpa-onnx-node`, an N-API addon, loaded directly and driven
+via `OfflineRecognizer`) versus node-subprocess (`stt-worker.mjs`, the exact
+same recognizer logic run in a separate `node` process, JSON over
+stdin/stdout). **In-process is the default**, chosen because the Task-1 spike
+(`scripts/spikes/sherpa-bun-smoke.ts`) confirmed the addon loads and runs
+correctly under Bun on this platform — `AGENT_VOICE_EXEC=subprocess` is a
+one-flag escape hatch to the node worker for a platform/Bun-version
+combination where that isn't true. Both implementations are wrapped in the
+identical `withWallClock` + `voice.transcribe` span shape, so switching the
+seam changes nothing observable except which process actually runs the
+model.
+
+**Known limitation — the in-process timeout is not actually enforced.**
+`recognizer.decode()` is a synchronous native call that blocks the JS event
+loop for its full duration, so the `withWallClock(cfg.timeoutMs, ...)` timer
+wrapping it in `createInProcessTranscriber` never gets a chance to fire
+before `decode()` returns on its own — a pathological hang inside the
+in-process recognizer is not interruptible. The subprocess path does not
+have this problem: the worker runs `decode()` out-of-process, so the parent's
+`withWallClock` timer fires on schedule and the process is killed. Set
+`AGENT_VOICE_EXEC=subprocess` when an enforceable transcribe timeout matters.
+
+### Auto-stop: ffmpeg `silencedetect`, not a real-time VAD model
+
+**Honest refinement note:** the original Slice-29 re-scope discussion
+mentioned Silero VAD as the auto-stop mechanism; what actually shipped is
+**ffmpeg's `silencedetect` audio filter** watching the live capture's
+stderr, not a model-based voice-activity detector. `createMicIo` starts
+`ffmpeg -f avfoundation ... -af silencedetect=noise=-35dB:d=0.8` and parses
+its stderr for `silence_start`/`silence_end` markers: a capture opens amid
+ambient silence, so the *first* `silence_start` would fire almost
+immediately and cut the recording before the user speaks — `silenceSignaled`
+only resolves on a `silence_start` that follows an observed `silence_end`
+(i.e. "stop on the first pause *after* speech was heard"). This was chosen
+over a real-time VAD model because it's **model-free and
+execution-seam-independent** — it lives entirely in the ffmpeg process that's
+already spawned to get PCM off the mic, so it adds no dependency and doesn't
+interact with the in-process/subprocess transcribe seam at all. It's
+explicitly a best-effort convenience, not a correctness dependency: if
+`silencedetect` never fires (no device, or the OS mic-permission prompt
+swallows the stream), `captureFromMic` still ends via manual
+`[space]`/`[enter]` or the hard `MAX_CAPTURE_SAMPLES` cap.
+
+### Configuration (env fallback-only, per this repo's rule — never hardcoded)
+
+`AGENT_VOICE_DIR` (voice model cache root, default `~/.cache/ai/voice`),
+`AGENT_VOICE_STT_MODEL` (absolute override of the resolved model directory),
+`AGENT_FFMPEG_CMD` (ffmpeg binary, default bare `ffmpeg` on `PATH`),
+`AGENT_VOICE_EXEC` (`inprocess` [default] `|subprocess`, the transcribe
+execution seam), `AGENT_MIC_INDEX` (ffmpeg `avfoundation` device index,
+default `0`), `AGENT_MEDIA_TIMEOUT_MS` (shared with `src/media/`; voice's own
+default is 30 s, distinct from media's 10-minute default, reflecting that a
+single interactive capture/transcribe turn should fail fast rather than hang
+a chat session).
+
+### Telemetry
+
+New span `voice.transcribe` (`withVoiceTranscribeSpan`,
+`telemetry/spans.ts`) wraps every transcribe call (both execution-seam
+branches). `withVoiceTranscribeSpan` itself sets `ATTR.VOICE_STT_MODEL`
+(`voice.stt.model`), `ATTR.VOICE_CAPTURE_SOURCE` (`voice.capture.source`,
+`CaptureSource`), and `ATTR.INPUT_MODALITY` (`gen_ai.input.modality` =
+`'audio'`) once up-front, before the transcriber runs. Three further
+attributes — `ATTR.VOICE_AUDIO_SECONDS` (`voice.audio.seconds`, samples ÷
+sample rate), `ATTR.VOICE_DURATION_MS` (`voice.duration.ms`, wall-clock), and
+`ATTR.VOICE_OUTCOME` (`voice.outcome`, `VoiceOutcome`) — are set inside each
+transcriber implementation itself, on **both** the success and failure paths
+(a timeout is distinguished from a generic failure by the outcome value),
+following the same no-op-safe `inSpan` pattern as every other subsystem's
+spans.
+
+### Why sherpa-onnx (browser-reuse rationale)
+
+The engine choice is **sherpa-onnx**, not the parakeet-mlx/whisper.cpp
+alternatives evaluated for this slice, specifically because it ships a
+**browser-WASM build alongside its Node addon** — the same recognizer
+family that transcribes on the CLI today can transcribe in **Slice 30's
+browser UI** tomorrow without a second STT stack. The `capture.ts ⟷
+transcribe.ts` split (above) is structured with that reuse in mind: a
+browser capture adapter (real `getUserMedia` PCM instead of ffmpeg
+`avfoundation`) would plug into the same `Transcriber` interface the CLI's
+in-process path already implements, with the actual sherpa-onnx moonshine
+config unchanged.
+
+### Testing + live-verify (honest status)
+
+Unit-tested: `types.ts`/`model.ts` (pure), `transcribe.ts` (both execution
+branches against fixture buffers + a fake `loadSherpa`/`spawn`), `capture.ts`
+(`captureFromFile` against a fake spawn; `captureFromMic`'s state machine
+against a fake `MicIo` covering start/stop/cancel/error/max-length paths),
+`ingest.ts` (degrade-never-crash across file/mic/both, ledger recording).
+**Not** unit-tested: `cli-io.ts` (real ffmpeg/TTY glue, by design — see
+above) and `scripts/setup-voice.ts`'s actual network download. Live-verify
+against the real `sherpa-onnx-node` addon, the real downloaded moonshine-tiny
+model, and real `ffmpeg` — **Task 13**, gated behind `VOICE_LIVE=1` (not run
+as part of the default suite), exactly like the multimodal live-verify pass
+in §22 — **ran and passed**: a macOS `say`-generated speech clip transcribed
+correctly through both execution-seam branches (in-process and
+`AGENT_VOICE_EXEC=subprocess`), and the pass caught a real bug (the
+`.bytes()`-vs-`.arrayBuffer()` all-zero-buffer issue noted in `capture.ts`
+above). Only interactive real-microphone capture (`captureFromMic`'s actual
+`avfoundation` tap-to-toggle flow) remains a manual, human-in-the-loop
+verification step — it can't be automated the way `say` automates the file
+path.

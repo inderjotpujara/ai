@@ -15,7 +15,14 @@ test('--image flag stores the file and appends an img marker', async () => {
   writeFileSync(p, new Uint8Array([1]));
   const res = await ingestMedia(
     'what is this',
-    { images: [p], audios: [], videos: [], paste: false },
+    {
+      images: [p],
+      audios: [],
+      videos: [],
+      paste: false,
+      voice: false,
+      voiceIn: [],
+    },
     freshStore(),
   );
   expect(res.prompt).toBe('what is this [img:img_1]');
@@ -28,7 +35,14 @@ test('a media-only prompt (no text) has no leading space before the marker', asy
   writeFileSync(p, new Uint8Array([1]));
   const res = await ingestMedia(
     '',
-    { images: [p], audios: [], videos: [], paste: false },
+    {
+      images: [p],
+      audios: [],
+      videos: [],
+      paste: false,
+      voice: false,
+      voiceIn: [],
+    },
     freshStore(),
   );
   expect(res.prompt).toBe('[img:img_1]');
@@ -40,7 +54,14 @@ test('--audio is transcribed to text and spliced into the prompt', async () => {
   writeFileSync(p, new Uint8Array([1]));
   const res = await ingestMedia(
     'summarize',
-    { images: [], audios: [p], videos: [], paste: false },
+    {
+      images: [],
+      audios: [p],
+      videos: [],
+      paste: false,
+      voice: false,
+      voiceIn: [],
+    },
     freshStore(),
     {
       transcribe: async () => 'hello world',
@@ -56,7 +77,14 @@ test('a dragged-in image path in the prompt is auto-detected', async () => {
   writeFileSync(p, new Uint8Array([1]));
   const res = await ingestMedia(
     `describe ${p}`,
-    { images: [], audios: [], videos: [], paste: false },
+    {
+      images: [],
+      audios: [],
+      videos: [],
+      paste: false,
+      voice: false,
+      voiceIn: [],
+    },
     freshStore(),
   );
   expect(res.prompt).toContain('[img:img_1]');
@@ -68,7 +96,14 @@ test('an auto-detected audio token blanked from the prompt leaves no double spac
   writeFileSync(p, new Uint8Array([1]));
   const res = await ingestMedia(
     `summarize ${p} please`,
-    { images: [], audios: [], videos: [], paste: false },
+    {
+      images: [],
+      audios: [],
+      videos: [],
+      paste: false,
+      voice: false,
+      voiceIn: [],
+    },
     freshStore(),
     {
       transcribe: async () => 'hello world',
@@ -86,7 +121,14 @@ test('a failing audio transcription degrades per-item instead of aborting the tu
   writeFileSync(audioPath, new Uint8Array([1]));
   const res = await ingestMedia(
     'what is this',
-    { images: [imgPath], audios: [audioPath], videos: [], paste: false },
+    {
+      images: [imgPath],
+      audios: [audioPath],
+      videos: [],
+      paste: false,
+      voice: false,
+      voiceIn: [],
+    },
     freshStore(),
     {
       transcribe: async () => {

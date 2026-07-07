@@ -33,7 +33,14 @@ test('parses --audio and --video flags', () => {
 test('returns empty flags for plain positional args', () => {
   const { positional, flags } = parseMediaArgs(['just', 'a', 'question']);
   expect(positional).toEqual(['just', 'a', 'question']);
-  expect(flags).toEqual({ images: [], audios: [], videos: [], paste: false });
+  expect(flags).toEqual({
+    images: [],
+    audios: [],
+    videos: [],
+    paste: false,
+    voice: false,
+    voiceIn: [],
+  });
 });
 
 test('drops a trailing value-taking flag with no value', () => {

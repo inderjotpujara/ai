@@ -11,6 +11,8 @@ export type IngestFlags = {
   audios: string[];
   videos: string[];
   paste: boolean;
+  voice: boolean;
+  voiceIn: string[];
 };
 
 export type IngestResult = {

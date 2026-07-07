@@ -1,149 +1,87 @@
-# Task 11 Report: Browser loopback OAuth callback server (Slice 26)
+# Task 11 Report: Voice ingest + chat wiring (Slice 29)
 
-*(Note: this path previously held a stale Slice-21 report for a differently-numbered
-Task 11 — "Migrate verified-build withWallClock + runtime probe literals." Overwritten
-here per the file-reuse convention that report itself documented.)*
+*(Note: this path previously held a stale Slice-26 report for a differently-numbered
+Task 11 — "Browser loopback OAuth callback server." Overwritten here per the
+per-slice task-numbering convention that report itself documented.)*
 
-**Status:** DONE.
+## Status: DONE_WITH_CONCERNS (concerns are all live-verify-only, see below)
 
 ## Files changed
+- `src/voice/ingest.ts` (new) — `ingestVoice()`, TDD-tested.
+- `src/voice/cli-io.ts` (new) — real ffmpeg/TTY `MicIo` + real deps factory.
+- `src/voice/capture.ts` — exported `bytesToFloat32` (was file-private) so `cli-io.ts` reuses the same byte→Float32 conversion instead of duplicating it.
+- `src/cli/chat.ts` — wired `ingestVoice` before `ingestMedia`; new imports of `createCliVoiceDeps`/`ingestVoice`.
+- `tests/voice/ingest.test.ts` (new) — the brief's 3 unit tests, verbatim.
 
-- `src/mcp/loopback.ts` (new) — `awaitOAuthRedirect(buildAuthUrl, expectedState, deps)`
-  and `loopbackRedirectUri(port)`.
-- `tests/mcp/loopback.test.ts` (new) — two tests (success path + state-mismatch path).
+## `ingestVoice` design (`src/voice/ingest.ts`)
+Signature: `ingestVoice(rawPrompt, flags, deps): Promise<{ prompt, warnings }>`, `deps = { captureFile, captureMic, transcriber, ledger? }`.
 
-## Signature (per the brief's NOTE, not the top-level Interfaces block)
+- Iterates `flags.voiceIn` (file paths) then, if `flags.voice`, does one mic capture — each routed through a shared `collect()` helper: capture → `transcriber.transcribe()` → trim → push non-empty text into `transcripts`.
+- Never throws: `collect()` wraps both the capture call and the transcribe call in one try/catch. On failure it pushes `voice: <message>[ — <hint>]` (hint comes from `VoiceError.hint` when present) into `warnings`, and calls `deps.ledger?.record({ kind: DegradeKind.ToolSkipped, subject: 'voice', reason: message })`. Optional-chained on `ledger` per the corrected ledger API (param type is `DegradationLedger | undefined`).
+- Final prompt: `[rawPrompt, ...transcripts].filter(Boolean).join('\n\n').trim()` — so a failed capture (empty `transcripts`) returns the prompt byte-for-byte unchanged (verified by test 2 and test 3).
+- Multiple `--voice-in` paths would each append their own transcript block; only tested with one path (matches the brief's 3 tests) — multi-file-plus-mic composition is a straightforward extension of the same loop, not exercised here.
 
-```ts
-export function loopbackRedirectUri(port: number): string; // http://127.0.0.1:<port>/callback
+### TDD RED → GREEN
+1. Wrote `tests/voice/ingest.test.ts` verbatim from the brief (3 cases: file transcript appended; capture failure degrades to warning + unchanged prompt; no voice flag → unchanged prompt).
+2. `bun test tests/voice/ingest.test.ts` → RED: `Cannot find module '../../src/voice/ingest.ts'`.
+3. Implemented `src/voice/ingest.ts` per the brief's sketch, corrected to the real `DegradeEvent` shape (`{kind, subject, reason}` — the brief's own sketch used a nonexistent `detail`-only call, which is why the task explicitly called out the corrected API).
+4. `bun test tests/voice/ingest.test.ts` → GREEN: 3 pass, 6 expect() calls.
 
-export function awaitOAuthRedirect(
-  buildAuthUrl: (redirectUri: string) => string,
-  expectedState: string,
-  deps?: { openBrowser?: (url: string) => void; timeoutMs?: number },
-): Promise<{ code: string; state: string; redirectUri: string }>;
-```
+## `cli-io.ts` design (real, not unit-tested — live-verify only)
+- `resolveVoiceConfig(env)`: builds `VoiceConfig` from `resolveVoiceModel(env)` / `ffmpegCmd(env)` / a timeout. Timeout reuses `AGENT_MEDIA_TIMEOUT_MS` (the one existing media-pipeline timeout env — didn't invent a voice-only var) with a **30_000 ms default**, distinct from the media pipeline's 600_000 ms default: a single interactive capture/transcribe turn should fail fast, not hang a chat session for 10 minutes.
+- `captureFromFile` bound to that config (straight reuse of Task 8's function).
+- Real `MicIo`:
+  - `start()` spawns `ffmpeg -hide_banner -loglevel info -f avfoundation -i :<AGENT_MIC_INDEX|0> -ac 1 -ar 16000 -af silencedetect=noise=-35dB:d=0.8 -f f32le pipe:1`.
+  - `frames`: an async generator reading `child.stdout`'s `ReadableStream`, converting each chunk via the now-exported `bytesToFloat32`.
+  - `silenceSignaled`: reads `child.stderr` line-by-line watching for `silencedetect`'s `silence_start`/`silence_end` markers.
+  - `stop()`: `child.kill('SIGTERM')` wrapped in try/catch (tolerates an already-exited process), then awaits `child.exited`.
+  - `onKey`: sets raw mode on `process.stdin` when it's a TTY, maps byte `0x20`→`space`, `0x0d`/`0x0a`→`enter`, `0x03`→`ctrl-c`; unsubscribe restores the prior raw-mode state.
+  - `print`: `console.error`.
+- `createCliVoiceDeps(ledger?, env?)`: assembles `{ captureFile, captureMic, transcriber, ledger }` (exactly `VoiceIngestDeps`, plus the `transcriber` typed on the return so the caller can `close()` it).
 
-The brief's top "Interfaces" block showed `awaitOAuthRedirect(authUrl, expectedState, deps)`,
-but its NOTE (and this task's dispatch instructions) explicitly call for the
-`buildAuthUrl(redirectUri)` callback signature so the redirect_uri (with the real
-ephemeral port) can be embedded in the authorization URL before it's opened. Implemented
-that signature; the `port` field was dropped from `LoopbackDeps` (not needed — Bun.serve
-binds `port: 0` and reports the actual bound port back via `server.port`).
+### Silencedetect heuristic (flagged as an assumption for Task 13 to confirm live)
+`silencedetect` logs `silence_start` the moment the input drops below the noise floor. A session starts amid ambient silence, so naively resolving on the *first* `silence_start` would cut the recording before the user speaks. Chosen heuristic: track a `sawSpeech` flag that flips true on the first `silence_end` (signal rose above the floor — the user started talking), and only resolve `silenceSignaled` on a `silence_start` **after** that. If silencedetect never fires (no device, permission prompt swallowing the stream, etc.) the promise simply never resolves — `captureFromMic` (Task 9, unchanged) still terminates via manual space/enter or its `MAX_CAPTURE_SAMPLES` hard cap, so this is a convenience, not a correctness dependency. This exact behavior needs a real mic + real ffmpeg to confirm — DONE_WITH_CONCERNS item for Task 13.
 
-## Behavior implemented
+## Chat wiring (`src/cli/chat.ts`)
+Inside the `withMcpRun` callback, right after `createMediaStore(run.dir)` and before `ingestMedia`:
+- Guarded on `flags.voice || flags.voiceIn.length > 0` (so a plain text/media chat never pays for loading the sherpa-onnx transcriber).
+- Calls `createCliVoiceDeps(ledger)` → `ingestVoice(rawPrompt, flags, voiceDeps)`, prints each warning via `console.error(warning)` (not re-prefixed — `ingestVoice`'s warnings already carry a `voice: ` prefix baked in, so double-prefixing was avoided), and always `close()`s the transcriber in a `finally`.
+- The resulting prompt (`promptWithVoice`) — not the raw positional-arg prompt — is what's passed into `ingestMedia`, so a typed prompt + voice transcript + `--image`/`--audio`/`--video`/auto-detected paths all compose into the final `task` string.
 
-- Binds `127.0.0.1:0` via `Bun.serve` (ephemeral port).
-- Computes `redirectUri = http://127.0.0.1:<server.port>/callback`, calls
-  `buildAuthUrl(redirectUri)`, then `deps.openBrowser(authUrl)` — default `openBrowser`
-  is `Bun.spawn(['open', url])` (darwin `open`).
-- `GET /callback?code&state`: `state !== expectedState` → responds 400 and rejects
-  `Error('state mismatch')`; otherwise responds 200 "You may close this window" and
-  resolves `{code, state, redirectUri}`.
-- Whole wait is guarded by `withWallClock(deps.timeoutMs ?? 180000, ...)` from
-  `src/reliability/timeout.ts`.
-- Server is stopped on every exit path via `.finally(() => server?.stop())` chained onto
-  the `withWallClock` promise — the promise-based equivalent of the requested try/finally
-  (resolve, reject-on-mismatch, and timeout-reject all funnel through it).
-  Used the **graceful** `stop()` (not `stop(true)`) deliberately: an initial `stop(true)`
-  attempt force-closed the in-flight `/callback` response socket before it flushed,
-  producing an `ECONNRESET` on the test's `fetch()` caller — graceful stop lets the
-  response finish sending, then stops accepting new connections.
-- No secrets logged anywhere in the module.
-
-## Tests (`bun test tests/mcp/loopback.test.ts` — 2 pass)
-
-1. `captures code+state from the callback` — injected `openBrowser` decodes the
-   `redirect_uri` query param out of the built authUrl and `fetch`s it with
-   `code=CODE123&state=xyz`; asserts the resolved `{code, state, redirectUri}` (also
-   asserts `redirectUri` matches `http://127.0.0.1:<port>/callback`).
-2. `rejects on state mismatch and stops the server` — injected `openBrowser` fetches the
-   callback with a wrong `state`; asserts the promise rejects with `'state mismatch'`.
-
-TDD: wrote the test first, confirmed it failed (`Cannot find module '../../src/mcp/loopback.ts'`),
-then implemented and both tests (plus the state-mismatch test added per the workflow
-contract) passed.
-
-## Verification run
-
-- `bun test tests/mcp/loopback.test.ts` → 2 pass, 0 fail.
-- `bun run typecheck` → clean (one fixup needed: `server.port` types as `number | undefined`
-  in Bun's typings even after binding a TCP port; guarded with an explicit
-  `if (server.port === undefined) reject(...)` branch rather than a non-null assertion or
-  `?? 0` fallback, so a genuinely-unbound server surfaces as a real rejection instead of a
-  silently wrong `redirectUri`).
-- `bun run lint:file src/mcp/loopback.ts tests/mcp/loopback.test.ts` → clean (biome
-  auto-fixed formatting; manually removed two `noNonNullAssertion` warnings from the test
-  file by extracting a small `redirectUriFrom(authUrl)` helper that throws instead of `!`).
+## What is live-verify-only (Task 13)
+- The real `MicIo` (`cli-io.ts`) — spawning actual ffmpeg against `avfoundation`, raw-TTY key handling, and the `silencedetect` heuristic above — cannot be exercised by a unit test without a real mic/TTY; per the constraints this task deliberately did not write brittle fakes for it.
+- End-to-end `--voice` / `--voice-in` runs through `chat.ts` with a real transcriber + real audio.
+- Confirm the 30s default voice timeout is sane for real moonshine-tiny inference latency on target hardware.
 
 ## Self-review
+- `bun test tests/voice/ tests/cli/ tests/media/` → 239 pass / 0 fail across 61 files (no regressions).
+- `bun run typecheck` → clean.
+- `bun run lint:file` on all 5 touched/created files → clean (after one `biome check --write` pass for import order + line wrapping).
+- Checked for import cycles: `src/voice/*` does not import anything from `src/cli/*`; `chat.ts` imports `voice/cli-io.ts` and `voice/ingest.ts` one-way. No cycle.
+- `src/voice/capture.ts`'s only change is exporting an already-existing private helper (`bytesToFloat32`) — no behavior change; its existing tests (`capture-file.test.ts`, `capture-mic.test.ts`) still pass.
 
-- Confirmed the server-stop-on-every-exit-path guarantee: success (resolve), state
-  mismatch (reject), and timeout (withWallClock's race rejects) all pass through the same
-  `.finally(() => server?.stop())` — no path leaves the listener bound. Verified this
-  concretely by observing the ECONNRESET regression when first using `stop(true)` and
-  fixing it with graceful `stop()`.
-- No secrets (code, state, or anything else) are logged.
+## Review-findings fixes (post-DONE_WITH_CONCERNS pass)
 
-## Commit
+### Important: voice-deps construction now inside the never-crash boundary (`src/cli/chat.ts`)
+`createCliVoiceDeps(ledger)` was being called *outside* the `try` that wraps `ingestVoice`. `createCliVoiceDeps` → `createTranscriber` → `createInProcessTranscriber` synchronously `require`s the sherpa-onnx native addon and constructs `new sherpa.OfflineRecognizer(moonshineConfig(cfg.modelDir))` — on the common first-run case (voice model not yet downloaded via `bun run setup:voice`, or the addon failing to load on the platform) this throws *before* `ingestVoice`'s own internal degrade-to-warning logic ever gets a chance to run, propagating up through `main().catch` → `process.exit(1)` and aborting the entire chat turn instead of degrading to text-only.
 
-`5d85cb6` — "feat(mcp): browser loopback OAuth redirect capture" — staged only
-`src/mcp/loopback.ts` and `tests/mcp/loopback.test.ts` by explicit path (confirmed via
-`git status --short` before commit); other working-tree edits from sibling task agents
-sharing this working tree were left untouched.
+Fix: `voiceDeps` is now declared outside the `try` (typed `ReturnType<typeof createCliVoiceDeps> | undefined`) and both the construction and `ingestVoice` call live inside one `try`:
+- **Success path:** unchanged — `promptWithVoice` gets `ingestVoice`'s returned prompt, its warnings print via `console.error` (already `voice: `-prefixed), transcriber closes in `finally`.
+- **Failure path (deps construction or, defensively, ingestVoice itself throwing):** `catch` prints `` voice: unavailable (<error message>) — run 'bun run setup:voice' to install the model `` to stderr, records `ledger?.record({ kind: DegradeKind.ToolSkipped, subject: 'voice', reason: message })`, and lets execution fall through with `promptWithVoice` still equal to `rawPrompt` (never reassigned) — the chat turn proceeds text-only. `DegradeKind` is now imported alongside `formatLedger` from `../reliability/ledger.ts`.
+- **`finally`:** `await voiceDeps?.transcriber.close()` — optional-chained so it's a no-op when construction never got far enough to produce a `transcriber` (the "only if it was constructed" requirement).
+- The pre-existing no-voice path (neither `flags.voice` nor `flags.voiceIn.length`) is untouched — voice deps are still never constructed when no voice flag is present.
 
-**Concerns:** none blocking. Minor: `LoopbackDeps` dropped the brief's optional `port`
-field since the caller-driven `buildAuthUrl(redirectUri)` signature makes a caller-supplied
-port unnecessary (the real bound port is always used). Task 12 (OAuth provider) should call
-`awaitOAuthRedirect` with its own `buildAuthUrl` closure that embeds PKCE/state params
-alongside the redirect_uri.
+### Minor 1: raw-TTY now paused on `onKey` unsubscribe (`src/voice/cli-io.ts`, real `MicIo.onKey`)
+The returned unsubscribe removed the `'data'` listener and restored raw mode but never `stdin.pause()`d, leaving stdin flowing with no consumer — a keystroke arriving before the next readline prompt (e.g. `askYesNo` later in chat's `main()`) could be silently dropped. Fixed: unsubscribe now calls `stdin.pause()` after removing the listener and restoring cooked mode, and is guarded by an `unsubscribed` flag so raw-mode-restore + pause only fire once even if the caller invokes the returned function more than once.
 
-## Fix: Important reviewer finding — missing-code resolved instead of rejected
+### Minor 2: silencedetect stderr reader now releases its lock (`src/voice/cli-io.ts`, real `MicIo.start`)
+The stderr-watching IIFE resolved `silenceSignaled` on the `silence_start`-after-`silence_end` branch without releasing the reader's lock, unlike `frames()` which already cleans up in a `finally`. Added a matching `finally { reader.releaseLock(); }` around the stderr read loop so every exit path (stream `done`, silence resolved, or an error) releases the lock consistently.
 
-**Finding:** the `/callback` handler resolved with `code: ''` when the `code` query param
-was missing but `state` matched (`src/mcp/loopback.ts:64,70` in the reviewed diff). This
-would let an empty authorization code flow into Task 12's token exchange instead of failing
-fast at the loopback boundary.
+## Commands + output (this pass)
+- `bun test tests/voice/` → 32 pass / 0 fail across 10 files.
+- `bun test tests/cli/chat.test.ts tests/cli/run-chat.test.ts` → 8 pass / 0 fail.
+- `bun run typecheck` → clean.
+- `bun run lint:file -- "src/cli/chat.ts" "src/voice/cli-io.ts"` → clean, no fixes needed.
 
-**Change:** added a missing-`code` guard in `src/mcp/loopback.ts`, placed immediately after
-the existing state-mismatch check (so state is still validated first): if `code === ''`,
-reject `new Error('missing code')` and respond 400 — mirroring the state-mismatch branch's
-shape exactly. Updated the function's doc comment to mention the new rejection case. The
-reject still propagates through the same `.finally(() => server?.stop())` on the outer
-`withWallClock` promise, so the server is stopped on this path too (confirmed by the new
-test passing without hanging/leaking a listener).
-
-Added `rejects on missing code and stops the server` to `tests/mcp/loopback.test.ts`,
-mirroring the state-mismatch test's structure: injected `openBrowser` fetches the callback
-URL with `state=expected-state` and no `code` param at all, asserts the promise rejects with
-`'missing code'`.
-
-### Verification run
-
-```
-$ bun test tests/mcp/loopback.test.ts
-bun test v1.3.11 (af24e281)
-
- 3 pass
- 0 fail
- 5 expect() calls
-Ran 3 tests across 1 file. [15.00ms]
-
-$ bun run typecheck
-$ tsc --noEmit
-(clean, no output)
-
-$ bun run lint:file src/mcp/loopback.ts tests/mcp/loopback.test.ts
-$ biome check src/mcp/loopback.ts tests/mcp/loopback.test.ts
-Checked 2 files in 3ms. No fixes applied.
-```
-
-### Commit
-
-`19889f1` — "fix(mcp): reject loopback callback on missing authorization code" — staged
-only `src/mcp/loopback.ts` and `tests/mcp/loopback.test.ts`.
-
-**Concerns:** none blocking. The guard only fires when `code` is absent or explicitly empty
-(`''`); it does not attempt to validate the code's shape/format, which is out of scope for
-the loopback layer and correctly left to Task 12's token exchange / the authorization
-server.
+## Seam-test feasibility (deps-construction-throws case)
+Considered adding a hermetic unit test at the chat-wiring seam for "voice deps construction throws → degrades to text-only." Not feasible without a broader refactor: `main()` in `src/cli/chat.ts` is a single unexported function that calls `createCliVoiceDeps` directly by import (no injectable factory), and it also drives `withMcpRun`, `buildRegistry`, runtime discovery, and model-manager wiring inline — mocking just `createCliVoiceDeps` via `bun:test`'s `mock.module` while leaving those other real subsystems live would not be hermetic, and stubbing all of them just to reach the voice branch is out of scope for this fix. `ingestVoice`'s own degrade path (capture/transcribe failures) is already covered by `tests/voice/ingest.test.ts`, which is untouched. Noting this gap for Task 13 (live-verify), where the no-model / addon-load-failure case can be exercised for real (e.g. running `--voice` before `bun run setup:voice`).

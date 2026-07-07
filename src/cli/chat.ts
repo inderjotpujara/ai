@@ -23,7 +23,7 @@ import {
   interactiveTTY,
   stdinInput,
 } from '../provisioning/ui/prompt.ts';
-import { formatLedger } from '../reliability/ledger.ts';
+import { DegradeKind, formatLedger } from '../reliability/ledger.ts';
 import { liveBudgetBytes } from '../resource/hardware.ts';
 import {
   effectiveKvBytesPerToken,
@@ -40,6 +40,8 @@ import { runtimeFor } from '../runtime/registry.ts';
 import { reuseDecision } from '../verified-build/reuse.ts';
 import type { CapabilitySignature } from '../verified-build/types.ts';
 import { ReuseKind } from '../verified-build/types.ts';
+import { createCliVoiceDeps } from '../voice/cli-io.ts';
+import { ingestVoice } from '../voice/ingest.ts';
 import { shouldOfferCrew } from './offer-crew.ts';
 import { runChat } from './run-chat.ts';
 import { createSelectHook } from './select-hook.ts';
@@ -120,10 +122,10 @@ export async function reuseHintText(
   return `💡 An existing ${best.match} looks similar (${pct}%) — you may not need a new one.`;
 }
 
-/** Split value-taking media flags (`--image/--audio/--video <path>`,
- *  repeatable) and the boolean `--paste` out of the positional args, mirroring
- *  crew.ts's `parseArgs`. Everything else stays positional (joined back into
- *  the raw prompt by the caller). */
+/** Split value-taking media flags (`--image/--audio/--video/--voice-in <path>`,
+ *  repeatable) and the boolean flags `--paste`/`--voice` out of the positional
+ *  args, mirroring crew.ts's `parseArgs`. Everything else stays positional
+ *  (joined back into the raw prompt by the caller). */
 export function parseMediaArgs(argv: string[]): {
   positional: string[];
   flags: IngestFlags;
@@ -134,6 +136,8 @@ export function parseMediaArgs(argv: string[]): {
     audios: [],
     videos: [],
     paste: false,
+    voice: false,
+    voiceIn: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -144,6 +148,12 @@ export function parseMediaArgs(argv: string[]): {
       if (arg === '--image') flags.images.push(value);
       else if (arg === '--audio') flags.audios.push(value);
       else flags.videos.push(value);
+    } else if (arg === '--voice-in') {
+      const value = argv[i + 1];
+      i += 1;
+      if (value !== undefined) flags.voiceIn.push(value);
+    } else if (arg === '--voice') {
+      flags.voice = true;
     } else if (arg === '--paste') {
       flags.paste = true;
     } else if (arg !== undefined) {
@@ -158,7 +168,9 @@ function hasMediaFlags(flags: IngestFlags): boolean {
     flags.images.length > 0 ||
     flags.audios.length > 0 ||
     flags.videos.length > 0 ||
-    flags.paste
+    flags.paste ||
+    flags.voice ||
+    flags.voiceIn.length > 0
   );
 }
 
@@ -167,7 +179,7 @@ async function main(): Promise<void> {
   const rawPrompt = positional.join(' ').trim();
   if (rawPrompt.length === 0 && !hasMediaFlags(flags)) {
     console.error(
-      'Usage: bun run src/cli/chat.ts "<your request>" [--image path] [--audio path] [--video path] [--paste]',
+      'Usage: bun run src/cli/chat.ts "<your request>" [--image path] [--audio path] [--video path] [--paste] [--voice] [--voice-in path]',
     );
     process.exit(1);
   }
@@ -237,8 +249,54 @@ async function main(): Promise<void> {
         try {
           warnUnknownChatAgents(config);
           const store = createMediaStore(run.dir);
+
+          // Voice runs BEFORE media ingest so its transcript(s) splice into
+          // the prompt text that ingestMedia then scans for dragged-in paths
+          // and `--image`/`--audio`/`--video` flags — typed prompt + voice
+          // transcript + media all compose into one `task`. Only spun up
+          // when a voice flag is present: building real deps loads the
+          // sherpa-onnx transcriber, which a plain text/media chat shouldn't
+          // pay for.
+          let promptWithVoice = rawPrompt;
+          if (flags.voice || flags.voiceIn.length > 0) {
+            // Deps construction AND ingestVoice share one try/catch: building
+            // real deps synchronously loads the sherpa-onnx addon and
+            // constructs its recognizer (createCliVoiceDeps -> createTranscriber
+            // -> createInProcessTranscriber), which throws before ingestVoice's
+            // own internal degrade-to-warning logic ever runs — e.g. the voice
+            // model hasn't been downloaded yet, or the addon fails to load.
+            // Any failure here must degrade to the original (non-voice) prompt
+            // rather than aborting the whole chat turn.
+            let voiceDeps: ReturnType<typeof createCliVoiceDeps> | undefined;
+            try {
+              voiceDeps = createCliVoiceDeps(ledger);
+              const voiceResult = await ingestVoice(
+                rawPrompt,
+                flags,
+                voiceDeps,
+              );
+              promptWithVoice = voiceResult.prompt;
+              // ingestVoice's warnings are already prefixed ("voice: ...").
+              for (const warning of voiceResult.warnings) {
+                console.error(warning);
+              }
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              console.error(
+                `voice: unavailable (${message}) — run 'bun run setup:voice' to install the model`,
+              );
+              ledger?.record({
+                kind: DegradeKind.ToolSkipped,
+                subject: 'voice',
+                reason: message,
+              });
+            } finally {
+              await voiceDeps?.transcriber.close();
+            }
+          }
+
           const { prompt: task, warnings } = await ingestMedia(
-            rawPrompt,
+            promptWithVoice,
             flags,
             store,
           );

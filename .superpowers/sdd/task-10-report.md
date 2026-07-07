@@ -1,206 +1,66 @@
-# Task 10 report: OAuth token store (0600 file)
+# Task 10 Report: CLI flag parsing (`--voice`, `--voice-in`)
 
-**Status:** DONE
+## Implementation
 
-**Commit:** `793cb0a` — feat(mcp): 0600 OAuth token store
-
-## What was built
-
-`src/mcp/token-store.ts`, mirroring the atomic temp+rename pattern from
-`src/mcp/consent.ts`'s `writeApprovals`, hardened for secrets:
-
-- `StoredTokens`, `ClientRecord`, `ServerAuthRecord` types per the brief.
-- `tokenStorePath()` — `$XDG_CONFIG_HOME || ~/.config` + `/ai/mcp-tokens.json`.
-- `readTokenStore(path?)` — missing or corrupt file → `{}`, never throws
-  (same defensive posture as `readApprovals`).
-- `writeTokenStore(store, path?)` — atomic write:
-  - `mkdirSync(dirname(path), { recursive: true, mode: 0o700 })` for the
-    parent dir.
-  - temp file written with `writeFileSync(tmp, ..., { mode: 0o600 })`.
-  - `renameSync(tmp, path)`.
-  - explicit `chmodSync(path, 0o600)` after rename as a belt-and-suspenders
-    check (rename generally preserves the temp's mode on the same
-    filesystem, but this guarantees it regardless).
-- `getServerAuth(server, path?)` / `setServerAuth(server, rec, path?)` —
-  read-modify-write; `setServerAuth` replaces the named server's whole
-  record in the store object (store-level merge — other servers'
-  records untouched) then persists via `writeTokenStore`.
-- Left an explicit comment on `tokenStorePath()` noting this file holds
-  real OAuth secrets in plaintext, protected only by 0600 permissions —
-  encryption-at-rest is deliberately deferred to Slice 35.
-
-## Test coverage
-
-`tests/mcp/token-store.test.ts`, 8 tests, all passing:
-1. Round-trips tokens for one server and asserts `statSync(path).mode & 0o777 === 0o600` (brief's required test).
-2. Missing file via `getServerAuth` → `{}`, never throws (brief's required test).
-3. `readTokenStore` on a missing file → `{}`.
-4. `readTokenStore` on a corrupt (non-JSON) file → `{}`, never throws.
-5. `setServerAuth` merges into an existing store, other servers' records preserved.
-6. `setServerAuth` overwrites/replaces the record for the same server (verifies store-level, not deep-field, merge semantics).
-7. `writeTokenStore` creates the parent dir with mode `0o700` and the file with `0o600`, including nested dirs that don't yet exist.
-8. `tokenStorePath()` resolves to a path ending in `ai/mcp-tokens.json` by default.
-
-All tests use `node:os` `tmpdir()` paths — none touch the real `~/.config`.
-
-## Verification run
-
-```
-bun test tests/mcp/token-store.test.ts   → 8 pass, 0 fail
-bun run typecheck                        → clean
-bun run lint:file src/mcp/token-store.ts tests/mcp/token-store.test.ts → clean (biome, no fixes needed)
-```
-
-Manual spot-check (outside the test suite) confirmed the final file's mode
-is `0600` after a real `setServerAuth` call, and that the default
-`tokenStorePath()` resolves to `~/.config/ai/mcp-tokens.json` when
-`XDG_CONFIG_HOME` is unset.
-
-## Self-review notes
-
-- Confirmed 0600 is set on both the temp file (at write time) AND the
-  final file (via explicit `chmodSync` post-rename) — never leaves a
-  world-readable window for the secrets file, satisfying the brief's
-  "set both to be safe" instruction.
-- `mkdirSync(..., { mode: 0o700 })` only applies the mode when the
-  directory is actually created; if a parent dir pre-exists with looser
-  permissions, `mkdirSync` won't tighten it. This matches the brief's
-  literal instruction and mirrors how `consent.ts` doesn't harden
-  pre-existing dirs either. Flagging as a known limitation, not a defect
-  introduced here — `~/.config` and `~/.config/ai` typically pre-exist
-  with normal user-only-writable perms in practice, and this store is
-  additive to that convention.
-- No behavior for concurrent writers (two processes racing on the same
-  temp file path) — same limitation as `consent.ts`; out of scope for
-  this task.
-- `docs/architecture.md`/README/ROADMAP were not touched: `src/mcp` is
-  already a documented subsystem, `bun run docs:check` (which runs as
-  part of the pre-commit hook) passed with no changes needed. No new
-  top-level subsystem was introduced.
-
-## Concerns for downstream tasks (12/14)
-
-- `setServerAuth`'s "merge" is store-level (replaces the named server's
-  entire `ServerAuthRecord`), not a deep merge of `tokens`/`codeVerifier`/
-  `client` sub-fields. If Task 12/14 need to update just one sub-field
-  (e.g., refresh `tokens` while preserving an existing `client` record),
-  callers must read the existing record via `getServerAuth` first, spread
-  it, and pass the merged object to `setServerAuth` — the store won't do
-  that merge for them. Confirmed this matches the "merge + persist"
-  wording in the brief (merge into the store, not into the record), and
-  no other task brief currently references a different expectation.
-- Did not touch any of the other `.superpowers/sdd/*.md` files or
-  `docs/ROADMAP.md` showing as modified in `git status` — those diffs
-  predate this task's work (other Slice 26 tasks running in parallel) and
-  were deliberately left out of this commit's staged files.
-
----
-
-## Fix: `setServerAuth` was a whole-record REPLACE, not a field merge
-
-**Reported by:** live review of Task 10, in the context of Task 12's
-call pattern (save `codeVerifier`, then save `client`, then save
-`tokens` as three separate `setServerAuth` calls during the OAuth
-handshake).
-
-**Bug:** `setServerAuth` did `store[server] = rec`. Each call fully
-replaced the server's stored record, so a later call (e.g. saving
-`tokens` after exchange) silently wiped fields set by an earlier call
-(e.g. `codeVerifier` set before the redirect). This is exactly the
-"concerns for downstream tasks" limitation flagged above, but it turned
-out to be a functional defect rather than an acceptable caller
-responsibility — Task 12's PKCE handshake needs `codeVerifier` to
-survive until the token exchange call, and nothing in that flow
-re-reads-and-spreads before calling `setServerAuth`.
-
-**Fix (`src/mcp/token-store.ts`):**
+### `src/media/ingest.ts`
+Extended `IngestFlags` with two new required fields:
 
 ```ts
-export function setServerAuth(
-  server: string,
-  rec: ServerAuthRecord,
-  path: string = tokenStorePath(),
-): void {
-  const store = readTokenStore(path);
-  store[server] = { ...store[server], ...rec };
-  writeTokenStore(store, path);
-}
+export type IngestFlags = {
+  images: string[];
+  audios: string[];
+  videos: string[];
+  paste: boolean;
+  voice: boolean;
+  voiceIn: string[];
+};
 ```
 
-Shallow merge is sufficient: `tokens`, `codeVerifier`, and `client` are
-the only three top-level keys on `ServerAuthRecord`, and each caller
-always sets a complete sub-object for the key(s) it's writing (never a
-partial `tokens` or partial `client`), so a shallow spread can't produce
-a Frankenstein sub-object.
+### `src/cli/chat.ts`
+- `parseMediaArgs`: initializes `voice: false, voiceIn: []` in the flags object; added two new branches to the arg-parsing loop — `--voice-in` consumes the next token and pushes it onto `flags.voiceIn` (repeatable, mirrors `--image`/`--audio`/`--video`), `--voice` sets the boolean `flags.voice = true`.
+- `hasMediaFlags`: now also returns `true` when `flags.voice` is set or `flags.voiceIn.length > 0`, so a voice-only invocation (e.g. `bun run src/cli/chat.ts --voice`) isn't rejected as an empty invocation.
+- Usage string (was at `chat.ts:170`) updated to append `[--voice] [--voice-in path]`.
+- Updated the doc comment above `parseMediaArgs` to mention the new flags.
 
-**Test fix (`tests/mcp/token-store.test.ts`):** the existing test named
-`'setServerAuth overwrites the record for the same server'` set
-`codeVerifier` then `tokens` but only asserted the `tokens` field —
-it never caught the clobbered `codeVerifier`. Renamed to
-`'setServerAuth field-merges into the existing record for the same
-server'` and rewrote to assert both fields survive:
+## IngestFlags construction sites found and updated
 
-```ts
-it('setServerAuth field-merges into the existing record for the same server', () => {
-  const path = join(tmpdir(), `mcp-tokens-merge-fields-${Date.now()}.json`);
-  setServerAuth('a', { codeVerifier: 'v1' }, path);
-  setServerAuth(
-    'a',
-    { tokens: { access_token: 'tok', token_type: 'Bearer' } },
-    path,
-  );
-  const rec = getServerAuth('a', path);
-  expect(rec.codeVerifier).toBe('v1');
-  expect(rec.tokens?.access_token).toBe('tok');
-});
-```
+Searched the repo (`grep -rn "IngestFlags"` plus a scan for `images: []`/`images: [p]`-style literals) and found construction sites in 3 files besides the type definition itself:
 
-**Verified the test actually catches the bug** — ran it against the old
-replace-code (`git stash` on just `src/mcp/token-store.ts` to
-temporarily revert the fix) before restoring the fix:
+1. `src/cli/chat.ts` — `parseMediaArgs` flags initializer (the "real" construction site; part of the task's core change, not a breakage fix).
+2. `tests/media/ingest.test.ts` — **6 literal sites** passed directly as the `IngestFlags`-typed second argument to `ingestMedia(...)` (originally lines 18, 31, 43, 59, 71, 89). All 6 updated to add `voice: false, voiceIn: []`.
+3. `tests/media/chat-args.test.ts` — **1 site**, a `toEqual({...})` runtime-structural comparison at line 36 (not type-checked against `IngestFlags` directly, but would have failed at runtime since `parseMediaArgs` now returns extra keys). Updated to include `voice: false, voiceIn: []`.
 
-```
-$ git stash push -- src/mcp/token-store.ts && bun test tests/mcp/token-store.test.ts
-...
-tests/mcp/token-store.test.ts:
-    expect(rec.codeVerifier).toBe('v1');
-                              ^
-error: expect(received).toBe(expected)
+Total: 1 real construction site (chat.ts) + 7 fixture/assertion sites across 2 test files, all updated. No other sites existed (`src/media/ingest.ts`'s own references are type annotations on function parameters, not object literals).
 
-Expected: "v1"
-Received: undefined
-(fail) token-store > setServerAuth field-merges into the existing record for the same server [0.67ms]
+## TDD: RED → GREEN
 
- 7 pass
- 1 fail
- 12 expect() calls
-Ran 8 tests across 1 file. [20.00ms]
+- Wrote `tests/voice/chat-args.test.ts` per the brief (verbatim) before touching implementation code.
+- RED: `bun test tests/voice/chat-args.test.ts` failed — `flags.voice` was `undefined`, `flags.voiceIn` was `undefined` (2 failing assertions, 0 pass).
+- Implemented the flag-parsing branches and type extension.
+- GREEN: `bun test tests/voice/chat-args.test.ts` → 2 pass, 0 fail, 4 expect() calls.
 
-$ git stash pop   # fix restored
-```
+## Typecheck + media-tests result
 
-**Full contract, with the fix restored:**
+- `bun run typecheck` initially surfaced exactly the 7 expected breakages (6 in `tests/media/ingest.test.ts`, 1 in `tests/media/chat-args.test.ts`) — all "missing voice, voiceIn" errors, nothing else. Fixed all 7; `bun run typecheck` now exits clean.
+- `bun test tests/media/` → **138 → 140 pass** (2 new voice tests included when running the combined command), 0 fail, 352 expect() calls, 35 files — full media suite green.
+- `bun test tests/voice/chat-args.test.ts` → 2 pass, 0 fail, unaffected by biome's later reformatting.
 
-```
-$ bun test tests/mcp/token-store.test.ts
-bun test v1.3.11 (af24e281)
+## Files changed
 
- 8 pass
- 0 fail
- 13 expect() calls
-Ran 8 tests across 1 file. [19.00ms]
+- `src/media/ingest.ts` — `IngestFlags` type extended.
+- `src/cli/chat.ts` — `parseMediaArgs`, `hasMediaFlags`, usage string, doc comment.
+- `tests/voice/chat-args.test.ts` — new test file (per brief, verbatim; reformatted by `biome check --write` for line-wrapping only, no semantic change).
+- `tests/media/ingest.test.ts` — 6 `IngestFlags` literals updated.
+- `tests/media/chat-args.test.ts` — 1 `toEqual` assertion updated.
 
-$ bun run typecheck
-$ tsc --noEmit
-(clean, no output)
+## Lint
 
-$ bun run lint:file src/mcp/token-store.ts tests/mcp/token-store.test.ts
-$ biome check src/mcp/token-store.ts tests/mcp/token-store.test.ts
-Checked 2 files in 4ms. No fixes applied.
-```
+`bun run lint:file -- src/cli/chat.ts src/media/ingest.ts tests/voice/chat-args.test.ts tests/media/ingest.test.ts tests/media/chat-args.test.ts` initially flagged formatting-only diffs (line-wrapping of the new object literals and the new test's array literal); ran `bunx biome check --write` on the same file set to apply Biome's own formatting, then reran `lint:file` — clean, no errors.
 
-**Superseded note above:** the "Concerns for downstream tasks" bullet
-about `setServerAuth`'s merge being store-level-only (not deep) is now
-resolved — the store performs a shallow field-merge per server, so
-Task 12/14 callers do NOT need to read-spread-write themselves for the
-three top-level keys.
+## Self-review
+
+- New fields are required (not optional) on `IngestFlags`, per the constraint — every construction site now sets them explicitly, so there's no silent `undefined` propagating through `ingestMedia` logic later (Task 11 will consume `voice`/`voiceIn`).
+- `--voice-in` follows the exact same repeatable-value pattern as `--image`/`--audio`/`--video` (push onto array, skip the consumed token) — no new parsing idiom introduced.
+- `hasMediaFlags` change is additive (OR'd onto the existing boolean expression) — cannot make a previously-true case false.
+- Confirmed no other call site in `src/` constructs an `IngestFlags` literal (only `chat.ts`'s `parseMediaArgs`), and no non-test file outside `src/cli/chat.ts` and `src/media/ingest.ts` needed changes.
+- Did not touch `ingestMedia`'s runtime behavior for voice — that's explicitly Task 11's scope (`ingestVoice + chat wiring`); this task is flag parsing only, matching the brief.

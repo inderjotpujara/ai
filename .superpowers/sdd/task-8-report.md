@@ -1,76 +1,54 @@
-# Task 8 report — gated live-verify for Slice 28 gen-fit
+# Task 8 Report: Capture from file (`--voice-in`)
 
-## Status: DONE
+## Implementation
 
-Commit: `fed57fa` — "test(media): gated live-verify for gen-fit (image/speech render, video degrade)"
-(branch: `slice-28-hardware-adaptive-gen`)
+Created `src/voice/capture.ts` exporting:
+- `CaptureDeps` — `{ spawn?: (cmd: string[]) => Promise<{ code, stdout: Uint8Array, stderr }> }`, injectable so tests never touch a real subprocess.
+- `defaultSpawn(cmd)` — real implementation using `Bun.spawn`, collecting stdout bytes / stderr text / exit code concurrently via `Promise.all`.
+- `bytesToFloat32(bytes)` — alignment-safe reinterpret helper (see below).
+- `captureFromFile(path, cfg, deps = {})` — builds the ffmpeg argv exactly as specified (`ffmpeg -hide_banner -loglevel error -i <path> -ac 1 -ar 16000 -f f32le pipe:1`), runs it via `deps.spawn ?? defaultSpawn`, and returns `VoiceFrames` (`{ samples, sampleRate: 16000 }`).
 
-## What was added
+## Byte-alignment handling
 
-Extended the existing `tests/integration/multimodal.live.test.ts` (Slice 27's
-gated-live-verify file) with 4 new cases, matching its existing gating style
-(`MULTIMODAL_LIVE=1` → `describe` vs `describe.skip`):
+ffmpeg's stdout arrives as a `Uint8Array` whose underlying `ArrayBuffer` is not guaranteed to start at byte offset 0 or have a length that's a multiple of 4 (e.g. Bun/Node stream buffers are frequently pooled/sliced views into larger buffers). Constructing a `Float32Array` directly over `bytes.buffer` would either throw (`RangeError: byte length not a multiple of 4`) or silently misread samples starting at the wrong offset.
 
-1. **(gated live, inside the existing `suite(...)` block) `gen-fit: image
-   auto-fit selects the installed anchor and renders`** — asserts
-   `selectGenModel(MediaKind.Image)` resolves to
-   `dhairyashil/FLUX.1-schnell-mflux-4bit`, then drives
-   `createGenerateTools(store).generate_image.execute({prompt: ...})` against a
-   real run-scoped `MediaStore`, extracts the `file://` URI from the returned
-   string via `fileURLToPath`, and asserts the file exists and is non-empty.
+`bytesToFloat32` guards against both:
+1. Copies the incoming bytes into a fresh `Uint8Array(bytes.byteLength)` via `.set()` — this allocates a brand-new `ArrayBuffer` with offset 0 and no aliasing to the original pooled buffer.
+2. Constructs `Float32Array(copy.buffer, 0, Math.floor(copy.byteLength / 4))` — explicit length in samples (not bytes), floor-dividing so a stray trailing partial sample (0–3 leftover bytes) is silently dropped rather than throwing.
 
-2. **(gated live)** `gen-fit: speech auto-fit selects Kokoro and renders` —
-   same shape for `generate_speech`, asserting `selectGenModel(MediaKind.Audio)`
-   → `mlx-community/Kokoro-82M-bf16` and a non-empty `.wav` file on disk.
+This matches the brief's reference implementation verbatim — preserved as instructed.
 
-3. **(NOT gated — deterministic, new `describe(...)` block)** `video tool
-   degrades gracefully when no model fits` — calls
-   `createGenerateTools(store, { selectModel: async () => undefined
-   }).generate_video.execute({prompt:'x'})` and asserts the returned message
-   contains both "no video" and "not generated" (case-insensitive), proving
-   the no-fit path never crashes. No real video render is attempted (correct,
-   since no video model is installed on this box).
+## Error handling
 
-4. **(NOT gated — deterministic)** `selectGenModel returns undefined under a
-   forced-tiny budget` — `selectGenModel(MediaKind.Video, { budgetBytes: 1,
-   isInstalled: () => true })` resolves to `undefined`.
+- `code !== 0` → `throw new VoiceError('ffmpeg decode failed: ' + stderr)` — message satisfies the test's `/ffmpeg/i` matcher and surfaces ffmpeg's own stderr for diagnosis.
+- `samples.length === 0` (empty/silent decode) → `throw new VoiceError('no audio decoded from file')`.
+- Both are the typed `VoiceError` from `src/voice/types.ts` (Task 2), not a bare `Error`.
 
-Also added a small `uriToPath` helper (`fileURLToPath` from `node:url`) to
-turn the tool's `file://...` return string into a filesystem path for
-`existsSync`/`statSync` assertions, and imported `createGenerateTools` /
-`selectGenModel` from `src/media/generate/tools.ts` / `select.ts`.
+## TDD RED → GREEN
 
-Note on tool `.execute` calls: `createGenerateTools` returns `ToolSet`
-(`Record<string, Tool>`), and with `noUncheckedIndexedAccess` enabled in this
-repo's `tsconfig.json`, indexing into it types as `Tool | undefined` — so the
-calls use `?.` (`generate_image?.execute?.(...)`) purely to satisfy the
-compiler; the tools are always defined in this construction (no behavior
-change).
+1. **RED**: Wrote `tests/voice/capture-file.test.ts` verbatim from the brief first. Ran `bun test tests/voice/capture-file.test.ts` — failed with `Cannot find module '../../src/voice/capture.ts'` (module didn't exist yet). Confirmed failure before writing implementation.
+2. **GREEN**: Wrote `src/voice/capture.ts` per the brief's Step 3. Re-ran the same test — `2 pass, 0 fail, 4 expect() calls`.
+3. Ran `bun run typecheck` — clean (`tsc --noEmit`, no output/errors).
+4. Ran `bun run lint:file -- "src/voice/capture.ts" "tests/voice/capture-file.test.ts"` — biome flagged 2 pure-formatting diffs (arg-wrapping style on the `spawn` type signature and an inline object literal in the second test). Applied `bunx biome check --write` to both files, then re-ran lint (clean), re-ran the test (still `2 pass`), and re-ran typecheck (still clean) to confirm the auto-format didn't change behavior.
 
-## Verification performed
+No fixture file (`tests/voice/fixtures/hello.f32`) was created — the brief's own test doesn't need one; it synthesizes Float32 PCM bytes in-memory via the `pcmBytes()` helper and injects a fake `spawn`, so no real ffmpeg or on-disk fixture is exercised. This keeps the test fully hermetic as required.
 
-- `bun run test:file -- "tests/integration/multimodal.live.test.ts"` (no
-  `MULTIMODAL_LIVE` set): **2 pass, 9 skip, 0 fail** — the 2 passing are the
-  new deterministic video-degrade + forced-tiny-budget cases; the 9 skipped
-  are all live-gated cases (7 pre-existing Slice-27 + 2 new gen-fit ones),
-  correctly skipped without the env var.
-- `bun run lint:file --write -- "tests/integration/multimodal.live.test.ts"`
-  then a clean re-run of `bun run lint:file` (no `--write`): **no
-  findings** (the `--write` pass only reordered imports).
-- `bun run typecheck`: **clean, no errors.**
+## Files changed
 
-The gated live cases (image/speech auto-fit render) were NOT executed by me —
-per the brief, the controller runs `MULTIMODAL_LIVE=1 bun run test:file --
-"tests/integration/multimodal.live.test.ts"` afterward on this box (where the
-image/Kokoro HF caches are confirmed present) to actually exercise the real
-renders.
+- `src/voice/capture.ts` (new, 44 lines after formatting)
+- `tests/voice/capture-file.test.ts` (new, 26 lines after formatting)
 
-## Blocking concerns
+## Self-review
 
-None. No bugs surfaced in the non-gated run. The gated image/speech render
-cases still need a live run with `MULTIMODAL_LIVE=1` (and ideally
-`AGENT_IMAGE_CMD=/tmp/mlxvenv/bin/mflux-generate
-AGENT_TTS_CMD=/tmp/mlxvenv/bin/mlx_audio.tts.generate` set per the brief's env
-facts) to confirm the real mflux/Kokoro renders succeed end-to-end — that is
-the controller's live-verify step per the task contract, not something I could
-self-certify from this dispatch.
+- Interfaces match the brief exactly: `captureFromFile(path, cfg, deps?): Promise<VoiceFrames>`, `CaptureDeps.spawn` signature matches what Task 9 (mic capture) will need to share in the same file.
+- `VoiceFrames.sampleRate` is a literal `16000` per `types.ts` — returned directly as the literal, matching the type.
+- ffmpeg argv matches the spec string token-for-token (`-hide_banner -loglevel error -i <path> -ac 1 -ar 16000 -f f32le pipe:1`).
+- Default real `spawn` (`defaultSpawn`) is exercised only by production code paths / future live-verify (Task 13), never by this unit test — confirmed via `deps.spawn` injection in both test cases.
+- Considered whether `bytesToFloat32` should reject a non-multiple-of-4 length instead of silently truncating; kept the brief's floor-and-drop behavior since ffmpeg's f32le output is expected to always be a clean multiple of 4 in practice, and Task 13's live-verify will catch any real-world discrepancy.
+- No `console.log` left in; no lint/typecheck suppressions added.
+
+## Commit
+
+- `49d8435` — `feat(voice): capture from file via ffmpeg decode` (on branch `slice-29-voice-input-stt`)
+
+(Note: this file previously held a stale report from Slice 28 Task 8 — the SDD task-numbering restarted per-slice and that filename got reused; this report replaces it with the correct Slice 29 / voice-input Task 8 content.)

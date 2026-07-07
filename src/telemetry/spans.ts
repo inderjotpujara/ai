@@ -10,6 +10,7 @@ import { contentPolicyLabel } from '../media/consent.ts';
 import { uncensoredEnabled } from '../media/policy.ts';
 import { type DegradeEvent, DegradeKind } from '../reliability/ledger.ts';
 import type { ArtifactKind, VerifiedLevel } from '../verified-build/types.ts';
+import type { CaptureSource } from '../voice/types.ts';
 import { recordIoEnabled } from './provider.ts';
 
 export const ATTR = {
@@ -138,6 +139,12 @@ export const ATTR = {
   GEN_FIT_BUDGET_BYTES: 'media.gen_fit.budget_bytes',
   GEN_FIT_MODEL_BYTES: 'media.gen_fit.model_bytes',
   GEN_FIT_CANDIDATES: 'media.gen_fit.candidates',
+  // Voice input (Slice 29)
+  VOICE_STT_MODEL: 'voice.stt.model',
+  VOICE_CAPTURE_SOURCE: 'voice.capture.source',
+  VOICE_AUDIO_SECONDS: 'voice.audio.seconds',
+  VOICE_DURATION_MS: 'voice.duration.ms',
+  VOICE_OUTCOME: 'voice.outcome',
 } as const;
 
 export type ModelSelectInfo = {
@@ -786,6 +793,25 @@ export function withTranscribeSpan<T>(
     if (info.outcome !== undefined) {
       span.setAttribute(ATTR.MEDIA_TRANSCRIBE_OUTCOME, info.outcome);
     }
+    return fn(span);
+  });
+}
+
+export type VoiceSpanInfo = { model: string; source: CaptureSource };
+
+/** Root span for one voice-input transcription call (Slice 29). Sets the STT
+ *  model and capture source (mic vs file) up-front, mirroring
+ *  withTranscribeSpan; callers that only learn `durationMs`/`outcome` after
+ *  the work completes can pass the span through via the returned `fn(span)`
+ *  and set attributes directly. */
+export function withVoiceTranscribeSpan<T>(
+  info: VoiceSpanInfo,
+  fn: (span: Span) => Promise<T>,
+): Promise<T> {
+  return inSpan('voice.transcribe', async (span) => {
+    span.setAttribute(ATTR.VOICE_STT_MODEL, info.model);
+    span.setAttribute(ATTR.VOICE_CAPTURE_SOURCE, info.source);
+    span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
     return fn(span);
   });
 }
