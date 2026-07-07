@@ -37,7 +37,10 @@ async function ensureFfmpeg(): Promise<void> {
   console.error('⚠ ffmpeg not found.');
   if (process.platform === 'darwin' && Bun.which('brew')) {
     console.error('Installing ffmpeg via brew...');
-    await run(['brew', 'install', 'ffmpeg']);
+    const brewCode = await run(['brew', 'install', 'ffmpeg']);
+    if (brewCode !== 0) {
+      console.error('ffmpeg install failed — voice capture will be unavailable.');
+    }
   } else {
     console.error('Install ffmpeg manually (voice capture needs it).');
   }
@@ -57,7 +60,11 @@ async function main(): Promise<void> {
     console.error('Download failed — voice input will be unavailable until it succeeds.');
     return;
   }
-  await run(['tar', '-xjf', archive, '-C', voiceCacheDir()]);
+  const tarCode = await run(['tar', '-xjf', archive, '-C', voiceCacheDir()]);
+  if (tarCode !== 0) {
+    console.error('Extraction failed.');
+    return;
+  }
   console.error(isModelReady(dir) ? `Voice model ready: ${dir}` : 'Extraction incomplete.');
 }
 
