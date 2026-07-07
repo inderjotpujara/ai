@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { MediaKind } from '../../src/media/types.ts';
 import { GEN_CATALOG, GenEngine } from '../../src/media/generate/catalog.ts';
+import { MediaKind } from '../../src/media/types.ts';
 
 describe('GEN_CATALOG', () => {
   test('covers all three generation kinds', () => {
@@ -22,7 +22,9 @@ describe('GEN_CATALOG', () => {
 
   test('the video ladder spans both engines (mlx-video one-shot + comfy-wan server)', () => {
     const videoEngines = new Set(
-      GEN_CATALOG.filter((c) => c.kind === MediaKind.Video).map((c) => c.engine),
+      GEN_CATALOG.filter((c) => c.kind === MediaKind.Video).map(
+        (c) => c.engine,
+      ),
     );
     expect(videoEngines.has(GenEngine.MlxVideo)).toBe(true);
     expect(videoEngines.has(GenEngine.ComfyWan)).toBe(true);
@@ -30,6 +32,8 @@ describe('GEN_CATALOG', () => {
 
   test('the image anchor is the ungated pre-quantized FLUX mirror', () => {
     const image = GEN_CATALOG.filter((c) => c.kind === MediaKind.Image);
-    expect(image.some((c) => c.repo === 'dhairyashil/FLUX.1-schnell-mflux-4bit')).toBe(true);
+    expect(
+      image.some((c) => c.repo === 'dhairyashil/FLUX.1-schnell-mflux-4bit'),
+    ).toBe(true);
   });
 });

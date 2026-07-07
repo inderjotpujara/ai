@@ -1,4 +1,4 @@
-import { ContentPolicy } from '../../core/types.ts';
+import type { ContentPolicy } from '../../core/types.ts';
 import { MediaVenv } from '../cmd-resolve.ts';
 import { ExecMode, MediaKind } from '../types.ts';
 
