@@ -1,42 +1,52 @@
-# Task 6 report — LM Studio inference-runtime strategy via `@lmstudio/sdk`
+# Task 6 report — runGenJob clears model on cross-engine degrade
 
 ## Status: DONE
 
-## Commits
-- `b9e4360` — feat(runtime): LM Studio inference runtime via @lmstudio/sdk (reload context)
-- `a8b714c` — fix(runtime): probe LM Studio reachability over REST, not the SDK client
+## Commit
+`d723c53` — fix(media): runGenJob drops engine-specific model repo when degrading to a fallback
+Branch: `slice-28-hardware-adaptive-gen`
 
-## What was built
+## What changed
+- `src/media/generate/adapter.ts`, `runGenJob`:
+  - one-shot-primary → server-fallback branch: `runServerJob(fallback, prompt, store, mediaType, opts, deps)` → `runServerJob(fallback, prompt, store, mediaType, { ...opts, model: undefined }, deps)`
+  - server-primary → one-shot-fallback branch: `runOneShotJob(fallback, prompt, store, mediaType, opts, deps)` → `runOneShotJob(fallback, prompt, store, mediaType, { ...opts, model: undefined }, deps)`
+  - Non-degrade paths (primary runs as-is) are untouched — `opts` still flows through unchanged.
+- New test: `tests/media/gen-job-degrade-model.test.ts` — added verbatim per brief, with one required fix (see Deviation below).
 
-- Ran `bun add @lmstudio/sdk` — landed `@lmstudio/sdk@1.5.0` in `package.json` `dependencies` and `bun.lock` (transitive: `@lmstudio/lms-isomorphic`, `ws`, `chalk`, `jsonschema`, `zod-to-json-schema`).
-- `src/runtime/strategies/lmstudio.ts`:
-  - `export type LmStudioClient = { load(model, ctx?): Promise<void>; unload(model): Promise<void>; listLoaded(): Promise<string[]>; reachable(): Promise<boolean> }` — the injectable seam, exactly as specified.
-  - `export function makeLmStudioStrategy(getClient: () => LmStudioClient): RuntimeStrategy` — `kind: RuntimeKind.LmStudio`, `contextCapability: 'reload'`, `defaultPort: 1234`, `healthPath: '/v1/models'`, `basePath: '/v1'`, no `launch`. `daemonLoad(model, numCtx)` → `getClient().load(model, numCtx)` then returns `{ baseUrl: 'http://127.0.0.1:1234/v1' }`; `daemonUnload(model)` → `getClient().unload(model)`; `detect()` → `getClient().reachable()`.
-  - `createDefaultLmStudioClient()` — the real-SDK-backed default client, all SDK usage isolated to this one file.
-  - `export const lmStudioStrategy = makeLmStudioStrategy(getDefaultClient)` + `export const lmStudioRuntime = createManagedRuntime(lmStudioStrategy)`.
-- `src/runtime/registry.ts` — appended `lmStudioRuntime` to `RUNTIMES` (order preserved: ollama, mlx-server, llama.cpp, lm-studio).
-- `tests/runtime/lmstudio-runtime.test.ts` — the brief's failing test plus 3 more (daemonUnload, detect() reachable/unreachable, static config fields), all using a fake `LmStudioClient`. Adapted the brief's exact test body to avoid non-null assertions (`daemonLoad!`) since the project's Biome config forbids `noNonNullAssertion` — used the same narrowing-helper pattern already established in `tests/runtime/llamacpp.test.ts`.
+## TDD sequence
+1. Wrote the failing test verbatim from the brief.
+2. Ran `bun run test:file -- "tests/media/gen-job-degrade-model.test.ts"` → FAIL as expected: `fallbackModel` was `'mlx/repo'` (opts.model leaked into fallback's `serverSubmit`).
+3. Applied the two-line fix in `adapter.ts` (both fallback invocations spread `opts` with `model: undefined`).
+4. Re-ran the same test → PASS.
 
-## Exact `@lmstudio/sdk` API bound to (v1.5.0, read directly from `node_modules/@lmstudio/sdk/dist/index.d.ts`)
+## Deviation from brief (required for typecheck)
+The brief's verbatim test code has `poll: async () => ({ fraction: 1 })` in the fallback's `serverSubmit` mock. `JobProgress` (src/media/types.ts) requires `message: string` (only `fraction` and `previewUri` are optional), so this literal fails `tsc --noEmit` with:
+```
+Property 'message' is missing in type '{ fraction: number; }' but required in type 'JobProgress'.
+```
+Fixed minimally by changing that line to `poll: async () => ({ fraction: 1, message: 'done' })`. No other code deviates from the brief. This is a test-only fix with no bearing on the behavior under test (the assertion is solely on `fallbackModel`).
 
-- `new LMStudioClient(opts?)` — `opts.logger?: LoggerInterface` etc. No `baseUrl` passed (defaults to guessing localhost ports).
-- `client.llm` is a `LLMNamespace extends ModelNamespace<LLMLoadModelConfig, LLMInstanceInfo, LLMInfo, LLMDynamicHandle, LLM>`, exposing:
-  - `load(modelKey: string, opts?: BaseLoadModelOpts<LLMLoadModelConfig>): Promise<LLM>` — `opts.config?: LLMLoadModelConfig` and `LLMLoadModelConfig.contextLength?: number`. Bound as `client.llm.load(model, { config: ctx ? { contextLength: ctx } : undefined })` — matches the plan's guess exactly.
-  - `unload(identifier: string): Promise<void>` — bound as `client.llm.unload(model)`.
-  - `listLoaded(): Promise<Array<LLM>>` — each `LLM` has `readonly identifier: string`; bound as `.map(m => m.identifier)`.
-- **Deviation from the brief's guessed `detect()`:** the brief suggested SDK-client reachability (or `lms` CLI presence). I initially wired `detect()`/`reachable()` to `client.system.getLMStudioVersion()` (confirmed to exist: `SystemNamespace.getLMStudioVersion(): Promise<{version, build}>`), wrapped in a timeout race. **Live-verified this was a bad default**: merely constructing `new LMStudioClient()` when no daemon is listening eagerly opens a WebSocket and starts a background reconnect loop that prints a boxed "Failed to connect to LM Studio" error (via `chalk`/`boxen`) on a ~1s repeating timer for the life of the process — and this happens even with `logger: <silent no-op>` passed to the constructor (the box bypasses the `logger` option entirely; reproduced by direct `bun -e` script, both via `getLMStudioVersion()` and via bare construction with zero method calls). Since `detect()`/`isAvailable()` is exactly the kind of check `availableRuntimes()` runs routinely, this would spam stderr indefinitely for every user who doesn't have LM Studio installed. Fixed in the second commit: `reachable()` now does a plain, silent `fetch('http://127.0.0.1:1234/v1/models', { signal: AbortSignal.timeout(probeTimeoutMs()) })` — same pattern already used by `src/runtime/ollama.ts`/`mlx-server.ts` — and the real `LMStudioClient` is now constructed lazily, only inside `load`/`unload`/`listLoaded`, i.e. only once this runtime is actually selected to warm/unload a model. Live-verified after the fix: `lmStudioStrategy.detect()` returns `false` in ~9ms with zero console output (no LM Studio running on this machine).
+## New test result
+`bun run test:file -- "tests/media/gen-job-degrade-model.test.ts"` → 1 pass, 0 fail (asserts `fallbackModel` is `undefined` after a forced one-shot→server degrade with `opts.model: 'mlx/repo'`).
 
-## Test summary
+## Existing adapter/gen test regression check
+Ran the following existing test files together with the new one:
+- `tests/media/adapter-oneshot.test.ts`
+- `tests/media/adapter-server.test.ts`
+- `tests/media/gen-select.test.ts`
+- `tests/media/generate-tools.test.ts`
+- `tests/media/telemetry-generate.test.ts`
 
-- `bun test tests/runtime/lmstudio-runtime.test.ts` — 4 pass, 0 fail, 11 expect() calls.
-- `bun test tests/runtime/` (full dir, 6 files incl. registry.test.ts which iterates `RUNTIMES`) — 38 pass, 0 fail, 75 expect() calls.
-- `bun run typecheck` — clean.
-- `bun run lint:file src/runtime/strategies/lmstudio.ts src/runtime/registry.ts tests/runtime/lmstudio-runtime.test.ts` — clean.
-- Live-verified (no mocks): `lmStudioStrategy.detect()` against a real, freshly-installed `@lmstudio/sdk@1.5.0` with no LM Studio daemon running → returns `false` in 9ms, no stderr output.
+Command: `bun run test:file -- "tests/media/gen-job-degrade-model.test.ts" "tests/media/adapter-oneshot.test.ts" "tests/media/adapter-server.test.ts" "tests/media/gen-select.test.ts" "tests/media/generate-tools.test.ts" "tests/media/telemetry-generate.test.ts"`
 
-## Concerns / follow-ups for the reviewer
+Result: **31 pass, 0 fail, 73 expect() calls across 6 files.** No regressions — same-strategy (non-degrade) paths keep passing `opts` unchanged, confirming the fix is scoped to only the two fallback-invocation branches.
 
-1. **SDK version installed:** `@lmstudio/sdk@1.5.0` (latest at install time, 2026-07-05).
-2. **Untested against a real running LM Studio daemon** (none available in this environment) — the `load`/`unload`/`listLoaded` bindings are verified against the SDK's shipped `.d.ts` signatures only, not exercised live. If Slice 26's live-verify gate expects an actual LM Studio install, that check should happen on a machine that has it.
-3. The noisy-reconnect-loop finding above is specific to `@lmstudio/sdk@1.5.0`'s `LMStudioClient` constructor/WS layer; if a future SDK bump changes this behavior, the `reachable()`-via-REST design is still the more conservative default and shouldn't need to change.
-4. `createManagedRuntime`'s `stopCurrent()` calls `strategy.daemonUnload(current.model)` whenever `current` is set (including right before a new `daemonLoad`, i.e. on every model switch) — so switching models on LM Studio incurs an SDK `unload` + `load` round trip each time. This matches the existing `daemonLoad`/`daemonUnload` contract from `managed-openai-compatible.ts` (Task 3) and is not something this task's scope changes.
+## Lint / typecheck
+- `bun run lint:file --write -- "src/media/generate/adapter.ts" "tests/media/gen-job-degrade-model.test.ts"` → Biome checked 2 files, fixed 2 files (import-order/formatting only, no logic changes — reviewed the diff, confirmed cosmetic).
+- `bun run typecheck` → clean, no errors (after the `message` fix above).
+
+## Blocking concerns
+None.
+
+## Note
+This report overwrites a stale `task-6-report.md` left over from a prior/different slice run (an unrelated LM Studio runtime-strategy task under the same filename). That content has been fully replaced with this task's report.

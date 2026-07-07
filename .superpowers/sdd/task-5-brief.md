@@ -1,32 +1,76 @@
-### Task 5: MLX strategy + rewrite `mlx-server.ts` onto the base
+### Task 5: Wan checkpoint from opts.model
 
 **Files:**
-- Create: `src/runtime/strategies/mlx.ts`
-- Modify: `src/runtime/mlx-server.ts` (rewrite to delegate to the base; KEEP exports `createMlxServerRuntime(deps?)` + `mlxServerRuntime`)
-- Modify: `src/runtime/registry.ts` (MLX now comes from the base; no new array entry — `mlxServerRuntime` already listed)
-- Test: `tests/runtime/mlx-server.test.ts` (existing — must still pass; extend for spawn)
+- Modify: `src/media/generate/comfy-lane.ts:34-87` (`buildWanWorkflow`)
+- Test: extend `tests/media/*` — add `tests/media/wan-checkpoint.test.ts`
 
 **Interfaces:**
-- Consumes: Task 3.
-- Produces: `mlxStrategy: RuntimeStrategy` (`kind: MlxServer`, `contextCapability: 'fixed'`, `defaultPort: 1234` — MLX/LM Studio default, `healthPath: '/v1/models'`, `basePath: '/v1'`; `launch(model, _numCtx, port)` → `{ cmd: 'mlx_lm.server', args: ['--model', model, '--host', '127.0.0.1', '--port', String(port)], port }`; `detect()` → `Bun.which('mlx_lm.server') != null` OR the `MLX_BASE_URL` server answers `/v1/models` — preserve today's env-based reachability so existing behavior is retained). `createMlxServerRuntime(deps?)` builds `createManagedRuntime(mlxStrategy, deps)` while preserving the `deps.baseUrl`/`deps.fetchImpl` injection (map `baseUrl` → override the fallback base URL so the existing tests that inject `baseUrl: 'http://fake:1234/v1'` keep working).
+- Consumes: `wanComfyStrategy` (its internal `buildWanWorkflow` is not exported — test through the public seam by exporting `buildWanWorkflow`).
+- Produces: `buildWanWorkflow` exported; adds a `CheckpointLoaderSimple` node whose `ckpt_name` is `opts.model` when set.
 
-**CRITICAL COMPAT NOTE:** the existing `tests/runtime/mlx-server.test.ts` (verbatim in the spec source) injects `{ baseUrl, fetchImpl }` and expects `getModelMax`/`listLoaded`/`isInstalled`/`isAvailable` to work against that injected fetch WITHOUT any spawn. So: when `deps.baseUrl` is provided, the MLX runtime must treat the server as already-running at that URL (no spawn) — `warm` becomes a no-op reachability path, exactly as today. Only spawn when NO external `baseUrl`/`MLX_BASE_URL` is configured. Preserve every existing test assertion.
+- [ ] **Step 1: Write the failing test**
 
-- [ ] **Step 1:** Run the EXISTING `tests/runtime/mlx-server.test.ts` first to capture green baseline, then add one spawn test:
-```typescript
-test('mlx warm spawns mlx_lm.server when no external base url is set', async () => {
-  const seen: string[] = [];
-  const spawn = ((cmd: string) => { seen.push(cmd); return { pid: 1, kill: () => {}, onExit: () => {} }; }) as unknown as import('../../src/runtime/process-supervisor.ts').SpawnFn;
-  const health = (async () => new Response(JSON.stringify({ data: [{ id: 'm' }] }), { status: 200 })) as unknown as typeof fetch;
-  const rt = createMlxServerRuntime({ spawn, fetchImpl: health } as never);
-  await rt.control.warm('m', 8192); // fixed capability: no context flag, but process is spawned
-  expect(seen).toEqual(['mlx_lm.server']);
+```ts
+// tests/media/wan-checkpoint.test.ts
+import { describe, expect, test } from 'bun:test';
+import { buildWanWorkflow } from '../../src/media/generate/comfy-lane.ts';
+
+describe('buildWanWorkflow checkpoint', () => {
+  test('adds a checkpoint loader from opts.model when set', () => {
+    const wf = buildWanWorkflow('a dog running', {
+      model: 'city96/LTX-Video-0.9.6-distilled-gguf',
+    }) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+    const loader = Object.values(wf).find(
+      (n) => n.class_type === 'CheckpointLoaderSimple',
+    );
+    expect(loader?.inputs.ckpt_name).toBe('city96/LTX-Video-0.9.6-distilled-gguf');
+  });
+
+  test('omits the checkpoint loader when opts.model is unset', () => {
+    const wf = buildWanWorkflow('a dog running', {}) as Record<
+      string,
+      { class_type: string }
+    >;
+    const hasLoader = Object.values(wf).some(
+      (n) => n.class_type === 'CheckpointLoaderSimple',
+    );
+    expect(hasLoader).toBe(false);
+  });
 });
 ```
-- [ ] **Step 2: fail** — new test fails (spawn seam not wired).
-- [ ] **Step 3: implement** — rewrite `mlx-server.ts` to build on `createManagedRuntime(mlxStrategy, ...)`, threading the compat `baseUrl`/`fetchImpl`/`spawn` deps. Extend `MlxServerDeps` with optional `spawn`. Keep `MemoryError` on `embed`.
-- [ ] **Step 4: pass** — the FULL existing mlx-server.test.ts + the new test all pass.
-- [ ] **Step 5: commit** (`refactor(runtime): rewrite MLX onto the managed base (fixed-context, supervised)`).
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `bun run test:file -- "tests/media/wan-checkpoint.test.ts"`
+Expected: FAIL — `buildWanWorkflow` not exported / no loader node.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/media/generate/comfy-lane.ts`: change `function buildWanWorkflow(` to `export function buildWanWorkflow(`. Before the `return workflow;` line, add:
+
+```ts
+  // Checkpoint from the gen-fit-selected repo (opts.model). Shape-only until
+  // live-verify against a real ComfyUI export corrects the exact node wiring.
+  if (opts.model) {
+    workflow['10'] = {
+      class_type: 'CheckpointLoaderSimple',
+      inputs: { ckpt_name: opts.model },
+    };
+  }
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bun run test:file -- "tests/media/wan-checkpoint.test.ts"`
+Expected: PASS (2 tests).
+
+- [ ] **Step 5: Typecheck + commit**
+
+Run: `bun run typecheck`
+```bash
+git add src/media/generate/comfy-lane.ts tests/media/wan-checkpoint.test.ts
+git commit -m "feat(media): Wan workflow takes checkpoint from opts.model (gen-fit injection)"
+```
 
 ---
 
