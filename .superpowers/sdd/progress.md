@@ -737,3 +737,5 @@ Task 14 (in progress): full gate green (docs:check/typecheck/lint after b4bbd71 
 - Minors fixed: subprocess done.catch on timeout; captureFromFile MAX_CAPTURE_SAMPLES cap; --voice-in existsSync guard (closes ffmpeg protocol surface); raw-TTY process.once('exit') restore backstop; setup-voice deletes archive after extract; docs §23 past-tense live-verify + VOICE_* attr count fix.
 - Fix commit 88e3bea5. Verified: voice 38 pass, typecheck clean, lint 0 err, docs:check ok, full check 1083 pass/0 fail/36 skip; live BOTH exec modes transcribe "The quick brown fox jumps." (confirms install-relative dyld loads).
 REMAINING: regenerate Artifact (4th surface, Voice node) → merge --no-ff + push (ask user) → ledger closeout + resume refresh.
+
+Task 14: COMPLETE — SLICE 29 LANDED. Merged --no-ff to main @ 6f3379e, PUSHED (e484bce..6f3379e, slice-landing gate passed), branch deleted, origin in sync. Artifact regenerated (same url c760844f, 🧭, "29 slices · 1083 tests", Voice node + cli→voice/voice→tel/voice→rel edges + concept + tour; 21 nodes/78 edges/20 tour/16 concepts, 0 dangling). ALL 4 doc surfaces current. Suite 1083 pass/36 skip/0 fail. SLICE 29 100% CLOSED.
