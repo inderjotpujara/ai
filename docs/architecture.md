@@ -228,6 +228,12 @@ graph TD
         mediaselect["generate/select.ts · selectGenModel (largest-that-fits, env-pin, consent)"]
         mediacatalog["generate/catalog.ts · GenModelCandidate ladders (Slice 28)"]
     end
+    subgraph VOICE["Voice Input · src/voice (Slice 29)"]
+        voicetypes["types.ts · VoiceFrames/CaptureSource/VoiceOutcome/VoiceError/VoiceConfig/Transcriber"]
+        voicemodel["model.ts · loadTranscriber (sherpa-onnx wrapper)"]
+        voicecapture["capture.ts · captureFrames (mic or file source)"]
+        voicescript["scripts/setup-voice.ts · install sherpa-onnx + ffmpeg"]
+    end
 
     %% Reliability data flow (Slice 21): classify feeds retry/breaker/degrade;
     %% delegation/workflow/crew/mcp/selector wrap cross-boundary ops through it;
@@ -297,6 +303,10 @@ graph TD
     mediaframes --> spans
     mediaadapter --> spans
 
+    chat --> voicecapture
+    voicecapture --> voicemodel
+    voicemodel --> voicetypes
+    voicecapture --> voicetypes
     chat --> runchat
     chat --> selhook
     chat --> buildreg
