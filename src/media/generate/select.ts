@@ -49,11 +49,14 @@ async function defaultAskConsent(): Promise<boolean> {
 
 /**
  * Prescribe a machine-appropriate generation model for `kind`, largest-that-
- * fits by footprint against the live hardware budget, among candidates whose
- * engine model is installed (or whose download the user consents to). Env pin
- * is authoritative. Returns `undefined` when nothing fits/installs — the
- * caller degrades gracefully (never crashes). Parallel to the main model
- * selector by design (media-gen has no runtime/LanguageModel).
+ * fits by footprint **bytes** (params × bytes-per-weight — so same-param
+ * quant tiers, e.g. a 4bit vs 8bit build of the same model, rank by the
+ * fidelity the machine can actually hold, not tie) against the live hardware
+ * budget, among candidates whose engine model is installed (or whose
+ * download the user consents to). Env pin is authoritative. Returns
+ * `undefined` when nothing fits/installs — the caller degrades gracefully
+ * (never crashes). Parallel to the main model selector by design (media-gen
+ * has no runtime/LanguageModel).
  */
 export async function selectGenModel(
   kind: MediaKind,
@@ -103,7 +106,10 @@ export async function selectGenModel(
         !isUncensoredModel({ model: c.repo, contentPolicy: c.contentPolicy })),
   );
 
-  // 3. Rank largest-that-fits by footprint.
+  // 3. Rank largest-that-fits by footprint bytes (not params — params alone
+  //    ties same-param quant tiers, e.g. FLUX 4bit vs 8bit are both 12B, and
+  //    would always pick whichever is listed first regardless of which one
+  //    actually fits with more headroom to spare).
   const budgetBytes = deps.budgetBytes ?? (await liveBudgetBytes());
   const withBytes = eligible.map((c) => ({
     c,
@@ -114,10 +120,7 @@ export async function selectGenModel(
   }));
   const fitting = withBytes
     .filter((x) => fitsBudget(x.bytes, budgetBytes))
-    .sort(
-      (a, b) =>
-        b.c.footprint.approxParamsBillions - a.c.footprint.approxParamsBillions,
-    );
+    .sort((a, b) => b.bytes - a.bytes);
 
   // 4. Walk best→worst: installed → pick; not installed → consent → pick/skip.
   const isInstalled =

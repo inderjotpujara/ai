@@ -126,6 +126,34 @@ describe('selectGenModel', () => {
     expect(chosen?.execMode).toBe(ExecMode.OneShot);
   });
 
+  test('ranks by footprint bytes, not params: same-param quant tiers do not tie', async () => {
+    // Same params (12B) as FLUX 4bit vs 8bit — only bytesPerWeight differs.
+    // 4bit listed FIRST so a params-only sort (stable) would always pick it.
+    const catalog = [
+      img('flux-4bit', 12, {
+        footprint: { approxParamsBillions: 12, bytesPerWeight: 0.55 },
+      }),
+      img('flux-8bit', 12, {
+        footprint: { approxParamsBillions: 12, bytesPerWeight: 1.1 },
+      }),
+    ];
+    const bothFit = await selectGenModel(MediaKind.Image, {
+      env: {},
+      budgetBytes: 20 * GB, // fits both 4bit (~7.9GB) and 8bit (~15.8GB)
+      isInstalled: () => true,
+      catalog,
+    });
+    expect(bothFit?.repo).toBe('flux-8bit'); // larger bytes wins on fidelity
+
+    const onlySmallFits = await selectGenModel(MediaKind.Image, {
+      env: {},
+      budgetBytes: 10 * GB, // fits 4bit (~7.9GB) but not 8bit (~15.8GB)
+      isInstalled: () => true,
+      catalog,
+    });
+    expect(onlySmallFits?.repo).toBe('flux-4bit');
+  });
+
   test("env pin to an unknown repo falls to the kind's one-shot default, not the first entry", async () => {
     const catalog: GenModelCandidate[] = [
       {

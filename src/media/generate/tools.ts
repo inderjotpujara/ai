@@ -37,10 +37,12 @@ function videoFallbackFor(primary: GenStrategy): GenStrategy {
  *  produce a file rather than just describing one. Each tool fit-selects a
  *  model first (`selectGenModel`, largest-that-fits by footprint against the
  *  live hardware budget) and returns a graceful message — never a crash —
- *  when nothing fits. The video tool additionally wires a same-kind
- *  other-engine `fallback` into `runGenJob` so the one-shot↔server degrade
- *  is reachable. Each tool returns a text summary including the output
- *  file's URI — never raw bytes.
+ *  when nothing fits, AND when the fit-selected engine itself fails (missing
+ *  CLI, unreachable server, any `job.result()` rejection) — every failure
+ *  mode degrades to a message, never an uncaught rejection. The video tool
+ *  additionally wires a same-kind other-engine `fallback` into `runGenJob`
+ *  so the one-shot↔server degrade is reachable. Each tool returns a text
+ *  summary including the output file's URI — never raw bytes.
  *
  *  `askCloneConsent` is injectable so tests (and non-TTY hosts) can script
  *  the voice-clone consent answer instead of hitting a real stdin prompt; it
@@ -77,8 +79,12 @@ export function createGenerateTools(
       const strategy = STRATEGY_FOR_ENGINE[candidate.engine];
       const opts: GenOpts = { model: candidate.repo };
       const job = runGenJob(strategy, prompt, store, 'image/png', opts, deps);
-      const fh = await job.result();
-      return `Generated image: ${fh.uri}`;
+      try {
+        const fh = await job.result();
+        return `Generated image: ${fh.uri}`;
+      } catch (err) {
+        return `Image generation failed (${err instanceof Error ? err.message : String(err)}). Image was not generated.`;
+      }
     },
   });
 
@@ -101,8 +107,12 @@ export function createGenerateTools(
       }
       const strategy = STRATEGY_FOR_ENGINE[candidate.engine];
       const job = runGenJob(strategy, prompt, store, 'audio/wav', opts, deps);
-      const fh = await job.result();
-      return `Generated speech: ${fh.uri}`;
+      try {
+        const fh = await job.result();
+        return `Generated speech: ${fh.uri}`;
+      } catch (err) {
+        return `Speech generation failed (${err instanceof Error ? err.message : String(err)}). Speech was not generated.`;
+      }
     },
   });
 
@@ -129,8 +139,12 @@ export function createGenerateTools(
         fallback: videoFallbackFor(strategy),
         serverReachable: () => true, // sync probe seam; async reachability below
       });
-      const fh = await job.result();
-      return `Generated video: ${fh.uri}`;
+      try {
+        const fh = await job.result();
+        return `Generated video: ${fh.uri}`;
+      } catch (err) {
+        return `Video generation failed (${err instanceof Error ? err.message : String(err)}). Video was not generated.`;
+      }
     },
   });
 
