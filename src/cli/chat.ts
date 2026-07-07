@@ -40,6 +40,8 @@ import { runtimeFor } from '../runtime/registry.ts';
 import { reuseDecision } from '../verified-build/reuse.ts';
 import type { CapabilitySignature } from '../verified-build/types.ts';
 import { ReuseKind } from '../verified-build/types.ts';
+import { createCliVoiceDeps } from '../voice/cli-io.ts';
+import { ingestVoice } from '../voice/ingest.ts';
 import { shouldOfferCrew } from './offer-crew.ts';
 import { runChat } from './run-chat.ts';
 import { createSelectHook } from './select-hook.ts';
@@ -247,8 +249,35 @@ async function main(): Promise<void> {
         try {
           warnUnknownChatAgents(config);
           const store = createMediaStore(run.dir);
+
+          // Voice runs BEFORE media ingest so its transcript(s) splice into
+          // the prompt text that ingestMedia then scans for dragged-in paths
+          // and `--image`/`--audio`/`--video` flags — typed prompt + voice
+          // transcript + media all compose into one `task`. Only spun up
+          // when a voice flag is present: building real deps loads the
+          // sherpa-onnx transcriber, which a plain text/media chat shouldn't
+          // pay for.
+          let promptWithVoice = rawPrompt;
+          if (flags.voice || flags.voiceIn.length > 0) {
+            const voiceDeps = createCliVoiceDeps(ledger);
+            try {
+              const voiceResult = await ingestVoice(
+                rawPrompt,
+                flags,
+                voiceDeps,
+              );
+              promptWithVoice = voiceResult.prompt;
+              // ingestVoice's warnings are already prefixed ("voice: ...").
+              for (const warning of voiceResult.warnings) {
+                console.error(warning);
+              }
+            } finally {
+              await voiceDeps.transcriber.close();
+            }
+          }
+
           const { prompt: task, warnings } = await ingestMedia(
-            rawPrompt,
+            promptWithVoice,
             flags,
             store,
           );

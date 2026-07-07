@@ -17,7 +17,7 @@ async function defaultSpawn(cmd: string[]) {
 }
 
 /** Reinterprets a byte buffer of little-endian Float32 as a Float32Array (copy for alignment). */
-function bytesToFloat32(bytes: Uint8Array): Float32Array {
+export function bytesToFloat32(bytes: Uint8Array): Float32Array {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return new Float32Array(copy.buffer, 0, Math.floor(copy.byteLength / 4));
