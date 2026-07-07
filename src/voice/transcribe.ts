@@ -72,7 +72,7 @@ export function createInProcessTranscriber(
             const text = await withWallClock(cfg.timeoutMs, async () => {
               const stream = recognizer.createStream();
               try {
-                stream.acceptWaveform?.({
+                stream.acceptWaveform({
                   sampleRate: frames.sampleRate,
                   samples: frames.samples,
                 });

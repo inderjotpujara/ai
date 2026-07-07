@@ -127,3 +127,55 @@ This report overwrites a stale `task-6-report.md` left over from a prior,
 unrelated task (Slice 28's `runGenJob` model-clear-on-degrade fix, which
 shared this filename from a different slice run). That content has been
 fully replaced with this task's report.
+
+## Review-finding fix (post-task, Important severity)
+
+**Problem:** the real `sherpa-onnx-node` API puts `acceptWaveform({sampleRate, samples})`
+on the STREAM object returned by `recognizer.createStream()` (verified in
+`node_modules/sherpa-onnx-node/non-streaming-asr.js`). The test fake had put
+`acceptWaveform` on the `OfflineRecognizer` class instead, and production used
+`stream.acceptWaveform?.(...)` (optional chaining) to paper over the mismatch.
+This meant: (a) production had an unjustified silent-failure risk — if the
+method were ever absent, decode would run on an empty stream and the span
+would still record `VoiceOutcome.Ok`; (b) the unit test passed without ever
+exercising the waveform-feeding call (`getResult` returned a canned string
+regardless of whether `acceptWaveform` ran).
+
+**Production fix (`src/voice/transcribe.ts`):** changed the call from
+`stream.acceptWaveform?.({...})` to a non-optional
+`stream.acceptWaveform({ sampleRate: frames.sampleRate, samples: frames.samples })`
+so any future API drift fails loudly instead of silently decoding an empty
+stream. `stream.free?.()` and `recognizer.free?.()` were left as optional
+chaining — those methods are genuinely absent from the real addon today
+(forward-compatible defensiveness), unlike `acceptWaveform` which exists.
+
+**Test fix (`tests/voice/transcribe.test.ts`):** moved `acceptWaveform` onto
+the object returned by `createStream()` (matching the real API) and made it
+record the args it received into an `acceptWaveformCalls` array. Strengthened
+the "returns recognized text for a buffer" test to assert
+`acceptWaveformCalls` equals `[{ sampleRate: 16000, samples: new Float32Array(16000) }]`,
+so the test now genuinely verifies the waveform-feeding path instead of just
+the canned `getResult` output. The empty-samples test was left unchanged — it
+still throws `VoiceError` before any stream work, so it never touches
+`acceptWaveform`.
+
+**Verification:**
+```
+$ bun test tests/voice/transcribe.test.ts
+bun test v1.3.11 (af24e281)
+
+ 2 pass
+ 0 fail
+ 3 expect() calls
+Ran 2 tests across 1 file. [61.00ms]
+```
+(3 expect() calls confirms the new `acceptWaveformCalls` assertion ran — the
+buffer test now has 2 expects instead of 1.)
+
+```
+$ bun run typecheck
+$ tsc --noEmit
+```
+Clean, no errors.
+
+Commit: `fix(voice): assert acceptWaveform on stream (drop optional chaining, fix fixture)`

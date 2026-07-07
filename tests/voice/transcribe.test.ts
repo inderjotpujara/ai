@@ -2,13 +2,17 @@ import { describe, expect, it } from 'bun:test';
 import { createInProcessTranscriber } from '../../src/voice/transcribe.ts';
 import { CaptureSource } from '../../src/voice/types.ts';
 
-function fakeSherpa(text: string) {
+function fakeSherpa(text: string, acceptWaveformCalls: unknown[] = []) {
   return () => ({
     OfflineRecognizer: class {
       createStream() {
-        return { free() {} };
+        return {
+          acceptWaveform(args: unknown) {
+            acceptWaveformCalls.push(args);
+          },
+          free() {},
+        };
       }
-      acceptWaveform() {}
       decode() {}
       getResult() {
         return { text };
@@ -21,8 +25,9 @@ const cfg = { modelDir: '/m', ffmpeg: 'ffmpeg', timeoutMs: 5000 };
 
 describe('createInProcessTranscriber', () => {
   it('returns recognized text for a buffer', async () => {
+    const acceptWaveformCalls: unknown[] = [];
     const t = createInProcessTranscriber(cfg, {
-      loadSherpa: fakeSherpa('hello world'),
+      loadSherpa: fakeSherpa('hello world', acceptWaveformCalls),
       source: CaptureSource.File,
     });
     const text = await t.transcribe({
@@ -30,6 +35,9 @@ describe('createInProcessTranscriber', () => {
       sampleRate: 16000,
     });
     expect(text).toBe('hello world');
+    expect(acceptWaveformCalls).toEqual([
+      { sampleRate: 16000, samples: new Float32Array(16000) },
+    ]);
     await t.close();
   });
   it('throws VoiceError with a hint on empty samples', async () => {
