@@ -111,3 +111,75 @@ export function createInProcessTranscriber(
     },
   };
 }
+
+export type SubprocessDeps = {
+  spawn?: (
+    cmd: string[],
+    stdin: string,
+  ) => Promise<{ code: number; stdout: string; stderr: string }>;
+  source?: CaptureSource;
+};
+
+async function defaultNodeSpawn(cmd: string[], stdin: string) {
+  const p = Bun.spawn(cmd, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+  p.stdin.write(stdin);
+  await p.stdin.end();
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(p.stdout).text(),
+    new Response(p.stderr).text(),
+    p.exited,
+  ]);
+  return { code, stdout, stderr };
+}
+
+/** Transcribes by shelling out to a `node` worker running the sherpa-onnx
+ *  addon (`stt-worker.mjs`). Robust fallback for when the addon can't be
+ *  loaded in-process (e.g. under Bun on a given platform/version). */
+export function createSubprocessTranscriber(
+  cfg: VoiceConfig,
+  deps: SubprocessDeps = {},
+): Transcriber {
+  const spawn = deps.spawn ?? defaultNodeSpawn;
+  const source = deps.source ?? CaptureSource.Mic;
+  const worker = join(import.meta.dir, 'stt-worker.mjs');
+  return {
+    async transcribe(frames: VoiceFrames): Promise<string> {
+      if (frames.samples.length === 0) {
+        throw new VoiceError(
+          'no audio captured',
+          'check the microphone / input file',
+        );
+      }
+      return withVoiceTranscribeSpan({ model: cfg.modelDir, source }, () =>
+        withWallClock(cfg.timeoutMs, async () => {
+          const payload = JSON.stringify({
+            modelDir: cfg.modelDir,
+            sampleRate: frames.sampleRate,
+            samples: Array.from(frames.samples),
+          });
+          const { code, stdout, stderr } = await spawn(
+            ['node', worker],
+            payload,
+          );
+          if (code !== 0) {
+            throw new VoiceError(`stt worker failed: ${stderr}`);
+          }
+          return String(JSON.parse(stdout).text ?? '').trim();
+        }),
+      );
+    },
+    async close() {},
+  };
+}
+
+/** Selects the transcriber impl. `AGENT_VOICE_EXEC=subprocess` forces the
+ *  node worker; otherwise in-process (default set by the Task-1 spike, which
+ *  confirmed the sherpa-onnx addon loads fine under Bun). */
+export function createTranscriber(
+  cfg: VoiceConfig,
+  env: Record<string, string | undefined> = process.env,
+): Transcriber {
+  return env.AGENT_VOICE_EXEC === 'subprocess'
+    ? createSubprocessTranscriber(cfg)
+    : createInProcessTranscriber(cfg);
+}
