@@ -1,38 +1,37 @@
-### Task 12: OAuth client provider
+### Task 12: Documentation (4-surface hard line)
 
 **Files:**
-- Create: `src/mcp/oauth-provider.ts`
-- Test: `tests/mcp/oauth-provider.test.ts`
+- Modify: `docs/architecture.md` (new §Voice + subsystem-registry table row for `src/voice`)
+- Modify: `README.md` (status line + slice-status table row + a feature paragraph)
+- Modify: `docs/ROADMAP.md` (flip "Voice INPUT (STT)" → ✅ shipped Slice 29 in gap table + phase table + recommended sequence)
+- Modify: `.superpowers/sdd/progress.md` (Slice 29 ledger section: per-task commits, decisions, live-verify)
 
-**Interfaces:**
-- Consumes: Task 10 (token store), Task 11 (loopback), `OAuthClientProvider` type from `@ai-sdk/mcp`.
-- Produces: `createOAuthProvider(serverName: string, opts?: { storePath?: string; scopes?: string[]; clientId?: string; openBrowser?: (u: string) => void }): OAuthClientProvider`.
-- Behavior: implement every required `OAuthClientProvider` member (verbatim contract from the spec): `tokens()` → store; `saveTokens(t)` → store; `redirectToAuthorization(url)` → `awaitOAuthRedirect` (the SDK gives the authorization URL; our provider opens the browser + captures the code — note: the AI SDK provider contract drives the actual code→token exchange, our `redirectToAuthorization` only needs to open the browser and the SDK's transport polls; confirm the exact SDK callback shape at implementation time and adapt — the SDK may instead expect `redirectToAuthorization` to just `open` and a separate `saveCodeVerifier`/`codeVerifier` + a code-provider callback); `saveCodeVerifier`/`codeVerifier` → store; `get redirectUrl()` → the loopback URI; `get clientMetadata()` → `{ client_name: 'ai-local-agent', redirect_uris: [redirectUrl], grant_types: ['authorization_code','refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none', scope: scopes?.join(' ') }`; `clientInformation()` → store's `client` (undefined ⇒ triggers DCR/CIMD in the SDK); `saveClientInformation?` → store.
+**Interfaces:** none (docs).
 
-> **Implementer:** the precise wiring of `redirectToAuthorization` vs. the SDK's code-capture differs by `@ai-sdk/mcp` version. Read `node_modules/@ai-sdk/mcp/…/oauth.ts` FIRST and make the provider satisfy the ACTUAL interface. The unit test below pins the store-backed methods (version-independent); the browser/loopback flow is proven live in Task 18.
+- [ ] **Step 1: Write the §Voice architecture section**
 
-- [ ] **Step 1: failing test** (store-backed methods, no network)
-```typescript
-// tests/mcp/oauth-provider.test.ts
-import { expect, test } from 'bun:test';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { createOAuthProvider } from '../../src/mcp/oauth-provider.ts';
+Add a `## Voice input (STT) (Slice 29)` section modeled on §22 Multimodal: file table (`src/voice/{types,model,transcribe,capture,ingest,cli-io}.ts` + `stt-worker.mjs` + `scripts/setup-voice.ts`), the capture→transcribe data-flow, the execution seam (in-process vs node-subprocess, chosen by spike), ffmpeg-silencedetect auto-stop, env-var block (`AGENT_VOICE_DIR`, `AGENT_VOICE_STT_MODEL`, `AGENT_FFMPEG_CMD`, `AGENT_VOICE_EXEC`), telemetry (`voice.transcribe` + `VOICE_*`), and the live-verify status. Add `src/voice` to the subsystem-registry table.
 
-test('persists + returns tokens and code verifier via the store', async () => {
-  const storePath = join(tmpdir(), `oauth-${Date.now()}.json`);
-  const p = createOAuthProvider('linear', { storePath });
-  await p.saveCodeVerifier('verifier-123');
-  expect(await p.codeVerifier()).toBe('verifier-123');
-  await p.saveTokens({ access_token: 'tok', token_type: 'Bearer' } as never);
-  expect((await p.tokens())?.access_token).toBe('tok');
-  expect(p.clientMetadata.redirect_uris.length).toBeGreaterThan(0);
-});
+- [ ] **Step 2: Run docs-check**
+
+Run: `bun run docs:check`
+Expected: PASS — `src/voice` now documented (it FAILS before this step).
+
+- [ ] **Step 3: Update README + ROADMAP + ledger**
+
+README: status line, add a slice-29 ✅ row to the slice-status table, add a "Voice input" feature paragraph + update the "Next" line to Slice 30. ROADMAP: flip the "Voice INPUT (STT)" gap row + recommended-sequence item 20 to ✅ Slice 29. Ledger: append the Slice-29 section (per-task commit SHAs, decisions D1–D8 + the silencedetect refinement, live-verify results).
+
+- [ ] **Step 4: Verify docs gate**
+
+Run: `bun run docs:check && bun run typecheck`
+Expected: both PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/architecture.md README.md docs/ROADMAP.md .superpowers/sdd/progress.md
+git commit -m "docs(slice-29): §Voice architecture + README/ROADMAP/ledger"
 ```
-- [ ] **Step 2: fail**.
-- [ ] **Step 3: implement** against the real SDK interface.
-- [ ] **Step 4: pass**.
-- [ ] **Step 5: commit** (`feat(mcp): live OAuth client provider (store + PKCE + DCR/CIMD)`).
 
 ---
 

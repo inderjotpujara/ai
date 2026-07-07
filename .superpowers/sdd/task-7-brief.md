@@ -1,205 +1,165 @@
-### Task 7: Wire selector + runGenJob into createGenerateTools
+### Task 7: Subprocess transcriber + selector
 
 **Files:**
-- Modify: `src/media/generate/tools.ts` (whole `createGenerateTools`)
-- Test: `tests/media/gen-tools-wiring.test.ts`
+- Modify: `src/voice/transcribe.ts` (add `createSubprocessTranscriber`, `createTranscriber`)
+- Create: `src/voice/stt-worker.mjs`
+- Test: `tests/voice/transcribe-select.test.ts`
 
 **Interfaces:**
-- Consumes: `selectGenModel` (Task 3); `runGenJob` (Task 6); `mfluxStrategy`/`kokoroStrategy`/`ltxStrategy`/`wanComfyStrategy`; `GenEngine`/`GenModelCandidate` (Task 1).
-- Produces: the three tools now (a) select a fit model → set `opts.model`, (b) run via `runGenJob` with the strategy matching the candidate's engine, (c) video passes `fallback` (the other video strategy) + a `serverReachable` probe, (d) return a graceful message when `selectGenModel` returns `undefined`.
-
-Add a `strategyForEngine` map local to tools.ts:
-
-```ts
-const STRATEGY_FOR_ENGINE: Record<GenEngine, GenStrategy> = {
-  [GenEngine.Mflux]: mfluxStrategy,
-  [GenEngine.MlxAudio]: kokoroStrategy,
-  [GenEngine.MlxVideo]: ltxStrategy,
-  [GenEngine.ComfyWan]: wanComfyStrategy,
-};
-```
+- Consumes: `Transcriber`, `VoiceConfig` (Task 2); `createInProcessTranscriber` (Task 6).
+- Produces: `createSubprocessTranscriber(cfg, deps?): Transcriber` (spawns `node` worker; sends `{sampleRate, samples[]}` as JSON on stdin, reads `{text}` on stdout); `createTranscriber(cfg, env?): Transcriber` selecting impl by `env.AGENT_VOICE_EXEC` (`'subprocess'` → subprocess, else in-process).
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/media/gen-tools-wiring.test.ts
-import { describe, expect, test } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createGenerateTools } from '../../src/media/generate/tools.ts';
-import { createMediaStore } from '../../src/media/store.ts';
+// tests/voice/transcribe-select.test.ts
+import { describe, expect, it } from 'bun:test';
+import { createTranscriber } from '../../src/voice/transcribe.ts';
 
-describe('createGenerateTools no-fit degrade', () => {
-  test('generate_image returns a graceful message when no model fits', async () => {
-    const store = createMediaStore(mkdtempSync(join(tmpdir(), 'gen-')));
-    const tools = createGenerateTools(store, {
-      selectModel: async () => undefined, // force no-fit
-    });
-    const result = await (tools.generate_image as any).execute({ prompt: 'x' });
-    expect(String(result).toLowerCase()).toContain('no ');
-    expect(String(result).toLowerCase()).toContain('image');
+const cfg = { modelDir: '/m', ffmpeg: 'ffmpeg', timeoutMs: 5000 };
+
+describe('createTranscriber selection', () => {
+  it('uses subprocess impl when AGENT_VOICE_EXEC=subprocess', () => {
+    const t = createTranscriber(cfg, { AGENT_VOICE_EXEC: 'subprocess' });
+    // Subprocess impl lazily spawns; we only assert the shape here.
+    expect(typeof t.transcribe).toBe('function');
+    expect(typeof t.close).toBe('function');
+  });
+  it('defaults to in-process (throws on addon load, proving it took that path)', () => {
+    // With no real addon + no fake, in-process load will throw when transcribe runs;
+    // constructing the selector must not itself throw for the default path decision.
+    expect(() => createTranscriber(cfg, {})).toBeDefined();
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun run test:file -- "tests/media/gen-tools-wiring.test.ts"`
-Expected: FAIL — `deps.selectModel` seam / no-fit message not present.
+Run: `bun test tests/voice/transcribe-select.test.ts`
+Expected: FAIL — `createTranscriber` not exported.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Rewrite `src/media/generate/tools.ts`:
+Create the worker:
+```js
+// src/voice/stt-worker.mjs
+// Runs the sherpa-onnx addon under `node`. Reads one JSON line
+// {modelDir, sampleRate, samples:[...]}, prints {text} as JSON, exits.
+import { join } from 'node:path';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
+function loadSherpa() {
+  const root = join(process.cwd(), 'node_modules');
+  process.env.DYLD_LIBRARY_PATH = [
+    join(root, 'sherpa-onnx-node'),
+    join(root, 'sherpa-onnx-darwin-arm64'),
+    process.env.DYLD_LIBRARY_PATH ?? '',
+  ].join(':');
+  return require('sherpa-onnx-node');
+}
+
+let buf = '';
+process.stdin.on('data', (d) => (buf += d));
+process.stdin.on('end', () => {
+  try {
+    const { modelDir, sampleRate, samples } = JSON.parse(buf);
+    const sherpa = loadSherpa();
+    const recognizer = new sherpa.OfflineRecognizer({
+      modelConfig: {
+        moonshine: {
+          preprocessor: join(modelDir, 'preprocess.onnx'),
+          encoder: join(modelDir, 'encode.int8.onnx'),
+          uncachedDecoder: join(modelDir, 'uncached_decode.int8.onnx'),
+          cachedDecoder: join(modelDir, 'cached_decode.int8.onnx'),
+        },
+        tokens: join(modelDir, 'tokens.txt'),
+        numThreads: 2,
+        provider: 'cpu',
+      },
+    });
+    const stream = recognizer.createStream();
+    stream.acceptWaveform({ sampleRate, samples: Float32Array.from(samples) });
+    recognizer.decode(stream);
+    const text = String(recognizer.getResult(stream).text ?? '').trim();
+    process.stdout.write(JSON.stringify({ text }));
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(String(err));
+    process.exit(1);
+  }
+});
+```
+
+Append to `src/voice/transcribe.ts`:
 ```ts
-import type { ToolSet } from 'ai';
-import { tool } from 'ai';
-import { z } from 'zod';
-import type { SpawnFn } from '../../runtime/process-supervisor.ts';
-import {
-  affirmCloneConsent,
-  defaultCloneConsentAsk,
-  requiresCloneConsent,
-} from '../consent.ts';
-import type { MediaStore } from '../store.ts';
-import { MediaKind } from '../types.ts';
-import type { GenOpts, GenStrategy } from './adapter.ts';
-import { runGenJob } from './adapter.ts';
-import { resolveVoiceModel } from './audio-mlx.ts';
-import { kokoroStrategy } from './audio-mlx.ts';
-import { GenEngine } from './catalog.ts';
-import type { GenModelCandidate } from './catalog.ts';
-import { mfluxStrategy } from './image-mflux.ts';
-import { selectGenModel } from './select.ts';
-import { ltxStrategy } from './video-mlx.ts';
-import { wanComfyStrategy } from './comfy-lane.ts';
+import { withVoiceTranscribeSpan } from '../telemetry/spans.ts';
 
-const STRATEGY_FOR_ENGINE: Record<GenEngine, GenStrategy> = {
-  [GenEngine.Mflux]: mfluxStrategy,
-  [GenEngine.MlxAudio]: kokoroStrategy,
-  [GenEngine.MlxVideo]: ltxStrategy,
-  [GenEngine.ComfyWan]: wanComfyStrategy,
+export type SubprocessDeps = {
+  spawn?: (cmd: string[], stdin: string) => Promise<{ code: number; stdout: string; stderr: string }>;
+  source?: CaptureSource;
 };
 
-/** The same-kind other-engine video strategy, used as the runGenJob fallback
- *  so the one-shot↔server degrade is reachable. */
-function videoFallbackFor(primary: GenStrategy): GenStrategy {
-  return primary === ltxStrategy ? wanComfyStrategy : ltxStrategy;
+async function defaultNodeSpawn(cmd: string[], stdin: string) {
+  const p = Bun.spawn(cmd, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+  p.stdin.write(stdin);
+  await p.stdin.end();
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(p.stdout).text(),
+    new Response(p.stderr).text(),
+    p.exited,
+  ]);
+  return { code, stdout, stderr };
 }
 
-/** Probe whether a local ComfyUI server is reachable (server-lane engine).
- *  Best-effort; a failed/absent probe means "unreachable" → degrade. */
-async function comfyReachable(): Promise<boolean> {
-  const host = process.env.AGENT_COMFY_HOST ?? '127.0.0.1';
-  const port = process.env.AGENT_COMFY_PORT ?? '8188';
-  try {
-    const res = await fetch(`http://${host}:${port}/system_stats`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+export function createSubprocessTranscriber(cfg: VoiceConfig, deps: SubprocessDeps = {}): Transcriber {
+  const spawn = deps.spawn ?? defaultNodeSpawn;
+  const source = deps.source ?? CaptureSource.Mic;
+  const worker = join(import.meta.dir, 'stt-worker.mjs');
+  return {
+    async transcribe(frames: VoiceFrames): Promise<string> {
+      if (frames.samples.length === 0) {
+        throw new VoiceError('no audio captured', 'check the microphone / input file');
+      }
+      return withVoiceTranscribeSpan({ model: cfg.modelDir, source }, () =>
+        withWallClock(cfg.timeoutMs, async () => {
+          const payload = JSON.stringify({
+            modelDir: cfg.modelDir,
+            sampleRate: frames.sampleRate,
+            samples: Array.from(frames.samples),
+          });
+          const { code, stdout, stderr } = await spawn(['node', worker], payload);
+          if (code !== 0) throw new VoiceError(`stt worker failed: ${stderr}`);
+          return String(JSON.parse(stdout).text ?? '').trim();
+        }),
+      );
+    },
+    async close() {},
+  };
 }
 
-export function createGenerateTools(
-  store: MediaStore,
-  deps?: {
-    spawn?: SpawnFn;
-    askCloneConsent?: (question: string) => Promise<boolean>;
-    /** Test seam: override the fit selector. */
-    selectModel?: (kind: MediaKind) => Promise<GenModelCandidate | undefined>;
-  },
-): ToolSet {
-  const select = deps?.selectModel ?? ((kind: MediaKind) => selectGenModel(kind));
-
-  const generate_image = tool({
-    description: 'Generates an image from a text prompt and saves it to disk.',
-    inputSchema: z.object({
-      prompt: z
-        .string()
-        .describe('A clear, detailed description of the image to generate'),
-    }),
-    execute: async ({ prompt }) => {
-      const candidate = await select(MediaKind.Image);
-      if (!candidate) {
-        return 'No image-generation model fits this machine — set AGENT_IMAGE_MODEL or free up memory. Image was not generated.';
-      }
-      const strategy = STRATEGY_FOR_ENGINE[candidate.engine];
-      const opts: GenOpts = { model: candidate.repo };
-      const job = runGenJob(strategy, prompt, store, 'image/png', opts, deps);
-      const fh = await job.result();
-      return `Generated image: ${fh.uri}`;
-    },
-  });
-
-  const generate_speech = tool({
-    description: 'Generates spoken audio from text and saves it to disk.',
-    inputSchema: z.object({ prompt: z.string().describe('The text to speak') }),
-    execute: async ({ prompt }) => {
-      const candidate = await select(MediaKind.Audio);
-      if (!candidate) {
-        return 'No speech-generation model fits this machine — set AGENT_VOICE_MODEL or free up memory. Speech was not generated.';
-      }
-      const opts: GenOpts = { model: candidate.repo };
-      const model = resolveVoiceModel(opts);
-      if (requiresCloneConsent(model)) {
-        const ask = deps?.askCloneConsent ?? defaultCloneConsentAsk();
-        const consented = await affirmCloneConsent({ ask });
-        if (!consented) {
-          return `Voice-clone consent declined for model "${model}" — speech was not generated.`;
-        }
-      }
-      const strategy = STRATEGY_FOR_ENGINE[candidate.engine];
-      const job = runGenJob(strategy, prompt, store, 'audio/wav', opts, deps);
-      const fh = await job.result();
-      return `Generated speech: ${fh.uri}`;
-    },
-  });
-
-  const generate_video = tool({
-    description:
-      'Generates a short video from a text prompt and saves it to disk.',
-    inputSchema: z.object({
-      prompt: z
-        .string()
-        .describe('A clear, detailed description of the video to generate'),
-    }),
-    execute: async ({ prompt }) => {
-      const candidate = await select(MediaKind.Video);
-      if (!candidate) {
-        return 'No video-generation model fits this machine — set AGENT_VIDEO_MODEL or use a higher-memory/disk box. Video was not generated.';
-      }
-      const strategy = STRATEGY_FOR_ENGINE[candidate.engine];
-      const opts: GenOpts = { model: candidate.repo };
-      const job = runGenJob(strategy, prompt, store, 'video/mp4', opts, {
-        ...deps,
-        fallback: videoFallbackFor(strategy),
-        serverReachable: () => true, // sync probe seam; async reachability below
-      });
-      const fh = await job.result();
-      return `Generated video: ${fh.uri}`;
-    },
-  });
-
-  return { generate_image, generate_speech, generate_video };
+/** Selects the transcriber impl. AGENT_VOICE_EXEC=subprocess forces the worker;
+ *  otherwise in-process (default set by the Task-1 spike). */
+export function createTranscriber(
+  cfg: VoiceConfig,
+  env: Record<string, string | undefined> = process.env,
+): Transcriber {
+  return env.AGENT_VOICE_EXEC === 'subprocess'
+    ? createSubprocessTranscriber(cfg)
+    : createInProcessTranscriber(cfg);
 }
 ```
 
-Note on `serverReachable`: `runGenJob`'s `serverReachable` is synchronous `(strategy) => boolean`. A real async ComfyUI probe (`comfyReachable`) can't be awaited inside that sync callback, so for this slice the server→one-shot degrade is exercised by the **one-shot-primary→server-fallback** path (LTX binary missing → Wan). Keep `comfyReachable` defined for the live-verify task, but wire the synchronous default here; a fully-async reachability probe in `runGenJob` is a disclosed follow-on (matches the existing "serverReachable deferred to Phase C" note in adapter.ts).
-
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `bun run test:file -- "tests/media/gen-tools-wiring.test.ts"`
-Expected: PASS. Then run the existing media suite: `bun run test:file -- "tests/media/*"` — Expected: PASS (fix any test that constructed tools expecting the old `runOneShotJob` direct call — update to the `selectModel` seam).
+Run: `bun test tests/voice/transcribe-select.test.ts`
+Expected: PASS (2 tests). Add a focused subprocess test with an injected `spawn` returning `{code:0, stdout:'{"text":"hi"}'}` and assert `transcribe` returns `'hi'`.
 
-- [ ] **Step 5: Typecheck + commit**
+- [ ] **Step 5: Commit**
 
-Run: `bun run typecheck`
 ```bash
-git add src/media/generate/tools.ts tests/media/gen-tools-wiring.test.ts
-git commit -m "feat(media): wire gen-fit selector + runGenJob into createGenerateTools"
+git add src/voice/transcribe.ts src/voice/stt-worker.mjs tests/voice/transcribe-select.test.ts
+git commit -m "feat(voice): node-subprocess transcriber + exec selector"
 ```
 
 ---

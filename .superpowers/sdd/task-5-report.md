@@ -1,73 +1,136 @@
-# Task 5 report: Wan checkpoint from opts.model
+### Task 5 report: Telemetry — `voice.transcribe` span
 
-## Status
-DONE
+**Status:** Done.
 
 ## Note on this file
-This report overwrites a stale `task-5-report.md` left over from an earlier
-slice's unrelated "MLX strategy + rewrite mlx-server.ts" task (same filename,
-different slice/task numbering — that content is preserved in git history at
-the commit before this one, and in `.superpowers/sdd/progress.md` if it was
-ledgered there).
+This overwrites a stale `task-5-report.md` from an unrelated earlier slice's
+task ("Wan checkpoint from opts.model" — Slice 28 media work), which had the
+same filename due to per-slice task numbering restarting at 1. That content
+is preserved in git history (previous commit touching this path) and in
+`.superpowers/sdd/progress.md` if ledgered there.
 
-## What shipped
+## Implementation
 
-### `src/media/generate/comfy-lane.ts`
-- `buildWanWorkflow` changed from a module-private `function` to an
-  `export function`, making it directly testable.
-- Before `return workflow;`, added a guarded block: when `opts.model` is set,
-  adds `workflow['10'] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: opts.model } }`.
-  When `opts.model` is unset, no such node is added — existing behavior for
-  callers that don't pass a model is unchanged. Kept the brief's comment
-  noting this is shape-only pending live-verify against a real ComfyUI export
-  (ComfyUI/Wan is not installed in this environment).
+Added `voice.transcribe` telemetry span + `VOICE_*` attributes to the shared
+`src/telemetry/spans.ts` (~850-line file), mirroring the existing Slice-27
+`withTranscribeSpan` pattern exactly.
 
-### `tests/media/wan-checkpoint.test.ts` (new)
-Two tests, per the brief verbatim:
-1. `adds a checkpoint loader from opts.model when set` — asserts the
-   `CheckpointLoaderSimple` node's `inputs.ckpt_name` equals the passed
-   `opts.model` value.
-2. `omits the checkpoint loader when opts.model is unset` — asserts no node
-   with `class_type === 'CheckpointLoaderSimple'` exists in the returned graph.
+### Exact insertion points
 
-## TDD sequence (as run this session)
-1. Wrote `tests/media/wan-checkpoint.test.ts` first.
-2. Ran `bun run test:file -- "tests/media/wan-checkpoint.test.ts"` → **failed**
-   as expected: `SyntaxError: Export named 'buildWanWorkflow' not found in
-   module '.../src/media/generate/comfy-lane.ts'`.
-3. Applied the two-part implementation change (export + guarded checkpoint
-   node) to `comfy-lane.ts`.
-4. Re-ran the same test → **2 pass, 0 fail, 2 expect() calls**.
+1. **`src/telemetry/spans.ts:13`** — new import (type-only, per biome
+   `useImportType`):
+   ```ts
+   import type { CaptureSource } from '../voice/types.ts';
+   ```
+   Inserted alphabetically between `'../verified-build/types.ts'` and
+   `'./provider.ts'`.
 
-## Checks (this session, branch `slice-28-hardware-adaptive-gen`)
-- `bun run test:file -- "tests/media/wan-checkpoint.test.ts"` → 2 pass, 0 fail,
-  2 expect() calls (both before and after the lint autofix pass).
-- `bun run lint:file --write -- "src/media/generate/comfy-lane.ts" "tests/media/wan-checkpoint.test.ts"`
-  → `biome check`, checked 2 files, fixed 1 (reformatted line wraps in the new
-  test file only — no logic change).
-- `bun run typecheck` → clean, no errors.
-- Pre-commit hook (`bun run scripts/docs-check.ts`) passed on commit — no
-  `docs/architecture.md` update was required since this is a small internal
-  wiring change on an already-documented subsystem (`src/media`), not a new
-  subsystem or a change to documented data flow.
+2. **`src/telemetry/spans.ts` — end of the frozen `ATTR` object**, right
+   after `GEN_FIT_CANDIDATES: 'media.gen_fit.candidates',` and before the
+   closing `} as const;`: added a new `// Voice input (Slice 29)` block with
+   the 5 required keys:
+   ```ts
+   VOICE_STT_MODEL: 'voice.stt.model',
+   VOICE_CAPTURE_SOURCE: 'voice.capture.source',
+   VOICE_AUDIO_SECONDS: 'voice.audio.seconds',
+   VOICE_DURATION_MS: 'voice.duration.ms',
+   VOICE_OUTCOME: 'voice.outcome',
+   ```
+
+3. **`src/telemetry/spans.ts`, immediately before `export type
+   FrameSampleSpanInfo = {`** (right after `withTranscribeSpan`'s closing
+   brace): added `VoiceSpanInfo` type + the `withVoiceTranscribeSpan` helper,
+   per the brief:
+   ```ts
+   export type VoiceSpanInfo = { model: string; source: CaptureSource };
+
+   export function withVoiceTranscribeSpan<T>(
+     info: VoiceSpanInfo,
+     fn: (span: Span) => Promise<T>,
+   ): Promise<T> {
+     return inSpan('voice.transcribe', async (span) => {
+       span.setAttribute(ATTR.VOICE_STT_MODEL, info.model);
+       span.setAttribute(ATTR.VOICE_CAPTURE_SOURCE, info.source);
+       span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
+       return fn(span);
+     });
+   }
+   ```
+   Added a docstring above it mirroring `withTranscribeSpan`'s comment style.
+   `VOICE_AUDIO_SECONDS` / `VOICE_DURATION_MS` / `VOICE_OUTCOME` are defined
+   in `ATTR` for downstream callers (Tasks 6-9: transcriber/capture wiring)
+   to `span.setAttribute(...)` directly via the `fn(span)` callback once
+   duration/outcome are known post-hoc — exactly the same pattern
+   `withTranscribeSpan`'s callers use today for `MEDIA_TRANSCRIBE_*`.
+
+### One deviation from the brief's literal snippet
+
+The brief's Step 3 snippet used a plain
+`import { CaptureSource } from '../voice/types.ts';`. Biome's
+`lint/style/useImportType` flagged this as a warning because `CaptureSource`
+is used only in a type position (`VoiceSpanInfo.source: CaptureSource`)
+inside `spans.ts` — its runtime/enum side is never referenced there. Changed
+to `import type { CaptureSource } from '../voice/types.ts';` to keep
+`bun run lint:file` clean. No behavior change: `tests/voice/spans.test.ts`
+still imports `CaptureSource` as a normal value import and uses
+`CaptureSource.File` at runtime, unaffected by the type-only import in
+`spans.ts`.
+
+## TDD — RED → GREEN
+
+- **RED:** Wrote `tests/voice/spans.test.ts` first (verbatim from brief).
+  `bun test tests/voice/spans.test.ts` failed with:
+  `SyntaxError: Export named 'withVoiceTranscribeSpan' not found in module
+  '/Users/inderjotsingh/ai/src/telemetry/spans.ts'.`
+- **GREEN:** After adding the ATTR keys + import + helper:
+  `bun test tests/voice/spans.test.ts` → `2 pass, 0 fail, 4 expect() calls`.
+
+## Typecheck — import-cycle gate
+
+`bun run typecheck` (`tsc --noEmit`) ran clean with **zero errors** after the
+change. Confirmed no import cycle: `src/voice/types.ts` imports nothing (it's
+a leaf module — only defines `VoiceFrames`, `CaptureSource`, `VoiceOutcome`,
+`VoiceError`, `VoiceConfig`, `Transcriber`), so `spans.ts` importing
+`CaptureSource` from it is a one-directional edge with no path back to
+`telemetry/`.
+
+## Lint
+
+`bun run lint:file -- "src/telemetry/spans.ts" "tests/voice/spans.test.ts"`
+→ clean (`biome check`, 0 warnings/errors) after switching to `import type`.
+
+## Files changed
+
+- `src/telemetry/spans.ts` — added import, 5 `ATTR.VOICE_*` keys,
+  `VoiceSpanInfo` type, `withVoiceTranscribeSpan` helper. No existing
+  exports touched, removed, or reordered.
+- `tests/voice/spans.test.ts` — new test file (verbatim from brief).
+
+## Self-review
+
+- Attribute key string values match the brief exactly (`voice.stt.model`,
+  `voice.capture.source`, `voice.audio.seconds`, `voice.duration.ms`,
+  `voice.outcome`).
+- `withVoiceTranscribeSpan` opens span `'voice.transcribe'`, sets model +
+  capture source + `ATTR.INPUT_MODALITY = 'audio'`, then runs `fn(span)` —
+  matches the brief's Step 3 code exactly (only the import line differs, per
+  the lint-driven deviation above).
+- Did not touch `withTranscribeSpan` or any other existing helper/export;
+  `ATTR` object remains frozen (`as const`).
+- New `ATTR` keys placed in a clearly labeled `// Voice input (Slice 29)`
+  section, consistent with the existing `// Multimodal analysis (Slice 27)` /
+  `// Runtime warm/spawn (Slice 26)` sectioning convention.
+- No `console.log` left in; no `any` introduced.
+
+## Concerns
+
+None blocking. The import-cycle risk called out in the task instructions was
+verified clean (`src/voice/types.ts` has zero imports). This is a pure
+additive telemetry change with no runtime wiring yet — Tasks 6-9 will call
+`withVoiceTranscribeSpan` from the actual transcriber/capture code and set
+the remaining `VOICE_AUDIO_SECONDS`/`VOICE_DURATION_MS`/`VOICE_OUTCOME`
+attributes via the span passed into `fn`.
 
 ## Commit
-- `483a840` — `feat(media): Wan workflow takes checkpoint from opts.model (gen-fit injection)`
-  on branch `slice-28-hardware-adaptive-gen`. Files: `src/media/generate/comfy-lane.ts`
-  (modified), `tests/media/wan-checkpoint.test.ts` (new).
-
-Only these two files were staged and committed. Other unstaged changes present
-in the working tree at commit time (from other in-flight Slice 28 tasks/
-sessions, e.g. `.superpowers/sdd/task-1..4-*`, `.remember/*`) were left
-untouched.
-
-## Concerns / follow-ups
-- None blocking. As the brief and code comment both note, the exact
-  `CheckpointLoaderSimple` node wiring (id `'10'`, input key `ckpt_name`) is
-  shape-only and has not been exercised against a live ComfyUI server —
-  correcting it against a real Wan workflow export is deferred to the
-  Slice 27 Phase C live-verify gate (`MULTIMODAL_LIVE=1`), consistent with how
-  the rest of `comfy-lane.ts` is already flagged.
-- Worth a follow-up audit of `task-1..4-report.md` for similar cross-slice
-  filename collisions, per the note already left in this same file by the
-  prior task's session.
+- See commit list in the final response; files staged were exactly
+  `src/telemetry/spans.ts` and `tests/voice/spans.test.ts`.

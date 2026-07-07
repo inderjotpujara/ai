@@ -1,32 +1,96 @@
-# Task 2 report — Gen-fit telemetry
+# Task 2 Report: Voice Types Module (Slice 29)
 
-## Status: DONE
+**Status:** DONE
 
-## What was done
-Followed `.superpowers/sdd/task-2-brief.md` verbatim, TDD:
+**Commit:** `cee8082` - feat(voice): core types (VoiceFrames, VoiceError, Transcriber)
 
-1. **Step 1** — wrote `tests/telemetry/gen-fit-span.test.ts` (exact test from brief: `recordGenFit` no-op with no active span).
-2. **Step 2** — ran `bun run test:file -- "tests/telemetry/gen-fit-span.test.ts"`; confirmed failure: `Export named 'recordGenFit' not found in module '.../src/telemetry/spans.ts'`.
-3. **Step 3** — implemented in `src/telemetry/spans.ts`:
-   - Added `GEN_FIT_CHOSEN`, `GEN_FIT_FITS`, `GEN_FIT_BUDGET_BYTES`, `GEN_FIT_MODEL_BYTES`, `GEN_FIT_CANDIDATES` to the `ATTR` object, immediately after `MEDIA_GENERATE_OUTCOME`.
-   - Added `export function recordGenFit(info: {...}): void` immediately after `recordDegrade`, mirroring its active-span `addEvent` shape (no-op if `trace.getActiveSpan()` returns undefined). No new imports needed — `trace` and `ATTR` already existed in the file.
-4. **Step 4** — reran the test file; passed (1 pass, 0 fail).
-5. **Step 5** — `bun run typecheck` clean (no output/errors). `bun run lint:file -- "src/telemetry/spans.ts" "tests/telemetry/gen-fit-span.test.ts"` → "Checked 2 files ... No fixes applied." (clean, no changes needed).
-6. Staged only the two intended files (`src/telemetry/spans.ts`, `tests/telemetry/gen-fit-span.test.ts`) — verified via `git status` that other unrelated pending changes in the working tree (`.remember/*`, `.superpowers/sdd/task-1-*`, etc.) were left untouched/unstaged.
-7. Committed: `feat(telemetry): recordGenFit + gen.fit.* attrs for gen-fit decisions` — pre-commit `docs-check` hook ran and passed automatically (no architecture.md change needed; `src/telemetry/` is an existing documented subsystem).
+---
 
-## Commit
-- `99c3153` — feat(telemetry): recordGenFit + gen.fit.* attrs for gen-fit decisions (2 files changed, 46 insertions)
-- Branch: `slice-28-hardware-adaptive-gen`
+## Implementation Summary
 
-## Test summary
-`bun run test:file -- "tests/telemetry/gen-fit-span.test.ts"` → 1 pass, 0 fail.
+Implemented the foundational types module `src/voice/types.ts` for the voice input subsystem (Slice 29), containing:
 
-## Lint result
-`bun run lint:file -- "src/telemetry/spans.ts" "tests/telemetry/gen-fit-span.test.ts"` → clean, no fixes applied.
+- **VoiceFrames** (type): Normalized Float32 audio at 16 kHz, ready for STT engine
+- **CaptureSource** (enum): Input source selector (Mic | File), using explicit string values
+- **VoiceOutcome** (enum): Capture result status (Ok | Empty | Failed | Timeout)
+- **VoiceError** (class): Typed error with `hint` property for user-actionable next steps
+- **VoiceConfig** (type): Configuration surface (modelDir, ffmpeg path, timeoutMs)
+- **Transcriber** (type): Interface for STT engines (transcribe + close methods)
 
-## Typecheck
-`bun run typecheck` → clean, no errors.
+---
 
-## Blocking concerns
-None. Implementation used the brief's code verbatim; no deviations were required.
+## TDD Workflow Evidence
+
+### Step 1: Write Failing Test
+Created `tests/voice/types.test.ts` with 2 test cases:
+- VoiceError construction and properties (hint, name)
+- Enum values using explicit string values
+
+### Step 2: Verify Failure (RED)
+```
+$ bun test tests/voice/types.test.ts
+# Error: Cannot find module '../../src/voice/types.ts'
+# 0 pass, 1 fail, 1 error
+```
+
+### Step 3: Implement Types
+Wrote `src/voice/types.ts` with all 6 types as per brief specification.
+
+### Step 4: Verify Pass (GREEN)
+```
+$ bun test tests/voice/types.test.ts
+# 2 pass, 0 fail, 5 expect() calls
+```
+
+**TypeScript Compatibility Fix:** Added explicit type casts in test assertions to satisfy strict mode type checking:
+- `expect(CaptureSource.Mic).toBe('mic' as CaptureSource)`
+- `expect(VoiceOutcome.Empty).toBe('empty' as VoiceOutcome)`
+
+This allows enum comparison with string literals in strict TypeScript mode.
+
+### Step 5: Typecheck ✓
+```
+$ bun run typecheck
+# tsc --noEmit (no errors)
+```
+
+### Step 6: Documentation Gate
+Pre-commit hook `docs:check` enforced documentation of new `src/voice/` subsystem:
+- Added VOICE subsystem definition to architecture.md Mermaid graph
+- Added data flow connections (chat → voice pipeline → types)
+- Gate passed; hook completed successfully
+
+---
+
+## Files Changed
+
+1. **src/voice/types.ts** (NEW)
+   - 44 lines: foundational types + VoiceError class + Transcriber interface
+   
+2. **tests/voice/types.test.ts** (NEW)
+   - 16 lines: 2 test cases covering error construction and enum values
+   
+3. **docs/architecture.md** (UPDATED)
+   - Added VOICE subsystem node (4 modules)
+   - Added voice data flow connections to chat entry
+
+---
+
+## Self-Review
+
+✓ Code follows project style (type > interface, string enums for finite sets)
+✓ Test coverage: both error behavior and enum values verified
+✓ TypeScript strict mode passes (type-safe assertions)
+✓ Documentation hard line met (architecture.md updated pre-push)
+✓ Conventional commit format with co-author trailer
+✓ No console.log; no unhandled edge cases in types
+✓ Foundation ready for downstream tasks (model.ts, capture.ts, telemetry)
+
+---
+
+## Next Steps (for Task 3+)
+
+- **Task 3:** `src/voice/model.ts` - Wrapper for sherpa-onnx/moonshine loader
+- **Task 4:** `scripts/setup-voice.ts` - Install sherpa-onnx binary + ffmpeg
+- **Task 5:** Telemetry instrumentation (voice.transcribe spans)
+- **Task 6+:** In-process/subprocess transcriber implementations, capture strategies
