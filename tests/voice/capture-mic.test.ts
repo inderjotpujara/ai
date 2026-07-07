@@ -131,10 +131,7 @@ describe('captureFromMic', () => {
   });
 
   it('ctrl-c cancels the capture with a VoiceError', async () => {
-    const { io, pressKey } = fakeIo(
-      [new Float32Array(800).fill(0.2)],
-      'space',
-    );
+    const { io, pressKey } = fakeIo([new Float32Array(800).fill(0.2)], 'space');
     const p = captureFromMic(cfg, io);
     pressKey('ctrl-c');
     await expect(p).rejects.toThrow(VoiceError);

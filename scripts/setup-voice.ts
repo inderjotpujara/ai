@@ -14,7 +14,8 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DEFAULT_VOICE_MODEL, voiceCacheDir } from '../src/voice/model.ts';
 
-const RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models';
+const RELEASE =
+  'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models';
 
 /** Download URL for a model name in the sherpa-onnx `asr-models` release. */
 export function modelUrl(name: string): string {
@@ -22,7 +23,10 @@ export function modelUrl(name: string): string {
 }
 
 /** A model dir is ready when its tokens.txt marker exists. */
-export function isModelReady(dir: string, exists: (p: string) => boolean = existsSync): boolean {
+export function isModelReady(
+  dir: string,
+  exists: (p: string) => boolean = existsSync,
+): boolean {
   return exists(join(dir, 'tokens.txt'));
 }
 
@@ -39,7 +43,9 @@ async function ensureFfmpeg(): Promise<void> {
     console.error('Installing ffmpeg via brew...');
     const brewCode = await run(['brew', 'install', 'ffmpeg']);
     if (brewCode !== 0) {
-      console.error('ffmpeg install failed — voice capture will be unavailable.');
+      console.error(
+        'ffmpeg install failed — voice capture will be unavailable.',
+      );
     }
   } else {
     console.error('Install ffmpeg manually (voice capture needs it).');
@@ -56,8 +62,18 @@ async function main(): Promise<void> {
   await mkdir(voiceCacheDir(), { recursive: true });
   const archive = join(voiceCacheDir(), `${DEFAULT_VOICE_MODEL}.tar.bz2`);
   console.error(`Downloading ${DEFAULT_VOICE_MODEL}...`);
-  if ((await run(['curl', '-L', '-o', archive, modelUrl(DEFAULT_VOICE_MODEL)])) !== 0) {
-    console.error('Download failed — voice input will be unavailable until it succeeds.');
+  if (
+    (await run([
+      'curl',
+      '-L',
+      '-o',
+      archive,
+      modelUrl(DEFAULT_VOICE_MODEL),
+    ])) !== 0
+  ) {
+    console.error(
+      'Download failed — voice input will be unavailable until it succeeds.',
+    );
     return;
   }
   const tarCode = await run(['tar', '-xjf', archive, '-C', voiceCacheDir()]);
@@ -65,7 +81,9 @@ async function main(): Promise<void> {
     console.error('Extraction failed.');
     return;
   }
-  console.error(isModelReady(dir) ? `Voice model ready: ${dir}` : 'Extraction incomplete.');
+  console.error(
+    isModelReady(dir) ? `Voice model ready: ${dir}` : 'Extraction incomplete.',
+  );
 }
 
 if (import.meta.main) {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { CaptureSource, VoiceError, VoiceOutcome } from '../../src/voice/types.ts';
+import {
+  CaptureSource,
+  VoiceError,
+  VoiceOutcome,
+} from '../../src/voice/types.ts';
 
 describe('voice types', () => {
   it('VoiceError carries an actionable hint', () => {
