@@ -15,6 +15,7 @@ import type { McpConfig } from '../mcp/types.ts';
 import { type IngestFlags, ingestMedia } from '../media/ingest.ts';
 import { createMediaStore } from '../media/store.ts';
 import { makeEmbedder } from '../memory/embed.ts';
+import { installSignalHandlers, onShutdown } from '../process/lifecycle.ts';
 import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
 import { detectMissing } from '../provisioning/detect-missing.ts';
 import { runProvision } from '../provisioning/provisioner.ts';
@@ -176,6 +177,8 @@ function hasMediaFlags(flags: IngestFlags): boolean {
 }
 
 async function main(): Promise<void> {
+  installSignalHandlers();
+
   const { positional, flags } = parseMediaArgs(process.argv.slice(2));
   const rawPrompt = positional.join(' ').trim();
   if (rawPrompt.length === 0 && !hasMediaFlags(flags)) {
@@ -188,6 +191,7 @@ async function main(): Promise<void> {
   await maybeAutoProvision();
 
   const manager = createModelManager();
+  onShutdown(() => manager.unloadAll());
   // Warm + pin the small router model the orchestrator runs on.
   console.error(`Preparing router model ${qwenRouter.model}...`);
   const routerNumCtx = await manager.ensureReady(qwenRouter, {
