@@ -10,6 +10,7 @@ import { RuntimeKind } from '../core/types.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
+import { createLogger } from '../log/logger.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
 import { type IngestFlags, ingestMedia } from '../media/ingest.ts';
@@ -190,14 +191,15 @@ async function main(): Promise<void> {
 
   await maybeAutoProvision();
 
+  const log = createLogger('chat');
   const manager = createModelManager();
   onShutdown(() => manager.unloadAll());
   // Warm + pin the small router model the orchestrator runs on.
-  console.error(`Preparing router model ${qwenRouter.model}...`);
+  log.info(`Preparing router model ${qwenRouter.model}...`);
   const routerNumCtx = await manager.ensureReady(qwenRouter, {
     pinned: [qwenRouter.model],
   });
-  console.error(
+  log.info(
     isProjectStoreActive()
       ? 'Using project-local models from ./model-images'
       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',

@@ -101,3 +101,9 @@ export function unregisterRun(runId: string): Promise<void> {
 export function withRunContext<T>(runId: string, fn: () => T): T {
   return context.with(context.active().setValue(RUN_ID_KEY, runId), fn);
 }
+
+/** Reads the run id bound into the active OTel context by `withRunContext`,
+ *  if any — used by the logger to stamp log records with the current run. */
+export function currentRunId(): string | undefined {
+  return context.active().getValue(RUN_ID_KEY) as string | undefined;
+}
