@@ -3,6 +3,7 @@
  *  platform glue `ingestVoice` (src/voice/ingest.ts) runs against from the
  *  CLI. Not unit-tested here (spawning real ffmpeg / raw stdin would be
  *  brittle); exercised end-to-end at live-verify (Task 13). */
+import { registerChild } from '../process/child-registry.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
 import type { MicIo, MicSession } from './capture.ts';
 import { captureFromFile, captureFromMic, carryPcmChunk } from './capture.ts';
@@ -80,6 +81,13 @@ function createMicIo(cfg: VoiceConfig, env: Env): MicIo {
         ],
         { stdout: 'pipe', stderr: 'pipe' },
       );
+      // Safety net: a process-wide SIGINT/SIGTERM can reach this mic ffmpeg
+      // even if stop() never runs. Unregister once it exits so we never
+      // signal a dead pid.
+      const unregisterChild = registerChild({
+        kill: (sig) => child.kill(sig ?? 'SIGTERM'),
+      });
+      void child.exited.finally(unregisterChild);
 
       const silenceSignaled = new Promise<void>((resolve) => {
         let sawSpeech = false;

@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { join, sep } from 'node:path';
+import { registerChild } from '../process/child-registry.ts';
 import { withWallClock } from '../reliability/timeout.ts';
 import { ATTR, withVoiceTranscribeSpan } from '../telemetry/spans.ts';
 import {
@@ -169,6 +170,11 @@ function defaultNodeSpawn(cmd: string[], stdin: string): SpawnHandle {
     ]);
     return { code, stdout, stderr };
   })();
+  // Safety net for a process-wide shutdown; unregister when the worker exits.
+  const unregisterChild = registerChild({
+    kill: (sig) => proc.kill(sig ?? 'SIGTERM'),
+  });
+  void done.finally(() => unregisterChild());
   return { kill: () => proc.kill('SIGTERM'), done };
 }
 
