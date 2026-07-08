@@ -33,7 +33,14 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
 
   async function ensureSpace(space: string, at: number): Promise<SpaceMeta> {
     const existing = sql.getSpace(space);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.embedModel !== cfg.embedModel) {
+        throw new MemoryError(
+          `space '${space}' was built with embedder '${existing.embedModel}' but '${cfg.embedModel}' is configured — run 'memory reindex ${space} ${cfg.embedModel}' (destructive) or restore the original embedder.`,
+        );
+      }
+      return existing;
+    }
     const { dim, maxInput } = await deps.probe(cfg.embedModel);
     const meta: SpaceMeta = {
       name: space,

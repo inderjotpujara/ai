@@ -1,54 +1,57 @@
-# Task 8 Report: Capture from file (`--voice-in`)
+# Task 8 Report: Schema migrations + embedder-mismatch guard
 
 ## Implementation
 
-Created `src/voice/capture.ts` exporting:
-- `CaptureDeps` — `{ spawn?: (cmd: string[]) => Promise<{ code, stdout: Uint8Array, stderr }> }`, injectable so tests never touch a real subprocess.
-- `defaultSpawn(cmd)` — real implementation using `Bun.spawn`, collecting stdout bytes / stderr text / exit code concurrently via `Promise.all`.
-- `bytesToFloat32(bytes)` — alignment-safe reinterpret helper (see below).
-- `captureFromFile(path, cfg, deps = {})` — builds the ffmpeg argv exactly as specified (`ffmpeg -hide_banner -loglevel error -i <path> -ac 1 -ar 16000 -f f32le pipe:1`), runs it via `deps.spawn ?? defaultSpawn`, and returns `VoiceFrames` (`{ samples, sampleRate: 16000 }`).
+1. **`src/db/migrate.ts`** (new) — `type Migration = { name: string; up: (db: Database) => void }` and `migrate(db: Database, migrations: Migration[]): number`. Reads `PRAGMA user_version`, applies each migration whose index is `>= version` inside its own `db.transaction(...)`, bumps `PRAGMA user_version` after each, returns the final version. One deviation from the brief's snippet: added `if (!m) continue;` after the array-index read, since the repo's `tsconfig.json` has `noUncheckedIndexedAccess` — `migrations[i]` types as `Migration | undefined` and the brief's version wouldn't typecheck as-is.
 
-## Byte-alignment handling
+2. **`src/memory/sqlite-store.ts`** — added a module-level `MEMORY_MIGRATIONS: Migration[]` constant wrapping the two original `CREATE TABLE IF NOT EXISTS` statements (`spaces`, `documents`) byte-for-byte as a single v1 migration's `up`. The constructor now calls `migrate(this.db, MEMORY_MIGRATIONS)` in place of the two bare `db.run(...)` calls, after the existing WAL/busy_timeout/foreign_keys PRAGMAs (Task 6 ordering preserved).
 
-ffmpeg's stdout arrives as a `Uint8Array` whose underlying `ArrayBuffer` is not guaranteed to start at byte offset 0 or have a length that's a multiple of 4 (e.g. Bun/Node stream buffers are frequently pooled/sliced views into larger buffers). Constructing a `Float32Array` directly over `bytes.buffer` would either throw (`RangeError: byte length not a multiple of 4`) or silently misread samples starting at the wrong offset.
+3. **`src/memory/store.ts`** `ensureSpace` — when `sql.getSpace(space)` returns a row whose `embedModel` differs from `cfg.embedModel`, throws `MemoryError` with the brief's exact actionable message pointing at `memory reindex <space> <embedModel>` (the destructive escape hatch, which already existed in this file as `reindex()`). Same-embedder case is unaffected (still returns `existing`).
 
-`bytesToFloat32` guards against both:
-1. Copies the incoming bytes into a fresh `Uint8Array(bytes.byteLength)` via `.set()` — this allocates a brand-new `ArrayBuffer` with offset 0 and no aliasing to the original pooled buffer.
-2. Constructs `Float32Array(copy.buffer, 0, Math.floor(copy.byteLength / 4))` — explicit length in samples (not bytes), floor-dividing so a stray trailing partial sample (0–3 leftover bytes) is silently dropped rather than throwing.
+4. **Tests** — `tests/db/migrate.test.ts` and `tests/memory/ensure-space-guard.test.ts`, both derived from the brief with two required fixes (see below).
 
-This matches the brief's reference implementation verbatim — preserved as instructed.
+## Deviations from the brief's verbatim test code (both required for the suite to compile/pass; without them the tests either fail to typecheck or fail for the wrong reason)
 
-## Error handling
+- **`ensure-space-guard.test.ts`**: the brief's `remember(text, { space: 'default' })` calls omit `at`, but `remember`'s options type has `at: number` as required (not optional) — `tsc --noEmit` rejected this (`Property 'at' is missing`). Added `at: 1` / `at: 2` to the two calls.
+- **`ensure-space-guard.test.ts`**: the brief's `deps(dim)` mock has `embedTexts: async () => []` — always returning an empty array regardless of input. `remember('hello', ...)` chunks the text into 1 chunk (single-sentence fast path in `chunk.ts`, which doesn't call `embed` at all) but then `writeChunks` calls `deps.embedTexts(['hello'])` directly and throws `MemoryError: embedTexts returned 0 vectors for 1 chunks` — before the code path under test (the second `createMemoryStore`'s `ensureSpace` guard) is ever reached. Fixed the mock to `texts.map(() => new Array(dim).fill(0))` (and `embedQuery` similarly) so `remember` succeeds normally and the *second* store's mismatched-embedder throw is what the test actually observes.
+- `src/db/migrate.ts`'s `if (!m) continue` (noted above) — required for `bun run typecheck`, not a test-file change.
 
-- `code !== 0` → `throw new VoiceError('ffmpeg decode failed: ' + stderr)` — message satisfies the test's `/ffmpeg/i` matcher and surfaces ffmpeg's own stderr for diagnosis.
-- `samples.length === 0` (empty/silent decode) → `throw new VoiceError('no audio decoded from file')`.
-- Both are the typed `VoiceError` from `src/voice/types.ts` (Task 2), not a bare `Error`.
+All three are minimal, mechanical fixes to make the brief's stated intent (RED then GREEN, final state passing `bun test` + `bun run typecheck`) actually hold; no behavior of `migrate`/`ensureSpace` was changed to accommodate them.
 
 ## TDD RED → GREEN
 
-1. **RED**: Wrote `tests/voice/capture-file.test.ts` verbatim from the brief first. Ran `bun test tests/voice/capture-file.test.ts` — failed with `Cannot find module '../../src/voice/capture.ts'` (module didn't exist yet). Confirmed failure before writing implementation.
-2. **GREEN**: Wrote `src/voice/capture.ts` per the brief's Step 3. Re-ran the same test — `2 pass, 0 fail, 4 expect() calls`.
-3. Ran `bun run typecheck` — clean (`tsc --noEmit`, no output/errors).
-4. Ran `bun run lint:file -- "src/voice/capture.ts" "tests/voice/capture-file.test.ts"` — biome flagged 2 pure-formatting diffs (arg-wrapping style on the `spawn` type signature and an inline object literal in the second test). Applied `bunx biome check --write` to both files, then re-ran lint (clean), re-ran the test (still `2 pass`), and re-ran typecheck (still clean) to confirm the auto-format didn't change behavior.
+1. **RED**: wrote both test files verbatim from the brief (`at`/mock bugs not yet fixed). `bun test tests/db/migrate.test.ts tests/memory/ensure-space-guard.test.ts` failed: `migrate.test.ts` — `Cannot find module '../../src/db/migrate.ts'`; `ensure-space-guard.test.ts` — threw `MemoryError: embedTexts returned 0 vectors for 1 chunks` on the *first* `remember` call (wrong-reason failure, due to the mock bug above).
+2. Fixed the mock + `at` fields in the guard test; re-ran — now failed with the *correct* symptom: `Expected promise that rejects. Received promise that resolved` (i.e. the pre-fix `ensureSpace` silently returns the stale space instead of throwing).
+3. **GREEN**: implemented `src/db/migrate.ts`, wired it into `sqlite-store.ts`, added the guard in `store.ts`. `bun test tests/db/ tests/memory/` → 41 pass, 1 skip, 0 fail (81 expect() calls) — the pre-existing `sqlite-store.test.ts`/`store.test.ts`/etc. all still pass unchanged, confirming the v1 migration reproduces the schema exactly.
+4. `bun run typecheck` — clean.
+5. `bun run lint:file` on the 5 touched TS files — biome flagged pure formatting (line-wrapping) on both new test files and the migration constant in `sqlite-store.ts`; applied `bunx biome check --write`, re-ran lint (clean), re-ran tests (still 41 pass) and typecheck (still clean).
 
-No fixture file (`tests/voice/fixtures/hello.f32`) was created — the brief's own test doesn't need one; it synthesizes Float32 PCM bytes in-memory via the `pcmBytes()` helper and injects a fake `spawn`, so no real ffmpeg or on-disk fixture is exercised. This keeps the test fully hermetic as required.
+## Docs gate
+
+`src/db/` is a new subsystem; `bun run docs:check` initially failed with `subsystem src/db/ is not documented in docs/architecture.md`. Added a **DB migrations** row to the architecture.md subsystem registry table (after **Core**, before **Reliability**) describing `migrate.ts`'s contract and its `memory/sqlite-store.ts` consumer. Also updated the existing **Memory / RAG** row to mention (a) the sqlite schema is now owned by `db/migrate.ts`'s `MEMORY_MIGRATIONS` and (b) `ensureSpace`'s new embedder-mismatch guard + the `reindex` escape hatch it points at, and added `db/migrate.ts` to that row's "Knows about" column. Re-ran `bun run docs:check` — passed (`✔ docs-check: living docs present + linked; every src subsystem documented.`).
 
 ## Files changed
 
-- `src/voice/capture.ts` (new, 44 lines after formatting)
-- `tests/voice/capture-file.test.ts` (new, 26 lines after formatting)
+- `src/db/migrate.ts` (new)
+- `tests/db/migrate.test.ts` (new)
+- `tests/memory/ensure-space-guard.test.ts` (new)
+- `src/memory/sqlite-store.ts` (modified — `MEMORY_MIGRATIONS` + `migrate()` call)
+- `src/memory/store.ts` (modified — `ensureSpace` guard)
+- `docs/architecture.md` (modified — new DB migrations row + Memory/RAG row update)
 
 ## Self-review
 
-- Interfaces match the brief exactly: `captureFromFile(path, cfg, deps?): Promise<VoiceFrames>`, `CaptureDeps.spawn` signature matches what Task 9 (mic capture) will need to share in the same file.
-- `VoiceFrames.sampleRate` is a literal `16000` per `types.ts` — returned directly as the literal, matching the type.
-- ffmpeg argv matches the spec string token-for-token (`-hide_banner -loglevel error -i <path> -ac 1 -ar 16000 -f f32le pipe:1`).
-- Default real `spawn` (`defaultSpawn`) is exercised only by production code paths / future live-verify (Task 13), never by this unit test — confirmed via `deps.spawn` injection in both test cases.
-- Considered whether `bytesToFloat32` should reject a non-multiple-of-4 length instead of silently truncating; kept the brief's floor-and-drop behavior since ffmpeg's f32le output is expected to always be a clean multiple of 4 in practice, and Task 13's live-verify will catch any real-world discrepancy.
-- No `console.log` left in; no lint/typecheck suppressions added.
+- The v1 migration's SQL is character-identical to the two original `CREATE TABLE IF NOT EXISTS` statements — confirmed by the full `tests/memory/` suite (40 pass, 1 skip) passing unchanged, including `sqlite-store-wal.test.ts` and `sqlite-store.test.ts` which exercise the schema directly.
+- `migrate` is idempotent: `tests/db/migrate.test.ts` asserts `migrate(db, ms)` returns `2` both times, and the version-gated `for` loop (`i = version; i < migrations.length`) is a no-op once `version === migrations.length`.
+- The embedder guard throws only on a genuine mismatch: `ensure-space-guard.test.ts` covers the throwing path; the pre-existing `store.test.ts`/`wiring.test.ts` etc. (same embedder across calls, the common case) all still pass, confirming the same-embedder branch (`return existing`) is untouched.
+- `docs:check` is green; no stray `console.log`; no lint/typecheck suppressions added.
+- Left the unrelated pre-existing working-tree changes (`.remember/*`, other `.superpowers/sdd/task-*` briefs/reports) unstaged — only Task 8's own files were added to this commit.
 
 ## Commit
 
-- `49d8435` — `feat(voice): capture from file via ffmpeg decode` (on branch `slice-29-voice-input-stt`)
+- `0cdb417` — `feat(db): user_version migration runner + memory embedder-mismatch guard` (on branch `slice-30a-production-foundation`, not pushed)
 
-(Note: this file previously held a stale report from Slice 28 Task 8 — the SDD task-numbering restarted per-slice and that filename got reused; this report replaces it with the correct Slice 29 / voice-input Task 8 content.)
+## Concerns / follow-ups (none blocking)
+
+- `migrate()` has no rollback/down migrations — acceptable for this slice's scope (append-only forward migrations), but worth noting if a future migration needs to be reverted in production.
+- The embedder-guard error message assumes the CLI's `memory reindex <space> <model>` argument order; if that CLI signature ever changes, the error string should be updated in lockstep (grep hit: `src/memory/store.ts`).

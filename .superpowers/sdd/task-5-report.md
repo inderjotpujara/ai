@@ -1,136 +1,117 @@
-### Task 5 report: Telemetry — `voice.transcribe` span
+### Task 5 report: Top-level error boundary + persisted `error.json`
 
 **Status:** Done.
 
 ## Note on this file
-This overwrites a stale `task-5-report.md` from an unrelated earlier slice's
-task ("Wan checkpoint from opts.model" — Slice 28 media work), which had the
-same filename due to per-slice task numbering restarting at 1. That content
-is preserved in git history (previous commit touching this path) and in
-`.superpowers/sdd/progress.md` if ledgered there.
+This overwrites a stale `task-5-report.md` from an unrelated earlier task
+in this same Ops Surface plan ("Signal-clean shutdown"), which had the same
+filename due to per-slice task numbering. That content is preserved in git
+history (previous commit touching this path).
 
 ## Implementation
 
-Added `voice.transcribe` telemetry span + `VOICE_*` attributes to the shared
-`src/telemetry/spans.ts` (~850-line file), mirroring the existing Slice-27
-`withTranscribeSpan` pattern exactly.
+- Created `src/errors/boundary.ts`:
+  - `explain(err: unknown): { title; hint }` — `instanceof` chain over all 8
+    exported `core/errors.ts` subclasses (`ResourceError`, `ProviderError`,
+    `ToolError`, `MemoryError`, `VerificationError`, `WorkflowError`,
+    `CrewError`, `MaxStepsError`), each mapped to an actionable title+hint;
+    anything else (plain `Error`, non-Error throws) falls to a generic
+    "Unexpected error" pair.
+  - `handleTopLevel(err, deps?): number` — logs `✖ <title>: <message>\n  →
+    <hint>` via injectable `log` (default `process.stderr.write`); if
+    `deps.runDir` is set, best-effort writes `error.json`
+    (`{name, title, message, hint, at}`) via injectable `write` (default
+    `writeFileSync`), wrapped in `try/catch` so a failing write never
+    propagates; always returns `1`.
+- Created `tests/errors/boundary.test.ts` — brief's Step 1 sample, written
+  first per TDD, confirmed RED (module missing), then GREEN after the
+  implementation. One deviation, see below.
+- Modified `src/cli/chat.ts`: bottom
+  `main().catch((err) => { console.error(err); process.exit(1); })` replaced
+  with `main().catch((err) => { process.exit(handleTopLevel(err)); })`;
+  added `import { handleTopLevel } from '../errors/boundary.ts';` in its
+  correct alphabetical slot in the existing import block (between
+  `discovery/build-registry.ts` and `log/logger.ts`).
+- Updated `docs/architecture.md`: added an **Error boundary** row
+  (`src/errors/`) to the subsystem registry table, placed right after the
+  **Process** row (same Slice-30a vintage) — required by the pre-commit
+  `docs:check` gate since `src/errors/` is a brand-new top-level subsystem.
 
-### Exact insertion points
+## Deviations from the brief's literal sample
 
-1. **`src/telemetry/spans.ts:13`** — new import (type-only, per biome
-   `useImportType`):
-   ```ts
-   import type { CaptureSource } from '../voice/types.ts';
-   ```
-   Inserted alphabetically between `'../verified-build/types.ts'` and
-   `'./provider.ts'`.
-
-2. **`src/telemetry/spans.ts` — end of the frozen `ATTR` object**, right
-   after `GEN_FIT_CANDIDATES: 'media.gen_fit.candidates',` and before the
-   closing `} as const;`: added a new `// Voice input (Slice 29)` block with
-   the 5 required keys:
-   ```ts
-   VOICE_STT_MODEL: 'voice.stt.model',
-   VOICE_CAPTURE_SOURCE: 'voice.capture.source',
-   VOICE_AUDIO_SECONDS: 'voice.audio.seconds',
-   VOICE_DURATION_MS: 'voice.duration.ms',
-   VOICE_OUTCOME: 'voice.outcome',
-   ```
-
-3. **`src/telemetry/spans.ts`, immediately before `export type
-   FrameSampleSpanInfo = {`** (right after `withTranscribeSpan`'s closing
-   brace): added `VoiceSpanInfo` type + the `withVoiceTranscribeSpan` helper,
-   per the brief:
-   ```ts
-   export type VoiceSpanInfo = { model: string; source: CaptureSource };
-
-   export function withVoiceTranscribeSpan<T>(
-     info: VoiceSpanInfo,
-     fn: (span: Span) => Promise<T>,
-   ): Promise<T> {
-     return inSpan('voice.transcribe', async (span) => {
-       span.setAttribute(ATTR.VOICE_STT_MODEL, info.model);
-       span.setAttribute(ATTR.VOICE_CAPTURE_SOURCE, info.source);
-       span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
-       return fn(span);
-     });
-   }
-   ```
-   Added a docstring above it mirroring `withTranscribeSpan`'s comment style.
-   `VOICE_AUDIO_SECONDS` / `VOICE_DURATION_MS` / `VOICE_OUTCOME` are defined
-   in `ATTR` for downstream callers (Tasks 6-9: transcriber/capture wiring)
-   to `span.setAttribute(...)` directly via the `fn(span)` callback once
-   duration/outcome are known post-hoc — exactly the same pattern
-   `withTranscribeSpan`'s callers use today for `MEDIA_TRANSCRIBE_*`.
-
-### One deviation from the brief's literal snippet
-
-The brief's Step 3 snippet used a plain
-`import { CaptureSource } from '../voice/types.ts';`. Biome's
-`lint/style/useImportType` flagged this as a warning because `CaptureSource`
-is used only in a type position (`VoiceSpanInfo.source: CaptureSource`)
-inside `spans.ts` — its runtime/enum side is never referenced there. Changed
-to `import type { CaptureSource } from '../voice/types.ts';` to keep
-`bun run lint:file` clean. No behavior change: `tests/voice/spans.test.ts`
-still imports `CaptureSource` as a normal value import and uses
-`CaptureSource.File` at runtime, unaffected by the type-only import in
-`spans.ts`.
+- `tests/errors/boundary.test.ts`: the brief's literal
+  `JSON.parse(writes['/tmp/r/error.json'])` fails `tsc --noEmit` under this
+  repo's `tsconfig.json` (`noUncheckedIndexedAccess: true` types the index
+  access as `string | undefined`). A first fix using a `!` non-null
+  assertion satisfied typecheck but tripped Biome's `noNonNullAssertion`
+  lint rule. Final form: pull the value into a `const written = writes[key]`,
+  assert `expect(written).toBeDefined()`, then `JSON.parse(written as
+  string)`. Same runtime assertions, clean under both typecheck and lint.
+  No other deviations — `src/errors/boundary.ts` matches the brief's Step 3
+  code verbatim (only reformatted/reordered per `bunx biome check --write`
+  for import grouping/line wraps, no logic changes).
 
 ## TDD — RED → GREEN
 
-- **RED:** Wrote `tests/voice/spans.test.ts` first (verbatim from brief).
-  `bun test tests/voice/spans.test.ts` failed with:
-  `SyntaxError: Export named 'withVoiceTranscribeSpan' not found in module
-  '/Users/inderjotsingh/ai/src/telemetry/spans.ts'.`
-- **GREEN:** After adding the ATTR keys + import + helper:
-  `bun test tests/voice/spans.test.ts` → `2 pass, 0 fail, 4 expect() calls`.
+- **RED:** `bun test tests/errors/boundary.test.ts` →
+  `error: Cannot find module '../../src/errors/boundary.ts'`.
+- **GREEN:** after adding `src/errors/boundary.ts`:
+  `bun test tests/errors/boundary.test.ts` → 2 pass, 0 fail.
 
-## Typecheck — import-cycle gate
+## Verification run
 
-`bun run typecheck` (`tsc --noEmit`) ran clean with **zero errors** after the
-change. Confirmed no import cycle: `src/voice/types.ts` imports nothing (it's
-a leaf module — only defines `VoiceFrames`, `CaptureSource`, `VoiceOutcome`,
-`VoiceError`, `VoiceConfig`, `Transcriber`), so `spans.ts` importing
-`CaptureSource` from it is a one-directional edge with no path back to
-`telemetry/`.
+- `bun test tests/errors/ tests/cli/` → **73 pass, 0 fail** (154 `expect()`
+  calls).
+- `bun run typecheck` → clean, 0 errors.
+- `bun run lint` (full `biome check .`) → **0 errors**; 14 pre-existing
+  warnings in files untouched by this task.
+- `bun run docs:check` → `✔ docs-check: living docs present + linked; every
+  src subsystem documented.` — also re-ran automatically by the pre-commit
+  hook on commit, passed.
 
-## Lint
+## Self-review checklist (from the task prompt)
 
-`bun run lint:file -- "src/telemetry/spans.ts" "tests/voice/spans.test.ts"`
-→ clean (`biome check`, 0 warnings/errors) after switching to `import type`.
+- `explain` covers all 8 exported error subclasses + a generic fallback —
+  confirmed by reading the `instanceof` chain.
+- `handleTopLevel` writes `error.json` to `runDir` when provided, and the
+  write path is wrapped in `try/catch` so a failing injected `write` never
+  throws out of `handleTopLevel`.
+- `chat.ts`'s bottom `main().catch` now routes through `handleTopLevel`,
+  importing it correctly.
+- `docs:check` green, both standalone and via the pre-commit hook on commit.
 
 ## Files changed
 
-- `src/telemetry/spans.ts` — added import, 5 `ATTR.VOICE_*` keys,
-  `VoiceSpanInfo` type, `withVoiceTranscribeSpan` helper. No existing
-  exports touched, removed, or reordered.
-- `tests/voice/spans.test.ts` — new test file (verbatim from brief).
-
-## Self-review
-
-- Attribute key string values match the brief exactly (`voice.stt.model`,
-  `voice.capture.source`, `voice.audio.seconds`, `voice.duration.ms`,
-  `voice.outcome`).
-- `withVoiceTranscribeSpan` opens span `'voice.transcribe'`, sets model +
-  capture source + `ATTR.INPUT_MODALITY = 'audio'`, then runs `fn(span)` —
-  matches the brief's Step 3 code exactly (only the import line differs, per
-  the lint-driven deviation above).
-- Did not touch `withTranscribeSpan` or any other existing helper/export;
-  `ATTR` object remains frozen (`as const`).
-- New `ATTR` keys placed in a clearly labeled `// Voice input (Slice 29)`
-  section, consistent with the existing `// Multimodal analysis (Slice 27)` /
-  `// Runtime warm/spawn (Slice 26)` sectioning convention.
-- No `console.log` left in; no `any` introduced.
+- `src/errors/boundary.ts` — new.
+- `tests/errors/boundary.test.ts` — new.
+- `src/cli/chat.ts` — replaced the bottom `main().catch` block + added the
+  import; nothing else touched.
+- `docs/architecture.md` — added the Error boundary subsystem row.
 
 ## Concerns
 
-None blocking. The import-cycle risk called out in the task instructions was
-verified clean (`src/voice/types.ts` has zero imports). This is a pure
-additive telemetry change with no runtime wiring yet — Tasks 6-9 will call
-`withVoiceTranscribeSpan` from the actual transcriber/capture code and set
-the remaining `VOICE_AUDIO_SECONDS`/`VOICE_DURATION_MS`/`VOICE_OUTCOME`
-attributes via the span passed into `fn`.
+- `chat.ts`'s top-level `main().catch((err) => { process.exit(handleTopLevel(err)); })`
+  calls `handleTopLevel(err)` with **no `deps`** — matches the brief's
+  literal wiring exactly, but it means today this call site only logs (via
+  the default `process.stderr.write`) and does **not** persist `error.json`
+  in a real failure, since `main()`'s top-level catch sits outside any
+  `withMcpRun`/`RunHandle` scope that would supply a concrete `runDir`.
+  `explain`'s message mapping and the exit(1) behavior work correctly
+  regardless. Wiring an actual run directory through to this outer catch
+  (e.g. restructuring `main()` so its catch runs inside the run scope, or
+  tracking a "last known run dir" module-level) is a natural follow-on if
+  per-run `error.json` persistence on real (non-test) failures is desired —
+  flagging for whoever picks up hardening this further, not blocking for
+  this task as scoped.
+- Did not touch `.superpowers/sdd/progress.md` or other tasks' brief/report
+  files that appear modified in `git status` — those belong to other
+  in-flight Ops Surface tasks and were left untouched/unstaged by this
+  task's commit.
+- Did not push, per instructions.
 
 ## Commit
-- See commit list in the final response; files staged were exactly
-  `src/telemetry/spans.ts` and `tests/voice/spans.test.ts`.
+
+`06fbc05` — "feat(errors): top-level boundary maps typed errors to
+actionable hints + persists error.json". Files in commit: exactly
+`src/errors/boundary.ts`, `tests/errors/boundary.test.ts`, `src/cli/chat.ts`,
+`docs/architecture.md`.

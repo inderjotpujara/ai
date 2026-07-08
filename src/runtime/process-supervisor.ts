@@ -1,3 +1,4 @@
+import { registerChild } from '../process/child-registry.ts';
 import { withWallClock } from '../reliability/timeout.ts';
 
 export type ChildHandle = {
@@ -62,6 +63,8 @@ export async function superviseServer(
   const healthOk = cfg.healthOk ?? ((res: Response) => res.ok);
 
   const child = spawn(cfg.cmd, cfg.args, { env: cfg.env });
+  const off = registerChild(child);
+  child.onExit(() => off());
   const baseUrl = `http://${cfg.host}:${cfg.port}${cfg.basePath}`;
   const healthUrl = `http://${cfg.host}:${cfg.port}${cfg.healthPath}`;
 

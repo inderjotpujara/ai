@@ -1,88 +1,77 @@
-### Task 3: Model + tool resolution
+### Task 3: `bun run status`
 
 **Files:**
-- Create: `src/voice/model.ts`
-- Test: `tests/voice/model.test.ts`
+- Create: `src/cli/status.ts`
+- Create: `tests/cli/status.test.ts`
+- Modify: `package.json` (`"status": "bun run src/cli/status.ts"`)
 
 **Interfaces:**
-- Consumes: none.
-- Produces: `voiceCacheDir(): string`, `resolveVoiceModel(env?): string` (returns model dir), `ffmpegCmd(env?): string`.
+- Produces:
+  - `collectStatus(deps: StatusDeps): Promise<StatusReport>` where `StatusDeps = { ollamaReachable: () => Promise<boolean>; loadedModels: () => Promise<string[]>; freeBudgetBytes: () => Promise<number>; version: string }` and `StatusReport = { version: string; ollama: boolean; loaded: string[]; freeGb: number }`.
+  - `renderStatus(r: StatusReport): string` — a compact human summary.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/voice/model.test.ts
-import { describe, expect, it } from 'bun:test';
-import { ffmpegCmd, resolveVoiceModel, voiceCacheDir } from '../../src/voice/model.ts';
+// tests/cli/status.test.ts
+import { expect, test } from 'bun:test';
+import { collectStatus, renderStatus } from '../../src/cli/status.ts';
 
-describe('voice model resolution', () => {
-  it('defaults the cache dir under ~/.cache/ai/voice', () => {
-    expect(voiceCacheDir({})).toMatch(/\.cache\/ai\/voice$/);
+test('collectStatus assembles a report from injected probes', async () => {
+  const r = await collectStatus({
+    ollamaReachable: async () => true,
+    loadedModels: async () => ['qwen2.5:14b'],
+    freeBudgetBytes: async () => 12_000_000_000,
+    version: '0.2.0',
   });
-  it('AGENT_VOICE_DIR overrides the cache dir', () => {
-    expect(voiceCacheDir({ AGENT_VOICE_DIR: '/tmp/v' })).toBe('/tmp/v');
-  });
-  it('resolveVoiceModel joins the default model name under the cache dir', () => {
-    expect(resolveVoiceModel({ AGENT_VOICE_DIR: '/tmp/v' })).toBe(
-      '/tmp/v/sherpa-onnx-moonshine-tiny-en-int8',
-    );
-  });
-  it('AGENT_VOICE_STT_MODEL overrides the model dir absolutely', () => {
-    expect(resolveVoiceModel({ AGENT_VOICE_STT_MODEL: '/models/base' })).toBe('/models/base');
-  });
-  it('ffmpegCmd honors AGENT_FFMPEG_CMD then falls back to ffmpeg', () => {
-    expect(ffmpegCmd({ AGENT_FFMPEG_CMD: '/opt/ffmpeg' })).toBe('/opt/ffmpeg');
-    expect(ffmpegCmd({})).toBe('ffmpeg');
-  });
+  expect(r).toEqual({ version: '0.2.0', ollama: true, loaded: ['qwen2.5:14b'], freeGb: 12 });
+  expect(renderStatus(r)).toContain('qwen2.5:14b');
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to verify failure**
 
-Run: `bun test tests/voice/model.test.ts`
-Expected: FAIL — module not found.
+Run: `bun test tests/cli/status.test.ts`
+Expected: FAIL — module missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement**
 
 ```ts
-// src/voice/model.ts
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+// src/cli/status.ts
+export type StatusDeps = {
+  ollamaReachable: () => Promise<boolean>;
+  loadedModels: () => Promise<string[]>;
+  freeBudgetBytes: () => Promise<number>;
+  version: string;
+};
+export type StatusReport = { version: string; ollama: boolean; loaded: string[]; freeGb: number };
 
-type Env = Record<string, string | undefined>;
-
-export const DEFAULT_VOICE_MODEL = 'sherpa-onnx-moonshine-tiny-en-int8';
-
-/** Cache dir for downloaded voice models. Env AGENT_VOICE_DIR overrides. */
-export function voiceCacheDir(env: Env = process.env): string {
-  return env.AGENT_VOICE_DIR ?? join(homedir(), '.cache', 'ai', 'voice');
+export async function collectStatus(deps: StatusDeps): Promise<StatusReport> {
+  const [ollama, loaded, free] = await Promise.all([deps.ollamaReachable(), deps.loadedModels(), deps.freeBudgetBytes()]);
+  return { version: deps.version, ollama, loaded, freeGb: Math.round(free / 1e9) };
 }
-
-/**
- * Resolves the moonshine model directory. Precedence:
- * explicit AGENT_VOICE_STT_MODEL (absolute) > <cacheDir>/<DEFAULT_VOICE_MODEL>.
- */
-export function resolveVoiceModel(env: Env = process.env): string {
-  if (env.AGENT_VOICE_STT_MODEL) return env.AGENT_VOICE_STT_MODEL;
-  return join(voiceCacheDir(env), DEFAULT_VOICE_MODEL);
-}
-
-/** ffmpeg binary. Env AGENT_FFMPEG_CMD overrides; else bare PATH `ffmpeg`. */
-export function ffmpegCmd(env: Env = process.env): string {
-  return env.AGENT_FFMPEG_CMD ?? 'ffmpeg';
+export function renderStatus(r: StatusReport): string {
+  return [
+    `agent-framework ${r.version}`,
+    `ollama:  ${r.ollama ? 'reachable' : 'DOWN'}`,
+    `models:  ${r.loaded.length ? r.loaded.join(', ') : '(none resident)'}`,
+    `budget:  ~${r.freeGb} GB free`,
+  ].join('\n');
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+Wire a `main()` that builds real deps (Ollama version ping via `src/runtime/ollama.ts`, `listLoaded` via `runtimeFor('ollama').control`, `liveBudgetBytes`, version from Task 4's `APP_VERSION`) and prints `renderStatus`. Add the `status` script to `package.json`.
 
-Run: `bun test tests/voice/model.test.ts`
-Expected: PASS (5 tests).
+- [ ] **Step 4: Run tests + typecheck**
+
+Run: `bun test tests/cli/status.test.ts && bun run typecheck`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/voice/model.ts tests/voice/model.test.ts
-git commit -m "feat(voice): model + ffmpeg resolution with env overrides"
+git add src/cli/status.ts tests/cli/status.test.ts package.json
+git commit -m "feat(cli): 'bun run status' — Ollama/models/budget/version at a glance (feeds the 30b live panel)"
 ```
 
 ---

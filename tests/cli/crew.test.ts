@@ -13,6 +13,7 @@ import {
 } from '../../src/crew/types.ts';
 import { createRun } from '../../src/run/run-store.ts';
 import { initRunTelemetry } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 import type { VerifyDeps } from '../../src/verification/types.ts';
 
 const crew: CrewDef = defineCrew({
@@ -67,17 +68,19 @@ describe('runCrewCli', () => {
   it('writes spans.jsonl with crew.run + result.txt on success', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'crew-'));
     const run = await createRun(runsRoot, 'r1');
-    const tel = initRunTelemetry(run.dir);
+    const tel = initRunTelemetry(run.dir, run.id);
     let outcome: CrewOutcome;
     try {
-      outcome = await runCrewCli({
-        def: crew,
-        input: 'hello',
-        run,
-        tools: {},
-        // deps hook: override the agent runner so no real model is needed
-        runAgentStep: async () => 'result text',
-      } as never);
+      outcome = await withRunContext(run.id, () =>
+        runCrewCli({
+          def: crew,
+          input: 'hello',
+          run,
+          tools: {},
+          // deps hook: override the agent runner so no real model is needed
+          runAgentStep: async () => 'result text',
+        } as never),
+      );
     } finally {
       await tel.shutdown();
     }
@@ -91,17 +94,19 @@ describe('runCrewCli', () => {
   it('verifyDeps present + a plain crew (no verify flags set) still verifies, and unverified.txt is written on abstain', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'crew-verify-'));
     const run = await createRun(runsRoot, 'r2');
-    const tel = initRunTelemetry(run.dir);
+    const tel = initRunTelemetry(run.dir, run.id);
     let outcome: CrewOutcome;
     try {
-      outcome = await runCrewCli({
-        def: crew, // no task.verify / crew.verify set in the fixture
-        input: 'hello',
-        run,
-        tools: {},
-        runAgentStep: async () => 'a draft answer [mem:c#0]',
-        verifyDeps: fakeVerifyDeps(false),
-      });
+      outcome = await withRunContext(run.id, () =>
+        runCrewCli({
+          def: crew, // no task.verify / crew.verify set in the fixture
+          input: 'hello',
+          run,
+          tools: {},
+          runAgentStep: async () => 'a draft answer [mem:c#0]',
+          verifyDeps: fakeVerifyDeps(false),
+        }),
+      );
     } finally {
       await tel.shutdown();
     }
@@ -116,17 +121,19 @@ describe('runCrewCli', () => {
   it('verifyDeps present + a grounded answer -> done, result.txt written', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'crew-verify-ok-'));
     const run = await createRun(runsRoot, 'r3');
-    const tel = initRunTelemetry(run.dir);
+    const tel = initRunTelemetry(run.dir, run.id);
     let outcome: CrewOutcome;
     try {
-      outcome = await runCrewCli({
-        def: crew,
-        input: 'hello',
-        run,
-        tools: {},
-        runAgentStep: async () => 'a grounded answer [mem:c#0]',
-        verifyDeps: fakeVerifyDeps(true),
-      });
+      outcome = await withRunContext(run.id, () =>
+        runCrewCli({
+          def: crew,
+          input: 'hello',
+          run,
+          tools: {},
+          runAgentStep: async () => 'a grounded answer [mem:c#0]',
+          verifyDeps: fakeVerifyDeps(true),
+        }),
+      );
     } finally {
       await tel.shutdown();
     }

@@ -8,6 +8,7 @@ import {
   initRunTelemetry,
   recordIoEnabled,
 } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 
 let dir: string;
 let dir2: string;
@@ -22,25 +23,25 @@ afterEach(async () => {
   await rm(dir2, { recursive: true, force: true });
 });
 
-test('initRunTelemetry registers a provider that writes spans.jsonl', async () => {
-  const tel = initRunTelemetry(dir);
-  const span = trace.getTracer('t').startSpan('hello');
-  span.end();
+test('initRunTelemetry registers processors that write spans.jsonl', async () => {
+  const tel = initRunTelemetry(dir, 'run-x');
+  withRunContext('run-x', () => trace.getTracer('t').startSpan('hello').end());
   await tel.shutdown();
   const raw = await readFile(join(dir, 'spans.jsonl'), 'utf8');
   expect(raw).toContain('"name":"hello"');
 });
 
-test('initRunTelemetry re-init swaps the provider so second run writes to its own file', async () => {
-  const a = initRunTelemetry(dir);
+test('a second run routes its spans to its own file (no provider swap)', async () => {
+  const a = initRunTelemetry(dir, 'run-a');
   await a.shutdown();
 
-  const b = initRunTelemetry(dir2);
-  const span = trace.getTracer('t').startSpan('second-run-span');
-  span.end();
+  const b = initRunTelemetry(dir2, 'run-b');
+  withRunContext('run-b', () =>
+    trace.getTracer('t').startSpan('second-run-span').end(),
+  );
   await b.shutdown();
 
-  // The span must appear in dir2's file (the re-init swapped the provider)
+  // The span is routed to run-b's file by the router (no global provider swap).
   const raw = await readFile(join(dir2, 'spans.jsonl'), 'utf8');
   expect(raw).toContain('"name":"second-run-span"');
 });

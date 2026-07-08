@@ -18,6 +18,53 @@ describe('withWallClock', () => {
       ),
     ).rejects.toThrow('timeout');
   });
+  it('aborts the work signal on timeout', async () => {
+    let seen: AbortSignal | undefined;
+    await expect(
+      withWallClock(
+        10,
+        (signal) =>
+          new Promise((_, rej) => {
+            seen = signal;
+            signal.addEventListener('abort', () =>
+              rej(new Error('aborted-by-clock')),
+            );
+          }),
+      ),
+    ).rejects.toThrow('timeout');
+    expect(seen?.aborted).toBe(true);
+  });
+  it('aborts the work AND rejects with timeout when a (not-yet-aborted) external signal is supplied but the clock fires first', async () => {
+    const ext = new AbortController(); // supplied, but never aborted by us
+    let seen: AbortSignal | undefined;
+    await expect(
+      withWallClock(
+        10,
+        (signal) =>
+          new Promise((_, rej) => {
+            seen = signal;
+            signal.addEventListener('abort', () =>
+              rej(new Error('aborted-by-clock')),
+            );
+          }),
+        ext.signal,
+      ),
+    ).rejects.toThrow('timeout');
+    expect(seen?.aborted).toBe(true);
+  });
+  it('aborts when an external signal aborts', async () => {
+    const ext = new AbortController();
+    const p = withWallClock(
+      10_000,
+      (s) =>
+        new Promise((_, rej) => {
+          s.addEventListener('abort', () => rej(new Error('x')));
+        }),
+      ext.signal,
+    );
+    ext.abort();
+    await expect(p).rejects.toThrow('x');
+  });
 });
 
 describe('IdleWatchdog', () => {

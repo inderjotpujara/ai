@@ -67,6 +67,21 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
   const failedPulls = new Set<string>();
   let tick = 0;
 
+  // Serializes the listLoaded->evict->warm admission section so two concurrent
+  // ensureReady calls (parallel delegations, or two runs sharing one manager)
+  // can't both read the same headroom and over-commit VRAM, or both pick the
+  // same LRU eviction victim. `.then(fn, fn)` chains onto the prior admission
+  // whether it resolved or rejected, and the `.catch(() => {})` on the stored
+  // chain link swallows the rejection there (the caller's own returned `run`
+  // promise still rejects normally) so one failed admission never wedges the
+  // lock for subsequent callers.
+  let admissionLock: Promise<unknown> = Promise.resolve();
+  function serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = admissionLock.then(fn, fn);
+    admissionLock = run.catch(() => {});
+    return run;
+  }
+
   async function modelMaxFor(
     c: RuntimeControl,
     model: string,
@@ -117,7 +132,14 @@ export function createModelManager(deps: ManagerDeps = defaultDeps()) {
     return f16;
   }
 
-  async function ensureReady(
+  function ensureReady(
+    decl: ModelDeclaration,
+    opts: EnsureOpts = {},
+  ): Promise<number> {
+    return serialize(() => ensureReadyInner(decl, opts));
+  }
+
+  async function ensureReadyInner(
     decl: ModelDeclaration,
     opts: EnsureOpts = {},
   ): Promise<number> {

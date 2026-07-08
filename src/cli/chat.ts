@@ -4,17 +4,21 @@ import qwenRouter from '../../models/qwen-router.ts';
 import { BOOTSTRAP } from '../../models/registry.ts';
 import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
+import { loadConfig } from '../config/schema.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { RuntimeKind } from '../core/types.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
+import { handleTopLevel } from '../errors/boundary.ts';
+import { createLogger } from '../log/logger.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
 import { type IngestFlags, ingestMedia } from '../media/ingest.ts';
 import { createMediaStore } from '../media/store.ts';
 import { makeEmbedder } from '../memory/embed.ts';
+import { installSignalHandlers, onShutdown } from '../process/lifecycle.ts';
 import { buildProvisionDeps, detectHost } from '../provisioning/cli-deps.ts';
 import { detectMissing } from '../provisioning/detect-missing.ts';
 import { runProvision } from '../provisioning/provisioner.ts';
@@ -36,6 +40,7 @@ import {
   isModelInstalled,
   listLoadedModels,
 } from '../resource/ollama-control.ts';
+import { newRunId } from '../run/run-id.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { reuseDecision } from '../verified-build/reuse.ts';
 import type { CapabilitySignature } from '../verified-build/types.ts';
@@ -175,6 +180,12 @@ function hasMediaFlags(flags: IngestFlags): boolean {
 }
 
 async function main(): Promise<void> {
+  // Validates the environment eagerly (today's per-module reads are lazy).
+  // Never throws — an invalid AGENT_* value falls back to its documented
+  // default, same convention as the rest of the codebase.
+  loadConfig();
+  installSignalHandlers();
+
   const { positional, flags } = parseMediaArgs(process.argv.slice(2));
   const rawPrompt = positional.join(' ').trim();
   if (rawPrompt.length === 0 && !hasMediaFlags(flags)) {
@@ -186,13 +197,15 @@ async function main(): Promise<void> {
 
   await maybeAutoProvision();
 
+  const log = createLogger('chat');
   const manager = createModelManager();
+  onShutdown(() => manager.unloadAll());
   // Warm + pin the small router model the orchestrator runs on.
-  console.error(`Preparing router model ${qwenRouter.model}...`);
+  log.info(`Preparing router model ${qwenRouter.model}...`);
   const routerNumCtx = await manager.ensureReady(qwenRouter, {
     pinned: [qwenRouter.model],
   });
-  console.error(
+  log.info(
     isProjectStoreActive()
       ? 'Using project-local models from ./model-images'
       : '⚠ Ollama is serving from its global store, not ./model-images. Run "bun run serve" to use this project\'s local models.',
@@ -234,7 +247,7 @@ async function main(): Promise<void> {
 
   try {
     await withMcpRun(
-      { runsRoot: 'runs', runId: `run-${process.pid}` },
+      { runsRoot: 'runs', runId: newRunId() },
       async ({ run, reg, config, ledger }) => {
         const onBeforeDelegate = createSelectHook({
           registry,
@@ -406,7 +419,6 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
-    console.error(err);
-    process.exit(1);
+    process.exit(handleTopLevel(err));
   });
 }

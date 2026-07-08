@@ -10,6 +10,7 @@ import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
 import { unloadModel } from '../../src/resource/ollama-control.ts';
 import { createRun } from '../../src/run/run-store.ts';
 import { initRunTelemetry } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 import type { WorkflowOutcome } from '../../src/workflow/types.ts';
 import { getWorkflow } from '../../workflows/index.ts';
 import { ollamaReady } from './ollama-available.ts';
@@ -28,16 +29,18 @@ describe.skipIf(!ready)('workflow.live', () => {
         const fileQa = createFileQaAgent(fileServer.tools);
         const webFetch = createWebFetchAgent(fetchServer.tools);
         const run = await createRun(runsRoot, 'live');
-        const tel = initRunTelemetry(run.dir);
+        const tel = initRunTelemetry(run.dir, run.id);
         let outcome: WorkflowOutcome;
         try {
-          outcome = await runFlow({
-            def,
-            input: 'https://example.com',
-            run,
-            agents: { [fileQa.name]: fileQa, [webFetch.name]: webFetch },
-            tools: { ...fileServer.tools, ...fetchServer.tools },
-          });
+          outcome = await withRunContext(run.id, () =>
+            runFlow({
+              def,
+              input: 'https://example.com',
+              run,
+              agents: { [fileQa.name]: fileQa, [webFetch.name]: webFetch },
+              tools: { ...fileServer.tools, ...fetchServer.tools },
+            }),
+          );
         } finally {
           await tel.shutdown();
         }

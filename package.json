@@ -1,6 +1,6 @@
 {
   "name": "local-agents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -25,7 +25,11 @@
     "mcp": "bun run src/cli/mcp.ts",
     "agent-builder": "bun run src/cli/agent-builder.ts",
     "crew-builder": "bun run src/cli/crew-builder.ts",
-    "archive": "bun run src/cli/archive.ts"
+    "archive": "bun run src/cli/archive.ts",
+    "config": "bun run src/cli/config.ts",
+    "start": "bun run src/cli/start.ts",
+    "status": "bun run src/cli/status.ts",
+    "usage": "bun run src/cli/usage.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.56",

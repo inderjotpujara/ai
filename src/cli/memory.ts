@@ -7,6 +7,7 @@ import { createModelManager } from '../resource/model-manager.ts';
 import { createRun } from '../run/run-store.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { initRunTelemetry } from '../telemetry/provider.ts';
+import { withRunContext } from '../telemetry/run-router.ts';
 
 export type MemoryCliDeps = {
   makeStore: () => MemoryStore;
@@ -161,17 +162,19 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const { flags } = parseFlags(argv.slice(1));
   const run = await createRun('runs', `memory-${process.pid}`);
-  const tel = initRunTelemetry(run.dir);
+  const tel = initRunTelemetry(run.dir, run.id);
   let storeAndManager:
     | { store: MemoryStore; manager: ReturnType<typeof createModelManager> }
     | undefined;
   try {
-    const code = await runMemoryCli(argv, {
-      makeStore: () => {
-        storeAndManager = makeRealStore(flags);
-        return storeAndManager.store;
-      },
-    });
+    const code = await withRunContext(run.id, () =>
+      runMemoryCli(argv, {
+        makeStore: () => {
+          storeAndManager = makeRealStore(flags);
+          return storeAndManager.store;
+        },
+      }),
+    );
     process.exitCode = code;
   } finally {
     if (storeAndManager) {

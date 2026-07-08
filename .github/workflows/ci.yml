@@ -1,0 +1,27 @@
+name: ci
+
+# The repo's first automated gate. Local git hooks (.githooks) only enforce
+# doc currency; nothing forced typecheck/lint/tests on push/PR until now. This
+# runs the same fast, mock-only suite `bun run check` runs locally. The
+# live-model suite (the ~21 *.live.test.ts, gated on a reachable Ollama / env
+# flags) is intentionally NOT run here — it needs a self-hosted Apple-Silicon
+# runner (tracked as Tier-2 Slice 40); on this runner those tests skip.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run docs:check
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun test

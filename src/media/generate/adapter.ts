@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { registerChild } from '../../process/child-registry.ts';
 import type {
   DegradationLedger,
   DegradeEvent,
@@ -175,6 +176,8 @@ export function runOneShotJob(
   const startedAt = Date.now();
   const child = spawn(cmd, args, env ? { env } : undefined);
   currentStatus = JobStatus.Working;
+  // Safety net for a process-wide shutdown; unregister on any exit path below.
+  const unregisterChild = registerChild(child);
 
   // Observability only: wraps `resultPromise` (the spawn→exit→store chain
   // that the callbacks below drive) so the completion is recorded as a
@@ -221,6 +224,7 @@ export function runOneShotJob(
   });
 
   child.onExit((code) => {
+    unregisterChild();
     if (currentStatus === JobStatus.Cancelled) {
       end();
       markExitHandled();

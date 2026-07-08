@@ -1,7 +1,22 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { type Migration, migrate } from '../db/migrate.ts';
 import type { SpaceMeta } from './types.ts';
+
+const MEMORY_MIGRATIONS: Migration[] = [
+  {
+    name: 'init-spaces-and-documents',
+    up: (db: Database) => {
+      db.run(`CREATE TABLE IF NOT EXISTS spaces (
+      name TEXT PRIMARY KEY, embed_model TEXT NOT NULL, embed_dim INTEGER NOT NULL,
+      chunk_cap_tokens INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
+      db.run(`CREATE TABLE IF NOT EXISTS documents (
+      space TEXT NOT NULL, source TEXT NOT NULL, hash TEXT NOT NULL, chunks INTEGER NOT NULL,
+      at INTEGER NOT NULL, PRIMARY KEY (space, source))`);
+    },
+  },
+];
 
 type SpaceRow = {
   name: string;
@@ -21,12 +36,10 @@ export class SqliteStore {
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
-    this.db.run(`CREATE TABLE IF NOT EXISTS spaces (
-      name TEXT PRIMARY KEY, embed_model TEXT NOT NULL, embed_dim INTEGER NOT NULL,
-      chunk_cap_tokens INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
-    this.db.run(`CREATE TABLE IF NOT EXISTS documents (
-      space TEXT NOT NULL, source TEXT NOT NULL, hash TEXT NOT NULL, chunks INTEGER NOT NULL,
-      at INTEGER NOT NULL, PRIMARY KEY (space, source))`);
+    this.db.run('PRAGMA journal_mode = WAL');
+    this.db.run('PRAGMA busy_timeout = 5000');
+    this.db.run('PRAGMA foreign_keys = ON');
+    migrate(this.db, MEMORY_MIGRATIONS);
   }
 
   getSpace(name: string): SpaceMeta | undefined {

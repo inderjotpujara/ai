@@ -82,13 +82,14 @@ export async function runOrchestrator(
   task: string,
   numCtx?: number,
   capture?: ResourceCapture,
+  signal?: AbortSignal,
 ): Promise<OrchestratorResult> {
   let text: string;
   let steps: Parameters<typeof findCapabilityGap>[0];
 
   try {
     const result = await withRootDelegationContext(numCtx, () =>
-      runDefinedAgent(orchestrator, task, numCtx),
+      runDefinedAgent(orchestrator, task, numCtx, undefined, signal),
     );
     text = result.text;
     steps = result.steps;
