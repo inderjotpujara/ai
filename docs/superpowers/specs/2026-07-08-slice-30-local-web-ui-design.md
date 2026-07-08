@@ -1,8 +1,13 @@
-# Slice 30 — Local web UI — design
+# Slice 30b — Local web UI — design
 
 **Date:** 2026-07-08
-**Branch:** `slice-30-local-web-ui` (off `main`)
-**Status:** design approved (brainstorm); spec revised after a 4-agent capability/forward-compat audit; under review before planning
+**Branch:** `slice-30b-local-web-ui` (stacks on `slice-30a-production-foundation`)
+**Status:** design (brainstorm); revised after a 4-agent capability audit **and** a 6-agent
+production-readiness audit; under review before planning
+**Depends on:** **Slice 30a (production foundation)** — collision-free run IDs, per-run
+telemetry, cancellation (AbortController), signal-clean shutdown + child registry,
+concurrency-safe stores, schema migrations, structured logger, config schema, `status`/`start`.
+30b is built on that stable base and does **not** re-derive it.
 
 ## Context & framing
 
@@ -36,8 +41,18 @@ Two framing decisions were locked with the user (2026-07-08):
    transport is **bidirectional** (server→client asks, client→server answers), not
    fire-and-forget. This same channel is what four future slices (24/25/34/38) need.
 
-The engine's *reasoning* stays untouched. Slice 30 is a **new surface that adapts existing
-pure, dependency-injected functions** over a typed contract boundary.
+3. **A localhost server is NOT a trusted boundary — perimeter security is a 30b concern, not
+   a Slice-24 deferral.** Slice 24 (remote access) lands *after* 30b, so deferring all auth
+   there leaves a window where an unauthenticated localhost server *is* the product. Per 2026
+   guidance (0.0.0.0-day, DNS rebinding), any webpage the user visits can `fetch()` a
+   localhost API and drive the agent — mount a malicious MCP server, trigger a build, or
+   auto-approve a consent prompt through the `/respond` back-channel. So 30b ships
+   **locally-authenticated now** (remote-*reachable* still waits for Slice 24). See §Web-
+   perimeter threat model.
+
+The engine's *reasoning* stays untouched. Slice 30b is a **new surface that adapts existing
+pure, dependency-injected functions** over a typed contract boundary, on top of the Slice-30a
+foundation.
 
 ## Goal (one sentence)
 
@@ -97,6 +112,31 @@ the frontend and engine becoming entangled.
   **lifecycle** state (`queued|running|paused-awaiting-input|done|failed|resumable`) + run
   **origin**; span/message **`degraded`/trust** marker (Slice 37); span **`node`/location**
   (Slices 31/38); `owner` (Slices 24/33). No AI-SDK types leak into the contract (Slice 23).
+- **D16 — Depends on Slice 30a.** The engine-lifecycle/concurrency/migration foundation is a
+  prerequisite; 30b assumes collision-free run IDs, per-run telemetry, a working
+  `AbortController` (for the Stop button), signal-clean shutdown, WAL sqlite, the migration
+  runner, the structured logger, and the config schema are already in place.
+- **D17 — Perimeter security ships IN 30b** (built with the server): a **per-session bearer
+  token** minted at launch (injected into the served HTML, required on every `/api` call); a
+  **Host-header allowlist** (`localhost`/`127.0.0.1:PORT`) + cross-origin `Origin` rejection
+  on every request (DNS-rebinding/CSRF defense); **inbound Zod validation** of every request
+  body before it reaches an engine function; **media-path confinement** (network-supplied
+  paths confined to the run/upload dir via `realpath`; the filesystem auto-detect in
+  `ingestMedia` is disabled when the caller is the server); the **consent back-channel**
+  (`/api/runs/:id/respond`) requires the session token + an unguessable capability `promptId`;
+  a **telemetry/record-IO toggle** in Settings (and record-IO defaults **off** for the served
+  deployment). Deep hardening (at-rest encryption, tool-exec sandbox, memory RBAC, egress
+  policy) stays Slice 35 — but the 30b endpoint auth is what keeps those Slice-35 gaps
+  unreachable in the meantime.
+- **D18 — Fold ALL 10 conversation must-haves in** (the product basics every peer ships):
+  stop-generation, edit+resend, regenerate/retry, copy-message, browser drag-drop +
+  paste-image, session rename/delete + **conversation search**, **long-run completion
+  notification** (Web Notifications), thumbs up/down feedback (feeds the Slice-31 eval loop),
+  real accessibility (keyboard nav + ARIA + `prefers-reduced-motion`), and a functional
+  **light theme** (not deferred). Also **delimit untrusted content** (recalled memory, tool
+  output, fetched pages, transcripts) in prompts — the builder path already does this;
+  extend it to the ingestion paths. SHOULD-haves (branch/fork, slash-commands, @-mentions,
+  persona, prompt library, artifacts/canvas, PWA, i18n) are **Tier-2 ROADMAP rows**, not 30b.
 
 ## Architecture
 
@@ -247,13 +287,37 @@ Status events are OUR Zod types (`data-run-start`/`-delegation`/`-model-select`/
 
 `web/src/shared/design/tokens.css` — Blueprint Mono palette/type/spacing/motion as CSS custom
 properties via Tailwind v4 `@theme`. Components reference tokens, never raw hex; themes are
-token overrides only. Geist Sans + Geist Mono embedded as `@font-face` data-URIs.
+token overrides only. Geist Sans + Geist Mono embedded as `@font-face` data-URIs. A
+**functional light theme** ships (D18), not just dark.
+
+### Web-perimeter threat model & required hardening (D17)
+
+The server exposes RCE-adjacent capability (mounting MCP servers, spawning processes,
+downloading models, writing+running generated agent code, driving the orchestrator). Treat
+localhost as hostile:
+
+| Threat | Defense (in 30b) |
+|---|---|
+| Any browser page `fetch()`ing our localhost API (0.0.0.0-day / CSRF) | **Host-header allowlist** + cross-origin `Origin` rejection on every request |
+| DNS rebinding defeating a random port | Host-header allowlist (not port secrecy) |
+| Unauthenticated capability access | **Per-session bearer token** minted at launch, required on all `/api` |
+| Malformed/hostile request bodies reaching engine fns | **Inbound Zod validation** before any engine call |
+| Arbitrary-file-read via network-supplied media paths | **Path confinement** (realpath ∈ run/upload dir); no fs auto-detect over HTTP |
+| CSRF auto-approving a consent prompt | `/respond` requires session token + unguessable capability `promptId` |
+| Prompt injection via recalled memory / tool output / fetched pages / transcripts | **Delimit untrusted content** as DATA (reuse the builder's `delimitData` pattern) |
+| PII/secrets persisted in `runs/spans.jsonl` and served to the browser | record-IO **off by default** for served mode; Settings toggle; same auth on any DTO carrying prompt bodies |
+
+COOP/COEP (needed for sherpa WASM `SharedArrayBuffer`) is **not** access control — the above
+still applies. Deep hardening (encryption-at-rest, VM/seccomp tool sandbox, memory
+RBAC/provenance, egress/SSRF allowlist, audit-grade logging) remains **Slice 35**; the 30b
+auth is what prevents those gaps from being remotely reachable until then.
 
 ## Screens (design set for D10 — synced to claude.ai/design before code)
 
 1. **Workspace** (chat + agent/model rail + trace strip); first-run/empty state.
-2. **Chat states** — streaming/shimmer, tool-call card, reasoning, citations, **`data-confirm`
-   inline prompt**, error/reconnecting.
+2. **Chat states** — streaming/shimmer, **Stop button** (mid-stream cancel), tool-call card,
+   reasoning, citations, message actions (**copy · edit+resend · regenerate/retry · 👍/👎
+   feedback**), **`data-confirm` inline prompt**, error/reconnecting.
 3. **Live agent/model panel** — status rail (enter→model-select→load→running→exit), model
    loaded/loading, degraded marker.
 4. **Crews** — crew list; crew detail (members/roles/process); run + live watch (delegation
@@ -269,7 +333,13 @@ token overrides only. Geist Sans + Geist Mono embedded as `@font-face` data-URIs
 10. **Voice active** — hold-to-talk, barge-in, interim→final, waveform.
 11. **⌘K command palette**.
 12. **Settings** — uncensored toggle (`AGENT_UNCENSORED`), theme switch, verify config, model prefs.
-13. **Sessions** — cross-invocation history sidebar (persistence).
+13. **Sessions** — cross-invocation history sidebar (persistence); **rename / delete /
+    conversation search**; export (md/json).
+14. **Composer** — text + **drag-drop file / paste-image**, attachment chips, voice toggle.
+15. **Notifications** — a **long-run-completion** toast/Web-Notification (minute-long local
+    runs); permission-request flow.
+16. **Accessibility pass** — visible focus, keyboard nav, ARIA on the rail/graph/trace,
+    `prefers-reduced-motion` (Blueprint Mono leans on spring motion, so this matters).
 
 ## Status events (transient SSE data-parts — all from existing seams)
 
@@ -357,10 +427,17 @@ pressure is on what the **contracts and transport leave room for**.
 
 ## Out of scope (explicit)
 
+The engine-lifecycle/concurrency/migration **foundation → Slice 30a** (prerequisite).
 Multi-device / cross-machine sync (Slice 31 A2A); the always-on daemon + secure remote tunnel
-+ auth (Slice 24 — the UI is built remote-*reachable*, but the tunnel/auth ships there);
-scheduled/triggered runs (Slice 25 — the DTO reserves `origin`, but no trigger CRUD UI now);
-TTS voice-*out* beyond what barge-in needs; a public/hosted deployment. Single-user localhost.
+(Slice 24 — 30b is remote-*reachable* and locally-authenticated, but the tunnel/remote-auth
+ships there); scheduled/triggered runs (Slice 25 — the DTO reserves `origin`, no trigger UI
+now); TTS voice-*out* beyond barge-in; a public/hosted deployment. Single-user localhost.
+
+**Tier-2 (registered as new ROADMAP rows, not built here):** model-weight disk GC, `runs/`
+retention + index, LanceDB compaction, live-model CI runner, **Artifacts/canvas**,
+branch/fork conversations, slash-commands, @-mentions, persona/custom-instructions, prompt
+library, responsive/PWA (pairs with Slice 24), i18n. **Deep hardening → Slice 35**;
+degradation taint → Slice 37 (fields reserved); Codex cloud → Slice 38.
 
 ## Top risks & mitigations
 
@@ -381,18 +458,28 @@ TTS voice-*out* beyond what barge-in needs; a public/hosted deployment. Single-u
 
 ## Build order within the slice (ships complete; reviewed in increments)
 
+**Prerequisite: Slice 30a lands first** (foundation + CI pipeline). Then:
+
 0. **Two day-1 spikes** (de-risk): (a) engine seams — extract `runChatSession`, prove leaf
    `streamText` → `useChat` token stream on v6; (b) sherpa WASM build + in-browser load.
-1. **Foundations** — `src/contracts/` (DTOs + status events + forward-compat fields) · thin
-   server + static serving + COOP/COEP · design-token system · app shell + ⌘K skeleton.
-2. **Chat + live rail** — SSE streaming chat (AI Elements/streamdown) · transient data-parts
-   → agent/model status rail · the bidirectional `data-confirm` channel.
+1. **Foundations + perimeter security** — `src/contracts/` (DTOs + status events +
+   forward-compat fields, **inbound request schemas**) · thin server + static serving +
+   COOP/COEP · **session token + Host/Origin allowlist + inbound validation + media-path
+   confinement** (D17) · frontend test harness (Vitest/Testing-Library) · design-token system
+   (light + dark) · app shell + ⌘K skeleton.
+2. **Chat + live rail + product basics** — SSE streaming chat (AI Elements/streamdown) ·
+   **Stop / edit / regenerate / copy / feedback** · transient data-parts → agent/model rail ·
+   the bidirectional `data-confirm` channel (token-protected) · composer drag-drop/paste ·
+   untrusted-content delimiting. SSE-lifecycle + contract tests here.
 3. **Runs** — run-history browser · @visx waterfall · @xyflow delegation graph · telemetry-gap
    closures (token roll-up, correlation id, uniform outcome).
 4. **Crews + Workflows** — browse/run/watch both; the workflow step DAG.
 5. **Builders + Library** — agent/crew builder flows (verify gate) · Models/Memory/MCP
    (incl. mount consent + OAuth redirect + provisioning selection).
-6. **Persistence** — `SessionStore` (owner reserved) · cross-invocation history · Sessions UI.
+6. **Persistence + product** — `SessionStore` (owner + `parentMessageId` reserved) ·
+   cross-invocation history · **wire memory recall into chat** · Sessions UI (rename/delete/
+   **search**/export) · **long-run completion notifications**.
 7. **Voice** — AudioWorklet + sherpa WASM + VAD + barge-in.
-8. **Polish + docs + live-verify** — motion, a11y, ⌘K completeness, all-4-docs + Artifact,
-   ledger, live-verify.
+8. **Polish + docs + live-verify** — motion, **a11y (keyboard/ARIA/reduced-motion)**, ⌘K
+   completeness, all-4-docs + Artifact, ledger, live-verify (real browser + model + crew +
+   voice barge-in + trace + Stop + notification).
