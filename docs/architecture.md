@@ -673,7 +673,7 @@ sequenceDiagram
 
 ---
 
-## 4. Resource model (Apple Silicon)
+## 4. Resource model (Apple Silicon; admission mutex, Slice 30a)
 
 Live budgeting + dynamic context sizing (Slices 4–5, 7).
 
@@ -684,6 +684,8 @@ Live budgeting + dynamic context sizing (Slices 4–5, 7).
 **Dynamic `num_ctx` (`src/resource/model-manager.ts`):** `chosenCtx = min(desired, modelMax, maxCtxByFit)`, floor `MIN_CTX=4096`, rounded to `CTX_ROUNDING=1024`. `modelMax` probed live via `POST /api/show` (`model_info["<arch>.context_length"]`); `maxCtxByFit = floor((headroom − weights) / kvPerToken)`. The same `chosenCtx` is used for warm AND inference (no runner reload).
 
 **Manager state** (all keyed by the **model string**, so two agents sharing a model share one resident copy): `lastUsed` (LRU), `chosenCtxByModel`, `maxCtxByModel`, `runtimeByModel`, `kvF16ByModel`, `kvRiskWarned`. `ensureReady` = check installed/loaded → compute min footprint → evict LRU non-pinned (then pinned, best-effort, as last resort) → size ctx → `withModelLoadSpan(c.warm)`. Control via Ollama HTTP (`ollama-control.ts`): warm/unload = `POST /api/generate`, list = `GET /api/ps`, probes = `POST /api/show`.
+
+**Admission mutex (Slice 30a Task 7 — concurrency-safety for the shared manager).** Two concurrent `ensureReady` calls against the *same* manager (parallel delegations, or two runs sharing one process) previously raced the whole `listLoaded → evict → warm` admission section, so both could observe the same stale "not yet loaded" state and pick the same LRU eviction victim, or both warm past the RAM budget. `ensureReady` now serializes admission through a per-manager promise-chain mutex: `serialize(fn)` chains `fn` onto a module-scoped `admissionLock` via `.then(fn, fn)` (running `fn` regardless of whether the prior admission resolved or rejected) and re-derives the lock from `.catch(() => {})` of that run, so **one failed admission never wedges the chain** — the caller whose `ensureReady` failed still sees the real rejection, but the next caller's admission still proceeds. `ensureReady` itself is now a thin wrapper (`serialize(() => ensureReadyInner(decl, opts))`); `ensureReadyInner` holds the actual check→evict→warm logic, unchanged. Empirically verified (a `maxActive===2` regression fails without the mutex).
 
 ### KV-cache quantization (Slice 7)
 Global type via `AGENT_KV_CACHE_TYPE` (default `q8_0`) + `OLLAMA_FLASH_ATTENTION=1`, both set by `scripts/serve.sh`. Per-model f16 baseline from `/api/show` arch: `f16KvBytesPerToken = block_count × head_count_kv × (key_length + value_length) × 2`; `effectiveKvBytesPerToken` × type multiplier (`f16`→1.0, `q8_0`→0.5, `q4_0`→0.25). Arch-derived risk advisory: `key_length ≤ 64` (small head_dim) **or** `expert_count > 0` (MoE) — no model-family names anywhere.
@@ -742,11 +744,14 @@ We use **llama.cpp through Ollama** — it wraps the engine (and Apple MLX on 32
 
 ---
 
-## 7. Observability — telemetry & run-viewer (Slice 8)
+## 7. Observability — telemetry & run-viewer (Slice 8; per-run routing, Slice 30a)
 
 Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewable with a terminal run-viewer. This is the **extensible layer every later feature emits into** (the "observable by default" principle).
 
-- **`provider.ts`** — `initRunTelemetry(runDir)` registers a per-run, Bun-safe `BasicTracerProvider` + `AsyncLocalStorageContextManager` (no Node auto-instrumentation), and processors via `buildProcessors`: a `JsonlFileExporter` always, **plus** an OTLP/HTTP exporter when `AGENT_OTLP_ENDPOINT` is set (the swappable-backend seam → Jaeger/Tempo/Phoenix). `recordIoEnabled()` gates prompt/response capture (`AGENT_TELEMETRY_RECORD_IO`).
+**Per-run routing, not a process-global provider (Slice 30a — the concurrency keystone).** Through Slice 29, `initRunTelemetry` installed a *fresh* `BasicTracerProvider` as the global tracer provider on every run, which correctly serves one run at a time but corrupts concurrent runs sharing a process (a long-lived web/daemon host, Slice 30b's target): the second run's `initRunTelemetry` call swaps the global provider out from under the first run's still-in-flight spans. Slice 30a replaces this with **one global provider for the process's lifetime, fronted by a single `RunRoutingSpanProcessor`** (`run-router.ts`):
+
+- **`run-router.ts`** — `ensureGlobalTelemetry()` builds the `BasicTracerProvider` + `RunRoutingSpanProcessor` + `AsyncLocalStorageContextManager` exactly once (idempotent — re-asserts the global provider on every call, since something else, e.g. the in-memory test provider, may have swapped it, but the router/provider instances themselves are stable across calls). `RunRoutingSpanProcessor` tags each span with the run id bound into its **OTel context** at `onStart` (a `WeakMap<ReadableSpan, runId>`, not a global mutable field) and fans it out at `onEnd` to that run's registered processors only — so spans from two concurrent runs are correctly isolated by context, not by provider identity. `registerRun(runId, procs)` / `unregisterRun(runId)` add/flush-and-remove a run's processor set; `withRunContext(runId, fn)` (used by `with-mcp-run.ts` / `with-run.ts`) binds `runId` into the active context for the duration of `fn`, and `currentRunId()` reads it back out (the seam the structured logger, §Logging, stamps log lines with).
+- **`provider.ts`** — `initRunTelemetry(runDir, runId)` now just calls `ensureGlobalTelemetry()` (idempotent) and `registerRun(runId, buildProcessors(...))` — it no longer owns a provider. `buildProcessors(spansFilePath)` builds the per-run processor list: a `JsonlFileExporter` always, **plus** an OTLP/HTTP exporter when `AGENT_OTLP_ENDPOINT` is set (the swappable-backend seam → Jaeger/Tempo/Phoenix, unchanged). `shutdown()` unregisters the run (flushes + shuts down that run's processors only — other concurrent runs' processors are untouched). `recordIoEnabled()` gates prompt/response capture (`AGENT_TELEMETRY_RECORD_IO`).
 - **`jsonl-exporter.ts`** — a `SpanExporter` serializing each span to one JSON line (`SpanRecord`); writes are serialized through a promise chain and **flushed on `shutdown()`** so `spans.jsonl` is never truncated.
 - **`spans.ts`** — the API: the **`ATTR`** key registry + helpers `withRunSpan` / `setRunOutcome` / `withDelegationSpan` / `recordModelSelect` / `withModelLoadSpan` / `recordEvict` / `recordGuardrailViolation` / `withWorkflowSpan` / `withStepSpan` / `annotateStep` (the last three back the workflow/DAG engine, §9). **AI-SDK** `experimental_telemetry` (enabled per `generateText` with `functionId = agent.name`) contributes `ai.generateText` / `ai.toolCall` / token spans for free, nested under our manual spans via the active context.
 
@@ -898,7 +903,7 @@ compiled workflow, no new engine required. Out of scope (v1): CrewAI "Flows"
 
 ---
 
-## 11. Memory/RAG (Slice 12)
+## 11. Memory/RAG (Slice 12; migrations + embedder guard + WAL, Slice 30a)
 
 A persistent, semantic memory layer — **`src/memory/`** — so agents can recall
 facts across runs instead of starting cold each time. Composed on top of what
@@ -912,7 +917,17 @@ mechanism**.
   store, **one table per named *space*** (e.g. `default`, a per-project space).
   `namespace` (e.g. a crew id) and `kind` (`MemoryKind.RunMemory | Document`)
   are plain filterable **columns within a table**, not separate tables/spaces.
-- **`bun:sqlite`** (`sqlite-store.ts`, `SqliteStore`) — two tables:
+- **`bun:sqlite`** (`sqlite-store.ts`, `SqliteStore`) — two tables, schema owned
+  by `db/migrate.ts`'s `MEMORY_MIGRATIONS` (Slice 30a Task 8, see the DB
+  migrations row in §2 — the `CREATE TABLE`s below are byte-for-byte the
+  pre-migration schema, wrapped as migration v1). The constructor also now
+  runs `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000`, and
+  `PRAGMA foreign_keys=ON` (Slice 30a Task 6) — WAL lets a reader and a
+  writer touch the DB concurrently instead of blocking on SQLite's default
+  rollback-journal exclusive write lock, and the busy-timeout makes a
+  genuinely-contended write retry for 5s before throwing `SQLITE_BUSY`,
+  rather than failing immediately — both aimed at the same concurrent-runs
+  target as the telemetry router and the admission mutex above:
   - `spaces` — the **space registry**, one row per space:
     `{name, embedModel, embedDim, chunkCapTokens, createdAt}`. This row is the
     **authority** for a space's embedder — recall/write always defer to it, not
@@ -925,7 +940,14 @@ mechanism**.
     space is a no-op (`seenDoc` short-circuits before any embedding work).
 - **Embedder-bound-to-space rule:** `ensureSpace` probes the embed model's
   dimension the *first* time a space is touched and freezes it into the
-  `spaces` row. `reindex(space, newEmbedModel)` is the **explicit, destructive**
+  `spaces` row. On every later touch, if the currently-configured
+  `cfg.embedModel` differs from the frozen `spaces.embedModel`, `ensureSpace`
+  **throws `MemoryError`** naming both models and pointing at `reindex`
+  (Slice 30a Task 8 — previously a mismatch was silently ignored and the
+  space kept serving under its original embedder while the caller believed
+  a different one was active, a latent mixed-dimension-vector corruption
+  risk that only surfaced as bad recall quality, never an error).
+  `reindex(space, newEmbedModel)` is the **explicit, destructive**
   escape hatch — it drops the LanceDB table, clears the document manifest for
   that space, and re-probes/creates under the new embedder; re-ingesting
   content afterward is the caller's job (not automatic).
@@ -2355,7 +2377,7 @@ confirm-gated reuse band exercised live.
 
 ---
 
-## 21. Reliability — graceful degradation + retries (Slice 21, Phase A — fills the last reliability gap)
+## 21. Reliability — graceful degradation + retries (Slice 21, Phase A — fills the last reliability gap; cooperative cancellation, Slice 30a)
 
 Before this slice, retry/timeout logic was duplicated 8 ways with no shared
 contract, degradation was siloed and invisible to the user (a specialist
@@ -2418,7 +2440,7 @@ direct HTTP.
 | `classify.ts` | `Lane` enum + `classify(err)` — the taxonomy above. |
 | `config.ts` | Computed, env-fallback-only knobs: `maxAttempts()`, `runTimeoutMs()`, `idleTimeoutMs()`, `breakerThreshold()`, `breakerCooldownMs()`, `breakerHalfOpenProbes()`, `retryBaseMs()`, `retryCapMs()`, `probeTimeoutMs()`. |
 | `retry.ts` | `withRetry<T>(fn, opts)` — full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, `onRetry` hook, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter()`; `abortableSleep`. |
-| `timeout.ts` | `withWallClock(ms, fn)` — hard run-timeout (`Promise.race`); `IdleWatchdog` — fires on `now() - lastAdvanceAt`, so it detects a **silent** stall (not just a slow-but-quiet stream) as well as a stalled-progress one; `withIdleTimeout(fn, {idleMs, onProgress})`. |
+| `timeout.ts` | `withWallClock(ms, fn(signal), external?)` — hard run-timeout (`Promise.race`) that **actually cancels `fn`'s work** on expiry (Slice 30a, cooperative cancellation — previously the timer fired but the raced-away promise kept running in the background): `fn` receives an `AbortSignal` that fires on the wall-clock timeout **or** when the optional `external` signal aborts, so the same call cancels on either trigger. The clock's rejection is ordered *before* the internal `controller.abort()` call — `abort()` synchronously fires the work's own abort listener, which typically rejects `fn`'s promise too, and `Promise.race` adopts whichever settles first, so rejecting the clock first guarantees the race resolves with `Error('timeout')` rather than whatever error the aborted work happens to reject with; `IdleWatchdog` — fires on `now() - lastAdvanceAt`, so it detects a **silent** stall (not just a slow-but-quiet stream) as well as a stalled-progress one; `withIdleTimeout(fn, {idleMs, onProgress})`. |
 | `breaker.ts` | `CircuitBreaker` — Closed → (≥`breakerThreshold()` consecutive failures) → Open → (after `breakerCooldownMs()`) → HalfOpen → (`breakerHalfOpenProbes()` successes) → Closed, any HalfOpen failure → Open; `run(fn)` short-circuits with `CircuitOpenError` while Open. `breakerFor(id)` is a **module-level registry** keyed by dependency id (MCP-server name, tool name, runtime kind) so correlated failures across many agent invocations trip *one* shared breaker — what stops a dead MCP server from stalling a whole crew. `resetBreakers()` clears the registry (tests). No timers — cooldown is checked lazily on `run`. |
 | `degrade.ts` | `degradeChain(candidates)` — failure-domain-aware ordered fallback list; `failureDomain(decl)` groups candidates so a retry doesn't re-hit the same dead daemon. Generalizes the pre-existing selector candidate-walk + `select-hook`'s MLX→Ollama fallback. |
 | `ledger.ts` | `DegradationLedger` (`{events, record(e)}`, `createLedger()`) — an in-run record of degrade/drop/retry events; `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`; `formatLedger()` renders a concise user-facing summary (`"⚠ dropped agent X — reason"`); `serializeLedger()` renders JSONL for persistence. |
@@ -2447,8 +2469,28 @@ future silent-quality-regression detection.
 ### 21.4 Wiring — where the layer is consumed
 
 - **`core/agent.ts` (`runAgent`)** — the single `generateText` call is
-  wrapped in `withWallClock(runTimeoutMs())` (belt to the AI SDK's own
-  `abortSignal` timeout). No second backoff retry, per D5.
+  wrapped in `withWallClock(runTimeoutMs(), fn, input.abortSignal)`, and the
+  `signal` `fn` receives (the combined internal timeout-or-external signal)
+  is passed to `generateText` as `abortSignal` **unconditionally** — not
+  `input.abortSignal ?? signal`, which would hand `generateText` the caller's
+  external signal whenever one is supplied and silently drop the wall-clock
+  timeout's ability to actually abort the call (Slice 30a; previously the
+  timeout only raced the call, it never cancelled it, so a timed-out
+  `generateText` kept running in the background). No second backoff retry,
+  per D5.
+- **Cooperative cancellation, end to end (Slice 30a Task 3).** An optional
+  `AbortSignal` threads the whole delegation chain top-down:
+  `cli/run-chat.ts`'s `runChat(deps.signal)` → `core/orchestrator.ts`'s
+  `runOrchestrator(..., signal)` → `core/agent-def.ts`'s `runDefinedAgent`
+  → `core/agent.ts`'s `runAgent(input.abortSignal)` → `generateText`. Every
+  hop is a plain optional parameter (no new context/ambient state), so a
+  caller that supplies a signal gets a run that actually stops mid-flight
+  when it fires, and a caller that supplies none gets the pre-existing
+  wall-clock-only behavior unchanged. As of this slice nothing in `chat.ts`
+  wires a live trigger (e.g. `SIGINT`) into that top-level `signal` yet —
+  the seam is threaded and tested end to end, but a concrete cancel source
+  (the coming web UI's cancel button, or an interactive Ctrl-C) is Slice 30b
+  work.
 - **`core/delegate.ts` (`runGuardedAgent`)** — on a caught cause,
   `classify(err)` is **advisory only**: the lane is recorded on the
   ledger event as `detail` (`lane=...`) but does not branch the recovery
