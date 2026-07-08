@@ -11,6 +11,7 @@ export type ChatDeps = {
   run: RunHandle;
   routerNumCtx?: number;
   capture?: ResourceCapture;
+  signal?: AbortSignal;
 };
 
 export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
@@ -21,6 +22,7 @@ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
       deps.task,
       deps.routerNumCtx,
       deps.capture,
+      deps.signal,
     );
     setRunOutcome(result);
     if (result.kind === 'answer') {

@@ -55,23 +55,32 @@ export async function runAgent(input: RunAgentInput): Promise<{
   text: string;
   steps: Awaited<ReturnType<typeof generateText>>['steps'];
 }> {
-  const result = await withWallClock(runTimeoutMs(), () =>
-    generateText({
-      model: input.model,
-      system: input.systemPrompt,
-      ...buildCallInput(input.prompt, input.attachments),
-      tools: input.tools,
-      temperature: input.temperature,
-      providerOptions: input.providerOptions,
-      abortSignal: input.abortSignal,
-      stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
-      experimental_telemetry: {
-        isEnabled: true,
-        functionId: input.functionId,
-        recordInputs: recordIoEnabled(),
-        recordOutputs: recordIoEnabled(),
-      },
-    }),
+  const result = await withWallClock(
+    runTimeoutMs(),
+    (signal) =>
+      generateText({
+        model: input.model,
+        system: input.systemPrompt,
+        ...buildCallInput(input.prompt, input.attachments),
+        tools: input.tools,
+        temperature: input.temperature,
+        providerOptions: input.providerOptions,
+        // `signal` is withWallClock's combined internal signal: it aborts on
+        // the wall-clock TIMEOUT *and* when `input.abortSignal` (passed as the
+        // external arg below) aborts. Pass it unconditionally — using
+        // `input.abortSignal ?? signal` would hand generateText the external
+        // signal whenever a caller supplies one, so the timeout would no
+        // longer abort the model call (the exact background-leak this fixes).
+        abortSignal: signal,
+        stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
+        experimental_telemetry: {
+          isEnabled: true,
+          functionId: input.functionId,
+          recordInputs: recordIoEnabled(),
+          recordOutputs: recordIoEnabled(),
+        },
+      }),
+    input.abortSignal,
   );
   const { text, finishReason, steps } = result;
   if (text.trim() === '' && finishReason !== 'stop') {
