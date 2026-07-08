@@ -2,241 +2,397 @@
 
 **Date:** 2026-07-08
 **Branch:** `slice-30-local-web-ui` (off `main`)
-**Status:** design approved (brainstorm), spec under review before planning
+**Status:** design approved (brainstorm); spec revised after a 4-agent capability/forward-compat audit; under review before planning
 
 ## Context & framing
 
-This is the framework's **first visual surface**. Every shipped slice to date is
-CLI + on-disk artifacts (`runs/<id>/spans.jsonl`); there is no web server, no daemon,
-and no frontend dependency in the repo. Slice 30 adds a **local web UI** — a browser app
-served from `localhost` — that becomes the primary way a person drives the framework:
-chat, watch the agents work, browse run history, and talk to it.
+This is the framework's **first visual surface**. Every shipped slice to date is CLI +
+on-disk artifacts (`runs/<id>/spans.jsonl`); there is no web server, no daemon, no frontend
+dependency in the repo. Slice 30 adds a **local web UI** served from `localhost` that
+becomes the primary way a person drives the framework: chat, run and watch crews/workflows,
+build agents, browse run traces, manage models/memory/MCP, and talk to it by voice.
 
 Two framing decisions were locked with the user (2026-07-08):
 
 - **Surface = browser web UI, not a terminal TUI.** The browser is the only surface that
-  unlocks the headline voice story deferred from Slice 29: `getUserMedia({ audio: {
-  echoCancellation: true }})` gives native acoustic echo cancellation (so barge-in works —
-  the exact self-echo wall the terminal hit) plus real `keydown`/`keyup` for true
-  hold-to-talk. It is also where "make it premium" lives.
-- **Scope = go big; fold Slice 34 in.** Per the no-deferrals rule, Slice 30 ships the
-  *complete* product surface rather than a run-history-only shell. It absorbs the core of
-  the planned Slice 34 ("primary chat / second brain"): **cross-invocation chat
-  persistence** (chat has zero memory across invocations today) is in-scope. What remains
-  for a later slice is multi-device/second-brain *extras* (sync across machines = Slice 31
-  A2A territory), not the primary chat surface.
+  unlocks the voice story deferred from Slice 29: `getUserMedia({ audio: { echoCancellation:
+  true }})` gives native AEC (so barge-in works) plus real `keydown`/`keyup` for hold-to-talk.
+- **Scope = go big; fold Slice 34 in.** Slice 30 ships the *complete* product surface, not a
+  run-history shell. It absorbs Slice 34's primary chat + **cross-invocation persistence**.
 
-The engine stays untouched. Slice 30 is a **new surface that adapts existing pure
-functions** (`runChat`, `withMcpRun`, `readSpans`/`buildTree`/`summarizeRun`, the
-declaration registries) over a typed boundary — not a rewrite.
+### Two load-bearing realities the audit surfaced (these shape the whole plan)
+
+1. **The engine is batch-only and the chat turn is trapped in `main()`.** Everything runs
+   through `generateText` (`src/core/agent.ts:54`); there is **no** `streamText`/`useChat`/SSE
+   anywhere. `chat.ts main()` (`:177`) is not exported and re-inlines model-selection wiring
+   that already exists as `createSelectionRuntime`. So "AI SDK v6 `useChat` over SSE" is not
+   free — it rests on three **bounded, nameable engine seams** (see §Engine seams): extract a
+   `runChatSession` entry point, add an optional event sink, and stream the leaf specialist.
+   None is an engine rewrite; the signals the UI needs already exist at known hook points.
+2. **Every capability has a human-in-the-loop consent that is stdin/TTY-only today.** MCP
+   mount + OAuth, provisioning selection + disk-shortfall, verify judge-pull, builder
+   confirm/reuse, archive prune, gen-model download + voice-clone, and the mic gesture are
+   all `askYesNo`/raw-TTY. The web UI must inject its own implementations, which means the
+   transport is **bidirectional** (server→client asks, client→server answers), not
+   fire-and-forget. This same channel is what four future slices (24/25/34/38) need.
+
+The engine's *reasoning* stays untouched. Slice 30 is a **new surface that adapts existing
+pure, dependency-injected functions** over a typed contract boundary.
 
 ## Goal (one sentence)
 
-A polished, maintainable local web app (Blueprint-Mono aesthetic) where a person chats with
-the multi-agent framework, watches which agent/model is live, browses and inspects run
-traces, and speaks with barge-in — built so the product can grow in complexity without the
-frontend and engine becoming entangled.
+A polished, maintainable local web app (Blueprint-Mono aesthetic) that surfaces *every*
+framework capability — chat, crews, workflows, agent/crew builders, run traces,
+models/memory/MCP, and barge-in voice — built so the product can grow in complexity without
+the frontend and engine becoming entangled.
 
 ## Decisions (locked with user, 2026-07-08)
 
-- **D1 — Surface = local browser web UI.** Served from `localhost`; single-user now,
-  remote-reachable later (Slice 24). Not a TUI (rationale above). TUI is not revisited.
-- **D2 — Scope folds Slice 34's primary-chat + persistence in.** Cross-invocation chat
-  memory (sessions + message history) is in-scope. Multi-device sync stays out (Slice 31).
-- **D3 — Aesthetic = "Blueprint Mono" (Direction A).** Near-black `#0B0C0E` over a
-  subliminal dot-grid; humanist sans for prose + mono for every label/datum; a single
-  blueprint-blue accent `#4C8DFF` reserved strictly for live/interactive elements; signal
-  teal `#35D0C0`; spring micro-motion; ⌘K palette as the spine. The two runner-up
-  directions (Terminal-Native Brutalist, Editorial Warm-Clinical) become **future
-  switchable themes** — this forces the token discipline in D5.
-- **D4 — Stack (validated against 2026 sources).** React 19 · Vite 8 (frontend under
-  `web/`) · Tailwind v4 + shadcn/ui-on-Base-UI · AI SDK **v6** `useChat` over SSE with
-  **transient data-parts** for the live status panel · Vercel **AI Elements** (copy-in) +
-  **streamdown** for the chat body · **@xyflow/react** for the live delegation graph ·
-  custom **@visx** waterfall for the run-history trace. **Pin `@ai-sdk/react@^3`** (the
-  v6-compatible major) — `@latest` is v7 and would break against our v6 engine pin.
+- **D1 — Surface = local browser web UI.** localhost; single-user now, remote-reachable
+  later (Slice 24). Not a TUI.
+- **D2 — Scope folds Slice 34's primary-chat + persistence in.** Multi-device sync stays out
+  (Slice 31).
+- **D3 — Aesthetic = "Blueprint Mono" (Direction A).** Near-black `#0B0C0E` + dot-grid;
+  humanist sans for prose + mono for labels/data; single blueprint-blue accent `#4C8DFF`
+  reserved for live/interactive; signal teal `#35D0C0`; spring micro-motion; ⌘K palette as
+  the spine. Runner-up directions (Brutalist, Editorial Warm) become future **token-swap
+  themes**.
+- **D4 — Stack (validated vs 2026 sources).** React 19 · Vite 8 (`web/`) · Tailwind v4 +
+  shadcn/ui-on-Base-UI · AI SDK **v6** `useChat` over SSE with **transient data-parts** ·
+  AI Elements (copy-in) + streamdown for chat · **@xyflow/react** for delegation + workflow
+  graphs · custom **@visx** waterfall for run traces. **Pin `@ai-sdk/react@^3`** (v6 major).
 - **D5 — Architecture = contract boundary + thin BFF + feature-sliced frontend + ports.**
-  A shared `src/contracts/` (isomorphic Zod schemas = the wire protocol, imported by both
-  server and web) is the single source of truth for the boundary. The server returns DTOs
-  mapped from spans, never raw `SpanRecord`s. The three volatile edges — **transport**,
-  **voice**, **persistence** — sit behind interfaces so implementations can be swapped as
-  the product grows. **Maintainability + scalability is the governing constraint** (user
-  directive): small focused files, feature isolation, no hardcoded design values.
-- **D6 — Server = a thin Bun.serve BFF that owns no business logic.** Dev: Vite dev server
-  proxies `/api` to the Bun server. Prod: `vite build` → static assets served by the Bun
-  server on one origin (no CORS) under **COOP/COEP** headers (required for sherpa WASM's
-  `SharedArrayBuffer`). All reasoning stays in the engine; endpoints are adapters, mappers
-  are pure functions.
-- **D7 — Persistence = `SessionStore` over `bun:sqlite`, behind a port.** Versioned,
-  migratable schema linking sessions ↔ messages ↔ run-ids. Swappable (Postgres) when
-  multi-user (Slice 33) arrives.
-- **D8 — Voice = getUserMedia(AEC) → AudioWorklet → sherpa-onnx WASM + Silero VAD, behind
-  a voice port.** True hold-to-talk (`keydown`/`keyup`), barge-in via AEC, interim→final
-  transcription. Reuses Slice 29's sherpa transcribe **contract** (Float32/16 kHz) — the
-  same C-core, a different (WASM) binding. Shares the conceptual `Transcriber` seam.
-- **D9 — ⌘K command palette is in-scope.** It is Blueprint Mono's spine: launch agents,
-  jump to runs, switch models, open settings. Keyboard-first is core to the aesthetic.
+  `src/contracts/` (isomorphic Zod, imported by server *and* web) is the single source of
+  truth; the server returns DTOs mapped from spans, never raw records. Volatile edges behind
+  interfaces. **Maintainability + scalability is the governing constraint** (user directive).
+- **D6 — Server = a thin transport-agnostic Bun.serve BFF that owns no business logic.**
+  Dev: Vite proxies `/api` to Bun. Prod: `vite build` → static assets served by Bun on one
+  origin under **COOP/COEP** (for sherpa WASM `SharedArrayBuffer`). Origin/CORS is
+  **config-driven** (a remote tunnel changes the origin — Slice 24). The browser is treated
+  as *one* client adapter, so a future Slack/Telegram gateway (Slice 34 Hermes) reuses it.
+- **D7 — Persistence = `SessionStore` over `bun:sqlite`, behind a port.** Versioned/migratable
+  schema, general beyond chat (goals/evals/triggers add as tables). **Reserve an `owner`
+  column now** (constant `"local"`) — backfilling ownership later (Slices 24/33) is the most
+  expensive retrofit. Swappable to Postgres.
+- **D8 — Voice = getUserMedia(AEC) → AudioWorklet → sherpa-onnx WASM + Silero VAD, behind a
+  voice port.** True hold-to-talk, barge-in, interim→final. Reuses Slice 29's sherpa
+  transcribe *contract* (Float32/16 kHz); a new browser `captureMic` replaces the raw-TTY one.
+- **D9 — ⌘K command palette is in-scope** (launch agent/crew/workflow, jump to run, switch
+  model, open settings). Blueprint Mono's spine.
 - **D10 — Screen designs precede code (user gate).** The full Blueprint-Mono screen set is
-  produced as HTML and **synced to a claude.ai/design Design System project** (via the
-  `DesignSync` tool / `/design-sync`) BEFORE implementation. The React components are then
-  built against that design-system reference. Screens enumerated below.
-- **D11 — Ships complete, reviewed in ordered increments** (build order below). No new
-  deferred debt.
+  produced as HTML and synced to a **new** claude.ai/design Design System project (via
+  `DesignSync`/`/design-sync`) before implementation; React components build against it.
+- **D11 — Ships complete, reviewed in ordered increments** (build order below). No new debt.
+- **D12 — The UI surfaces ALL capabilities as first-class, not chat-only.** Nav: **Chat ·
+  Crews · Workflows · Builders · Runs · Library (Models / Memory / MCP) · Settings**, tied by
+  ⌘K. (This corrects the first draft, which omitted crews/workflows/builders/library.)
+- **D13 — Engine seams are explicit, bounded pre-req tasks** (see §Engine seams): extract
+  `runChatSession`, add optional `events` sink, add optional leaf `streamText`, inject
+  web consent ports. No engine rewrite; the existing loop and signals are reused.
+- **D14 — Transport is bidirectional + resume-ready.** SSE for server→client streaming with
+  **event IDs** (`Last-Event-ID`); a `POST /api/runs/:id/respond` back-channel for
+  consent/human-in-the-loop; `RunStream` carries a resume cursor. Enables Slices 24/25/34/38
+  with no contract break.
+- **D15 — Contracts reserve forward-compat fields now** (all optional, cheap): run
+  **lifecycle** state (`queued|running|paused-awaiting-input|done|failed|resumable`) + run
+  **origin**; span/message **`degraded`/trust** marker (Slice 37); span **`node`/location**
+  (Slices 31/38); `owner` (Slices 24/33). No AI-SDK types leak into the contract (Slice 23).
 
 ## Architecture
 
-Three new top-level areas; the engine is unchanged.
+Three new areas; the engine is unchanged.
 
 ```
 ~/ai/
 ├─ src/
-│  ├─ contracts/   ← Zod schemas + TS types = the wire protocol (isomorphic, no Node APIs).
-│  │                 Imported by BOTH server and web. Single source of truth for the boundary.
-│  ├─ server/      ← Thin Bun HTTP/SSE backend-for-frontend. Adapts engine → HTTP.
-│  │                 Pure span→DTO mappers. Owns NO business logic.
-│  └─ (existing engine untouched)
+│  ├─ contracts/   ← Zod schemas + TS types = the wire protocol (isomorphic, no Node/AI-SDK types).
+│  │                 Imported by BOTH server and web. Single source of truth.
+│  ├─ server/      ← Thin Bun HTTP/SSE BFF. Adapts engine → HTTP. Pure DTO mappers. No business logic.
+│  │   ├─ session/ ← runChatSession extraction + SessionStore (bun:sqlite) + owner scoping
+│  │   └─ consent/ ← web implementations of the stdin/TTY consent ports (§Engine seams)
+│  └─ (existing engine untouched; small optional seams added — §Engine seams)
 └─ web/            ← React 19 + Vite frontend. Feature-sliced.
 ```
 
 ### Data flow
 
 ```
-browser (web/) ──POST /api/chat──▶ server ──runChat/withMcpRun──▶ engine (orchestrator)
-      ▲   ▲                          │                                   │
-      │   └── SSE UI-message stream ─┘ (tokens + transient data-status)   │ spans → runs/<id>/spans.jsonl
-      │                                                                   │
-      └── GET /api/runs[/:id][/stream] ──▶ server ──readSpans/buildTree/summarizeRun──▶ DTOs
-      └── GET /api/agents · /api/models ──▶ server ──registries──▶ DTOs
-      └── voice: getUserMedia(AEC) → AudioWorklet → sherpa WASM → transcript → chat input (local)
+browser ──POST /api/chat (task+media)──▶ server.runChatSession ──▶ engine orchestrator (batch)
+   ▲  ▲                                     │  │                        │
+   │  └── SSE UI-message stream ────────────┘  │ events sink            │ spans → runs/<id>/spans.jsonl
+   │      (leaf token deltas + transient          (delegation/model/
+   │       data-status + data-confirm)             ledger → SSE)
+   └── POST /api/runs/:id/respond ◀── client answers a data-confirm (consent / human-in-loop)
+   └── GET /api/runs[/:id][/stream] ──▶ span→DTO mappers ──▶ RunDTO/SpanDTO/DegradeDTO
+   └── GET/POST /api/{crews,workflows,agents,models,memory,mcp} ──▶ registries + clean engine fns
+   └── voice: getUserMedia(AEC) → AudioWorklet → sherpa WASM → transcript → chat input (local)
 ```
 
-### Server (`src/server/`) — endpoints
+### Engine seams (bounded pre-req tasks — no rewrite)
 
-- `POST /api/chat` → SSE UI-message stream (`createUIMessageStream`). Runs the orchestrator
-  via `runChat`/`withMcpRun`; emits tokens **plus transient `data-status` parts**
-  (agent/model/phase) sourced from the existing `onBeforeDelegate` hook + telemetry, so the
-  live panel updates without polluting saved chat history.
-- `GET /api/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/stream` (live tail) → via
-  `summarizeRun`/`readSpans`/`buildTree` → **contract DTOs** (a mapping layer keeps the
-  wire stable even if span internals change).
-- `GET /api/agents`, `GET /api/models` → declaration registries → DTOs.
-- Static serving of built `web/` under COOP/COEP. `server.timeout(req, 0)` on SSE handlers
-  (Bun closes idle connections at 10s; a quiet stream counts as idle).
+1. **Extract `runChatSession({ task, media, events?, confirm?, deps })`** from `chat.ts`
+   `main()` — the one genuinely missing abstraction. It re-assembles the existing exported
+   pieces (`createSelectionRuntime`, `withMcpRun`, `ingestVoice`/`ingestMedia`,
+   `createSuperAgent`, `runChat`) in the current order (provision → warm router → run-scope →
+   voice → media → orchestrator → runChat → result). **Both the CLI and the server call it**,
+   so behavior can't diverge. Media/voice consent + the gap auto-offer become injected ports.
+2. **Optional `events` sink** — a typed `(e: StatusEvent) => void` threaded through the
+   already-optional arg chain (`asDelegateTool`/`createOrchestrator` opts, like `ledger`).
+   It re-points signals that already exist: the `notify` closure (`select-hook.ts:54`, which
+   already computes model/footprint/install/budget), a new `onDelegation(phase, agent)`
+   callback that reads the `AsyncLocalStorage` delegation context (depth/ancestors are
+   *already assembled* by `withDelegationSpan`), and `ledger.record`. Default sink = today's
+   stderr/spans; the server supplies an SSE-writing sink. **No loop change.**
+3. **Optional leaf `streamText`** — only the leaf specialist `runAgent` gains an optional
+   `streamText` path (guarded by presence of a stream sink; `generateText` stays the default
+   so tests/builders are unaffected). The router stays batch (it emits tool-calls, thin
+   tokens). `withWallClock` moves to consume the stream to keep the timeout. `textStream`
+   forwards up through `runGuardedAgent`'s return.
+4. **Web consent ports** — the server injects its own implementations of the existing
+   injectable seams: `ProvisionUi` (`askYesNo`/`selectModels`/progress bar), builder
+   `confirm`/`confirmReuse`, verify `ensureJudge`, archive `ask`, MCP `ensureConsent` +
+   OAuth `openBrowser` (→ in-app redirect), gen `askConsent` + `affirmCloneConsent`, and a
+   browser `captureMic`. Each maps to a `data-confirm`/`data-select` SSE event + a
+   `POST /api/runs/:id/respond`. **These seams already exist as injected deps** — we only
+   supply web-backed implementations.
+
+### Server endpoints
+
+- `POST /api/chat` → SSE UI-message stream: leaf token deltas + **transient `data-*` status
+  parts** + `data-confirm` asks. Runs `runChatSession`.
+- `POST /api/runs/:id/respond` → resolves a pending consent/human-in-the-loop prompt.
+- `GET /api/runs`, `/api/runs/:id`, `/api/runs/:id/stream` (live tail w/ event IDs) →
+  `readSpans`/`buildTree`/`summarizeRun` → **DTOs**.
+- `GET /api/crews`, `POST /api/crews/:name/run` (SSE) · `GET /api/workflows`,
+  `POST /api/workflows/:name/run` (SSE) → `getCrew`/`CREWS`, `getWorkflow`/`WORKFLOWS`,
+  `runCrew`/`runFlow`.
+- `POST /api/build/agent`, `POST /api/build/crew` (SSE, interactive consent) →
+  `buildAgent`/`buildCrewOrWorkflow` + `verifyAndCommit` gate.
+- `GET /api/agents` · `GET /api/models` + `POST /api/provision`/`/api/discover` (SSE) ·
+  `GET/POST /api/memory` (ingest/recall/stats/reindex) · `GET/POST /api/mcp` (list/status/add
+  + OAuth redirect) → the clean DI engine entry points from the inventory.
+- Static-serve built `web/` under COOP/COEP; `server.timeout(req, 0)` on SSE handlers.
 
 ### Frontend (`web/src/`) — feature-sliced
 
 ```
 web/src/
-├─ app/       shell, layout (rail │ main │ trace), providers, routing, ⌘K palette
+├─ app/         shell, layout, routing, providers, ⌘K palette
 ├─ features/
-│  ├─ chat/   streaming chat (AI Elements + streamdown), useChat wiring, error boundary
-│  ├─ agents/ live agent/model status rail (consumes transient data-parts)
-│  ├─ runs/   run-history browser + @visx trace waterfall + @xyflow delegation graph
-│  ├─ voice/  getUserMedia(AEC) → AudioWorklet → sherpa WASM + VAD + orb/waveform
+│  ├─ chat/     streaming chat (AI Elements + streamdown), useChat, error boundary
+│  ├─ agents/   live agent/model status rail (transient data-parts)
+│  ├─ crews/    browse CREWS · members/roles/process · run + watch · outcome
+│  ├─ workflows/ browse WORKFLOWS · step DAG (@xyflow) · run + step-by-step watch
+│  ├─ builders/ agent-builder + crew-builder guided flows (replace TTY offers; verify gate)
+│  ├─ runs/     run-history browser + @visx waterfall + @xyflow delegation graph
+│  ├─ library/  models/provisioning · memory/RAG · MCP mounts (+ OAuth redirect)
+│  ├─ voice/    getUserMedia(AEC) → AudioWorklet → sherpa WASM + VAD + orb/waveform
 │  └─ sessions/ session list + cross-invocation history (persistence UI)
-└─ shared/    design tokens, Base-UI/shadcn primitives, contract client, ports, hooks
+└─ shared/      design tokens, Base-UI/shadcn primitives, contract client, ports, hooks
 ```
 
-**Isolation rule:** a feature imports only `shared/` and `src/contracts/` — never another
-feature's internals. Growth = a new `features/x/` folder. Each feature region has its own
-**error boundary** (chat can fail without killing the rail).
+**Isolation rule:** a feature imports only `shared/` + `src/contracts/`, never another
+feature's internals. Growth = a new `features/x/` folder. Each region has its own error
+boundary. To keep nav from sprawling, Models/Memory/MCP live under a single **Library** area.
 
-### Ports & adapters (the volatile edges)
+### Ports & adapters
 
-- **Transport port** (`shared/transport`) — `ChatTransport` / `RunStream`. Default adapter:
-  SSE (AI SDK). Later: WebSocket or Redis-backed resumable streams (remote, Slice 24).
-- **Voice port** (`features/voice`) — `SttEngine` + `AudioCapture`. Adapter: sherpa WASM +
-  AudioWorklet. Swappable: Whisper-WASM fallback or server-side STT.
-- **Persistence port** (`src/server`) — `SessionStore`. Adapter: `bun:sqlite`. Swappable:
-  Postgres (multi-user, Slice 33).
+- **Transport** (`shared/transport`) — `ChatTransport`/`RunStream`, **bidirectional +
+  resumable** (SSE + `respond` back-channel + resume cursor). Adapter: SSE now; WS/resumable
+  later.
+- **Voice** (`features/voice`) — `SttEngine`+`AudioCapture`. Adapter: sherpa WASM + AudioWorklet.
+- **Persistence** (`src/server/session`) — `SessionStore`. Adapter: `bun:sqlite`.
+- **Consent** (`src/server/consent`) — the web-backed implementations of the engine's
+  injected consent seams.
 
-### Design-token system (Blueprint Mono)
+### Contract DTOs (`src/contracts/`) — precise, forward-compat
 
-`web/src/shared/design/tokens.css` defines palette / type-scale / spacing / motion as CSS
-custom properties consumed via Tailwind v4 `@theme`. **Components reference tokens, never
-raw hex.** Themes (Blueprint default; Brutalist / Editorial later) are token overrides only
-— no component changes to add a theme. Fonts embedded as `@font-face` data-URIs (Geist Sans
-+ Geist Mono); no CDN.
+```ts
+type RunDTO = {
+  id: string; owner: string;                 // owner reserved now (= "local")
+  origin: 'manual'|'schedule'|'webhook'|'api'|'remote';   // provenance (Slice 25)
+  lifecycle: 'queued'|'running'|'paused-awaiting-input'|'done'|'failed'|'resumable'; // not just terminal
+  startMs: number; durationMs: number;
+  outcome: string;                           // agent.run.outcome, w/ workflow/crew fallbacks (gap #2)
+  models: string[]; contentPolicy?: string;
+  tokens?: { input?: number; output?: number };  // run-level roll-up (gap #1; tolerate absence)
+  degraded: boolean; degrades: DegradeDTO[]; // Slice 37 taint
+  malformedSpans: number; spanCount: number;
+  roots: string[]; spans: SpanDTO[];         // flattened; UI rebuilds TREE via parentSpanId (Slice 36)
+  artifacts: { name: string; bytes: number; kind: 'answer'|'gap'|'spans'|'degradation'|'other' }[];
+};                                            // artifacts via readdir+classify (gap #4)
+
+type SpanDTO = {
+  spanId: string; parentSpanId: string|null; name: string;
+  offsetMs: number; durationMs: number; depth: number;   // durationMs exact; offset approx (gap #5)
+  status: 'ok'|'error'; statusMessage?: string;
+  agent?: string;                            // derived from ancestors/target (gap #6)
+  delegation?: { target: string; depth: number; ancestors: string[] };
+  model?: { id: string; provider?: string; numCtx?: number; footprintBytes?: number; runtimeDegraded?: boolean; /* … */ };
+  tokens?: { input?: number; output?: number };
+  degraded: boolean;                         // Slice 37; node?: string reserved for Slices 31/38
+  attributes: Record<string, unknown>;       // passthrough for domain panels (workflow/crew/memory/mcp/media/voice)
+  events: { name: string; offsetMs: number; attributes?: Record<string, unknown> }[];
+};
+
+type DegradeDTO = { kind: DegradeKind; label: string; subject: string; reason: string;
+                    from?: string; to?: string; attempts?: number; lane?: string; spanId?: string };
+// ChatMessageDTO also carries an optional `degraded`/trust marker (Slice 37).
+```
+
+Status events are OUR Zod types (`data-run-start`/`-delegation`/`-model-select`/`-model-load`/
+`-degrade`/`-confirm`/`-run-end`), never re-exported AI-SDK `UIMessage` types.
+
+### Design-token system
+
+`web/src/shared/design/tokens.css` — Blueprint Mono palette/type/spacing/motion as CSS custom
+properties via Tailwind v4 `@theme`. Components reference tokens, never raw hex; themes are
+token overrides only. Geist Sans + Geist Mono embedded as `@font-face` data-URIs.
 
 ## Screens (design set for D10 — synced to claude.ai/design before code)
 
-1. **Workspace** — chat + agent/model rail + trace strip (default state); **first-run /
-   empty** state.
-2. **Chat states** — streaming with shimmer, tool-call card, reasoning block, citations,
-   error/reconnecting.
-3. **Live agent/model panel** — status rail (done/running/queued/idle), model
+1. **Workspace** (chat + agent/model rail + trace strip); first-run/empty state.
+2. **Chat states** — streaming/shimmer, tool-call card, reasoning, citations, **`data-confirm`
+   inline prompt**, error/reconnecting.
+3. **Live agent/model panel** — status rail (enter→model-select→load→running→exit), model
    loaded/loading, degraded marker.
-4. **Run-history browser** — the run list (outcome, duration, models, tokens).
-5. **Run detail** — @visx trace waterfall + @xyflow delegation graph, per-span token/cost.
-6. **Voice active** — hold-to-talk, barge-in, interim→final transcription, waveform.
-7. **⌘K command palette** — launch agent, jump to run, switch model, open settings.
-8. **Settings** — uncensored toggle (`AGENT_UNCENSORED`), theme switch, model selection.
-9. **Sessions** — session list / cross-invocation history sidebar (persistence).
+4. **Crews** — crew list; crew detail (members/roles/process); run + live watch (delegation
+   graph shines here); outcome (done/failed/unverified).
+5. **Workflows** — workflow list; step DAG (@xyflow); run + step-by-step execution.
+6. **Builders** — agent-builder & crew-builder guided flows (need → proposal → verify gate →
+   commit), replacing the CLI TTY offers.
+7. **Runs** — run-history list (outcome/duration/models/tokens/lifecycle/origin).
+8. **Run detail** — @visx waterfall + @xyflow delegation graph, per-span tokens/model,
+   degrade/taint badges.
+9. **Library** — Models/provisioning (with download consent + disk-shortfall), Memory/RAG
+   (ingest/recall/stats), MCP mounts (list/status/add + mount-consent + OAuth redirect).
+10. **Voice active** — hold-to-talk, barge-in, interim→final, waveform.
+11. **⌘K command palette**.
+12. **Settings** — uncensored toggle (`AGENT_UNCENSORED`), theme switch, verify config, model prefs.
+13. **Sessions** — cross-invocation history sidebar (persistence).
+
+## Status events (transient SSE data-parts — all from existing seams)
+
+`data-run-start` · `data-provision` · `data-mcp-mount` · `data-delegation` (agent, depth,
+parentAgent, ancestors) · `data-model-select` (agent, model, numCtx, footprint, install,
+degraded) · `data-model-load` (pull/evict/warm) · `data-degrade` · **`data-confirm`**
+(bidirectional; promptId, kind, question) · leaf token deltas · `data-run-end`. The live
+panel's agent/model/phase triple maps directly onto delegation + model-select + model-load.
+
+## Telemetry gaps to close (found by the audit)
+
+1. **Token roll-up not emitted** by `spans.ts` (only AI-SDK `experimental_telemetry` on gen
+   spans) → add an explicit run/agent token roll-up (sum child gen spans); mapper tolerates absence.
+2. **No uniform run-outcome** on workflow-/crew-only roots → mapper falls back to
+   `workflow.outcome`/`crew.*.outcome`; framework sets a uniform root outcome attr.
+3. **Degrade↔span correlation missing** → emit a `spanId`/`degrade.id` on both the ledger row
+   and the `reliability.degrade` span event so taint badges land on the exact bar.
+4. **Ledger/artifact filenames caller-defined** → mapper `readdir`s the run dir and classifies;
+   pin canonical names at call sites if the UI needs stable deep-links.
+5. **`startUnixNano` lossy** → use exact `durationMs` for bar widths; treat offsets as approximate.
+6. **Delegating agent name not a first-class span attr** → derive node labels from
+   `ancestors`/`target` (or add the attr).
+
+## Anticipate-now seams for future slices (build room, don't build now)
+
+Ranked by retrofit-cost × dependents (from the forward-compat audit):
+1. **`owner` identity** reserved in schema + session/message/run DTOs + server request context
+   (Slices 24/33/35). *Most expensive to backfill.*
+2. **Bidirectional + resumable transport** — SSE event IDs, `respond` back-channel, resume
+   cursor (Slices 24/25/34/38).
+3. **Run lifecycle + origin** in the DTO, not just terminal outcome (Slices 24/25/34/38).
+4. **Optional `degraded`/trust + `node`/location** fields on span & message DTOs (Slices
+   37/31/38) — trivial now, costly to thread through @visx/@xyflow later.
+5. **Own the wire schema** — no AI-SDK-v6 types in `src/contracts/` (Slice 23 → v7 = adapter swap).
+6. **Transport-agnostic BFF** — browser is one client adapter (Slice 34 Hermes gateway).
+7. **Trace DTO on the span tree** via `buildTree`, never flat (Slice 36 CodeAct).
+8. **Config-driven origin/CORS** (Slice 24 tunnel).
+9. **Extensible SessionStore schema** — goals/evals/triggers as additive tables.
+
+No *new port* beyond transport/voice/persistence/consent is needed for any future slice — the
+pressure is on what the **contracts and transport leave room for**.
 
 ## Error handling / graceful degrade (never crash)
 
-- **Server:** typed errors; every endpoint degrades gracefully (reuses Slice 21
-  reliability). The SSE stream emits typed **error data-parts** — never a silent drop.
-- **Frontend:** per-feature error boundaries; connection loss → EventSource auto-reconnect
-  + a visible "reconnecting" state; voice permission denied / no mic → explicit inline
-  message (mirrors the Slice 29 TCC-permission hint); WASM/model load failure → degrade to
-  text input with a clear notice.
-- Never silent-fail (upheld by the silent-failure-hunter review dimension).
+- **Server:** typed errors; every endpoint degrades gracefully (reuses Slice 21); SSE emits
+  typed **error data-parts**, never a silent drop.
+- **Frontend:** per-feature error boundaries; connection loss → EventSource auto-reconnect via
+  `Last-Event-ID` + a visible "reconnecting" state; voice permission/mic denied → explicit
+  inline hint (mirrors Slice 29 TCC hint); WASM/model load failure → degrade to text input.
+- Consent prompts that the user dismisses resolve to the fail-safe default (decline), matching
+  the engine's off-TTY behavior (gen-model download / clone consent already default-decline).
 
 ## Testing
 
-- **Contracts:** Zod schema round-trip tests (parse ⇄ serialize).
-- **Server:** pure span→DTO mapper unit tests; endpoint integration tests against Bun.serve
-  with a fake orchestrator; SSE lifecycle (idle-timeout, error-part) tests.
-- **Frontend:** component tests (Vitest + Testing Library / the webapp-testing skill);
-  transport-port contract test; a smoke e2e (drive a run, assert the stream renders and the
-  rail updates).
-- **Voice:** unit-test the PCM downsample/format math (48k→16k, Float32→Int16) with the WASM
-  engine mocked; the WASM build itself validated in live-verify.
-- **Live-verify (gated):** real browser + real model + real voice (barge-in) + real trace,
-  end-to-end on this Mac, per the live-verify-before-merge rule.
+- **Contracts:** Zod round-trip tests (parse ⇄ serialize), incl. the forward-compat optional fields.
+- **Engine seams:** `runChatSession` unit test with fake deps (asserts CLI/server parity); the
+  `events` sink emits the expected StatusEvents for a scripted delegation; leaf `streamText`
+  path vs `generateText` default.
+- **Server:** pure span→DTO mapper tests (incl. the 6 gap behaviors); endpoint integration
+  tests against Bun.serve with a fake orchestrator; SSE lifecycle (idle-timeout, event IDs,
+  error part); consent round-trip (`data-confirm` → `respond`).
+- **Frontend:** component tests (Vitest + Testing Library / webapp-testing skill); transport
+  port contract test; smoke e2e (drive a run, assert stream + rail + trace render).
+- **Voice:** PCM downsample/format math unit tests (WASM mocked); WASM validated in live-verify.
+- **Live-verify (gated):** real browser + model + crew run + voice barge-in + trace, end-to-end.
 
 ## Standing spec notes (per repo CLAUDE.md)
 
-- **Architecture-doc update note:** this slice ADDS subsystems (`src/contracts/`,
-  `src/server/`) and a new top-level `web/`. `scripts/docs-check.ts` hard-fails until each
-  `src/<subsystem>` is named in `docs/architecture.md`, so new **§Contracts** and **§Server
-  (web BFF)** sections plus a **§Web UI** section (feature-slice map + data-flow + ports +
-  token system) are day-one work. Also update the subsystem-registry table, the Mermaid
-  module + data-flow diagrams (new web/server/contracts nodes + edges), README (status line
-  + slice-status row ✅ Slice 30 + a Web-UI feature paragraph + "Next" line), `docs/ROADMAP.md`
-  (flip "TUI / local web UI" → ✅ shipped Slice 30 in the gap table, phase table, and
-  recommended sequence; note Slice 34's primary-chat scope folded in), the SDD ledger
-  `.superpowers/sdd/progress.md`, and regenerate the docs-snapshot Artifact (new Web-UI /
-  Server / Contracts nodes + footer slice & test counts).
-- **Telemetry to emit:** a `server.request` span per HTTP request and a `ui.stream` span per
-  SSE session (attributes: route, status, duration-ms, bytes/chunks, outcome), plus a
-  `voice.transcribe` span reusing the Slice-29 `VOICE_*` semantics for the browser path.
-  Server spans nest under / correlate with the existing run trace so a UI-driven run is one
-  continuous trace. Degrade events via `recordDegrade` on the ledger.
+- **Architecture-doc update note:** adds subsystems `src/contracts/`, `src/server/` (+
+  `session/`, `consent/`) and top-level `web/`. `scripts/docs-check.ts` hard-fails until each
+  `src/<subsystem>` is in `docs/architecture.md`, so new **§Contracts**, **§Server (web BFF)**,
+  **§Web UI** sections (feature map + data-flow + engine seams + ports + token system + DTO
+  contract) are day-one. Also: subsystem-registry table; Mermaid module + data-flow diagrams
+  (web/server/contracts nodes+edges, the bidirectional respond edge, the events-sink edge);
+  README (status line + ✅ Slice 30 row + Web-UI feature paragraph + Next line); ROADMAP (flip
+  "TUI / local web UI" → ✅ Slice 30 in gap/phase/sequence tables; note Slice 34 primary-chat
+  folded in); SDD ledger `.superpowers/sdd/progress.md`; regenerate the docs-snapshot Artifact
+  (new nodes + footer slice/test counts).
+- **Telemetry to emit:** `server.request` span per HTTP request (route, status, duration,
+  **request principal/owner** so it upgrades to audit-grade for Slice 35) and `ui.stream` span
+  per SSE session (chunks/bytes/outcome, resume count); reuse Slice-29 `voice.transcribe` for
+  the browser path. Server spans correlate with the run trace so a UI-driven run is one
+  continuous trace. New engine seams emit: `events`-sink coverage is observable via the
+  existing delegation/model spans (no new engine spans needed beyond the roll-up in gap #1).
 
 ## Out of scope (explicit)
 
-Multi-device / cross-machine sync (Slice 31 A2A), scheduled/triggered runs from the UI
-(Slice 25), the always-on daemon + secure remote tunnel (Slice 24 — the UI is built to be
-remote-*reachable* but shipping the tunnel/auth is that slice), TTS voice-*out* beyond what
-barge-in needs, and a public/hosted deployment. Slice 30 is single-user localhost.
+Multi-device / cross-machine sync (Slice 31 A2A); the always-on daemon + secure remote tunnel
++ auth (Slice 24 — the UI is built remote-*reachable*, but the tunnel/auth ships there);
+scheduled/triggered runs (Slice 25 — the DTO reserves `origin`, but no trigger CRUD UI now);
+TTS voice-*out* beyond what barge-in needs; a public/hosted deployment. Single-user localhost.
 
 ## Top risks & mitigations
 
 1. **sherpa-onnx browser WASM is build-from-source (Emscripten), not an npm install** — the
-   biggest hidden effort. Mitigate with a **day-1 de-risking spike** (build + self-host +
-   load a model in-browser) before committing the voice phase; ship a single-threaded WASM
-   fallback if COOP/COEP isolation proves troublesome; lazy-load + IndexedDB-cache the
-   ~80 MB model blobs.
-2. **AI SDK v6-vs-v7 drift** — `ai@latest` is v7; we are pinned to v6. Pin `@ai-sdk/react@^3`
-   explicitly and lock versions; verify `useChat` transient data-parts on v6 in the spike.
-3. **Bun SSE flushing / idle-timeout** — Bun can batch `ReadableStream` chunks and closes
-   idle connections at 10s. Use the async-generator body pattern, call `server.timeout(req,
-   0)`, and verify token-level flushing live.
-4. **Scope (this is a large slice)** — enforced ordered phases (contracts+shell → chat+rail
-   → runs → persistence → voice → palette+polish+docs), each independently reviewable, so
-   the slice lands complete without a big-bang merge.
-5. **Design/engine coupling creep** — the contract boundary + pure DTO mappers + feature
-   isolation are the guardrail; the final review audits that no feature reaches into engine
-   internals and no component hardcodes design values.
+   biggest hidden effort. **Day-1 de-risking spike** (build + self-host + in-browser model
+   load) before the voice phase; single-threaded fallback if COOP/COEP isolation is
+   troublesome; lazy-load + IndexedDB-cache the ~80 MB blobs.
+2. **The engine seams (runChatSession extraction + leaf streamText + events sink)** are the
+   critical path — a second **day-1 spike** proves the extraction + a token stream reaching the
+   browser through `useChat` on AI SDK v6 before committing the chat phase.
+3. **AI SDK v6-vs-v7 drift** — pin `@ai-sdk/react@^3`; keep AI-SDK types out of `src/contracts/`.
+4. **Bun SSE flushing / idle-timeout** — async-generator body, `server.timeout(req,0)`, verify
+   token-level flushing live.
+5. **Scope (large slice)** — enforced ordered phases (below), each independently reviewable.
+6. **Design/engine coupling creep** — contract boundary + pure mappers + feature isolation are
+   the guardrail; the final review audits that no feature reaches engine internals and no
+   component hardcodes design values.
+
+## Build order within the slice (ships complete; reviewed in increments)
+
+0. **Two day-1 spikes** (de-risk): (a) engine seams — extract `runChatSession`, prove leaf
+   `streamText` → `useChat` token stream on v6; (b) sherpa WASM build + in-browser load.
+1. **Foundations** — `src/contracts/` (DTOs + status events + forward-compat fields) · thin
+   server + static serving + COOP/COEP · design-token system · app shell + ⌘K skeleton.
+2. **Chat + live rail** — SSE streaming chat (AI Elements/streamdown) · transient data-parts
+   → agent/model status rail · the bidirectional `data-confirm` channel.
+3. **Runs** — run-history browser · @visx waterfall · @xyflow delegation graph · telemetry-gap
+   closures (token roll-up, correlation id, uniform outcome).
+4. **Crews + Workflows** — browse/run/watch both; the workflow step DAG.
+5. **Builders + Library** — agent/crew builder flows (verify gate) · Models/Memory/MCP
+   (incl. mount consent + OAuth redirect + provisioning selection).
+6. **Persistence** — `SessionStore` (owner reserved) · cross-invocation history · Sessions UI.
+7. **Voice** — AudioWorklet + sherpa WASM + VAD + barge-in.
+8. **Polish + docs + live-verify** — motion, a11y, ⌘K completeness, all-4-docs + Artifact,
+   ledger, live-verify.
