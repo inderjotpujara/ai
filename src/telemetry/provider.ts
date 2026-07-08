@@ -1,16 +1,17 @@
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { context, trace } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
-import { resourceFromAttributes } from '@opentelemetry/resources';
 import {
-  BasicTracerProvider,
   BatchSpanProcessor,
   SimpleSpanProcessor,
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
-import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { JsonlFileExporter } from './jsonl-exporter.ts';
+import {
+  ensureGlobalTelemetry,
+  registerRun,
+  unregisterRun,
+} from './run-router.ts';
 
 /** Whether prompts/responses/tool-IO are captured. Default on; AGENT_TELEMETRY_RECORD_IO=0 disables. */
 export function recordIoEnabled(): boolean {
@@ -31,29 +32,22 @@ export function buildProcessors(spansFilePath: string): SpanProcessor[] {
   return processors;
 }
 
-let contextManagerSet = false;
-
-/** Register a per-run global TracerProvider writing to runDir/spans.jsonl. */
-export function initRunTelemetry(runDir: string): {
-  shutdown: () => Promise<void>;
-} {
-  const provider = new BasicTracerProvider({
-    resource: resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: 'local-agent-framework',
-    }),
-    spanProcessors: buildProcessors(join(runDir, 'spans.jsonl')),
-  });
-  if (!contextManagerSet) {
-    context.setGlobalContextManager(
-      new AsyncLocalStorageContextManager().enable(),
-    );
-    contextManagerSet = true;
-  }
-  trace.disable();
-  trace.setGlobalTracerProvider(provider);
+/** Register this run's processors on the shared router. No process-global swap:
+ *  ONE global provider fans each span to the run active in its OTel context, so
+ *  concurrent runs in one process stay isolated. Spans emitted inside this run
+ *  must run under `withRunContext(runId, ...)` to be routed here. */
+export function initRunTelemetry(
+  runDir: string,
+  runId: string,
+): { shutdown: () => Promise<void> } {
+  ensureGlobalTelemetry();
+  // The JSONL exporter appends and does not create parents; ensure the run dir
+  // exists so spans.jsonl is writable even when the caller did not pre-create it.
+  mkdirSync(runDir, { recursive: true });
+  registerRun(runId, buildProcessors(join(runDir, 'spans.jsonl')));
   return {
     shutdown: async () => {
-      await provider.shutdown();
+      await unregisterRun(runId);
     },
   };
 }

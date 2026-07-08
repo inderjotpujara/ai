@@ -8,6 +8,7 @@ import { runCrewCli } from '../../src/cli/crew.ts';
 import { createFetchTools, createFileTools } from '../../src/mcp/client.ts';
 import { createRun } from '../../src/run/run-store.ts';
 import { initRunTelemetry } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 import { ollamaReady } from './ollama-available.ts';
 
 const ready = await ollamaReady(qwenFast.model);
@@ -22,14 +23,16 @@ describe.skipIf(!ready)('crew.live', () => {
       try {
         const runsRoot = await mkdtemp(join(tmpdir(), 'crewlive-'));
         const run = await createRun(runsRoot, 'live');
-        const tel = initRunTelemetry(run.dir);
+        const tel = initRunTelemetry(run.dir, run.id);
         try {
-          const outcome = await runCrewCli({
-            def,
-            input: 'the example.com domain',
-            run,
-            tools: { ...fileServer.tools, ...fetchServer.tools },
-          });
+          const outcome = await withRunContext(run.id, () =>
+            runCrewCli({
+              def,
+              input: 'the example.com domain',
+              run,
+              tools: { ...fileServer.tools, ...fetchServer.tools },
+            }),
+          );
           expect(outcome.kind).toBe('done');
         } finally {
           await tel.shutdown();

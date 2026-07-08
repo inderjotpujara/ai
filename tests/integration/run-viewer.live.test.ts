@@ -11,6 +11,7 @@ import { unloadModel } from '../../src/resource/ollama-control.ts';
 import { createRun } from '../../src/run/run-store.ts';
 import { readSpans } from '../../src/run/run-trace.ts';
 import { initRunTelemetry } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 import { ollamaReady } from './ollama-available.ts';
 
 const ready = await ollamaReady(qwenRouter.model);
@@ -32,13 +33,15 @@ describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
           name === 'file_qa' ? tools : {},
         );
         const run = await createRun(runsRoot, 'live-1');
-        const tel = initRunTelemetry(run.dir);
+        const tel = initRunTelemetry(run.dir, run.id);
         try {
-          await runChat({
-            orchestrator,
-            task: `What is written in ${filePath}?`,
-            run,
-          });
+          await withRunContext(run.id, () =>
+            runChat({
+              orchestrator,
+              task: `What is written in ${filePath}?`,
+              run,
+            }),
+          );
         } finally {
           await tel.shutdown();
         }

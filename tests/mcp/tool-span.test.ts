@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initRunTelemetry } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 import { withMcpMountSpan, withToolSpan } from '../../src/telemetry/spans.ts';
 
 // No provider initialized → no-op tracer; helpers must pass results through
@@ -34,14 +35,16 @@ describe('withMcpMountSpan', () => {
 describe('withMcpMountSpan root-span counts', () => {
   it('records mounted-server count and summed tool count (not a raw record count)', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'mountspan-'));
-    const tel = initRunTelemetry(dir);
-    await withMcpMountSpan(async (record) => {
-      record('a', 'mounted', 3);
-      record('b', 'mounted', 2);
-      record('c', 'consent not granted'); // skipped
-      record('d', 'dormant');
-      return 'x';
-    });
+    const tel = initRunTelemetry(dir, 'run-mount');
+    await withRunContext('run-mount', () =>
+      withMcpMountSpan(async (record) => {
+        record('a', 'mounted', 3);
+        record('b', 'mounted', 2);
+        record('c', 'consent not granted'); // skipped
+        record('d', 'dormant');
+        return 'x';
+      }),
+    );
     await tel.shutdown();
     const lines = (await readFile(join(dir, 'spans.jsonl'), 'utf8'))
       .trim()

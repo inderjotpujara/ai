@@ -1,5 +1,6 @@
 import { createRun, type RunHandle } from '../run/run-store.ts';
 import { initRunTelemetry } from '../telemetry/provider.ts';
+import { withRunContext } from '../telemetry/run-router.ts';
 
 /** Per-run CLI scope for CLIs that mount NO MCP servers (the builders +
  *  archive). Mirrors withMcpRun's ordering invariant minus the mount step:
@@ -12,9 +13,9 @@ export async function withRunTelemetry<T>(
   body: (run: RunHandle) => Promise<T>,
 ): Promise<T> {
   const run = await createRun(opts.runsRoot, opts.runId);
-  const tel = initRunTelemetry(run.dir);
+  const tel = initRunTelemetry(run.dir, run.id);
   try {
-    return await body(run);
+    return await withRunContext(run.id, () => body(run));
   } finally {
     await tel.shutdown();
   }

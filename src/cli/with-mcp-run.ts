@@ -15,6 +15,7 @@ import {
 } from '../reliability/ledger.ts';
 import { createRun, type RunHandle, writeArtifact } from '../run/run-store.ts';
 import { initRunTelemetry } from '../telemetry/provider.ts';
+import { withRunContext } from '../telemetry/run-router.ts';
 import { withMcpMountSpan } from '../telemetry/spans.ts';
 
 export type McpRunContext = {
@@ -83,7 +84,7 @@ export async function withMcpRun<T>(
   body: (ctx: McpRunContext) => Promise<T>,
 ): Promise<T> {
   const run = await createRun(opts.runsRoot, opts.runId);
-  const tel = initRunTelemetry(run.dir);
+  const tel = initRunTelemetry(run.dir, run.id);
   const config = opts.config ?? loadMcpConfig();
   const ledger = createLedger();
   // Caller-supplied providers win over the auto-built ones (spread order).
@@ -91,27 +92,36 @@ export async function withMcpRun<T>(
     ...buildAuthProviders(config),
     ...opts.mountDeps?.authProviders,
   };
-  const reg = await withMcpMountSpan(async (record, recordAuth) => {
-    recordAuthOutcomes(config, recordAuth);
-    const r = await mountAll(config, { ...opts.mountDeps, authProviders });
-    for (const m of r.mounted) record(m.name, 'mounted', m.toolCount, m.kind);
-    for (const s of r.skipped) record(s.name, s.reason);
-    for (const d of config.dormant) record(d.name, 'dormant');
-    return r;
-  });
-  try {
-    return await body({ run, reg, config, ledger });
-  } finally {
-    if (ledger.events.length > 0) {
-      try {
-        await writeArtifact(run, 'degradation.jsonl', serializeLedger(ledger));
-      } catch (err) {
-        console.error(
-          `failed to persist degradation ledger: ${err instanceof Error ? err.message : String(err)}`,
-        );
+  // Bind the run id into the OTel context so every span opened inside — the
+  // mcp.mount span AND everything the body emits — routes to this run's
+  // spans.jsonl (the router fans by run id; there is no per-run provider).
+  return await withRunContext(run.id, async () => {
+    const reg = await withMcpMountSpan(async (record, recordAuth) => {
+      recordAuthOutcomes(config, recordAuth);
+      const r = await mountAll(config, { ...opts.mountDeps, authProviders });
+      for (const m of r.mounted) record(m.name, 'mounted', m.toolCount, m.kind);
+      for (const s of r.skipped) record(s.name, s.reason);
+      for (const d of config.dormant) record(d.name, 'dormant');
+      return r;
+    });
+    try {
+      return await body({ run, reg, config, ledger });
+    } finally {
+      if (ledger.events.length > 0) {
+        try {
+          await writeArtifact(
+            run,
+            'degradation.jsonl',
+            serializeLedger(ledger),
+          );
+        } catch (err) {
+          console.error(
+            `failed to persist degradation ledger: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
+      await reg.close();
+      await tel.shutdown();
     }
-    await reg.close();
-    await tel.shutdown();
-  }
+  });
 }

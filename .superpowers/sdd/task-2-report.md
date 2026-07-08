@@ -1,96 +1,71 @@
-# Task 2 Report: Voice Types Module (Slice 29)
+# Task 2 report — Per-run telemetry via a routing span-processor (Slice 30a)
 
 **Status:** DONE
 
-**Commit:** `cee8082` - feat(voice): core types (VoiceFrames, VoiceError, Transcriber)
+## What shipped
+Replaced the process-global `trace.setGlobalTracerProvider`-per-run design with
+ONE global `BasicTracerProvider` fronted by a single `RunRoutingSpanProcessor`
+that fans each span to the run active in its OTel `Context`. Two overlapping runs
+in one process now write to separate `spans.jsonl` files.
 
----
+### Files
+- **Created** `src/telemetry/run-router.ts` — `RunRoutingSpanProcessor`
+  (`onStart` captures the run id from the parent context into a `WeakMap`;
+  `onEnd` looks it up and delegates to that run's processors), plus
+  `ensureGlobalTelemetry`, `registerRun`, `unregisterRun`, `withRunContext`.
+- **Created** `tests/telemetry/run-router.test.ts` — the two-overlapping-runs
+  proof test (verbatim from the brief).
+- **Modified** `src/telemetry/provider.ts` — `initRunTelemetry(runDir, runId)`
+  registers the run's processors on the shared router; `shutdown` flushes +
+  unregisters. No process-global swap. `buildProcessors`/`recordIoEnabled`
+  unchanged.
+- **Modified** `src/cli/with-mcp-run.ts` — passes `run.id`; wraps mount + body +
+  teardown in `withRunContext(run.id, ...)` (mount must be inside the context so
+  the `mcp.mount` span still lands in the run's spans.jsonl — asserted by
+  `tests/cli/with-mcp-run.test.ts`).
+- **Modified** `src/cli/with-run.ts` and `src/cli/memory.ts` — pass `run.id`,
+  wrap body in `withRunContext`.
+- **Modified** test call sites to the 2-arg signature + `withRunContext`:
+  `tests/telemetry/provider.test.ts`, `tests/cli/run-chat.test.ts`,
+  `tests/cli/crew.test.ts`, `tests/cli/flow.test.ts`,
+  `tests/mcp/tool-span.test.ts`, and the 3 `tests/integration/*.live.test.ts`.
 
-## Implementation Summary
+## Deviations from the brief (resolved against the installed SDK, not guessed)
 
-Implemented the foundational types module `src/voice/types.ts` for the voice input subsystem (Slice 29), containing:
+1. **`initRunTelemetry` now `mkdirSync(runDir, {recursive:true})`.** The proof
+   test uses raw dirs (`join(root,'A')`) without `createRun`, and
+   `JsonlFileExporter` uses `appendFile` (no parent-dir creation), so the write
+   ENOENT'd and nothing landed. Production callers already `createRun` first;
+   this is defensive and idempotent.
 
-- **VoiceFrames** (type): Normalized Float32 audio at 16 kHz, ready for STT engine
-- **CaptureSource** (enum): Input source selector (Mic | File), using explicit string values
-- **VoiceOutcome** (enum): Capture result status (Ok | Empty | Failed | Timeout)
-- **VoiceError** (class): Typed error with `hint` property for user-actionable next steps
-- **VoiceConfig** (type): Configuration surface (modelDir, ffmpeg path, timeoutMs)
-- **Transcriber** (type): Interface for STT engines (transcribe + close methods)
+2. **`ensureGlobalTelemetry` re-asserts the global provider on every call**
+   (build router+provider once; `trace.disable()` + `setGlobalTracerProvider`
+   each call) rather than a pure one-time `installed` guard. Reason found the
+   hard way: `bun test` shares module state across files (verified with a probe),
+   and the existing span-assertion tests swap the global tracer provider via
+   `tests/helpers/otel-test-provider.ts` (`registerTestProvider` →
+   `trace.disable()` + `setGlobalTracerProvider(InMemory)`). A pure install-once
+   guard never reclaims the global after that swap, so later runs' spans went to
+   a shut-down test provider (empty files / ENOENT). Re-asserting reclaims it.
+   Safe for concurrent runs: the router is a stable singleton and routing is by
+   the run id in the active context, not by which provider a span came through;
+   the `disable`+`setGlobal` pair is synchronous so no span is emitted in the
+   gap. This mirrors the old code's per-call re-registration while keeping ONE
+   router so registrations accumulate.
 
----
+3. The brief's inline `import('@opentelemetry/api').Context` was hoisted to a
+   top-level `type` import for lint cleanliness; types are otherwise imported
+   from `@opentelemetry/sdk-trace-base` / `@opentelemetry/api` as specified.
 
-## TDD Workflow Evidence
+## Tests / checks
+- `bun test tests/telemetry/ tests/cli/run-chat.test.ts` → 41 pass, 0 fail
+  (incl. the two-overlapping-runs proof test).
+- `bun test tests/cli/ tests/mcp/` → 162 pass, 0 fail.
+- `bun run typecheck` → clean.
+- `bun run lint:file` on all 14 touched files → clean.
 
-### Step 1: Write Failing Test
-Created `tests/voice/types.test.ts` with 2 test cases:
-- VoiceError construction and properties (hint, name)
-- Enum values using explicit string values
-
-### Step 2: Verify Failure (RED)
-```
-$ bun test tests/voice/types.test.ts
-# Error: Cannot find module '../../src/voice/types.ts'
-# 0 pass, 1 fail, 1 error
-```
-
-### Step 3: Implement Types
-Wrote `src/voice/types.ts` with all 6 types as per brief specification.
-
-### Step 4: Verify Pass (GREEN)
-```
-$ bun test tests/voice/types.test.ts
-# 2 pass, 0 fail, 5 expect() calls
-```
-
-**TypeScript Compatibility Fix:** Added explicit type casts in test assertions to satisfy strict mode type checking:
-- `expect(CaptureSource.Mic).toBe('mic' as CaptureSource)`
-- `expect(VoiceOutcome.Empty).toBe('empty' as VoiceOutcome)`
-
-This allows enum comparison with string literals in strict TypeScript mode.
-
-### Step 5: Typecheck ✓
-```
-$ bun run typecheck
-# tsc --noEmit (no errors)
-```
-
-### Step 6: Documentation Gate
-Pre-commit hook `docs:check` enforced documentation of new `src/voice/` subsystem:
-- Added VOICE subsystem definition to architecture.md Mermaid graph
-- Added data flow connections (chat → voice pipeline → types)
-- Gate passed; hook completed successfully
-
----
-
-## Files Changed
-
-1. **src/voice/types.ts** (NEW)
-   - 44 lines: foundational types + VoiceError class + Transcriber interface
-   
-2. **tests/voice/types.test.ts** (NEW)
-   - 16 lines: 2 test cases covering error construction and enum values
-   
-3. **docs/architecture.md** (UPDATED)
-   - Added VOICE subsystem node (4 modules)
-   - Added voice data flow connections to chat entry
-
----
-
-## Self-Review
-
-✓ Code follows project style (type > interface, string enums for finite sets)
-✓ Test coverage: both error behavior and enum values verified
-✓ TypeScript strict mode passes (type-safe assertions)
-✓ Documentation hard line met (architecture.md updated pre-push)
-✓ Conventional commit format with co-author trailer
-✓ No console.log; no unhandled edge cases in types
-✓ Foundation ready for downstream tasks (model.ts, capture.ts, telemetry)
-
----
-
-## Next Steps (for Task 3+)
-
-- **Task 3:** `src/voice/model.ts` - Wrapper for sherpa-onnx/moonshine loader
-- **Task 4:** `scripts/setup-voice.ts` - Install sherpa-onnx binary + ffmpeg
-- **Task 5:** Telemetry instrumentation (voice.transcribe spans)
-- **Task 6+:** In-process/subprocess transcriber implementations, capture strategies
+## Concerns
+None blocking. Note for downstream: any NEW code path that emits spans for a run
+must run under `withRunContext(runId, ...)` (or a child of it) or its spans will
+not be routed to that run's spans.jsonl — the intended trade for concurrency
+isolation.

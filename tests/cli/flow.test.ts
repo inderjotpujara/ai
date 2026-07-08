@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { runFlow } from '../../src/cli/flow.ts';
 import { createRun } from '../../src/run/run-store.ts';
 import { initRunTelemetry } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 import type { VerifyDeps } from '../../src/verification/types.ts';
 import { defineWorkflow } from '../../src/workflow/define.ts';
 import { StepKind, type WorkflowOutcome } from '../../src/workflow/types.ts';
@@ -50,16 +51,18 @@ describe('runFlow', () => {
       ],
     });
     const run = await createRun(runsRoot, 'r1');
-    const tel = initRunTelemetry(run.dir);
+    const tel = initRunTelemetry(run.dir, run.id);
     let outcome: WorkflowOutcome;
     try {
-      outcome = await runFlow({
-        def,
-        input: 'hello',
-        run,
-        agents: { web_fetch: cannedAgent('web_fetch') },
-        tools: {},
-      });
+      outcome = await withRunContext(run.id, () =>
+        runFlow({
+          def,
+          input: 'hello',
+          run,
+          agents: { web_fetch: cannedAgent('web_fetch') },
+          tools: {},
+        }),
+      );
     } finally {
       await tel.shutdown();
     }
@@ -86,16 +89,18 @@ describe('runFlow', () => {
       ],
     });
     const run = await createRun(runsRoot, 'r2');
-    const tel = initRunTelemetry(run.dir);
+    const tel = initRunTelemetry(run.dir, run.id);
     let outcome: WorkflowOutcome;
     try {
-      outcome = await runFlow({
-        def,
-        input: null,
-        run,
-        agents: { web_fetch: cannedAgent('web_fetch') },
-        tools: {},
-      });
+      outcome = await withRunContext(run.id, () =>
+        runFlow({
+          def,
+          input: null,
+          run,
+          agents: { web_fetch: cannedAgent('web_fetch') },
+          tools: {},
+        }),
+      );
     } finally {
       await tel.shutdown();
     }
@@ -143,17 +148,19 @@ describe('runFlow', () => {
       ],
     });
     const run = await createRun(runsRoot, 'r3');
-    const tel = initRunTelemetry(run.dir);
+    const tel = initRunTelemetry(run.dir, run.id);
     let outcome: WorkflowOutcome;
     try {
-      outcome = await runFlow({
-        def, // no step.verify set in the fixture
-        input: 'hello',
-        run,
-        agents: { web_fetch: cannedAgent('web_fetch') },
-        tools: {},
-        verifyDeps: fakeVerifyDeps(false),
-      });
+      outcome = await withRunContext(run.id, () =>
+        runFlow({
+          def, // no step.verify set in the fixture
+          input: 'hello',
+          run,
+          agents: { web_fetch: cannedAgent('web_fetch') },
+          tools: {},
+          verifyDeps: fakeVerifyDeps(false),
+        }),
+      );
     } finally {
       await tel.shutdown();
     }
@@ -180,17 +187,19 @@ describe('runFlow', () => {
       ],
     });
     const run = await createRun(runsRoot, 'r4');
-    const tel = initRunTelemetry(run.dir);
+    const tel = initRunTelemetry(run.dir, run.id);
     let outcome: WorkflowOutcome;
     try {
-      outcome = await runFlow({
-        def,
-        input: 'hello',
-        run,
-        agents: { web_fetch: cannedAgent('web_fetch') },
-        tools: {},
-        verifyDeps: fakeVerifyDeps(true),
-      });
+      outcome = await withRunContext(run.id, () =>
+        runFlow({
+          def,
+          input: 'hello',
+          run,
+          agents: { web_fetch: cannedAgent('web_fetch') },
+          tools: {},
+          verifyDeps: fakeVerifyDeps(true),
+        }),
+      );
     } finally {
       await tel.shutdown();
     }

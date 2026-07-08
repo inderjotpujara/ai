@@ -9,6 +9,7 @@ import { createOrchestrator } from '../../src/core/orchestrator.ts';
 import { createRun } from '../../src/run/run-store.ts';
 import { readSpans } from '../../src/run/run-trace.ts';
 import { initRunTelemetry } from '../../src/telemetry/provider.ts';
+import { withRunContext } from '../../src/telemetry/run-router.ts';
 
 let root: string;
 beforeEach(async () => {
@@ -68,14 +69,16 @@ function gapOrchestrator(): Agent {
 
 test('runChat records a gap run and writes the gap artifact', async () => {
   const run = await createRun(root, 'run-1');
-  const tel = initRunTelemetry(run.dir);
+  const tel = initRunTelemetry(run.dir, run.id);
   let result: Awaited<ReturnType<typeof runChat>>;
   try {
-    result = await runChat({
-      orchestrator: gapOrchestrator(),
-      task: 'email my boss',
-      run,
-    });
+    result = await withRunContext(run.id, () =>
+      runChat({
+        orchestrator: gapOrchestrator(),
+        task: 'email my boss',
+        run,
+      }),
+    );
   } finally {
     await tel.shutdown();
   }
@@ -108,14 +111,16 @@ function answerOrchestrator(): Agent {
 
 test('runChat records an answer run and writes the answer artifact', async () => {
   const run = await createRun(root, 'run-2');
-  const tel = initRunTelemetry(run.dir);
+  const tel = initRunTelemetry(run.dir, run.id);
   let result: Awaited<ReturnType<typeof runChat>>;
   try {
-    result = await runChat({
-      orchestrator: answerOrchestrator(),
-      task: 'what is 2+2?',
-      run,
-    });
+    result = await withRunContext(run.id, () =>
+      runChat({
+        orchestrator: answerOrchestrator(),
+        task: 'what is 2+2?',
+        run,
+      }),
+    );
   } finally {
     await tel.shutdown();
   }
@@ -130,14 +135,16 @@ test('runChat records an answer run and writes the answer artifact', async () =>
 
 test('runChat writes spans.jsonl with a root run span carrying the outcome', async () => {
   const run = await createRun(root, 'run-span');
-  const tel = initRunTelemetry(run.dir);
+  const tel = initRunTelemetry(run.dir, run.id);
   let result: Awaited<ReturnType<typeof runChat>>;
   try {
-    result = await runChat({
-      orchestrator: gapOrchestrator(),
-      task: 'email my boss',
-      run,
-    });
+    result = await withRunContext(run.id, () =>
+      runChat({
+        orchestrator: gapOrchestrator(),
+        task: 'email my boss',
+        run,
+      }),
+    );
   } finally {
     await tel.shutdown();
   }
@@ -150,13 +157,15 @@ test('runChat writes spans.jsonl with a root run span carrying the outcome', asy
 
 test('runChat no longer writes journal.jsonl', async () => {
   const run = await createRun(root, 'run-nojournal');
-  const tel = initRunTelemetry(run.dir);
+  const tel = initRunTelemetry(run.dir, run.id);
   try {
-    await runChat({
-      orchestrator: gapOrchestrator(),
-      task: 'x',
-      run,
-    });
+    await withRunContext(run.id, () =>
+      runChat({
+        orchestrator: gapOrchestrator(),
+        task: 'x',
+        run,
+      }),
+    );
   } finally {
     await tel.shutdown();
   }
