@@ -36,6 +36,7 @@ import {
   isModelInstalled,
   listLoadedModels,
 } from '../resource/ollama-control.ts';
+import { newRunId } from '../run/run-id.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { reuseDecision } from '../verified-build/reuse.ts';
 import type { CapabilitySignature } from '../verified-build/types.ts';
@@ -234,7 +235,7 @@ async function main(): Promise<void> {
 
   try {
     await withMcpRun(
-      { runsRoot: 'runs', runId: `run-${process.pid}` },
+      { runsRoot: 'runs', runId: newRunId() },
       async ({ run, reg, config, ledger }) => {
         const onBeforeDelegate = createSelectHook({
           registry,
