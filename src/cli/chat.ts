@@ -4,6 +4,7 @@ import qwenRouter from '../../models/qwen-router.ts';
 import { BOOTSTRAP } from '../../models/registry.ts';
 import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
+import { loadConfig } from '../config/schema.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { RuntimeKind } from '../core/types.ts';
@@ -178,6 +179,10 @@ function hasMediaFlags(flags: IngestFlags): boolean {
 }
 
 async function main(): Promise<void> {
+  // Validates the environment eagerly (today's per-module reads are lazy).
+  // Never throws — an invalid AGENT_* value falls back to its documented
+  // default, same convention as the rest of the codebase.
+  loadConfig();
   installSignalHandlers();
 
   const { positional, flags } = parseMediaArgs(process.argv.slice(2));
