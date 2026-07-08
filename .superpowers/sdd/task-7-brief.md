@@ -1,165 +1,80 @@
-### Task 7: Subprocess transcriber + selector
+### Task 7: Serialize model-manager admission (eviction lock)
 
 **Files:**
-- Modify: `src/voice/transcribe.ts` (add `createSubprocessTranscriber`, `createTranscriber`)
-- Create: `src/voice/stt-worker.mjs`
-- Test: `tests/voice/transcribe-select.test.ts`
+- Modify: `src/resource/model-manager.ts` (wrap `ensureReady` body in a per-manager async mutex)
+- Create: `tests/resource/model-manager-lock.test.ts`
 
 **Interfaces:**
-- Consumes: `Transcriber`, `VoiceConfig` (Task 2); `createInProcessTranscriber` (Task 6).
-- Produces: `createSubprocessTranscriber(cfg, deps?): Transcriber` (spawns `node` worker; sends `{sampleRate, samples[]}` as JSON on stdin, reads `{text}` on stdout); `createTranscriber(cfg, env?): Transcriber` selecting impl by `env.AGENT_VOICE_EXEC` (`'subprocess'` → subprocess, else in-process).
+- Consumes: existing `createModelManager(deps)` → `{ ensureReady, unloadAll }` (unchanged signature).
+- Produces: `ensureReady` calls are serialized per manager instance — no two concurrent calls interleave the listLoaded→evict→warm section.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/voice/transcribe-select.test.ts
-import { describe, expect, it } from 'bun:test';
-import { createTranscriber } from '../../src/voice/transcribe.ts';
+// tests/resource/model-manager-lock.test.ts
+import { expect, mock, test } from 'bun:test';
+import { createModelManager } from '../../src/resource/model-manager.ts';
+import type { ModelDeclaration } from '../../src/core/types.ts';
 
-const cfg = { modelDir: '/m', ffmpeg: 'ffmpeg', timeoutMs: 5000 };
-
-describe('createTranscriber selection', () => {
-  it('uses subprocess impl when AGENT_VOICE_EXEC=subprocess', () => {
-    const t = createTranscriber(cfg, { AGENT_VOICE_EXEC: 'subprocess' });
-    // Subprocess impl lazily spawns; we only assert the shape here.
-    expect(typeof t.transcribe).toBe('function');
-    expect(typeof t.close).toBe('function');
-  });
-  it('defaults to in-process (throws on addon load, proving it took that path)', () => {
-    // With no real addon + no fake, in-process load will throw when transcribe runs;
-    // constructing the selector must not itself throw for the default path decision.
-    expect(() => createTranscriber(cfg, {})).toBeDefined();
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/voice/transcribe-select.test.ts`
-Expected: FAIL — `createTranscriber` not exported.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Create the worker:
-```js
-// src/voice/stt-worker.mjs
-// Runs the sherpa-onnx addon under `node`. Reads one JSON line
-// {modelDir, sampleRate, samples:[...]}, prints {text} as JSON, exits.
-import { join } from 'node:path';
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-
-function loadSherpa() {
-  const root = join(process.cwd(), 'node_modules');
-  process.env.DYLD_LIBRARY_PATH = [
-    join(root, 'sherpa-onnx-node'),
-    join(root, 'sherpa-onnx-darwin-arm64'),
-    process.env.DYLD_LIBRARY_PATH ?? '',
-  ].join(':');
-  return require('sherpa-onnx-node');
+function decl(model: string): ModelDeclaration {
+  return { runtime: 'ollama', model, params: { numCtx: 4096 }, role: 'general',
+    footprint: { approxParamsBillions: 1, bytesPerWeight: 1 } } as ModelDeclaration;
 }
 
-let buf = '';
-process.stdin.on('data', (d) => (buf += d));
-process.stdin.on('end', () => {
-  try {
-    const { modelDir, sampleRate, samples } = JSON.parse(buf);
-    const sherpa = loadSherpa();
-    const recognizer = new sherpa.OfflineRecognizer({
-      modelConfig: {
-        moonshine: {
-          preprocessor: join(modelDir, 'preprocess.onnx'),
-          encoder: join(modelDir, 'encode.int8.onnx'),
-          uncachedDecoder: join(modelDir, 'uncached_decode.int8.onnx'),
-          cachedDecoder: join(modelDir, 'cached_decode.int8.onnx'),
-        },
-        tokens: join(modelDir, 'tokens.txt'),
-        numThreads: 2,
-        provider: 'cpu',
-      },
-    });
-    const stream = recognizer.createStream();
-    stream.acceptWaveform({ sampleRate, samples: Float32Array.from(samples) });
-    recognizer.decode(stream);
-    const text = String(recognizer.getResult(stream).text ?? '').trim();
-    process.stdout.write(JSON.stringify({ text }));
-    process.exit(0);
-  } catch (err) {
-    process.stderr.write(String(err));
-    process.exit(1);
-  }
-});
-```
-
-Append to `src/voice/transcribe.ts`:
-```ts
-import { withVoiceTranscribeSpan } from '../telemetry/spans.ts';
-
-export type SubprocessDeps = {
-  spawn?: (cmd: string[], stdin: string) => Promise<{ code: number; stdout: string; stderr: string }>;
-  source?: CaptureSource;
-};
-
-async function defaultNodeSpawn(cmd: string[], stdin: string) {
-  const p = Bun.spawn(cmd, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
-  p.stdin.write(stdin);
-  await p.stdin.end();
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
-}
-
-export function createSubprocessTranscriber(cfg: VoiceConfig, deps: SubprocessDeps = {}): Transcriber {
-  const spawn = deps.spawn ?? defaultNodeSpawn;
-  const source = deps.source ?? CaptureSource.Mic;
-  const worker = join(import.meta.dir, 'stt-worker.mjs');
-  return {
-    async transcribe(frames: VoiceFrames): Promise<string> {
-      if (frames.samples.length === 0) {
-        throw new VoiceError('no audio captured', 'check the microphone / input file');
-      }
-      return withVoiceTranscribeSpan({ model: cfg.modelDir, source }, () =>
-        withWallClock(cfg.timeoutMs, async () => {
-          const payload = JSON.stringify({
-            modelDir: cfg.modelDir,
-            sampleRate: frames.sampleRate,
-            samples: Array.from(frames.samples),
-          });
-          const { code, stdout, stderr } = await spawn(['node', worker], payload);
-          if (code !== 0) throw new VoiceError(`stt worker failed: ${stderr}`);
-          return String(JSON.parse(stdout).text ?? '').trim();
-        }),
-      );
-    },
-    async close() {},
+test('concurrent ensureReady calls are serialized (warm never overlaps)', async () => {
+  let active = 0, maxActive = 0;
+  const control = {
+    isInstalled: mock(async () => true),
+    listLoaded: mock(async () => []),
+    pull: mock(async () => {}), unload: mock(async () => {}),
+    getModelMax: mock(async () => 8192), getModelKvArch: mock(async () => undefined),
+    embed: mock(async () => []),
+    warm: mock(async () => { active++; maxActive = Math.max(maxActive, active); await new Promise((r) => setTimeout(r, 20)); active--; }),
   };
-}
-
-/** Selects the transcriber impl. AGENT_VOICE_EXEC=subprocess forces the worker;
- *  otherwise in-process (default set by the Task-1 spike). */
-export function createTranscriber(
-  cfg: VoiceConfig,
-  env: Record<string, string | undefined> = process.env,
-): Transcriber {
-  return env.AGENT_VOICE_EXEC === 'subprocess'
-    ? createSubprocessTranscriber(cfg)
-    : createInProcessTranscriber(cfg);
-}
+  const m = createModelManager({ budgetBytes: 1e12, warn: () => {}, controlFor: () => control as never });
+  await Promise.all([m.ensureReady(decl('a')), m.ensureReady(decl('b'))]);
+  expect(maxActive).toBe(1);
+});
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Run to verify failure**
 
-Run: `bun test tests/voice/transcribe-select.test.ts`
-Expected: PASS (2 tests). Add a focused subprocess test with an injected `spawn` returning `{code:0, stdout:'{"text":"hi"}'}` and assert `transcribe` returns `'hi'`.
+Run: `bun test tests/resource/model-manager-lock.test.ts`
+Expected: FAIL — `maxActive` is 2 (both admissions interleave).
+
+- [ ] **Step 3: Implement a tiny promise-chain mutex**
+
+At the top of `createModelManager` (near the per-instance maps ~`:49`):
+
+```ts
+  let admissionLock: Promise<unknown> = Promise.resolve();
+  function serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = admissionLock.then(fn, fn);
+    admissionLock = run.catch(() => {});
+    return run;
+  }
+```
+
+Rename the current `ensureReady` to `ensureReadyInner` and expose a wrapper:
+
+```ts
+  function ensureReady(decl: ModelDeclaration, opts: EnsureOpts = {}): Promise<number> {
+    return serialize(() => ensureReadyInner(decl, opts));
+  }
+```
+
+(`return { ensureReady, unloadAll };` stays.)
+
+- [ ] **Step 4: Run tests + typecheck**
+
+Run: `bun test tests/resource/ && bun run typecheck`
+Expected: PASS (existing 25 model-manager tests still green; lock test passes).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/voice/transcribe.ts src/voice/stt-worker.mjs tests/voice/transcribe-select.test.ts
-git commit -m "feat(voice): node-subprocess transcriber + exec selector"
+git add src/resource/model-manager.ts tests/resource/model-manager-lock.test.ts
+git commit -m "fix(resource): serialize model-manager admission (concurrent ensureReady raced eviction/VRAM budget)"
 ```
 
 ---

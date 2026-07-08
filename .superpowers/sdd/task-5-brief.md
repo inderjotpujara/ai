@@ -1,83 +1,94 @@
-### Task 5: Telemetry — `voice.transcribe` span
+### Task 5: Top-level error boundary + persisted `error.json`
 
 **Files:**
-- Modify: `src/telemetry/spans.ts` (add `VOICE_*` attrs near the Slice-27 block ~line 119-135; add `withVoiceTranscribeSpan` near `withTranscribeSpan` ~line 773)
-- Test: `tests/voice/spans.test.ts`
+- Create: `src/errors/boundary.ts`
+- Create: `tests/errors/boundary.test.ts`
+- Modify: `src/cli/chat.ts:407-412` (replace `main().catch(console.error)`)
 
 **Interfaces:**
-- Consumes: `CaptureSource`, `VoiceOutcome` (Task 2).
-- Produces: `withVoiceTranscribeSpan(info, fn)` where `info: { model: string; source: CaptureSource }`; sets outcome/duration on the span at settle.
+- Consumes: the exported error classes from `src/core/errors.ts` (`ProviderError`, `ToolError`, `ResourceError`, `WorkflowError`, `CrewError`, `MemoryError`, `VerificationError`, `MaxStepsError`).
+- Produces:
+  - `explain(err: unknown): { title: string; hint: string }` — maps a `FrameworkError` subclass to an actionable message; unknown errors get a generic pair.
+  - `handleTopLevel(err: unknown, deps?: { runDir?: string; write?: (path: string, data: string) => void; log?: (s: string) => void }): number` — logs the explained error, persists `error.json` to `runDir` if provided, returns exit code `1`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/voice/spans.test.ts
-import { describe, expect, it } from 'bun:test';
-import { ATTR, withVoiceTranscribeSpan } from '../../src/telemetry/spans.ts';
-import { CaptureSource } from '../../src/voice/types.ts';
+// tests/errors/boundary.test.ts
+import { expect, test } from 'bun:test';
+import { explain, handleTopLevel } from '../../src/errors/boundary.ts';
+import { ResourceError, ProviderError } from '../../src/core/errors.ts';
 
-describe('withVoiceTranscribeSpan', () => {
-  it('exposes VOICE_* attribute keys', () => {
-    expect(ATTR.VOICE_STT_MODEL).toBe('voice.stt.model');
-    expect(ATTR.VOICE_CAPTURE_SOURCE).toBe('voice.capture.source');
-    expect(ATTR.VOICE_OUTCOME).toBe('voice.outcome');
-  });
-  it('runs the fn and returns its value', async () => {
-    const out = await withVoiceTranscribeSpan(
-      { model: 'tiny', source: CaptureSource.File },
-      async () => 'hi',
-    );
-    expect(out).toBe('hi');
-  });
+test('explain maps typed errors to actionable hints', () => {
+  expect(explain(new ResourceError('no fit')).title).toMatch(/memory budget|resource/i);
+  expect(explain(new ProviderError('ollama down')).hint).toMatch(/ollama|provider/i);
+  expect(explain(new Error('weird')).title).toBeDefined();
+});
+test('handleTopLevel persists error.json and returns exit 1', () => {
+  const writes: Record<string, string> = {};
+  const code = handleTopLevel(new ProviderError('x'), { runDir: '/tmp/r', write: (p, d) => { writes[p] = d; }, log: () => {} });
+  expect(code).toBe(1);
+  expect(JSON.parse(writes['/tmp/r/error.json'])).toMatchObject({ name: 'ProviderError' });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to verify failure**
 
-Run: `bun test tests/voice/spans.test.ts`
-Expected: FAIL — `ATTR.VOICE_STT_MODEL` undefined / `withVoiceTranscribeSpan` not exported.
+Run: `bun test tests/errors/boundary.test.ts`
+Expected: FAIL — module missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement**
 
-In `src/telemetry/spans.ts`, add to the frozen `ATTR` object (near the multimodal block):
 ```ts
-  VOICE_STT_MODEL: 'voice.stt.model',
-  VOICE_CAPTURE_SOURCE: 'voice.capture.source',
-  VOICE_AUDIO_SECONDS: 'voice.audio.seconds',
-  VOICE_DURATION_MS: 'voice.duration.ms',
-  VOICE_OUTCOME: 'voice.outcome',
-```
+// src/errors/boundary.ts
+import { join } from 'node:path';
+import { writeFileSync } from 'node:fs';
+import { ProviderError, ToolError, ResourceError, WorkflowError, CrewError, MemoryError, VerificationError, MaxStepsError } from '../core/errors.ts';
 
-Then add the helper (mirroring `withTranscribeSpan`), importing `CaptureSource` at top:
-```ts
-import { CaptureSource } from '../voice/types.ts';
+export function explain(err: unknown): { title: string; hint: string } {
+  if (err instanceof ResourceError) return { title: 'No model fits the memory budget', hint: 'Free memory, pick a smaller model, or run `bun run provision`.' };
+  if (err instanceof ProviderError) return { title: 'A model provider/runtime failed', hint: 'Check the provider (e.g. Ollama running: `bun run status`).' };
+  if (err instanceof ToolError) return { title: 'A tool failed', hint: 'Check the tool/MCP server; see the run trace with `bun run runs`.' };
+  if (err instanceof MemoryError) return { title: 'A memory/RAG error', hint: 'Check the space/embedder; a reindex may be required.' };
+  if (err instanceof VerificationError) return { title: 'Verification was misused', hint: 'Ensure a memory store is configured for --verify.' };
+  if (err instanceof WorkflowError || err instanceof CrewError) return { title: 'A workflow/crew error', hint: 'Inspect the failing step with `bun run runs`.' };
+  if (err instanceof MaxStepsError) return { title: 'The agent hit its step ceiling', hint: 'The task may need a crew/workflow, or a higher step budget.' };
+  return { title: 'Unexpected error', hint: 'See the stack below; re-run with AGENT_LOG_LEVEL=debug for detail.' };
+}
 
-export type VoiceSpanInfo = { model: string; source: CaptureSource };
-
-/** Wraps a voice transcription in a `voice.transcribe` span. */
-export function withVoiceTranscribeSpan<T>(
-  info: VoiceSpanInfo,
-  fn: (span: Span) => Promise<T>,
-): Promise<T> {
-  return inSpan('voice.transcribe', async (span) => {
-    span.setAttribute(ATTR.VOICE_STT_MODEL, info.model);
-    span.setAttribute(ATTR.VOICE_CAPTURE_SOURCE, info.source);
-    span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
-    return fn(span);
-  });
+export function handleTopLevel(err: unknown, deps: { runDir?: string; write?: (path: string, data: string) => void; log?: (s: string) => void } = {}): number {
+  const write = deps.write ?? ((p, d) => writeFileSync(p, d));
+  const log = deps.log ?? ((s) => process.stderr.write(`${s}\n`));
+  const { title, hint } = explain(err);
+  const name = err instanceof Error ? err.name : 'Error';
+  const message = err instanceof Error ? err.message : String(err);
+  log(`✖ ${title}: ${message}\n  → ${hint}`);
+  if (deps.runDir) {
+    try { write(join(deps.runDir, 'error.json'), JSON.stringify({ name, title, message, hint, at: new Date().toISOString() }, null, 2)); } catch { /* best-effort */ }
+  }
+  return 1;
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Wire into chat.ts + run tests**
 
-Run: `bun test tests/voice/spans.test.ts`
-Expected: PASS (2 tests). Also run `bun run typecheck` (the new import must not create a cycle — `types.ts` imports nothing from telemetry, so it's safe).
+Replace `src/cli/chat.ts:407-412` with:
+
+```ts
+if (import.meta.main) {
+  main().catch((err) => { process.exit(handleTopLevel(err)); });
+}
+```
+(import `handleTopLevel` from `../errors/boundary.ts`.)
+
+Run: `bun test tests/errors/ && bun run typecheck`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/telemetry/spans.ts tests/voice/spans.test.ts
-git commit -m "feat(voice): voice.transcribe span + VOICE_* attributes"
+git add src/errors/boundary.ts tests/errors/boundary.test.ts src/cli/chat.ts
+git commit -m "feat(errors): top-level boundary maps typed errors to actionable hints + persists error.json"
 ```
 
 ---

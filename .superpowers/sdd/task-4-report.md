@@ -1,19 +1,35 @@
-# Task 4 — Central child-process registry — report
+# Task 4 Report: App version + `--version` + `start` scaffold
 
-Status: DONE (controller-recovered after the implementer subagent was interrupted by an org spend-window limit; then review fixes applied).
+## Status
+✅ COMPLETED
 
-## Shipped
-- src/process/child-registry.ts — registerChild(handle):()=>void, killAllChildren(sig?:NodeJS.Signals), childCount(). Killable = { kill:(sig?:NodeJS.Signals)=>void } (narrowed from string so ChildHandle is assignable, no cast).
-- tests/process/child-registry.test.ts — asserts kill-drains-live-only + unregister-removes; beforeEach(killAllChildren) isolates it from the process-global singleton (order-independent across suites).
-- Wired register + unregister-on-exit into all four spawn sites: runtime/process-supervisor.ts (superviseServer), media/generate/adapter.ts (runOneShotJob), voice/cli-io.ts (mic), voice/transcribe.ts (defaultNodeSpawn).
-- docs/architecture.md — Process subsystem row (per-commit docs:check requires new subsystems documented).
+## Implementation Summary
 
-## Review fixes (Important x2)
-1. Voice kill-closures forward the signal: kill:(sig)=>child.kill(sig ?? 'SIGTERM') (was hardcoded SIGTERM; would ignore a future killAllChildren('SIGKILL') escalation).
-2. architecture.md Process row reworded to not reference lifecycle.ts (Task 5's file, not yet shipped).
+### Changes Made
+1. **Bumped version**: `package.json` `version` from `0.1.0` to `0.2.0`
+2. **Created `src/version.ts`**: Exports `APP_VERSION` by reading from `package.json` using JSON import with `with { type: 'json' }`
+3. **Created `src/cli/start.ts`**: CLI entry point that:
+   - Prints `APP_VERSION` on `--version` flag
+   - Otherwise prints scaffold message: `agent-framework {VERSION}\nWeb UI starts here in Slice 30b. For now use: bun run src/cli/chat.ts "<task>"\n`
+4. **Created `tests/version.test.ts`**: Test verifying `APP_VERSION` matches semver pattern `/^\d+\.\d+\.\d+/`
+5. **Added script**: `"start": "bun run src/cli/start.ts"` to `package.json`
 
-## Verification
-typecheck clean; lint clean on all touched files; bun test tests/process/ tests/voice/ tests/runtime/ tests/media/ -> 223 pass/0 fail (registry test passes alone and combined); docs:check green.
+### Verification Results
+- ✅ Version test passes: `bun test tests/version.test.ts` — 1 pass, 0 fail
+- ✅ `bun run start --version` outputs: `0.2.0`
+- ✅ Typecheck clean: `bun run typecheck` (JSON import with `with { type: 'json' }` typechecks correctly)
+- ✅ Lint clean: `bun run lint` (no new warnings introduced; pre-existing warnings from other files unrelated to this task)
+- ✅ Docs check passes: `bun run docs:check` (no subsystem directory, so no docs update needed; top-level `src/version.ts` is covered)
+
+## Commit
+- **Hash**: `28eb13b`
+- **Message**: `feat(cli): app version + --version + 'bun run start' scaffold (web server lands in 30b)`
+- **Staged files**: `package.json`, `src/cli/start.ts`, `src/version.ts`, `tests/version.test.ts`
 
 ## Notes
-Additive safety net; no spawn site's own kill/teardown removed. Lesson: each new-subsystem task must add its own architecture.md stub (per-commit docs:check gate).
+- JSON import attribute `with { type: 'json' }` typechecks under the repo's `tsconfig` without errors (Bun native support)
+- Formatter required wrapping the long stdout.write call to multi-line format — fixed before final lint
+- No console.log statements in new code; all output via `process.stdout.write` as per brief
+
+## Test Summary
+Version test validates APP_VERSION is a semver string (format: MAJOR.MINOR.PATCH). Test passes with value 0.2.0.

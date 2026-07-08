@@ -1,152 +1,83 @@
-### Task 6: In-process transcriber (sherpa-onnx addon)
+### Task 6: Usage/cost rollup + `bun run usage`
 
 **Files:**
-- Create: `src/voice/transcribe.ts`
-- Test: `tests/voice/transcribe.test.ts`
+- Create: `src/usage/aggregate.ts`
+- Create: `src/cli/usage.ts`
+- Create: `tests/usage/aggregate.test.ts`
+- Modify: `package.json` (`"usage": "bun run src/cli/usage.ts"`)
 
 **Interfaces:**
-- Consumes: `VoiceFrames`, `VoiceConfig`, `Transcriber`, `VoiceError` (Task 2); `withVoiceTranscribeSpan` (Task 5); `withWallClock` from `src/reliability/timeout.ts`; `CaptureSource`.
-- Produces: `createInProcessTranscriber(cfg, deps?): Transcriber`, where `deps.loadSherpa?: () => SherpaModule` is injectable for tests. `SherpaModule` shape: `{ OfflineRecognizer: new (config) => { createStream(): Stream; decode(s): void; getResult(s): { text: string }; }, ... }`.
+- Consumes: `readSpans` from `src/run/run-trace.ts` (returns `{ spans: SpanRecord[] }`); span attrs `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `span.durationMs`.
+- Produces:
+  - `aggregateSpans(spans: SpanRecord[]): UsageRow[]` where `UsageRow = { model: string; inputTokens: number; outputTokens: number; durationMs: number; calls: number }` (grouped by model; tolerant of missing token attrs — treats absent as 0).
+  - `renderUsage(rows: UsageRow[]): string`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/voice/transcribe.test.ts
-import { describe, expect, it } from 'bun:test';
-import { createInProcessTranscriber } from '../../src/voice/transcribe.ts';
-import { CaptureSource } from '../../src/voice/types.ts';
+// tests/usage/aggregate.test.ts
+import { expect, test } from 'bun:test';
+import { aggregateSpans } from '../../src/usage/aggregate.ts';
+import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
 
-function fakeSherpa(text: string) {
-  return () => ({
-    OfflineRecognizer: class {
-      createStream() {
-        return { free() {} };
-      }
-      acceptWaveform() {}
-      decode() {}
-      getResult() {
-        return { text };
-      }
-    },
-  });
+function span(model: string, inp?: number, out?: number, dur = 100): SpanRecord {
+  return { name: 'agent.delegation', kind: 0, traceId: 't', spanId: 's', parentSpanId: null,
+    startUnixNano: 0, endUnixNano: 0, durationMs: dur, status: { code: 0 },
+    attributes: { 'gen_ai.request.model': model, ...(inp !== undefined ? { 'gen_ai.usage.input_tokens': inp } : {}), ...(out !== undefined ? { 'gen_ai.usage.output_tokens': out } : {}) },
+    events: [] };
 }
-
-const cfg = { modelDir: '/m', ffmpeg: 'ffmpeg', timeoutMs: 5000 };
-
-describe('createInProcessTranscriber', () => {
-  it('returns recognized text for a buffer', async () => {
-    const t = createInProcessTranscriber(cfg, {
-      loadSherpa: fakeSherpa('hello world'),
-      source: CaptureSource.File,
-    });
-    const text = await t.transcribe({ samples: new Float32Array(16000), sampleRate: 16000 });
-    expect(text).toBe('hello world');
-    await t.close();
-  });
-  it('throws VoiceError with a hint on empty samples', async () => {
-    const t = createInProcessTranscriber(cfg, {
-      loadSherpa: fakeSherpa(''),
-      source: CaptureSource.Mic,
-    });
-    await expect(
-      t.transcribe({ samples: new Float32Array(0), sampleRate: 16000 }),
-    ).rejects.toThrow(/no audio/i);
-  });
+test('aggregates tokens + duration + calls by model, tolerating missing tokens', () => {
+  const rows = aggregateSpans([span('qwen2.5:14b', 100, 50), span('qwen2.5:14b'), span('qwen-fast', 10, 5, 40)]);
+  const big = rows.find((r) => r.model === 'qwen2.5:14b');
+  expect(big).toEqual({ model: 'qwen2.5:14b', inputTokens: 100, outputTokens: 50, durationMs: 200, calls: 2 });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to verify failure**
 
-Run: `bun test tests/voice/transcribe.test.ts`
-Expected: FAIL — module not found.
+Run: `bun test tests/usage/aggregate.test.ts`
+Expected: FAIL — module missing.
 
-- [ ] **Step 3: Write minimal implementation**
-
-> NOTE: the sherpa-onnx `OfflineRecognizer` config nesting (`modelConfig.moonshine.{preprocessor,encoder,uncachedDecoder,cachedDecoder}`, `modelConfig.tokens`) must be confirmed against the installed `node_modules/sherpa-onnx-node` examples at implementation time — set the paths from `cfg.modelDir`.
+- [ ] **Step 3: Implement**
 
 ```ts
-// src/voice/transcribe.ts
-import { join } from 'node:path';
-import { withWallClock } from '../reliability/timeout.ts';
-import { withVoiceTranscribeSpan } from '../telemetry/spans.ts';
-import { CaptureSource, type Transcriber, type VoiceConfig, VoiceError, type VoiceFrames } from './types.ts';
+// src/usage/aggregate.ts
+import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
+export type UsageRow = { model: string; inputTokens: number; outputTokens: number; durationMs: number; calls: number };
 
-/** Sets the dyld path the addon needs, then loads it (default loader). */
-function defaultLoadSherpa(): unknown {
-  const root = join(process.cwd(), 'node_modules');
-  process.env.DYLD_LIBRARY_PATH = [
-    join(root, 'sherpa-onnx-node'),
-    join(root, 'sherpa-onnx-darwin-arm64'),
-    process.env.DYLD_LIBRARY_PATH ?? '',
-  ].join(':');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  return require('sherpa-onnx-node');
+export function aggregateSpans(spans: SpanRecord[]): UsageRow[] {
+  const by = new Map<string, UsageRow>();
+  for (const s of spans) {
+    const model = s.attributes['gen_ai.request.model'] as string | undefined;
+    if (!model) continue;
+    const row = by.get(model) ?? { model, inputTokens: 0, outputTokens: 0, durationMs: 0, calls: 0 };
+    row.inputTokens += Number(s.attributes['gen_ai.usage.input_tokens'] ?? 0);
+    row.outputTokens += Number(s.attributes['gen_ai.usage.output_tokens'] ?? 0);
+    row.durationMs += s.durationMs;
+    row.calls += 1;
+    by.set(model, row);
+  }
+  return [...by.values()].sort((a, b) => b.durationMs - a.durationMs);
 }
-
-export type InProcessDeps = {
-  loadSherpa?: () => unknown;
-  source?: CaptureSource;
-};
-
-/** Builds an OfflineRecognizer config from a moonshine model directory. */
-function moonshineConfig(modelDir: string) {
-  return {
-    modelConfig: {
-      moonshine: {
-        preprocessor: join(modelDir, 'preprocess.onnx'),
-        encoder: join(modelDir, 'encode.int8.onnx'),
-        uncachedDecoder: join(modelDir, 'uncached_decode.int8.onnx'),
-        cachedDecoder: join(modelDir, 'cached_decode.int8.onnx'),
-      },
-      tokens: join(modelDir, 'tokens.txt'),
-      numThreads: 2,
-      provider: 'cpu',
-    },
-  };
-}
-
-export function createInProcessTranscriber(cfg: VoiceConfig, deps: InProcessDeps = {}): Transcriber {
-  const load = deps.loadSherpa ?? defaultLoadSherpa;
-  const source = deps.source ?? CaptureSource.Mic;
-  // biome-ignore lint/suspicious/noExplicitAny: addon has no types
-  const sherpa = load() as any;
-  const recognizer = new sherpa.OfflineRecognizer(moonshineConfig(cfg.modelDir));
-
-  return {
-    async transcribe(frames: VoiceFrames): Promise<string> {
-      if (frames.samples.length === 0) {
-        throw new VoiceError('no audio captured', 'check the microphone / input file');
-      }
-      return withVoiceTranscribeSpan({ model: cfg.modelDir, source }, () =>
-        withWallClock(cfg.timeoutMs, async () => {
-          const stream = recognizer.createStream();
-          try {
-            stream.acceptWaveform({ sampleRate: frames.sampleRate, samples: frames.samples });
-            recognizer.decode(stream);
-            return String(recognizer.getResult(stream).text ?? '').trim();
-          } finally {
-            stream.free?.();
-          }
-        }),
-      );
-    },
-    async close() {
-      recognizer.free?.();
-    },
-  };
+export function renderUsage(rows: UsageRow[]): string {
+  const head = 'MODEL                         IN      OUT     MS      CALLS';
+  const body = rows.map((r) => `${r.model.padEnd(28)}  ${String(r.inputTokens).padEnd(6)}  ${String(r.outputTokens).padEnd(6)}  ${String(r.durationMs).padEnd(6)}  ${r.calls}`);
+  return [head, ...body].join('\n');
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+`src/cli/usage.ts`: `readdir(AGENT_RUNS_ROOT)`, `readSpans` each, flat-map, `aggregateSpans`, print `renderUsage`. Add the `usage` script.
 
-Run: `bun test tests/voice/transcribe.test.ts`
-Expected: PASS (2 tests).
+- [ ] **Step 4: Run tests + typecheck**
+
+Run: `bun test tests/usage/ && bun run typecheck`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/voice/transcribe.ts tests/voice/transcribe.test.ts
-git commit -m "feat(voice): in-process sherpa-onnx transcriber (buffer to text)"
+git add src/usage/aggregate.ts src/cli/usage.ts tests/usage/aggregate.test.ts package.json
+git commit -m "feat(usage): aggregate token/latency by model + 'bun run usage' (from existing span data)"
 ```
 
 ---
