@@ -11,6 +11,7 @@ import { RuntimeKind } from '../core/types.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
+import { handleTopLevel } from '../errors/boundary.ts';
 import { createLogger } from '../log/logger.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
@@ -418,7 +419,6 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
-    console.error(err);
-    process.exit(1);
+    process.exit(handleTopLevel(err));
   });
 }
