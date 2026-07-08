@@ -1,6 +1,7 @@
 /**
  * Top-level error boundary — maps typed framework errors to actionable
- * user-facing messages and persists an `error.json` per run.
+ * user-facing messages and, when given a run dir, persists an `error.json`
+ * (the top-level chat catch does not yet thread one — wired in Slice 30b).
  *
  * Consumed by `cli/chat.ts`'s `main().catch(...)` in place of a bare
  * `console.error` so a run's failure is both explained to the user and
