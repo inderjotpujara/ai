@@ -21,6 +21,9 @@ export class SqliteStore {
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
+    this.db.run('PRAGMA journal_mode = WAL');
+    this.db.run('PRAGMA busy_timeout = 5000');
+    this.db.run('PRAGMA foreign_keys = ON');
     this.db.run(`CREATE TABLE IF NOT EXISTS spaces (
       name TEXT PRIMARY KEY, embed_model TEXT NOT NULL, embed_dim INTEGER NOT NULL,
       chunk_cap_tokens INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
