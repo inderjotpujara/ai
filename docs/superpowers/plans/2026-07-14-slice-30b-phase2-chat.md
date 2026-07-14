@@ -32,6 +32,7 @@ Chat routes through the **super-agent/orchestrator**, which delegates to special
 - **Code style:** `type` over `interface`; **`enum` over string-literal unions** (string enums only); early returns; small focused files; descriptive names.
 - **Degrade, never crash:** typed errors; every endpoint emits a typed SSE error data-part, never a silent drop; dismissed consent prompts resolve to the fail-safe default (decline).
 - **Per-task gate (SDD lesson):** the implementer runs `bun run typecheck` **and** `bun run lint:file` **and** the focused tests CLEAN before commit (`bun test` type-checks nothing; pre-commit is docs:check only). Root tests run from repo root; web tests run in `web/` (`cd web && bunx vitest run ...`).
+- **Test runner by location (do NOT mix):** root tests (`tests/**`) import from **`bun:test`** and run under `bun test` — `vitest` is a `web/`-only dev tool and must NOT be added to root `package.json`/`tsconfig.json`. `bun:test` provides `describe/it/test/expect/beforeEach/afterEach/mock/spyOn` (there is no `vi`; use `mock`/`spyOn`). Web tests (`web/src/**`) import from `vitest`. Any code snippet in a task below that shows a root test importing from `'vitest'` is a typo — use `'bun:test'`.
 - **Docs hard-line:** all 4 living surfaces updated at the phase close (Task 15), not per micro-task; regenerate-Artifact reminder noted.
 - **Telemetry to emit:** `ui.stream` span per SSE session (chunks/bytes/outcome/resume); the existing `server.request` span stays for the short request; delegation/model spans already cover the events-sink signals.
 
@@ -75,7 +76,7 @@ Chat routes through the **super-agent/orchestrator**, which delegates to special
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { StatusEventType } from '../../src/contracts/index.ts';
 import { type EventSink, noopEventSink } from '../../src/core/events.ts';
 
@@ -133,7 +134,7 @@ git commit -m "feat(core): EventSink type + no-op default for run-status events"
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { StatusEventType } from '../../src/contracts/index.ts';
 import type { StatusEvent } from '../../src/contracts/index.ts';
 import { runGuardedAgent } from '../../src/core/delegate.ts';
@@ -220,7 +221,7 @@ git add -A && git commit -m "feat(core): thread optional events sink through del
 - [ ] **Step 1: Write the failing test** — construct `createSelectHook` with a fake registry + `events` spy, invoke the returned hook for one agent, assert a `data-model-select` event with the model id fired.
 
 ```ts
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { StatusEventType } from '../../src/contracts/index.ts';
 // build deps with a stub ensureReady/listLoaded/registry that returns a known declaration
 // invoke hook(agent) and assert events spy saw { type:'data-model-select', agent, model }
@@ -250,7 +251,7 @@ import { StatusEventType } from '../../src/contracts/index.ts';
 - [ ] **Step 1: Write the failing test** — assert that when `stream` is provided, `runAgent` invokes the sink exactly once with a `ReadableStream` and still resolves `{text}`. Use a fake model via the AI SDK `MockLanguageModelV2` streaming fixture (see `scripts/spikes/stream-chat/` for the shape) or a stub `LanguageModel` whose `doStream` yields two text deltas.
 
 ```ts
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { runAgent } from '../../src/core/agent.ts';
 // use a streaming mock model that yields "Hel","lo"; assert sink called once with a ReadableStream and text === "Hello".
 ```
