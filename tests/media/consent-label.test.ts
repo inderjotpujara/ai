@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MediaVenv } from '../../src/media/cmd-resolve.ts';
 import {
   affirmCloneConsent,
   contentPolicyLabel,
@@ -9,9 +10,32 @@ import {
   LEGAL_NOTE,
   requiresCloneConsent,
 } from '../../src/media/consent.ts';
+import type { GenModelCandidate } from '../../src/media/generate/catalog.ts';
+import { GenEngine } from '../../src/media/generate/catalog.ts';
 import { createGenerateTools } from '../../src/media/generate/tools.ts';
 import { createMediaStore } from '../../src/media/store.ts';
+import { ExecMode, MediaKind } from '../../src/media/types.ts';
 import type { SpawnFn } from '../../src/runtime/process-supervisor.ts';
+
+/** A fit-selected audio candidate fixture for a given `repo` — mirrors
+ *  `tests/media/generate-tools.test.ts`'s `fakeCandidate` seam (the tools
+ *  now fit-select a model before running, so any test exercising real
+ *  generation must inject `selectModel` instead of depending on the live
+ *  hardware/installed-model state `selectGenModel` reads). `repo` is
+ *  parameterized here (unlike the sibling's fixed `'fake/repo'`) because
+ *  these tests assert on `requiresCloneConsent`, which classifies by repo
+ *  name: a `csm` repo requires clone consent, the Kokoro repo does not. */
+function fakeAudioCandidate(repo: string): GenModelCandidate {
+  return {
+    kind: MediaKind.Audio,
+    repo,
+    engine: GenEngine.MlxAudio,
+    venv: MediaVenv.Media,
+    execMode: ExecMode.OneShot,
+    footprint: { approxParamsBillions: 1, bytesPerWeight: 1 },
+    label: 'fake audio candidate',
+  };
+}
 
 test('contentPolicyLabel maps uncensored/default', () => {
   expect(contentPolicyLabel(true)).toBe('uncensored');
@@ -68,6 +92,7 @@ test('generate_speech with a clone-consent model does not generate when consent 
   try {
     const tools = createGenerateTools(store, {
       spawn,
+      selectModel: async () => fakeAudioCandidate('mlx-community/csm-1b'),
       askCloneConsent: async () => false,
     });
     const result = await tools.generate_speech?.execute?.(
@@ -96,6 +121,7 @@ test('generate_speech with a clone-consent model generates once consent is grant
   try {
     const tools = createGenerateTools(store, {
       spawn,
+      selectModel: async () => fakeAudioCandidate('mlx-community/csm-1b'),
       askCloneConsent: async () => true,
     });
     const result = await tools.generate_speech?.execute?.(
@@ -120,6 +146,8 @@ test('generate_speech with the default Kokoro model needs no consent prompt', as
   };
   const tools = createGenerateTools(store, {
     spawn,
+    selectModel: async () =>
+      fakeAudioCandidate('mlx-community/Kokoro-82M-bf16'),
     askCloneConsent: async () => {
       throw new Error('should not be called for Kokoro');
     },
