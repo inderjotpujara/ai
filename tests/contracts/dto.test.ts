@@ -49,38 +49,40 @@ test('SpanDTO survives a JSON serialize/parse round-trip with optionals present'
   expect(SpanDtoSchema.parse(wire)).toEqual(rich);
 });
 
+const validRun = {
+  id: 'run-123',
+  owner: 'local',
+  origin: RunOrigin.Manual,
+  lifecycle: RunLifecycle.Done,
+  startMs: 1000,
+  durationMs: 50,
+  outcome: 'answer',
+  models: ['qwen3.5:4b'],
+  degraded: true,
+  degrades: [
+    {
+      kind: DegradeKind.Retried,
+      label: 'retried',
+      subject: 'ollama',
+      reason: 'timeout',
+      attempts: 2,
+    },
+  ],
+  malformedSpans: 0,
+  spanCount: 1,
+  roots: ['s1'],
+  spans: [minimalSpan],
+  artifacts: [{ name: 'answer.txt', bytes: 12, kind: ArtifactKind.Answer }],
+};
+
 test('RunDTO parses with reserved owner + lifecycle + origin and nested spans', () => {
-  const run = {
-    id: 'run-123',
-    owner: 'local',
-    origin: RunOrigin.Manual,
-    lifecycle: RunLifecycle.Done,
-    startMs: 1000,
-    durationMs: 50,
-    outcome: 'answer',
-    models: ['qwen3.5:4b'],
-    degraded: true,
-    degrades: [
-      {
-        kind: DegradeKind.Retried,
-        label: 'retried',
-        subject: 'ollama',
-        reason: 'timeout',
-        attempts: 2,
-      },
-    ],
-    malformedSpans: 0,
-    spanCount: 1,
-    roots: ['s1'],
-    spans: [minimalSpan],
-    artifacts: [{ name: 'answer.txt', bytes: 12, kind: ArtifactKind.Answer }],
-  };
-  const parsed = RunDtoSchema.parse(run);
+  const parsed = RunDtoSchema.parse(validRun);
   expect(parsed.owner).toBe('local');
   expect(parsed.tokens).toBeUndefined();
   expect(parsed.degrades[0]?.kind).toBe(DegradeKind.Retried);
 });
 
 test('RunDTO rejects an unknown lifecycle value', () => {
-  expect(() => RunDtoSchema.parse({ ...{}, lifecycle: 'exploded' })).toThrow();
+  const invalidRun = { ...validRun, lifecycle: 'exploded' };
+  expect(() => RunDtoSchema.parse(invalidRun)).toThrow();
 });

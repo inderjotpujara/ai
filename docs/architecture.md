@@ -3078,9 +3078,12 @@ no AI-SDK types, per Slice-23 forward-compat).
 **Mechanism.** `enums.ts` holds the finite named sets (`RunOrigin`,
 `RunLifecycle`, `SpanStatus`, `ArtifactKind`, `DegradeKind`, `ChatRole`,
 `ModelLoadAction`, `StatusEventType`). `dto.ts` defines the read-model DTOs
-(`RunDTO`/`SpanDTO`/`DegradeDTO`/`ChatMessageDTO`) with forward-compat fields
-optional (reserved `owner`, run `lifecycle`/`origin`, span `degraded`/`node`,
-token roll-ups). `events.ts` defines the transient-SSE `StatusEvent`
+(`RunDTO`/`SpanDTO`/`DegradeDTO`/`ChatMessageDTO`). The forward-compat fields
+reserved for later slices are already **present and required** today (`owner`
+constant `"local"`; run `lifecycle`/`origin`; run/span `degraded`) — forward
+compat means their non-default *values* only start arriving in later slices
+(e.g. real ownership in Slices 24/33). Only `node` (span location, Slices
+31/38) and the token roll-ups are `.optional()`. `events.ts` defines the transient-SSE `StatusEvent`
 discriminated union (`data-run-start` … `data-confirm` … `data-run-end`) —
 OUR types, never re-exported AI-SDK `UIMessage` parts. `requests.ts` defines the
 inbound bodies the server validates before any engine call (`ChatRequest` over a

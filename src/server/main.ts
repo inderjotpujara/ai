@@ -8,10 +8,13 @@ import { mintSessionToken } from './security/token.ts';
  * rather than a network round-trip. Phase 1b replaces this with the Vite build.
  */
 export function renderIndexHtml(token: string): string {
+  // JSON.stringify does not escape `</`, so a token value could break out of
+  // the <script> tag; escape `<` to a unicode escape before interpolating.
+  const safeToken = JSON.stringify(token).replace(/</g, '\\u003c');
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<title>AI Local Agent</title>' +
-    `<script>window.__AGENT_TOKEN__=${JSON.stringify(token)};</script>` +
+    `<script>window.__AGENT_TOKEN__=${safeToken};</script>` +
     '</head><body><div id="root"></div></body></html>'
   );
 }
