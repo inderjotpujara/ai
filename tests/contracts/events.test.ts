@@ -23,6 +23,7 @@ test('parses a data-model-load event with an enum action', () => {
     model: 'qwen3.5:4b',
     action: ModelLoadAction.Warm,
   });
+  expect(e.type as string).toBe(StatusEventType.ModelLoad as string);
   if (e.type === StatusEventType.ModelLoad) {
     expect(e.action as string).toBe('warm');
   }
@@ -35,6 +36,7 @@ test('parses the bidirectional data-confirm ask', () => {
     kind: 'mcp-mount',
     question: 'Mount github MCP server?',
   });
+  expect(e.type as string).toBe(StatusEventType.Confirm as string);
   if (e.type === StatusEventType.Confirm) {
     expect(e.promptId).toBe('cap-abc123');
   }
