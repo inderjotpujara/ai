@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "serve": "bash scripts/serve.sh",
+    "web": "bun run src/server/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:file": "bun test",
