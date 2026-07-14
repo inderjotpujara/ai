@@ -7,5 +7,10 @@
   "javascript": {
     "formatter": { "quoteStyle": "single", "semicolons": "always" }
   },
-  "assist": { "actions": { "source": { "organizeImports": "on" } } }
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "css": {
+    "parser": { "cssModules": false, "tailwindDirectives": true },
+    "linter": { "enabled": false },
+    "formatter": { "enabled": false }
+  }
 }
