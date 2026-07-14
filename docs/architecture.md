@@ -715,7 +715,7 @@ sequenceDiagram
         Orch->>Consent: port(ask, emit) — mints promptId (randomBytes(32)), emits data-confirm, awaits
         Consent-->>Browser: data-confirm {promptId, kind, question} (transient data-part)
         Browser->>App: POST /api/runs/:id/respond {promptId, value}
-        App->>Consent: resolve(promptId, value) — settles the pending promise (fail-safe decline if never answered)
+        App->>Consent: resolve(promptId, value) — settles the pending promise (an unanswered promptId stays pending forever, no server-side auto-decline; a client dismiss sends an explicit value:false)
     end
     Chat-->>Browser: SSE stream: data-* status parts (transient) + orchestrator text-delta parts
     Browser->>Browser: useStatusEvents folds data-* into {agent, model, phase, degraded} — LiveRail
@@ -3396,8 +3396,12 @@ CLI-first engine, not a fork of it:
   message"), **edit+resend** (truncate `messages` at the edited index, then
   resend as a fresh turn), **👍/👎** (`POST /api/feedback`), and an inline
   **data-confirm** prompt (`ConfirmPrompt`, answers via
-  `createSseTransport().respond(...)`; dismissing it clears client state only
-  — the server's own fail-safe decline covers an unanswered prompt). The
+  `createSseTransport().respond(...)`; dismissing it clears client state AND
+  posts an explicit decline (`value:false`) — there is no server-side
+  auto-decline, an unanswered prompt would otherwise stay pending forever.
+  Note the consent channel has no engine consumer this phase — it's a
+  built-but-unconsumed seam; real consumers (MCP mount, provision, build,
+  gen-download, mic) wire in as their features land in Phases 5/7). The
   composer supports **drag-drop and paste-image** attachment: each image
   uploads to the confined `/api/upload` endpoint, becomes a chip, and its
   `uploadId` rides the next `sendMessage`'s request body.

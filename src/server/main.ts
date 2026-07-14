@@ -1,3 +1,4 @@
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
@@ -54,6 +55,19 @@ export function startWebServer(opts: StartOptions = {}): {
   // perimeter/health tests stay Ollama-free.
   const runChatTurn = createRealRunChatTurn(createLazyEngine(runsRoot));
   const consent = createConsentRegistry();
+  // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
+  // across the per-request `/api/chat` run lifecycle since the upload and
+  // the chat turn that references it are two separate HTTP requests.
+  const uploadsDir = join(runsRoot, '_uploads');
+  // Create it up front — before any upload ever happens — so the READ side
+  // (`handleChat`'s `confineToDir(uploadId, uploadsDir)`) never hits a
+  // nonexistent ROOT. `confineToDir` calls `realpathSync` on the root itself;
+  // if the dir doesn't exist yet, that throws a raw `ENOENT` (not
+  // `MediaPathError`), which `handleChat` doesn't catch, producing a 500
+  // instead of the intended 400 for a bogus uploadId. `handleUpload` also
+  // mkdirs this dir before writing (the write path was already safe); this
+  // covers the read path too.
+  mkdirSync(uploadsDir, { recursive: true });
   const deps: ServerDeps = {
     token,
     policy,
@@ -62,10 +76,7 @@ export function startWebServer(opts: StartOptions = {}): {
     indexHtml: renderIndexHtml(token),
     runChatTurn,
     consent,
-    // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
-    // across the per-request `/api/chat` run lifecycle since the upload and
-    // the chat turn that references it are two separate HTTP requests.
-    uploadsDir: join(runsRoot, '_uploads'),
+    uploadsDir,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

@@ -110,6 +110,19 @@ export async function handleChat(
             stream: streamSink,
             signal: req.signal,
           });
+          // For 'answer', the text already streamed token-by-token via
+          // `streamSink`/`writer.merge` above — nothing more to write. For
+          // 'gap'/'resource', the orchestrator only SYNTHESIZES `result.message`
+          // AFTER generation finishes (see `runOrchestrator`), so nothing has
+          // reached the stream yet; without this, the browser renders an empty
+          // assistant bubble (the CLI doesn't have this gap — it prints
+          // `result.message` directly). Write it as a one-shot text part.
+          if (result.kind !== 'answer') {
+            const id = `outcome-${result.kind}`;
+            writer.write({ type: 'text-start', id });
+            writer.write({ type: 'text-delta', id, delta: result.message });
+            writer.write({ type: 'text-end', id });
+          }
           rec.outcome(result.kind);
         } catch (err) {
           rec.outcome('error');

@@ -71,6 +71,37 @@ describe('useStatusEvents', () => {
     expect(result.current.view.degraded).toBe(true);
   });
 
+  it('resets degraded/agent/model on RunStart (regression: a prior-turn degrade must not linger onto the next turn)', () => {
+    const { result } = renderHook(() => useStatusEvents());
+
+    act(() => {
+      result.current.handleData({
+        type: 'data-model-select',
+        data: {
+          type: 'data-model-select',
+          agent: 'file_qa',
+          model: 'qwen3:4b',
+          degraded: true,
+        },
+      });
+    });
+    expect(result.current.view.degraded).toBe(true);
+    expect(result.current.view.agent).toBeUndefined();
+    expect(result.current.view.model).toBe('qwen3:4b');
+
+    act(() => {
+      result.current.handleData({
+        type: 'data-run-start',
+        data: { type: 'data-run-start', runId: 'run-2' },
+      });
+    });
+
+    expect(result.current.view).toEqual({
+      phase: RailPhase.Starting,
+      degraded: false,
+    });
+  });
+
   it('ignores parts whose data.type is not a StatusEventType', () => {
     const { result } = renderHook(() => useStatusEvents());
 

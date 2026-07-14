@@ -36,7 +36,13 @@ export type PendingConfirm = {
 function foldEvent(view: RailView, event: StatusEvent): RailView {
   switch (event.type) {
     case StatusEventType.RunStart:
-      return { ...view, phase: RailPhase.Starting };
+      // A new run starting means the PRIOR turn ended — reset to a fresh
+      // view rather than spreading `view`, so a degrade/agent/model from the
+      // previous turn doesn't linger onto this one (e.g. a turn that
+      // degraded would otherwise show the degraded badge on every later
+      // turn). A Degrade event racing in AFTER this reset still re-sets the
+      // flag correctly (see the Degrade case below).
+      return { phase: RailPhase.Starting, degraded: false };
     case StatusEventType.Provision:
     case StatusEventType.McpMount:
       // Keep it simple: treat as an early-lifecycle signal unless we're

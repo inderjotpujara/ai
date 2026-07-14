@@ -93,6 +93,37 @@ test('the ui.stream span records the real outcome + chunk count after the awaite
   await provider.shutdown();
 });
 
+test('renders a "gap" outcome message on the stream (regression: the orchestrator synthesizes result.message AFTER generation — nothing streams it otherwise, so the browser shows an empty bubble)', async () => {
+  const gapRunChatTurn: RunChatTurn = async () => ({
+    kind: 'gap',
+    missingCapability: 'video-editing',
+    message: "I don't have a capability to handle this yet: video-editing.",
+  });
+
+  const res = await handleChat(chatRequest(validBody), {
+    runChatTurn: gapRunChatTurn,
+  });
+
+  const body = await res.text();
+  expect(body).toContain(
+    "I don't have a capability to handle this yet: video-editing.",
+  );
+});
+
+test('renders a "resource" outcome message on the stream', async () => {
+  const resourceRunChatTurn: RunChatTurn = async () => ({
+    kind: 'resource',
+    message: 'model failed to load: out of memory',
+  });
+
+  const res = await handleChat(chatRequest(validBody), {
+    runChatTurn: resourceRunChatTurn,
+  });
+
+  const body = await res.text();
+  expect(body).toContain('model failed to load: out of memory');
+});
+
 test('rejects a malformed body (missing messages) with 400', async () => {
   const res = await handleChat(
     new Request('http://localhost/api/chat', {
