@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 
 const TOKEN = 'a'.repeat(64);
@@ -57,4 +60,79 @@ test('an unknown /api route returns a JSON 404 (never throws)', async () => {
   });
   expect(res.status).toBe(404);
   expect(await res.json()).toEqual({ error: 'not found' });
+});
+
+test('an unexpected throw outside /api handling degrades to a JSON 500 (top-level catch-all)', async () => {
+  // `indexHtml` is typed as a plain string, but the top-level try/catch must
+  // also cover non-/api failures — a throwing getter forces exactly that path
+  // (serveStatic reads deps.indexHtml for GET /) without touching /api at all.
+  const throwingPolicy = { port: 0, allowedOrigins: [] as string[] };
+  const throwingDeps: ServerDeps = {
+    token: TOKEN,
+    policy: throwingPolicy,
+    recordIo: false,
+    get indexHtml(): string {
+      throw new Error('boom: index render failed');
+    },
+  };
+  const throwingServer = Bun.serve({
+    port: 0,
+    fetch: buildFetch(throwingDeps),
+    idleTimeout: 0,
+  });
+  try {
+    const { port } = throwingServer;
+    if (port === undefined) throw new Error('server did not bind a port');
+    throwingPolicy.port = port;
+    const res = await fetch(`http://localhost:${port}/`);
+    expect(res.status).toBe(500);
+    expect(res.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    expect(res.headers.get('cross-origin-embedder-policy')).toBe(
+      'require-corp',
+    );
+    const body = (await res.json()) as { error: string };
+    expect(typeof body.error).toBe('string');
+    expect(body.error.length).toBeGreaterThan(0);
+  } finally {
+    throwingServer.stop(true);
+  }
+});
+
+test('serveStatic confines staticDir: a normal file serves, a traversal/absolute-escape 404s', async () => {
+  const staticDir = mkdtempSync(join(tmpdir(), 'app-static-'));
+  writeFileSync(join(staticDir, 'hello.txt'), 'hi there');
+  const confinedPolicy = { port: 0, allowedOrigins: [] as string[] };
+  const confinedDeps: ServerDeps = {
+    token: TOKEN,
+    policy: confinedPolicy,
+    staticDir,
+    recordIo: false,
+    indexHtml: '<!doctype html><title>t</title>',
+  };
+  const confinedServer = Bun.serve({
+    port: 0,
+    fetch: buildFetch(confinedDeps),
+    idleTimeout: 0,
+  });
+  try {
+    const { port } = confinedServer;
+    if (port === undefined) throw new Error('server did not bind a port');
+    confinedPolicy.port = port;
+    const confinedBase = `http://localhost:${port}`;
+
+    const ok = await fetch(`${confinedBase}/hello.txt`);
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toBe('hi there');
+
+    const traversal = await fetch(`${confinedBase}/../../../../etc/passwd`);
+    expect(traversal.status).toBe(404);
+    expect(await traversal.text()).not.toContain('root:');
+
+    const encodedTraversal = await fetch(
+      `${confinedBase}/%2e%2e/%2e%2e/etc/passwd`,
+    );
+    expect(encodedTraversal.status).toBe(404);
+  } finally {
+    confinedServer.stop(true);
+  }
 });

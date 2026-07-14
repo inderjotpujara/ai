@@ -1,6 +1,6 @@
-import { join } from 'node:path';
 import { explain } from '../errors/boundary.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
+import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
 
@@ -38,15 +38,22 @@ export function buildFetch(
 ): (req: Request) => Promise<Response> {
   const guard = createTokenGuard(deps.token);
   return async (req) => {
-    const blocked = enforcePerimeter(req, deps.policy);
-    if (blocked) return blocked;
+    // Top-level backstop: ANY throw anywhere below (perimeter, static serving,
+    // URL parsing, ...) degrades to a JSON 500, never crashes the process.
+    // The /api-level try/catch in handleApi is the fast path; this is the net.
+    try {
+      const blocked = enforcePerimeter(req, deps.policy);
+      if (blocked) return blocked;
 
-    const url = new URL(req.url);
-    if (url.pathname.startsWith('/api')) {
-      if (!guard.verify(req)) return json({ error: 'unauthorized' }, 401);
-      return handleApi(req, url);
+      const url = new URL(req.url);
+      if (url.pathname.startsWith('/api')) {
+        if (!guard.verify(req)) return json({ error: 'unauthorized' }, 401);
+        return await handleApi(req, url);
+      }
+      return await serveStatic(url, deps);
+    } catch (err) {
+      return json({ error: explain(err).title }, 500);
     }
-    return serveStatic(url, deps);
   };
 }
 
@@ -80,11 +87,24 @@ async function serveStatic(url: URL, deps: ServerDeps): Promise<Response> {
       },
     });
   }
-  // Reject traversal before any filesystem touch.
-  if (deps.staticDir && !url.pathname.includes('..')) {
-    const file = Bun.file(join(deps.staticDir, url.pathname));
-    if (await file.exists()) {
-      return new Response(file, { headers: { ...ISOLATION_HEADERS } });
+  if (deps.staticDir) {
+    try {
+      // Strip the leading slash(es): confineToDir's resolve(root, candidate)
+      // treats a leading-slash candidate as its OWN absolute path (bypassing
+      // root entirely), so a bare pathname like "/hello.txt" must become the
+      // relative "hello.txt" to join under staticDir. confineToDir then
+      // resolves symlinks/`..`/absolute-escape candidates and throws
+      // MediaPathError for anything outside staticDir — including a
+      // merely-missing file, which is fine: both fall through to the plain
+      // 404 below without leaking which case it was.
+      const candidate = url.pathname.replace(/^\/+/, '');
+      const real = confineToDir(candidate, deps.staticDir);
+      const file = Bun.file(real);
+      if (await file.exists()) {
+        return new Response(file, { headers: { ...ISOLATION_HEADERS } });
+      }
+    } catch (err) {
+      if (!(err instanceof MediaPathError)) throw err;
     }
   }
   return new Response('not found', {

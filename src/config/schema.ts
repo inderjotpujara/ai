@@ -486,7 +486,7 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     env: 'AGENT_WEB_RECORD_IO',
     kind: 'boolean',
     def: false,
-    doc: "Record prompt/response IO into spans for SERVED (web) runs; default OFF, only '1' enables (D17). Distinct from AGENT_TELEMETRY_RECORD_IO (CLI, default on).",
+    doc: "Record prompt/response IO into spans for SERVED (web) runs; default OFF for served/web mode per the Slice-30b web-perimeter hardening; only '1' enables. Distinct from AGENT_TELEMETRY_RECORD_IO (CLI, default on).",
     strict: true,
   },
 ];

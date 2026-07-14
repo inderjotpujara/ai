@@ -1,7 +1,12 @@
 import { expect, test } from 'bun:test';
-import { RunDtoSchema, SpanDtoSchema } from '../../src/contracts/dto.ts';
+import {
+  ChatMessageDtoSchema,
+  RunDtoSchema,
+  SpanDtoSchema,
+} from '../../src/contracts/dto.ts';
 import {
   ArtifactKind,
+  ChatRole,
   DegradeKind,
   RunLifecycle,
   RunOrigin,
@@ -85,4 +90,38 @@ test('RunDTO parses with reserved owner + lifecycle + origin and nested spans', 
 test('RunDTO rejects an unknown lifecycle value', () => {
   const invalidRun = { ...validRun, lifecycle: 'exploded' };
   expect(() => RunDtoSchema.parse(invalidRun)).toThrow();
+});
+
+test('ChatMessageDTO parses a valid message with the optional degraded flag', () => {
+  const parsed = ChatMessageDtoSchema.parse({
+    id: 'm1',
+    role: ChatRole.Assistant,
+    text: 'hello there',
+    degraded: true,
+  });
+  expect(parsed.id).toBe('m1');
+  expect(parsed.role).toBe(ChatRole.Assistant);
+  expect(parsed.text).toBe('hello there');
+  expect(parsed.degraded).toBe(true);
+});
+
+test('ChatMessageDTO parses with degraded absent (forward-compat optional)', () => {
+  const parsed = ChatMessageDtoSchema.parse({
+    id: 'm2',
+    role: ChatRole.User,
+    text: 'hi',
+  });
+  expect(parsed.degraded).toBeUndefined();
+});
+
+test('ChatMessageDTO rejects a message missing text', () => {
+  expect(() =>
+    ChatMessageDtoSchema.parse({ id: 'm3', role: ChatRole.User }),
+  ).toThrow();
+});
+
+test('ChatMessageDTO rejects an unknown role', () => {
+  expect(() =>
+    ChatMessageDtoSchema.parse({ id: 'm4', role: 'narrator', text: 'x' }),
+  ).toThrow();
 });
