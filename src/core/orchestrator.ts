@@ -1,6 +1,7 @@
 import type { LanguageModel, ToolSet } from 'ai';
 import type { MediaStore } from '../media/store.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
+import type { StreamSink } from './agent.ts';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
 import {
   CAPABILITY_GAP_TOOL,
@@ -88,13 +89,22 @@ export async function runOrchestrator(
   numCtx?: number,
   capture?: ResourceCapture,
   signal?: AbortSignal,
+  stream?: StreamSink,
 ): Promise<OrchestratorResult> {
   let text: string;
   let steps: Parameters<typeof findCapabilityGap>[0];
 
   try {
     const result = await withRootDelegationContext(numCtx, () =>
-      runDefinedAgent(orchestrator, task, numCtx, undefined, signal),
+      runDefinedAgent(
+        orchestrator,
+        task,
+        numCtx,
+        undefined,
+        signal,
+        undefined,
+        stream ? { stream } : undefined,
+      ),
     );
     text = result.text;
     steps = result.steps;
