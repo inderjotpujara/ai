@@ -1,8 +1,9 @@
 # Dependencies
 node_modules/
 
-# Run artifacts (per-run dirs + journals)
-runs/
+# Run artifacts (per-run dirs + journals). Anchored to the repo root so
+# src/features/runs/ (web UI feature area) stays tracked — see /memory/ below.
+/runs/
 
 # Memory datastore (LanceDB tables + bun:sqlite; local, never committed). See docs/architecture.md §11
 # Anchored to the repo root so src/memory/ + tests/memory/ stay tracked.
