@@ -145,6 +145,13 @@ export const ATTR = {
   VOICE_AUDIO_SECONDS: 'voice.audio.seconds',
   VOICE_DURATION_MS: 'voice.duration.ms',
   VOICE_OUTCOME: 'voice.outcome',
+  // Server / web BFF (Slice 30b)
+  SERVER_ROUTE: 'server.route',
+  SERVER_METHOD: 'http.request.method',
+  SERVER_STATUS: 'http.response.status_code',
+  SERVER_DURATION_MS: 'server.duration_ms',
+  /** Request principal/owner; reserved "local" now, upgrades to audit-grade in Slice 35. */
+  SERVER_PRINCIPAL: 'server.principal',
 } as const;
 
 export type ModelSelectInfo = {
@@ -203,6 +210,35 @@ export function withRunSpan<T>(
     );
     if (recordIoEnabled()) span.setAttribute(ATTR.TASK, task);
     return fn();
+  });
+}
+
+/**
+ * Span for one HTTP request handled by the web BFF (Slice 30b). Follows the
+ * recorder-callback pattern (`withRuntimeSpan`): opens a `server.request` span,
+ * sets route/method + the reserved principal, runs `fn` (which reports the final
+ * status via `rec.status`), records the duration in a `finally`, and — via
+ * `inSpan` — records an error status if `fn` throws.
+ */
+export function withServerRequestSpan<T>(
+  info: { route: string; method: string; principal?: string },
+  fn: (rec: { status: (code: number) => void }) => Promise<T>,
+): Promise<T> {
+  return inSpan('server.request', async (span) => {
+    const startedAt = performance.now();
+    span.setAttribute(ATTR.SERVER_ROUTE, info.route);
+    span.setAttribute(ATTR.SERVER_METHOD, info.method);
+    span.setAttribute(ATTR.SERVER_PRINCIPAL, info.principal ?? 'local');
+    try {
+      return await fn({
+        status: (code) => span.setAttribute(ATTR.SERVER_STATUS, code),
+      });
+    } finally {
+      span.setAttribute(
+        ATTR.SERVER_DURATION_MS,
+        Math.round(performance.now() - startedAt),
+      );
+    }
   });
 }
 
