@@ -3,6 +3,7 @@ import { SessionsSidebar } from '../features/sessions/index.tsx';
 import { useTheme } from '../shared/design/theme.tsx';
 import { Button } from '../shared/ui/button.tsx';
 import { RegionErrorBoundary } from '../shared/ui/error-boundary.tsx';
+import { CommandPalette } from './command-palette.tsx';
 
 const NAV: { to: string; label: string }[] = [
   { to: '/', label: 'Chat' },
@@ -43,6 +44,7 @@ export function AppShell() {
           </Button>
         </div>
       </header>
+      <CommandPalette />
       <div className="flex min-h-0 flex-1">
         <SessionsSidebar />
         <main className="min-w-0 flex-1 overflow-auto">
