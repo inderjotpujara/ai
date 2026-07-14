@@ -156,6 +156,9 @@ export const ATTR = {
   UI_STREAM_BYTES: 'ui.stream.bytes',
   UI_STREAM_RESUMES: 'ui.stream.resumes',
   UI_STREAM_OUTCOME: 'ui.stream.outcome',
+  // Chat feedback (Slice 30b Phase 2; Slice 31 consumes it for the eval loop)
+  FEEDBACK_MESSAGE_ID: 'chat.feedback.message_id',
+  FEEDBACK_RATING: 'chat.feedback.rating',
 } as const;
 
 export type ModelSelectInfo = {
@@ -286,6 +289,23 @@ export function withUiStreamSpan<T>(
       span.setAttribute(ATTR.UI_STREAM_RESUMES, resumes);
       span.setAttribute(ATTR.UI_STREAM_OUTCOME, outcome);
     }
+  });
+}
+
+/**
+ * One-shot span for `POST /api/feedback` (Slice 30b Phase 2): records the
+ * 👍/👎 on a chat message as its own `chat.feedback` span (no parent request
+ * span carries useful attributes here, unlike `withServerRequestSpan`).
+ * Slice 31 will query these spans to close the eval loop — this is just the
+ * telemetry seam, no consumer yet.
+ */
+export function recordChatFeedback(info: {
+  messageId: string;
+  rating: string;
+}): Promise<void> {
+  return inSpan('chat.feedback', async (span) => {
+    span.setAttribute(ATTR.FEEDBACK_MESSAGE_ID, info.messageId);
+    span.setAttribute(ATTR.FEEDBACK_RATING, info.rating);
   });
 }
 

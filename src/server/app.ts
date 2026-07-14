@@ -4,6 +4,7 @@ import { handleChat } from './chat/handler.ts';
 import type { RunChatTurn } from './chat/run-turn.ts';
 import type { ConsentRegistry } from './consent/registry.ts';
 import { handleRespond } from './consent/respond.ts';
+import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
@@ -82,6 +83,10 @@ async function handleApi(
         if (req.method === 'POST' && runId !== undefined) {
           rec.status(200);
           return handleRespond(req, deps, runId);
+        }
+        if (req.method === 'POST' && url.pathname === '/api/feedback') {
+          rec.status(200);
+          return handleFeedback(req);
         }
         rec.status(404);
         return json({ error: 'not found' }, 404);

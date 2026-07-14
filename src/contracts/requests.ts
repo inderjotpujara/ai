@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ChatRole } from './enums.ts';
+import { ChatRole, FeedbackRating } from './enums.ts';
 
 /**
  * A minimal, structural UIMessage-like shape. We deliberately do NOT import
@@ -30,3 +30,10 @@ export const RespondRequestSchema = z.object({
   value: z.unknown(),
 });
 export type RespondRequest = z.infer<typeof RespondRequestSchema>;
+
+/** `POST /api/feedback` — thumbs up/down on a chat message (Slice 30b Phase 2). */
+export const FeedbackRequestSchema = z.object({
+  messageId: z.string(),
+  rating: z.enum(FeedbackRating),
+});
+export type FeedbackRequest = z.infer<typeof FeedbackRequestSchema>;

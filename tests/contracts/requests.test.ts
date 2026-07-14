@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test';
-import { ChatRole } from '../../src/contracts/enums.ts';
+import { ChatRole, FeedbackRating } from '../../src/contracts/enums.ts';
 import {
   ChatRequestSchema,
+  FeedbackRequestSchema,
   RespondRequestSchema,
   UiMessageLikeSchema,
 } from '../../src/contracts/requests.ts';
@@ -36,4 +37,26 @@ test('RespondRequest requires a promptId and accepts an opaque value', () => {
   });
   expect(parsed.promptId).toBe('cap-x');
   expect(() => RespondRequestSchema.parse({ value: 1 })).toThrow();
+});
+
+test('FeedbackRequest validates a messageId + rating', () => {
+  const parsed = FeedbackRequestSchema.parse({
+    messageId: 'm1',
+    rating: FeedbackRating.Up,
+  });
+  expect(parsed.messageId).toBe('m1');
+  expect(parsed.rating).toBe(FeedbackRating.Up);
+});
+
+test('FeedbackRequest rejects an invalid rating enum value', () => {
+  const result = FeedbackRequestSchema.safeParse({
+    messageId: 'm1',
+    rating: 'sideways',
+  });
+  expect(result.success).toBe(false);
+});
+
+test('FeedbackRequest rejects a missing messageId', () => {
+  const result = FeedbackRequestSchema.safeParse({ rating: 'up' });
+  expect(result.success).toBe(false);
 });
