@@ -1,10 +1,10 @@
 import { agentNames } from '../../agents/index.ts';
-import { createSuperAgent } from '../../agents/super.ts';
 import qwenRouter from '../../models/qwen-router.ts';
 import { BOOTSTRAP } from '../../models/registry.ts';
 import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
 import { loadConfig } from '../config/schema.ts';
+import { noopEventSink } from '../core/events.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { ModelDeclaration } from '../core/types.ts';
 import { RuntimeKind } from '../core/types.ts';
@@ -15,7 +15,7 @@ import { handleTopLevel } from '../errors/boundary.ts';
 import { createLogger } from '../log/logger.ts';
 import { warnUnknownAgents } from '../mcp/mount.ts';
 import type { McpConfig } from '../mcp/types.ts';
-import { type IngestFlags, ingestMedia } from '../media/ingest.ts';
+import type { IngestFlags } from '../media/ingest.ts';
 import { createMediaStore } from '../media/store.ts';
 import { makeEmbedder } from '../memory/embed.ts';
 import { installSignalHandlers, onShutdown } from '../process/lifecycle.ts';
@@ -48,7 +48,7 @@ import { ReuseKind } from '../verified-build/types.ts';
 import { createCliVoiceDeps } from '../voice/cli-io.ts';
 import { ingestVoice } from '../voice/ingest.ts';
 import { shouldOfferCrew } from './offer-crew.ts';
-import { runChat } from './run-chat.ts';
+import { runChatSession } from './run-chat-session.ts';
 import { createSelectHook } from './select-hook.ts';
 import { formatSelectionNotice } from './selection-notice.ts';
 import { withMcpRun } from './with-mcp-run.ts';
@@ -308,27 +308,29 @@ async function main(): Promise<void> {
             }
           }
 
-          const { prompt: task, warnings } = await ingestMedia(
-            promptWithVoice,
-            flags,
-            store,
-          );
-          for (const warning of warnings) {
-            console.error(`media: ${warning}`);
-          }
-          const orchestrator = createSuperAgent(
-            (name) => reg.forAgent(name),
-            onBeforeDelegate,
-            ledger,
-            store,
-          );
-          const result = await runChat({
-            orchestrator,
-            task,
-            run,
-            routerNumCtx,
-            capture,
+          const {
+            result,
+            warnings,
+            task: ingestedTask,
+          } = await runChatSession({
+            task: promptWithVoice,
+            media: flags,
+            events: noopEventSink, // CLI keeps its existing notify-based model announcements; a console event sink would double-print
+            deps: {
+              registry: reg,
+              selectHook: onBeforeDelegate,
+              capture,
+              run,
+              ledger,
+              routerNumCtx,
+              mediaStore: store,
+            },
           });
+          for (const warning of warnings) console.error(`media: ${warning}`);
+          // `ingestedTask` is the FINAL, post-media-ingestion prompt (markers
+          // spliced in, transcripts appended) — the exact string the pre-refactor
+          // post-`ingestMedia` `task` carried. The gap branch below seeds the
+          // reuse-hint and crew/agent builders from it so behaviour is byte-exact.
           if (result.kind === 'answer') {
             console.log(result.text);
           } else if (result.kind === 'gap') {
@@ -346,7 +348,7 @@ async function main(): Promise<void> {
                   model: embedModel,
                 });
                 const hint = await reuseHintText(
-                  `${result.missingCapability} ${task}`,
+                  `${result.missingCapability} ${ingestedTask}`,
                   embedder.embed,
                 );
                 if (hint !== undefined) console.log(hint);
@@ -356,7 +358,7 @@ async function main(): Promise<void> {
             }
             if (
               interactiveTTY() &&
-              shouldOfferCrew(`${result.missingCapability} ${task}`)
+              shouldOfferCrew(`${result.missingCapability} ${ingestedTask}`)
             ) {
               const wantsCrew = await askYesNo(
                 `This looks multi-step. Propose a crew/workflow for "${result.missingCapability}"?`,
@@ -366,7 +368,7 @@ async function main(): Promise<void> {
                 const { deps, cleanup } = await makeRealCrewBuilderDeps();
                 try {
                   const built = await buildCrewOrWorkflow(
-                    `${result.missingCapability}. Original task: ${task}`,
+                    `${result.missingCapability}. Original task: ${ingestedTask}`,
                     deps,
                   );
                   if (built.kind === 'written') {
@@ -389,7 +391,7 @@ async function main(): Promise<void> {
                 const { deps, cleanup } = await makeRealBuilderDeps();
                 try {
                   const built = await buildAgent(
-                    `${result.missingCapability}. Original task: ${task}`,
+                    `${result.missingCapability}. Original task: ${ingestedTask}`,
                     deps,
                   );
                   if (built.kind === 'written') {

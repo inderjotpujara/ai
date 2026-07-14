@@ -1,6 +1,7 @@
 import type { LanguageModel, ToolSet } from 'ai';
 import type { MediaStore } from '../media/store.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
+import type { StreamSink } from './agent.ts';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
 import {
   CAPABILITY_GAP_TOOL,
@@ -13,6 +14,7 @@ import {
   delegateToolName,
 } from './delegate.ts';
 import { MaxStepsError } from './errors.ts';
+import { type EventSink, noopEventSink } from './events.ts';
 import { withRootDelegationContext } from './guardrails.ts';
 import type { ResourceCapture } from './resource-capture.ts';
 
@@ -56,6 +58,9 @@ export function createOrchestrator(opts: {
    *  markers in its task (media-by-reference — the orchestrator itself
    *  never rehydrates attachments). */
   mediaStore?: MediaStore;
+  /** Optional status-event sink; forwarded to each delegate tool so a future
+   *  server can observe delegation without the engine importing wire types. */
+  events?: EventSink;
 }): Agent {
   const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
   for (const agent of opts.agents) {
@@ -64,6 +69,7 @@ export function createOrchestrator(opts: {
       opts.onBeforeDelegate,
       opts.ledger,
       opts.mediaStore,
+      opts.events ?? noopEventSink,
     );
   }
   return {
@@ -83,13 +89,22 @@ export async function runOrchestrator(
   numCtx?: number,
   capture?: ResourceCapture,
   signal?: AbortSignal,
+  stream?: StreamSink,
 ): Promise<OrchestratorResult> {
   let text: string;
   let steps: Parameters<typeof findCapabilityGap>[0];
 
   try {
     const result = await withRootDelegationContext(numCtx, () =>
-      runDefinedAgent(orchestrator, task, numCtx, undefined, signal),
+      runDefinedAgent(
+        orchestrator,
+        task,
+        numCtx,
+        undefined,
+        signal,
+        undefined,
+        stream ? { stream } : undefined,
+      ),
     );
     text = result.text;
     steps = result.steps;

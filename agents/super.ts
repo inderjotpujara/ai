@@ -2,6 +2,7 @@ import type { ToolSet } from 'ai';
 import qwenRouter from '../models/qwen-router.ts';
 import type { Agent } from '../src/core/agent-def.ts';
 import type { BeforeDelegate } from '../src/core/delegate.ts';
+import type { EventSink } from '../src/core/events.ts';
 import { createOrchestrator } from '../src/core/orchestrator.ts';
 import { createGenerateTools } from '../src/media/generate/tools.ts';
 import type { MediaStore } from '../src/media/store.ts';
@@ -19,12 +20,15 @@ const BASE_PROMPT = [
  *  `ledger`, when supplied, is forwarded to the orchestrator so a dropped
  *  sub-agent (or a tripped circuit) during delegation is recorded.
  *  `mediaStore`, when supplied, is forwarded so specialists can resolve
- *  `[img:h]`/`[video:h]` markers attached to a chat's media flags. */
+ *  `[img:h]`/`[video:h]` markers attached to a chat's media flags.
+ *  `events`, when supplied, is forwarded so a future server can observe
+ *  delegation without the engine importing wire types. */
 export function createSuperAgent(
   toolsFor: (name: string) => ToolSet,
   onBeforeDelegate?: BeforeDelegate,
   ledger?: DegradationLedger,
   mediaStore?: MediaStore,
+  events?: EventSink,
 ): Agent {
   const agents: Agent[] = agentNames().map((name) => {
     const factory = AGENTS[name];
@@ -48,5 +52,6 @@ export function createSuperAgent(
     onBeforeDelegate,
     ledger,
     mediaStore,
+    events,
   });
 }

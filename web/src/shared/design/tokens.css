@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Let Tailwind v4 scan streamdown's built output so its utility classes
+   (used by the streaming-markdown renderer) are detected and emitted. */
+@source "../../../node_modules/streamdown/dist/index.js";
+
 /* Class-toggled dark mode (Task 3 toggles the .dark class on <html>).
    Without this, dark: only follows OS prefers-color-scheme. */
 @custom-variant dark (&:where(.dark, .dark *));

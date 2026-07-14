@@ -1,3 +1,4 @@
+import type { StreamSink } from '../core/agent.ts';
 import type { Agent } from '../core/agent-def.ts';
 import type { OrchestratorResult } from '../core/orchestrator.ts';
 import { runOrchestrator } from '../core/orchestrator.ts';
@@ -12,6 +13,7 @@ export type ChatDeps = {
   routerNumCtx?: number;
   capture?: ResourceCapture;
   signal?: AbortSignal;
+  stream?: StreamSink;
 };
 
 export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
@@ -23,6 +25,7 @@ export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
       deps.routerNumCtx,
       deps.capture,
       deps.signal,
+      deps.stream,
     );
     setRunOutcome(result);
     if (result.kind === 'answer') {

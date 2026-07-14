@@ -3,14 +3,27 @@ import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
+import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
+import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
+// None of these tests exercise POST /api/upload or an /api/chat body with
+// uploadIds, so a plain (never-read) confined dir suffices.
+const uploadsDir = mkdtempSync(join(tmpdir(), 'app-uploads-'));
+// None of these tests exercise POST /api/chat — a fake that throws if ever
+// invoked keeps the fixtures honest about what's actually under test here.
+const unusedRunChatTurn: RunChatTurn = async () => {
+  throw new Error('runChatTurn should not be invoked by these tests');
+};
 const deps: ServerDeps = {
   token: TOKEN,
   policy,
   recordIo: false,
   indexHtml: '<!doctype html><title>t</title>',
+  runChatTurn: unusedRunChatTurn,
+  consent: createConsentRegistry(),
+  uploadsDir,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -74,6 +87,9 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     get indexHtml(): string {
       throw new Error('boom: index render failed');
     },
+    runChatTurn: unusedRunChatTurn,
+    consent: createConsentRegistry(),
+    uploadsDir,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -108,6 +124,9 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     staticDir,
     recordIo: false,
     indexHtml: '<!doctype html><title>t</title>',
+    runChatTurn: unusedRunChatTurn,
+    consent: createConsentRegistry(),
+    uploadsDir,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -160,6 +179,9 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     staticDir,
     recordIo: false,
     indexHtml: '<!doctype html><title>t</title>',
+    runChatTurn: unusedRunChatTurn,
+    consent: createConsentRegistry(),
+    uploadsDir,
   };
   const symlinkServer = Bun.serve({
     port: 0,

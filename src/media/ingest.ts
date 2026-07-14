@@ -21,10 +21,19 @@ export type IngestResult = {
   warnings: string[];
 };
 
-type IngestDeps = {
+export type IngestDeps = {
   capturePaste?: typeof captureClipboardImage;
   transcribe?: (path: string) => Promise<string>;
   sampleFrames?: (path: string, store: MediaStore) => Promise<MediaItem>;
+  /**
+   * Existence probe for the prompt-text filesystem auto-detect
+   * (`autoDetectPaths`). Defaults to `existsSync`. The SERVER path passes
+   * `() => false` to DISABLE auto-detect entirely (D17): over HTTP the task
+   * text is attacker-controlled, so scanning it for real host paths + reading
+   * them would be an arbitrary-file-read hole. `flags.images` ingestion does
+   * NOT consult this (it goes straight through `store.putFile`), so confined
+   * upload paths are unaffected — only the text scan is gated.
+   */
   exists?: (p: string) => boolean;
   mediaTypeOf?: (p: string) => string;
 };

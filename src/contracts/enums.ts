@@ -56,6 +56,12 @@ export enum ChatRole {
   System = 'system',
 }
 
+/** Thumbs feedback on a chat message (Slice 30b Phase 2; Slice 31 consumes it). */
+export enum FeedbackRating {
+  Up = 'up',
+  Down = 'down',
+}
+
 /** Model-lifecycle transition carried by `data-model-load`. */
 export enum ModelLoadAction {
   Pull = 'pull',

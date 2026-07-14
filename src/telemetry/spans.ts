@@ -152,6 +152,13 @@ export const ATTR = {
   SERVER_DURATION_MS: 'server.duration_ms',
   /** Request principal/owner; reserved "local" now, upgrades to audit-grade in Slice 35. */
   SERVER_PRINCIPAL: 'server.principal',
+  UI_STREAM_CHUNKS: 'ui.stream.chunks',
+  UI_STREAM_BYTES: 'ui.stream.bytes',
+  UI_STREAM_RESUMES: 'ui.stream.resumes',
+  UI_STREAM_OUTCOME: 'ui.stream.outcome',
+  // Chat feedback (Slice 30b Phase 2; Slice 31 consumes it for the eval loop)
+  FEEDBACK_MESSAGE_ID: 'chat.feedback.message_id',
+  FEEDBACK_RATING: 'chat.feedback.rating',
 } as const;
 
 export type ModelSelectInfo = {
@@ -239,6 +246,66 @@ export function withServerRequestSpan<T>(
         Math.round(performance.now() - startedAt),
       );
     }
+  });
+}
+
+/**
+ * Span for one SSE chat stream session (Slice 30b Phase 2). Follows the
+ * recorder-callback pattern (`withRuntimeSpan`/`withGenerateSpan`): opens a
+ * `ui.stream` span, sets the route, runs `fn` (which reports chunks/bytes as
+ * they're written, resumes on reconnect, and the final outcome), and records
+ * the aggregates in a `finally` so they land on the span even if `fn` throws.
+ */
+export function withUiStreamSpan<T>(
+  info: { route: string },
+  fn: (rec: {
+    chunk: (bytes: number) => void;
+    resume: () => void;
+    outcome: (o: string) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('ui.stream', async (span) => {
+    span.setAttribute(ATTR.SERVER_ROUTE, info.route);
+    let chunks = 0;
+    let bytes = 0;
+    let resumes = 0;
+    let outcome = 'unknown';
+    try {
+      return await fn({
+        chunk: (b) => {
+          chunks += 1;
+          bytes += b;
+        },
+        resume: () => {
+          resumes += 1;
+        },
+        outcome: (o) => {
+          outcome = o;
+        },
+      });
+    } finally {
+      span.setAttribute(ATTR.UI_STREAM_CHUNKS, chunks);
+      span.setAttribute(ATTR.UI_STREAM_BYTES, bytes);
+      span.setAttribute(ATTR.UI_STREAM_RESUMES, resumes);
+      span.setAttribute(ATTR.UI_STREAM_OUTCOME, outcome);
+    }
+  });
+}
+
+/**
+ * One-shot span for `POST /api/feedback` (Slice 30b Phase 2): records the
+ * 👍/👎 on a chat message as its own `chat.feedback` span (no parent request
+ * span carries useful attributes here, unlike `withServerRequestSpan`).
+ * Slice 31 will query these spans to close the eval loop — this is just the
+ * telemetry seam, no consumer yet.
+ */
+export function recordChatFeedback(info: {
+  messageId: string;
+  rating: string;
+}): Promise<void> {
+  return inSpan('chat.feedback', async (span) => {
+    span.setAttribute(ATTR.FEEDBACK_MESSAGE_ID, info.messageId);
+    span.setAttribute(ATTR.FEEDBACK_RATING, info.rating);
   });
 }
 
