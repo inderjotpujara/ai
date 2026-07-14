@@ -6,7 +6,7 @@ const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 export function hostAllowed(req: Request, port: number): boolean {
   const host = req.headers.get('host');
   if (host === null) return false;
-  return LOCAL_HOSTS.some((h) => host === `${h}:${port}` || host === h);
+  return LOCAL_HOSTS.some((h) => host === `${h}:${port}`);
 }
 
 /**
@@ -18,10 +18,7 @@ export function hostAllowed(req: Request, port: number): boolean {
 export function originAllowed(req: Request, policy: OriginPolicy): boolean {
   const origin = req.headers.get('origin');
   if (origin === null) return true;
-  const loopback = LOCAL_HOSTS.flatMap((h) => [
-    `http://${h}:${policy.port}`,
-    `http://${h}`,
-  ]);
+  const loopback = LOCAL_HOSTS.map((h) => `http://${h}:${policy.port}`);
   return loopback.includes(origin) || policy.allowedOrigins.includes(origin);
 }
 
