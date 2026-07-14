@@ -67,7 +67,7 @@ test('RunDTO parses with reserved owner + lifecycle + origin and nested spans', 
   const parsed = RunDtoSchema.parse(run);
   expect(parsed.owner).toBe('local');
   expect(parsed.tokens).toBeUndefined();
-  expect(parsed.degrades[0].kind).toBe(DegradeKind.Retried);
+  expect(parsed.degrades[0]?.kind).toBe(DegradeKind.Retried);
 });
 
 test('RunDTO rejects an unknown lifecycle value', () => {

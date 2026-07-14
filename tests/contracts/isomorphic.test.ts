@@ -10,7 +10,7 @@ function importSpecifiers(src: string): string[] {
   const re = /(?:import|export)[^'"]*from\s*['"]([^'"]+)['"]/g;
   let m: RegExpExecArray | null = re.exec(src);
   while (m !== null) {
-    out.push(m[1]);
+    if (m[1] !== undefined) out.push(m[1]);
     m = re.exec(src);
   }
   return out;
