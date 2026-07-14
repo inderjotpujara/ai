@@ -25,6 +25,13 @@ export type RailView = {
 
 const INITIAL_VIEW: RailView = { phase: RailPhase.Idle, degraded: false };
 
+/** A pending human-in-the-loop consent ask (`data-confirm`), awaiting an answer. */
+export type PendingConfirm = {
+  promptId: string;
+  kind: string;
+  question: string;
+};
+
 /** Fold one `StatusEvent` into the current rail view. */
 function foldEvent(view: RailView, event: StatusEvent): RailView {
   switch (event.type) {
@@ -63,16 +70,41 @@ function foldEvent(view: RailView, event: StatusEvent): RailView {
 /**
  * Folds transient `StatusEvent` data-parts (never land in `message.parts`,
  * per Spike-A) from `useChat({ onData })` into a live `{ agent, model,
- * phase, degraded }` view for the `<LiveRail>`.
+ * phase, degraded }` view for the `<LiveRail>`, plus (Task 15) the current
+ * `runId` (from `RunStart`) and any `pendingConfirm` ask (from `Confirm`) so
+ * the chat feature can answer human-in-the-loop consent prompts.
  */
 export function useStatusEvents() {
   const [view, setView] = useState<RailView>(INITIAL_VIEW);
+  const [runId, setRunId] = useState<string | undefined>(undefined);
+  const [pendingConfirm, setPendingConfirm] = useState<
+    PendingConfirm | undefined
+  >(undefined);
 
   const handleData = useCallback((part: DataUIPart<UIDataTypes>) => {
     const parsed = StatusEventSchema.safeParse(part.data);
     if (!parsed.success) return; // not a StatusEventType — ignore
     setView((prev) => foldEvent(prev, parsed.data));
+    switch (parsed.data.type) {
+      case StatusEventType.RunStart:
+        setRunId(parsed.data.runId);
+        break;
+      case StatusEventType.Confirm:
+        setPendingConfirm({
+          promptId: parsed.data.promptId,
+          kind: parsed.data.kind,
+          question: parsed.data.question,
+        });
+        break;
+      case StatusEventType.RunEnd:
+        setPendingConfirm(undefined);
+        break;
+      default:
+        break;
+    }
   }, []);
 
-  return { view, handleData };
+  const clearConfirm = useCallback(() => setPendingConfirm(undefined), []);
+
+  return { view, handleData, pendingConfirm, runId, clearConfirm };
 }
