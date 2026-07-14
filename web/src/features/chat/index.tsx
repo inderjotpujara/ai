@@ -77,8 +77,9 @@ export function ChatArea() {
   async function handleConfirmAnswer(value: boolean) {
     if (!pendingConfirm) return;
     // A Confirm without a prior RunStart has no run to answer to; don't POST
-    // to `/api/runs//respond`. Just clear it — the server's fail-safe decline
-    // covers the unanswered prompt.
+    // to `/api/runs//respond`. Just clear it locally — the prompt is simply
+    // left unanswered (no consumer awaits it this phase; the consent channel is
+    // a dormant seam, so there is nothing to decline server-side).
     if (!runId) {
       clearConfirm();
       return;
