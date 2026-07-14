@@ -1,6 +1,8 @@
+import { ModelLoadAction, StatusEventType } from '../contracts/index.ts';
 import type { Agent } from '../core/agent-def.ts';
 import type { BeforeDelegate } from '../core/delegate.ts';
 import { ResourceError } from '../core/errors.ts';
+import type { EventSink } from '../core/events.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import { type ModelDeclaration, RuntimeKind } from '../core/types.ts';
 import { uncensoredEnabled } from '../media/policy.ts';
@@ -26,6 +28,8 @@ export type SelectHookDeps = {
   log?: (message: string) => void;
   /** Optional degradation ledger; records a ModelDegraded event on the runtime-degrade path. */
   ledger?: DegradationLedger;
+  /** Optional status-event sink; emits ModelSelect/ModelLoad for the web live-rail. */
+  events?: EventSink;
 };
 
 /**
@@ -84,6 +88,11 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
       // before the first call. Skipped when degraded to Ollama above.
       if (rt.kind !== RuntimeKind.Ollama) {
         await rt.control.warm(effectiveDecl.model, numCtx);
+        deps.events?.({
+          type: StatusEventType.ModelLoad,
+          model: effectiveDecl.model,
+          action: ModelLoadAction.Warm,
+        });
       }
       recordModelSelect({
         modelId: effectiveDecl.model,
@@ -91,6 +100,13 @@ export function createSelectHook(deps: SelectHookDeps): BeforeDelegate {
         numCtx,
         paramsBillions: decl.footprint.approxParamsBillions,
         runtime: rt.kind,
+        degraded,
+      });
+      deps.events?.({
+        type: StatusEventType.ModelSelect,
+        agent: agent.name,
+        model: effectiveDecl.model,
+        numCtx,
         degraded,
       });
       const model = rt.createModel(effectiveDecl);
