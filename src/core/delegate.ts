@@ -1,6 +1,7 @@
 import type { LanguageModel } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import { StatusEventType } from '../contracts/index.ts';
 import type { MediaStore } from '../media/store.ts';
 import { classify } from '../reliability/classify.ts';
 import { CircuitOpenError } from '../reliability/errors.ts';
@@ -11,6 +12,7 @@ import {
   withDelegationSpan,
 } from '../telemetry/spans.ts';
 import { type Agent, runDefinedAgent } from './agent-def.ts';
+import { type EventSink, noopEventSink } from './events.ts';
 import {
   checkDelegation,
   concise,
@@ -39,7 +41,10 @@ export type BeforeDelegate = (
  *  step. `abortSignal` (optional) is threaded down to the underlying
  *  generateText so a caller can wall-clock-bound the run (verify gate).
  *  `mediaStore` (optional) is forwarded to `runDefinedAgent` so a specialist
- *  can resolve `[img:h]`/`[video:h]` markers in `task` (media-by-reference). */
+ *  can resolve `[img:h]`/`[video:h]` markers in `task` (media-by-reference).
+ *  `events` (optional) is a status-event sink: emits a `Delegation` event on
+ *  entry and a `Degrade` event alongside each ledger record, so a future
+ *  server can observe delegation without the engine importing wire types. */
 export function runGuardedAgent(
   agent: Agent,
   task: string,
@@ -47,14 +52,23 @@ export function runGuardedAgent(
   abortSignal?: AbortSignal,
   ledger?: DegradationLedger,
   mediaStore?: MediaStore,
+  events: EventSink = noopEventSink,
 ): Promise<{ text: string } | { error: string }> {
   return withDelegationSpan(agent.name, async () => {
+    const ctx = currentDelegationContext();
+    events({
+      type: StatusEventType.Delegation,
+      agent: agent.name,
+      depth: ctx.depth,
+      parentAgent: ctx.ancestors[ctx.ancestors.length - 1],
+      ancestors: ctx.ancestors,
+    });
     const check = checkDelegation(agent.name);
     if (!check.ok) {
       recordGuardrailViolation(check.kind, check.reason);
       return { error: check.reason };
     }
-    const callerNumCtx = currentDelegationContext().numCtx;
+    const callerNumCtx = ctx.numCtx;
     try {
       const pre = onBeforeDelegate ? await onBeforeDelegate(agent) : undefined;
       if (pre?.abort) {
@@ -90,6 +104,12 @@ export function runGuardedAgent(
       };
       ledger?.record(event);
       recordDegrade(event);
+      events({
+        type: StatusEventType.Degrade,
+        kind: event.kind,
+        subject: event.subject,
+        reason: event.reason,
+      });
       return { error: `Agent ${agent.name} failed: ${message}` };
     }
   });
@@ -104,6 +124,7 @@ export function asDelegateTool(
   onBeforeDelegate?: BeforeDelegate,
   ledger?: DegradationLedger,
   mediaStore?: MediaStore,
+  events: EventSink = noopEventSink,
 ) {
   return tool({
     description: agent.description,
@@ -118,6 +139,7 @@ export function asDelegateTool(
         options?.abortSignal,
         ledger,
         mediaStore,
+        events,
       ),
   });
 }

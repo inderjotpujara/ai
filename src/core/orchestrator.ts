@@ -13,6 +13,7 @@ import {
   delegateToolName,
 } from './delegate.ts';
 import { MaxStepsError } from './errors.ts';
+import { type EventSink, noopEventSink } from './events.ts';
 import { withRootDelegationContext } from './guardrails.ts';
 import type { ResourceCapture } from './resource-capture.ts';
 
@@ -56,6 +57,9 @@ export function createOrchestrator(opts: {
    *  markers in its task (media-by-reference — the orchestrator itself
    *  never rehydrates attachments). */
   mediaStore?: MediaStore;
+  /** Optional status-event sink; forwarded to each delegate tool so a future
+   *  server can observe delegation without the engine importing wire types. */
+  events?: EventSink;
 }): Agent {
   const tools: ToolSet = { [CAPABILITY_GAP_TOOL]: capabilityGapTool };
   for (const agent of opts.agents) {
@@ -64,6 +68,7 @@ export function createOrchestrator(opts: {
       opts.onBeforeDelegate,
       opts.ledger,
       opts.mediaStore,
+      opts.events ?? noopEventSink,
     );
   }
   return {
