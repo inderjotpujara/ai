@@ -2,7 +2,11 @@ name: ci
 
 # The repo's first automated gate. Local git hooks (.githooks) only enforce
 # doc currency; nothing forced typecheck/lint/tests on push/PR until now. This
-# runs the same fast, mock-only suite `bun run check` runs locally. The
+# runs the exact same gate `bun run check` runs locally — docs:check,
+# typecheck, lint, the `web/` workspace gate (web typecheck + Vitest, Slice
+# 30b Phase 1b), and the root test suite (path-ignoring `web/**`, which the
+# `web/` Vitest files are picked up by `check:web` instead) — via a single
+# `bun run check` step, so CI and the local gate can never drift apart. The
 # live-model suite (the ~21 *.live.test.ts, gated on a reachable Ollama / env
 # flags) is intentionally NOT run here — it needs a self-hosted Apple-Silicon
 # runner (tracked as Tier-2 Slice 40); on this runner those tests skip.
@@ -21,7 +25,4 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
-      - run: bun run docs:check
-      - run: bun run typecheck
-      - run: bun run lint
-      - run: bun test
+      - run: bun run check
