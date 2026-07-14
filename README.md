@@ -63,49 +63,66 @@ Mini.
 > BFF (`src/server/`) with the localhost security perimeter (per-session
 > bearer token, port-scoped Host/Origin allowlist, realpath media-path
 > confinement), `/api/health`, COOP/COEP static serving, and `bun run web`.
-> **Phase 1b (the browser frontend scaffold) has now also landed** — a
+> **Phase 1b (the browser frontend scaffold) then landed** — a
 > Vite 8 + React 19 SPA (Bun workspace `web/`) with the app shell, TanStack
 > Router across the 7 nav areas, a ⌘K palette skeleton, light+dark design
-> tokens, and the contract-client + transport-port interface — but it does
-> not stream, chat, or persist yet. Streaming chat and the rest of the
-> surface are Phases 2–8. Next: **Slice 30b Phase 2** — streaming chat +
-> the live rail. **Slices 23/24/25 remain held** on the `ai@7` provider
-> blocker. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> tokens, and the contract-client + transport-port interface — but it did
+> not yet stream, chat, or persist. **Phase 2 — streaming chat + the live
+> rail — has now landed**: the browser sends a real chat turn to
+> `POST /api/chat` and watches the top-level orchestrator's answer stream
+> token-by-token over SSE (specialists still run batch; a status-event sink
+> narrates their delegation on a live agent/model rail), plus the
+> conversation basics — Stop, copy, per-message regenerate, edit+resend,
+> 👍/👎 feedback, an inline human-in-the-loop consent prompt, and
+> drag-drop/paste-image upload (media-by-reference, confined server-side).
+> Chat is still **stateless per request** — cross-invocation persistence is
+> Phase 6. The crews/workflows/builders/library screens, DTO-mapped run
+> history, and browser voice remain Phases 3–8. Next: **Slice 30b Phase 3**
+> — Runs (span→`RunDTO` waterfall mappers + `@visx`/`@xyflow` run history).
+> **Slices 23/24/25 remain held** on the `ai@7` provider blocker. See
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 30b **Phases 1 (web backend foundation) and 1b
-> (frontend scaffold) have landed** — a browser UI scaffold that renders,
-> routes, and themes but does **not** stream/chat/persist yet (that's
-> Phase 2). **Contracts** (`src/contracts/`): an
-> isomorphic Zod wire protocol shared by the server and the future
-> browser — wire enums, read-model DTOs (`RunDTO`/`SpanDTO`/`DegradeDTO`/
-> `ChatMessageDTO`, forward-compat fields already present-and-required), a
-> transient-SSE `StatusEvent` discriminated union, and inbound request
-> schemas (`ChatRequest`/`RespondRequest`); kept dependency-free of the
-> engine and Node by `tests/contracts/isomorphic.test.ts`. **Server**
-> (`src/server/`): a thin, business-logic-free `Bun.serve` BFF — a
-> per-session bearer token (constant-time verify), a **port-scoped**
-> Host/Origin allowlist (closes a portless-loopback DNS-rebinding/CSRF
-> bypass a security-lens review caught in-slice), realpath media-path
-> confinement (defeats traversal + symlink escape), `/api/health`, COOP/COEP
-> static serving (readies a future sherpa-onnx-WASM `SharedArrayBuffer` for
-> barge-in voice), `server.request` telemetry, and typed-error→JSON degrade.
-> `bun run web` mints the token, injects it into the served HTML, and boots
-> the server. **Live-verified** against the real running server (curl +
-> Chrome): perimeter ordering (403 before auth), token guard, COOP/COEP,
-> `crossOriginIsolated === true`. **Phase 1b (frontend scaffold) then
-> landed:** `web/` as a Bun workspace member (Vite 8 + React 19 + Tailwind
-> v4 + Vitest/happy-dom), Blueprint-Mono light+dark design tokens +
-> `ThemeProvider`, Base-UI `Button`/`Dialog` + a per-region error boundary,
-> a token'd contract client + a bidirectional transport-port **interface**
-> (both consuming `src/contracts/` via a `@contracts` alias), a TanStack
-> Router app shell over the 7 nav areas + run-detail, and a ⌘K
-> command-palette skeleton — 26 web component tests (Vitest/happy-dom).
-> **Explicitly not yet shipped (Phases 2–8):** the streaming chat/SSE
-> handler + `useChat` wiring, DTO mappers off real engine data, the
-> crews/workflows/builders/library feature screens, cross-invocation
-> persistence, and the browser voice surface. Full suite 1161 pass/36
-> skip/0 fail (root) + 26 pass (web).
-> See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server.
+> **Status:** Slice 30b **Phases 1 (web backend foundation), 1b (frontend
+> scaffold), and 2 (streaming chat + live rail) have landed** — this is
+> still a **partial-slice** landing (Phases 3–8 remain; the Slice-30b
+> capability line item is not yet flipped to fully ✅ shipped). **Phase 2**
+> turns the Phase-1b Chat area live: the browser sends a real turn to
+> `POST /api/chat` and the **top-level orchestrator streams its answer
+> token-by-token** over an AI-SDK v6 UI-message-stream SSE response
+> (specialists stay on the existing batch `generateText` path — a new
+> `EventSink` threaded through delegation narrates their progress instead,
+> since v6's `useChat` can't nest a second live stream inside a tool call).
+> New engine seams are additive and optional (`src/core/events.ts`'s
+> `EventSink`; `core/agent.ts`'s `StreamSink`/`streamText` path, draining
+> `consumeStream()` **inside** `withWallClock` so the wall-clock timeout
+> still bounds a streaming generation — a trap caught before it shipped);
+> `src/cli/run-chat-session.ts` extracts the shared "run one chat turn" body
+> both the CLI and the server now call. **Server** (`src/server/`) adds
+> `POST /api/chat` (the SSE handler, over a **lazily built** engine — nothing
+> warms at server boot), `POST /api/runs/:id/respond` (a bidirectional
+> human-in-the-loop consent channel keyed by an unguessable `randomBytes(32)`
+> promptId), `POST /api/upload` (a confined image upload — server-minted
+> filename, mediaType allowlist, 20 MB cap, `confineToDir` on write **and**
+> read), and `POST /api/feedback` (a `chat.feedback` span, the Slice-31 eval
+> seam). **Security finding fixed in-slice (D17):** wiring uploads first
+> reactivated `ingestMedia`'s prompt-text filesystem auto-detect on the
+> server path (task text is attacker-controlled over HTTP) — now explicitly
+> disabled server-side (`ingestDeps:{exists:()=>false}`), CLI unaffected.
+> **Web** (`web/`) ships a real streaming `features/chat/` (`@ai-sdk/react`'s
+> `useChat` + `DefaultChatTransport`, hand-authored AI-Elements/`streamdown`
+> rendering) with the conversation basics — **Stop**, copy, per-message
+> **regenerate**, **edit+resend**, 👍/👎 **feedback**, an inline
+> **data-confirm** prompt, and **drag-drop/paste-image** upload
+> (media-by-reference) — plus `features/agents/`'s live agent/model **rail**
+> (`useStatusEvents` folding transient `data-*` parts into
+> `{agent, model, phase, degraded}`). Chat is still **stateless per
+> request** — no `SessionStore` until Phase 6. **Explicitly not yet shipped
+> (Phases 3–8):** span→`RunDTO` waterfall mappers + `@visx`/`@xyflow` run
+> history, the crews/workflows/builders/library feature screens,
+> cross-invocation persistence, and the browser voice surface. Full suite:
+> 1209 pass/36 skip/0 fail (root) + 64 pass (web, Vitest/happy-dom).
+> See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server,
+> §"Web frontend", §"Streaming chat".
 >
 > **Previously:** Slice 30a — **concurrency & lifecycle core + ops
 > surface**, the production foundation the local web UI (Slice 30b) needs
@@ -114,8 +131,9 @@ Mini.
 > **router** (`telemetry/run-router.ts`) replacing the old process-global
 > OTel provider so concurrent runs' spans no longer corrupt each other;
 > cooperative cancellation (`withWallClock` now actually aborts the work it
-> races; an `AbortSignal` threads the whole `runChat`→`generateText` chain,
-> wired end to end though no live trigger — e.g. a Stop button — exists yet);
+> races; an `AbortSignal` threads the whole `runChat`→`generateText` chain;
+> Slice 30b Phase 2 wired the first live trigger — the web UI's **Stop**
+> button, via `useChat.stop()` aborting the underlying fetch);
 > a central child-process registry + `SIGINT`/`SIGTERM` shutdown so Ctrl-C no
 > longer orphans model servers/ffmpeg; sqlite `WAL`+`busy_timeout`; a
 > model-manager **admission mutex** (closes a concurrent-load race,
@@ -369,6 +387,55 @@ engine data, and the crews/workflows/builders/library UI, persistence, and
 voice surfaces — Phases 1b through 8. See
 [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server.
 
+**Local web UI — Phase 1b: frontend scaffold, then Phase 2: streaming
+chat + live rail (Slice 30b).** Phase 1b landed the browser side of the
+scaffold — `web/` as its own Bun workspace member (Vite 8 + React 19 +
+Tailwind v4), a Blueprint-Mono light/dark design-token system, a TanStack
+Router app shell over the 7 nav areas, and a ⌘K palette skeleton — but it
+only rendered, routed, and themed; nothing streamed, chatted, or persisted.
+**Phase 2 turns the Chat area live.** The browser now sends a real turn to
+`POST /api/chat` and watches the **top-level orchestrator stream its answer
+token-by-token** over an AI-SDK v6 UI-message-stream SSE response;
+delegated specialists stay on the existing batch `generateText` path (v6's
+`useChat` can't nest a second live stream inside a tool call), so a new
+`EventSink` threaded through delegation narrates their progress on a live
+agent/model **rail** instead (`Delegation` → `ModelSelect` → `ModelLoad` →
+running). The engine seams are additive and optional: `src/core/events.ts`'s
+`EventSink`; `core/agent.ts`'s `StreamSink`/`streamText` path (draining
+`consumeStream()` **inside** the wall-clock race, or the timeout would never
+actually bound a streaming generation — a trap caught before it shipped);
+`src/cli/run-chat-session.ts` extracts the shared "run one chat turn" body
+the CLI and server both call now. **Server** (`src/server/`) adds
+`POST /api/chat` (over a **lazily built** engine — nothing warms at server
+boot, only on the first real request), `POST /api/runs/:id/respond` (a
+bidirectional human-in-the-loop consent channel keyed by an unguessable
+`randomBytes(32)` promptId — no real consumer wires into it yet, the channel
+itself ships), `POST /api/upload` (a confined image upload — server-minted
+filename, an image-mediaType allowlist, a 20 MB cap, `confineToDir` on
+**both** the write and read side), and `POST /api/feedback` (a
+`chat.feedback` telemetry span, the Slice-31 eval seam). **A security finding
+fixed in-slice (D17):** wiring uploads first reactivated `ingestMedia`'s
+prompt-text filesystem auto-detect on the server path — since the task text
+is attacker-controlled over HTTP, scanning it for real host paths and
+reading them unconfined would be an arbitrary-file-read hole; the server
+path now explicitly disables that auto-detect (`ingestDeps:{exists:()=>false}`),
+while the CLI (a trusted local caller) keeps it. **Web** ships a real
+streaming `features/chat/` (`@ai-sdk/react`'s `useChat` +
+`DefaultChatTransport`, hand-authored AI-Elements/`streamdown` message
+rendering) with the conversation basics — **Stop** (aborts the underlying
+fetch mid-stream), **copy**, per-message **regenerate**, **edit+resend**
+(truncate history, resend), **👍/👎 feedback**, an inline **data-confirm**
+prompt (dismiss = fail-safe decline), and **drag-drop/paste-image** upload
+(media-by-reference) — plus `features/agents/`'s live rail
+(`useStatusEvents` folding transient `data-*` parts into
+`{agent, model, phase, degraded}`). Chat stays **stateless per request** —
+no `SessionStore` until Phase 6. **Explicitly not yet shipped (Phases
+3–8):** span→`RunDTO`/`SpanDTO` waterfall mappers + `@visx`/`@xyflow` run
+history, the crews/workflows/builders/library feature screens,
+cross-invocation persistence, and the browser voice surface. See
+[`docs/architecture.md`](docs/architecture.md) §"Web frontend",
+§"Streaming chat".
+
 ---
 
 ## Quick start
@@ -573,8 +640,8 @@ higher concurrency via vMLX) can slot in the same way later. See
 | **28** | **Hardware-adaptive media generation + reachable gen degrade** (Slice-27 follow-on) — a **parallel gen-fit selector** (`generate/select.ts` `selectGenModel`) prescribes a machine-appropriate generation model per modality: env-pin authoritative (`AGENT_{IMAGE,VOICE,VIDEO}_MODEL`) → uncensored filter → **largest-that-fits** by footprint vs the live hardware budget (`weightsBytes`/`liveBudgetBytes`) → installed/consent walk (`isGenModelInstalled` honors `HF_HOME`; consent-gate a pull, decline → next-installed) → `undefined` on no-fit (graceful degrade, never crashes). Candidate ladders in `generate/catalog.ts` (`GenModelCandidate`, **not** a `ModelDeclaration` — gen has no runtime/`LanguageModel`, so it rides a path *parallel* to the main selector). Chosen repo is injected via the existing `GenOpts.model` seam (image/speech unchanged; `ltxStrategy` gains `--model`, Wan graph gains a checkpoint node). `createGenerateTools` now runs via **`runGenJob`** (engine→strategy map, video passes the other-engine `fallback` + `serverReachable`) so the one-shot↔server degrade + ComfyUI/Wan lane are reachable; `runGenJob` drops the engine-specific repo when degrading cross-engine. `gen.fit.*` telemetry (`recordGenFit`). **Live-verified:** image auto-fit → real FLUX-schnell-4bit PNG, speech auto-fit → real Kokoro WAV, video degrades gracefully (no fitting model cached — auto-renders once one is present). Adversarial review caught + fixed 2 real bugs (env-pin engine misroute; enum-cast fallback). See [`docs/architecture.md`](docs/architecture.md) §22 | ✅ Done |
 | **29** | **CLI voice input (STT), re-scoped** (Phase F) — new `src/voice/` subsystem: tap-to-toggle mic capture (`--voice`, ffmpeg `avfoundation` + `silencedetect` auto-stop) or file transcription (`--voice-in <path>`), transcribed via **sherpa-onnx** (moonshine-tiny model, `bun run setup:voice`) and spliced into the prompt exactly like `--audio`'s text-splice (§22). Transcription runs behind an execution seam — **in-process** `sherpa-onnx-node` (default, a day-1 spike confirmed it loads under Bun) or a **node-subprocess** worker (`AGENT_VOICE_EXEC=subprocess`) — chosen because the same recognizer family ships a browser-WASM build, reusable by Slice 30b's web UI. Auto-stop uses ffmpeg `silencedetect`, not a real-time VAD model — a disclosed refinement from the original re-scope. Degrade-never-crash: a missing model/addon, failed capture, or silence all warn + ledger rather than crash. Original "voice in/out + streaming CLI" scope was built and **reset** (archived on branch `slice-29-voice-streaming-cli`) — voice-out/barge-in/hold-to-talk deferred to Slice 30b's browser-native AEC. See [`docs/architecture.md`](docs/architecture.md) §23 | ✅ Done |
 | **30a** | **Concurrency & lifecycle core + ops surface** (Phase F/ops — production foundation ahead of the web UI, split out after a production-readiness audit) — **Concurrency & lifecycle:** collision-free run ids (`run/run-id.ts` `newRunId()`, replacing collision-prone `run-<pid>`); a **per-run telemetry router** (`telemetry/run-router.ts` — one global OTel provider fronted by a `RunRoutingSpanProcessor` that routes spans by run-id-in-context, replacing the old process-global `setGlobalTracerProvider` swap that corrupted concurrent runs); cooperative **cancellation** (`withWallClock(ms, fn(signal), external?)` now actually aborts the work it races, not just the timer; an `AbortSignal` threads `runChat`→`runOrchestrator`→`runDefinedAgent`→`runAgent`→`generateText` — wired end to end, no live trigger yet); a central child-process registry + signal-clean shutdown (`process/child-registry.ts` + `process/lifecycle.ts` — `SIGINT`/`SIGTERM` drains `onShutdown` callbacks then kills every registered child); sqlite `WAL`+`busy_timeout`; a model-manager admission mutex (serializes `ensureReady`, empirically closes a concurrent-load race); `db/migrate.ts` schema migrations + a memory embedder-mismatch guard (`ensureSpace` now throws instead of silently serving a stale embedder). **Ops surface:** a structured, run-id-stamped logger (`log/logger.ts`); a documented config schema (`config/schema.ts`, 64 `AGENT_*` entries, `bun run config`); `bun run status` (Ollama reachability, loaded models, live RAM, version); app versioning (`0.2.0`, `--version`, `bun run start` — the 30b web-UI scaffold entry point); a top-level error boundary (`errors/boundary.ts`, actionable hints + `error.json` persistence); a usage rollup (`bun run usage`, aggregates token/latency from existing `spans.jsonl`); and the **first CI pipeline** (`.github/workflows/ci.yml` — docs:check → typecheck → lint → test on every push/PR). Full suite 1108 pass/36 skip/0 fail. See [`docs/architecture.md`](docs/architecture.md) §§4, 7, 11, 21 | ✅ Done |
-| **30b** | **Local web UI — Phases 1 (web backend) + 1b (frontend scaffold)** (Phase F, multi-phase slice, stacks on 30a) — **Phase 1:** an isomorphic Zod wire protocol (`src/contracts/`: enums, read-model DTOs, transient-SSE `StatusEvent` union, inbound request schemas) + a thin `Bun.serve` BFF (`src/server/`: per-session bearer token, port-scoped Host/Origin allowlist, realpath media-path confinement, `/api/health`, COOP/COEP static serving, `server.request` telemetry, `bun run web`); live-verified against the real running server (curl + Chrome). **Phase 1b:** the browser frontend scaffold — `web/` as a Bun workspace member (Vite 8 + React 19 + Tailwind v4 + Vitest/happy-dom), Blueprint-Mono light+dark design tokens + `ThemeProvider`, Base-UI `Button`/`Dialog` + per-region error boundary, a token'd contract client + a bidirectional transport-port **interface** (both via a `@contracts` alias), a TanStack Router app shell over the 7 nav areas + run-detail, and a ⌘K palette skeleton (26 web component tests). The scaffold renders/routes/themes but does **not** stream/chat/persist yet. **Still ahead (Phases 2–8):** streaming chat/SSE + `useChat`, DTO mappers off real data, the crews/workflows/builders/library feature screens, persistence, and voice. See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server, §"Web frontend" | 🚧 In progress — Phases 1 & 1b landed |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **F** local web UI (**Slice 30b Phase 2 onward** — streaming chat + the live rail, then the crews/workflows/builders/library screens, persistence, and voice, stacking on the Phase 1/1b foundation; rich, interruptible voice lives here, on browser-native `getUserMedia` AEC + `keydown`/`keyup` hold-to-talk, completing what Slice 29's CLI STT started); **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) — held on the `ai@7` provider blocker (Slices 23/24/25); Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38) | Planned |
+| **30b** | **Local web UI — Phases 1 (web backend) + 1b (frontend scaffold) + 2 (streaming chat + live rail)** (Phase F, multi-phase slice, stacks on 30a) — **Phase 1:** an isomorphic Zod wire protocol (`src/contracts/`: enums, read-model DTOs, transient-SSE `StatusEvent` union, inbound request schemas) + a thin `Bun.serve` BFF (`src/server/`: per-session bearer token, port-scoped Host/Origin allowlist, realpath media-path confinement, `/api/health`, COOP/COEP static serving, `server.request` telemetry, `bun run web`); live-verified against the real running server (curl + Chrome). **Phase 1b:** the browser frontend scaffold — `web/` as a Bun workspace member (Vite 8 + React 19 + Tailwind v4 + Vitest/happy-dom), Blueprint-Mono light+dark design tokens + `ThemeProvider`, Base-UI `Button`/`Dialog` + per-region error boundary, a token'd contract client + a bidirectional transport-port **interface** (both via a `@contracts` alias), a TanStack Router app shell over the 7 nav areas + run-detail, and a ⌘K palette skeleton (26 web component tests). **Phase 2:** turns Chat live — `POST /api/chat` streams the top-level orchestrator's answer token-by-token (specialists stay batch, narrated via a new `EventSink`) over an AI-SDK v6 UI-message SSE response, built on additive engine seams (`core/events.ts`'s `EventSink`, `core/agent.ts`'s `StreamSink`/`streamText` path draining inside `withWallClock`, `cli/run-chat-session.ts`'s shared CLI/server turn runner); the server adds `POST /api/runs/:id/respond` (consent back-channel, unguessable `promptId`), `POST /api/upload` (confined image upload — a security finding here, D17, closed the server-side `ingestMedia` auto-detect hole an HTTP-attacker could otherwise reach), and `POST /api/feedback`; the web app ships a real streaming `features/chat/` (`useChat`+`DefaultChatTransport`, AI-Elements/`streamdown`) with Stop/copy/regenerate/edit-resend/👍👎/data-confirm/drag-drop-upload, plus `features/agents/`'s live agent/model rail. Chat stays **stateless per request** (no `SessionStore` — Phase 6). **Still ahead (Phases 3–8):** span→`RunDTO` mappers + `@visx`/`@xyflow` run history, the crews/workflows/builders/library feature screens, persistence, and voice. See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server, §"Web frontend", §"Streaming chat" | 🚧 In progress — Phases 1, 1b & 2 landed |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **F** local web UI (**Slice 30b Phase 3 onward** — Runs [span→`RunDTO`/`SpanDTO` waterfall mappers + `@visx`/`@xyflow` run history], then the crews/workflows/builders/library screens, persistence, and voice, stacking on the Phase 1/1b/2 foundation; rich, interruptible voice lives here, on browser-native `getUserMedia` AEC + `keydown`/`keyup` hold-to-talk, completing what Slice 29's CLI STT started); **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) — held on the `ai@7` provider blocker (Slices 23/24/25); Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:
