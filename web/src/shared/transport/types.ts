@@ -4,8 +4,9 @@ import type { RespondRequest, StatusEvent } from '@contracts';
 export type TransportEvent = StatusEvent & { eventId: string };
 
 /**
- * Bidirectional + resumable transport (spec D14). Adapter is SSE now
- * (Last-Event-ID reconnect); the interface leaves room for WS/resumable later.
+ * Bidirectional + resumable transport (spec D14). Interface only for now —
+ * the SSE adapter (Last-Event-ID reconnect) lands in Phase 2; this leaves
+ * room for WS/resumable later.
  */
 export type ChatTransport = {
   /** server→client stream; `fromCursor` replays after a Last-Event-ID reconnect. */

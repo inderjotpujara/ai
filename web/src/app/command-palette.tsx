@@ -61,6 +61,9 @@ export function CommandPalette() {
         aria-expanded="true"
         aria-controls="cmdk-list"
         aria-label="Command palette"
+        aria-activedescendant={
+          results[selected] ? `cmdk-option-${results[selected].id}` : undefined
+        }
         autoFocus
         value={query}
         onChange={(e) => {
@@ -77,8 +80,10 @@ export function CommandPalette() {
         className="mt-3 max-h-80 overflow-auto"
       >
         {results.map((c, i) => (
+          // biome-ignore lint/a11y/useKeyWithClickEvents: listbox options are activated via the combobox input's keyboard handler (aria-activedescendant pattern); option elements are intentionally not individually focusable (tabIndex=-1).
           <div
             key={c.id}
+            id={`cmdk-option-${c.id}`}
             role="option"
             tabIndex={-1}
             aria-selected={i === selected}
@@ -91,13 +96,6 @@ export function CommandPalette() {
             onClick={() => {
               c.run(navigate);
               onOpenChange(false);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                c.run(navigate);
-                onOpenChange(false);
-              }
             }}
           >
             {c.label}

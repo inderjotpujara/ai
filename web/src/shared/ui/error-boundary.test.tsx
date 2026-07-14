@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RegionErrorBoundary } from './error-boundary.tsx';
 
 function Boom(): never {
@@ -7,6 +7,10 @@ function Boom(): never {
 }
 
 describe('RegionErrorBoundary', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('renders children normally', () => {
     render(
       <RegionErrorBoundary region="Chat">

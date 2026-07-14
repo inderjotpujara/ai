@@ -19,6 +19,9 @@ model-images/*
 # .remember/ (session-memory .md buffers), .claude/settings.local.json, .githooks/.
 # Only truly-transient junk stays ignored (below + .remember/{logs,tmp}).
 
+# Vite build output (web/ workspace member); never committed
+web/dist/
+
 # Misc
 *.log
 .DS_Store

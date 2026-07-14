@@ -3130,11 +3130,13 @@ OFF by default (`AGENT_WEB_RECORD_IO`), distinct from the CLI's
 **Feature.** `web/` is the local web UI's browser code — a **scaffold only**:
 an app shell, a design-token system, and the interfaces the later phases wire
 real behavior into. It is its own Bun workspace member (own `package.json`,
-`tsconfig.json`, and Vitest config, separate from the root's), and is served
-as static assets by `src/server/` (§ "Server" above — `staticDir` + token
-injection into the served HTML + the COOP/COEP headers). Nothing in this
-section talks to a model, streams a response, or persists anything; that is
-explicitly deferred to Phases 2–8 (see "Not yet built" below).
+`tsconfig.json`, and Vitest config, separate from the root's). Phase 2 will
+point `src/server/`'s static serving + token injection (§ "Server" above —
+`staticDir` + the COOP/COEP headers) at the Vite build output (`web/dist`);
+today `/` still returns the Phase 1 stub page unchanged and no `web/dist`
+build is wired. Nothing in this section talks to a model, streams a response,
+or persists anything; that is explicitly deferred to Phases 2–8 (see "Not yet
+built" below).
 
 **Structure (feature-sliced, isolation-rule enforced).**
 - `web/src/main.tsx` — the entry point: mounts the app and wires the
