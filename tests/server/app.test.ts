@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
+import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -18,6 +19,7 @@ const deps: ServerDeps = {
   recordIo: false,
   indexHtml: '<!doctype html><title>t</title>',
   runChatTurn: unusedRunChatTurn,
+  consent: createConsentRegistry(),
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -82,6 +84,7 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
       throw new Error('boom: index render failed');
     },
     runChatTurn: unusedRunChatTurn,
+    consent: createConsentRegistry(),
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -117,6 +120,7 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     recordIo: false,
     indexHtml: '<!doctype html><title>t</title>',
     runChatTurn: unusedRunChatTurn,
+    consent: createConsentRegistry(),
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -170,6 +174,7 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     recordIo: false,
     indexHtml: '<!doctype html><title>t</title>',
     runChatTurn: unusedRunChatTurn,
+    consent: createConsentRegistry(),
   };
   const symlinkServer = Bun.serve({
     port: 0,

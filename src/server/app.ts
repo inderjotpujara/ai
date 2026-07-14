@@ -2,6 +2,8 @@ import { explain } from '../errors/boundary.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import { handleChat } from './chat/handler.ts';
 import type { RunChatTurn } from './chat/run-turn.ts';
+import type { ConsentRegistry } from './consent/registry.ts';
+import { handleRespond } from './consent/respond.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
@@ -19,9 +21,10 @@ export type ServerDeps = {
   recordIo: boolean;
   indexHtml: string;
   runChatTurn: RunChatTurn;
+  consent: ConsentRegistry;
 };
 
-function json(body: unknown, status = 200): Response {
+export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
@@ -71,6 +74,14 @@ async function handleApi(
         if (req.method === 'POST' && url.pathname === '/api/chat') {
           rec.status(200);
           return handleChat(req, deps);
+        }
+        const respondMatch = url.pathname.match(
+          /^\/api\/runs\/([^/]+)\/respond$/,
+        );
+        const runId = respondMatch?.[1];
+        if (req.method === 'POST' && runId !== undefined) {
+          rec.status(200);
+          return handleRespond(req, deps, runId);
         }
         rec.status(404);
         return json({ error: 'not found' }, 404);
