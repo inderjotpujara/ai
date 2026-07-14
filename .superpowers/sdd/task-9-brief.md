@@ -1,166 +1,119 @@
-### Task 9: Capture from mic (tap-to-toggle + silencedetect auto-stop)
+### Task 9: Telemetry — `server.request` span helper
 
 **Files:**
-- Modify: `src/voice/capture.ts` (add `captureFromMic`)
-- Test: `tests/voice/capture-mic.test.ts`
+- Modify: `src/telemetry/spans.ts`
+- Test: `tests/telemetry/server-request-span.test.ts`
 
 **Interfaces:**
-- Consumes: `VoiceFrames`, `VoiceConfig`, `VoiceError`; `ffmpegCmd`.
-- Produces: `captureFromMic(cfg, io): Promise<VoiceFrames>` where `io` is injectable:
-  `{ start(): Promise<MicSession>; onKey(cb: (key: 'space'|'enter'|'ctrl-c') => void): () => void; print(msg: string): void }`
-  and `MicSession = { frames: AsyncIterable<Float32Array>; silenceSignaled: Promise<void>; stop(): Promise<void> }`.
-  Control logic: print "tap space to start"; on first space → `start()`; accumulate `frames`; stop when `silenceSignaled` resolves (ffmpeg `silencedetect` on stderr) OR a second space/enter; empty accumulation → `VoiceError` with mic-permission hint.
+- Consumes: existing `inSpan`, `ATTR`, `trace`, `SpanStatusCode` in `src/telemetry/spans.ts`; test uses `tests/helpers/otel-test-provider.ts` `registerTestProvider()`.
+- Produces: new `ATTR` keys `SERVER_ROUTE`/`SERVER_METHOD`/`SERVER_STATUS`/`SERVER_DURATION_MS`/`SERVER_PRINCIPAL`; `withServerRequestSpan<T>(info: { route: string; method: string; principal?: string }, fn: (rec: { status: (code: number) => void }) => Promise<T>): Promise<T>`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing span test**
 
 ```ts
-// tests/voice/capture-mic.test.ts
-import { describe, expect, it } from 'bun:test';
-import { captureFromMic } from '../../src/voice/capture.ts';
+// tests/telemetry/server-request-span.test.ts
+import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { SpanStatusCode } from '@opentelemetry/api';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
+import { withServerRequestSpan } from '../../src/telemetry/spans.ts';
 
-const cfg = { modelDir: '/m', ffmpeg: 'ffmpeg', timeoutMs: 10000 };
+// registerTestProvider() returns { exporter, provider }; shutdown is on .provider.
+let h: ReturnType<typeof registerTestProvider>;
+beforeAll(() => {
+  h = registerTestProvider();
+});
+afterAll(() => h.provider.shutdown());
 
-function fakeIo(chunks: Float32Array[], stopVia: 'silence' | 'space') {
-  let keyCb: (k: string) => void = () => {};
-  return {
-    io: {
-      async start() {
-        return {
-          frames: (async function* () {
-            for (const c of chunks) yield c;
-          })(),
-          silenceSignaled:
-            stopVia === 'silence' ? Promise.resolve() : new Promise<void>(() => {}),
-          async stop() {},
-        };
-      },
-      onKey(cb: (k: 'space' | 'enter' | 'ctrl-c') => void) {
-        keyCb = cb as (k: string) => void;
-        return () => {};
-      },
-      print() {},
-    },
-    pressSpace: () => keyCb('space'),
-  };
-}
-
-describe('captureFromMic', () => {
-  it('accumulates frames and stops on silence', async () => {
-    const { io, pressSpace } = fakeIo([new Float32Array(800).fill(0.2)], 'silence');
-    const p = captureFromMic(cfg, io);
-    pressSpace(); // begin recording
-    const frames = await p;
-    expect(frames.samples.length).toBe(800);
+test('withServerRequestSpan emits a server.request span with route/method/status/principal', async () => {
+  await withServerRequestSpan({ route: '/api/health', method: 'GET' }, async (rec) => {
+    rec.status(200);
   });
-  it('throws mic-permission hint on all-zero (silent) capture', async () => {
-    const { io, pressSpace } = fakeIo([new Float32Array(800)], 'silence');
-    const p = captureFromMic(cfg, io);
-    pressSpace();
-    await expect(p).rejects.toThrow(/microphone/i);
-  });
+  const span = h.exporter.getFinishedSpans().find((s) => s.name === 'server.request');
+  expect(span).toBeDefined();
+  expect(span?.attributes['server.route']).toBe('/api/health');
+  expect(span?.attributes['http.request.method']).toBe('GET');
+  expect(span?.attributes['http.response.status_code']).toBe(200);
+  expect(span?.attributes['server.principal']).toBe('local');
+  expect(typeof span?.attributes['server.duration_ms']).toBe('number');
+});
+
+test('a throwing handler records an error status and still ends the span', async () => {
+  await expect(
+    withServerRequestSpan({ route: '/api/boom', method: 'POST' }, async () => {
+      throw new Error('kaboom');
+    }),
+  ).rejects.toThrow('kaboom');
+  const span = h.exporter.getFinishedSpans().find((s) => s.name === 'server.request' && s.attributes['server.route'] === '/api/boom');
+  expect(span?.status.code).toBe(SpanStatusCode.ERROR);
 });
 ```
 
+(Verified 2026-07-14: `registerTestProvider()` in `tests/helpers/otel-test-provider.ts` returns `{ exporter: InMemorySpanExporter; provider }` — read spans via `h.exporter.getFinishedSpans()`, shut down via `h.provider.shutdown()`, exactly as above.)
+
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/voice/capture-mic.test.ts`
-Expected: FAIL — `captureFromMic` not exported.
+Run: `bun test tests/telemetry/server-request-span.test.ts`
+Expected: FAIL — `withServerRequestSpan` is not exported.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Add the server ATTR constants**
 
-Append to `src/voice/capture.ts`:
+In `src/telemetry/spans.ts`, inside the `ATTR` object, add (alongside the other groups, e.g. after the `VOICE_*` block, before the closing `} as const;`):
+
 ```ts
-export type MicSession = {
-  frames: AsyncIterable<Float32Array>;
-  silenceSignaled: Promise<void>;
-  stop(): Promise<void>;
-};
+  // Server / web BFF (Slice 30b)
+  SERVER_ROUTE: 'server.route',
+  SERVER_METHOD: 'http.request.method',
+  SERVER_STATUS: 'http.response.status_code',
+  SERVER_DURATION_MS: 'server.duration_ms',
+  /** Request principal/owner; reserved "local" now, upgrades to audit-grade in Slice 35. */
+  SERVER_PRINCIPAL: 'server.principal',
+```
 
-export type MicIo = {
-  start(): Promise<MicSession>;
-  onKey(cb: (key: 'space' | 'enter' | 'ctrl-c') => void): () => void;
-  print(msg: string): void;
-};
+- [ ] **Step 4: Add the `withServerRequestSpan` helper**
 
-/** True if the buffer carries perceptible energy (not TCC-denied silence). */
-function hasEnergy(samples: Float32Array): boolean {
-  let peak = 0;
-  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
-  return peak > 0.005;
-}
+In `src/telemetry/spans.ts`, append (near the other `with*Span` helpers, e.g. after `withRunSpan`):
 
-/** Live mic capture: tap space to start, ffmpeg silencedetect (or space/enter) to stop. */
-export async function captureFromMic(cfg: VoiceConfig, io: MicIo): Promise<VoiceFrames> {
-  io.print('🎤 tap [space] to start (auto-stops on a pause, or [space] to stop)');
-  const chunks: Float32Array[] = [];
-  let session: MicSession | undefined;
-
-  await new Promise<void>((resolve, reject) => {
-    let recording = false;
-    const off = io.onKey(async (key) => {
-      if (key === 'ctrl-c') {
-        await session?.stop();
-        off();
-        reject(new VoiceError('cancelled'));
-        return;
-      }
-      if (!recording && key === 'space') {
-        recording = true;
-        io.print('recording ●');
-        try {
-          session = await io.start();
-        } catch (err) {
-          off();
-          reject(new VoiceError('could not open microphone', String(err)));
-          return;
-        }
-        session.silenceSignaled.then(async () => {
-          await session?.stop();
-          off();
-          resolve();
-        });
-        (async () => {
-          for await (const frame of session.frames) chunks.push(frame);
-        })();
-        return;
-      }
-      if (recording && (key === 'space' || key === 'enter')) {
-        await session?.stop();
-        off();
-        resolve();
-      }
-    });
+```ts
+/**
+ * Span for one HTTP request handled by the web BFF (Slice 30b). Follows the
+ * recorder-callback pattern (`withRuntimeSpan`): opens a `server.request` span,
+ * sets route/method + the reserved principal, runs `fn` (which reports the final
+ * status via `rec.status`), records the duration in a `finally`, and — via
+ * `inSpan` — records an error status if `fn` throws.
+ */
+export function withServerRequestSpan<T>(
+  info: { route: string; method: string; principal?: string },
+  fn: (rec: { status: (code: number) => void }) => Promise<T>,
+): Promise<T> {
+  return inSpan('server.request', async (span) => {
+    const startedAt = performance.now();
+    span.setAttribute(ATTR.SERVER_ROUTE, info.route);
+    span.setAttribute(ATTR.SERVER_METHOD, info.method);
+    span.setAttribute(ATTR.SERVER_PRINCIPAL, info.principal ?? 'local');
+    try {
+      return await fn({
+        status: (code) => span.setAttribute(ATTR.SERVER_STATUS, code),
+      });
+    } finally {
+      span.setAttribute(
+        ATTR.SERVER_DURATION_MS,
+        Math.round(performance.now() - startedAt),
+      );
+    }
   });
-
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const samples = new Float32Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    samples.set(c, off);
-    off += c.length;
-  }
-  if (total === 0 || !hasEnergy(samples)) {
-    throw new VoiceError(
-      'no audio captured from the microphone',
-      'grant Microphone access to your terminal app in System Settings → Privacy & Security → Microphone',
-    );
-  }
-  return { samples, sampleRate: 16000 };
 }
 ```
 
-> NOTE: the real `MicIo` impl (ffmpeg `-f avfoundation -i :<idx> -ac 1 -ar 16000 -f f32le pipe:1`, parsing `-af silencedetect` events off stderr, and raw-TTY keypress via `process.stdin.setRawMode(true)`) is wired in Task 11's CLI deps and exercised in live-verify; unit tests use the injected fake above.
+- [ ] **Step 5: Run span test + typecheck to verify pass**
 
-- [ ] **Step 4: Run test to verify it passes**
+Run: `bun test tests/telemetry/server-request-span.test.ts && bun run typecheck`
+Expected: PASS (2 tests) and no type errors.
 
-Run: `bun test tests/voice/capture-mic.test.ts`
-Expected: PASS (2 tests).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/voice/capture.ts tests/voice/capture-mic.test.ts
-git commit -m "feat(voice): live mic capture (tap-to-toggle + silencedetect auto-stop)"
+git add src/telemetry/spans.ts tests/telemetry/server-request-span.test.ts
+git commit -m "feat(telemetry): add server.request span helper for the web BFF"
 ```
 
 ---

@@ -1,52 +1,80 @@
-# Task 3 report: `bun run status`
+# Task 3: Contract Status Events — Transient-SSE Discriminated Union
 
-**Status:** DONE
-**Commit:** `dca833c` — feat(cli): 'bun run status' — Ollama/models/budget/version at a glance (feeds the 30b live panel)
-**Branch:** `slice-30a-production-foundation` (not pushed)
+## Status
+**DONE**
 
-## What shipped
+## Commit
+`bf1454e` — feat(contracts): add StatusEvent transient-SSE discriminated union
 
-- `src/cli/status.ts`
-  - `StatusDeps` / `StatusReport` types exactly per brief.
-  - `collectStatus(deps)` — parallel-probes via `Promise.all`, `freeGb = Math.round(free / 1e9)`.
-  - `renderStatus(r)` — compact 4-line summary (version, ollama reachable/DOWN, models or "(none resident)", budget GB).
-  - `main()` builds real deps and prints via `process.stdout.write` (no `console.log`); wrapped in `if (import.meta.main)`, errors go to `process.stderr.write` + `process.exit(1)`.
-- `tests/cli/status.test.ts` — verbatim from the brief (injected fakes, no live Ollama needed).
-- `package.json` — added `"status": "bun run src/cli/status.ts"`.
+## Summary
+- **Test**: `bun test tests/contracts/events.test.ts` — 5 pass, 0 fail
+- **Typecheck**: `bun run typecheck` — clean, no errors
+- **Isomorphic**: `bun test tests/contracts/isomorphic.test.ts` — 1 pass (confirms events.ts respects isomorphic rule)
 
-## Real `main()` wiring (only exercised by `bun run status` itself; the unit test uses injected fakes)
+## Implementation
+Created `src/contracts/events.ts` (89 lines) with:
+- 9 per-variant Zod schemas: `RunStartEventSchema`, `ProvisionEventSchema`, `McpMountEventSchema`, `DelegationEventSchema`, `ModelSelectEventSchema`, `ModelLoadEventSchema`, `DegradeEventSchema`, `ConfirmEventSchema`, `RunEndEventSchema`
+- Discriminated union: `StatusEventSchema = z.discriminatedUnion('type', [...])`
+- Exported type: `StatusEvent = z.infer<typeof StatusEventSchema>`
 
-- `ollamaReachable` — a local `pingOllamaReachable()` in `status.ts` that mirrors `src/runtime/ollama.ts`'s
-  `isAvailable()` exactly: `fetch('http://localhost:11434/api/version', { signal: AbortSignal.timeout(probeTimeoutMs()) })`,
-  `try/catch → false`. Reuses `probeTimeoutMs()` from `src/reliability/config.ts` (same timeout source the runtime
-  layer uses). Did not call `ollamaRuntime.isAvailable()` directly since it's only reachable via the full `Runtime`
-  object (which also pulls in `control`, embeddings, etc.) for what is just a boolean ping — see Concerns.
-- `loadedModels` — `runtimeFor(RuntimeKind.Ollama).control.listLoaded()` from `src/runtime/registry.ts`, mapped
-  `LoadedModel[] → string[]` via `.map(m => m.name)`. Wrapped in try/catch → `[]`.
-- `freeBudgetBytes` — `liveBudgetBytes()` from `src/resource/hardware.ts` (the same live budget source
-  `src/resource/model-manager.ts` defaults to for its `BudgetSource`). Wrapped in try/catch → `0`.
-- `version` — `APP_VERSION` from `src/version.ts` (already landed).
+All schemas use enum members (StatusEventType, DegradeKind, ModelLoadAction) from `./enums.ts` as discriminants and field types. The `ConfirmEventSchema.kind` field remains a free string to accommodate extensibility across multiple consent seams.
 
-Every probe is individually try/catch-wrapped so a down Ollama (or any single probe failure) degrades to a safe
-value (`false` / `[]` / `0`) rather than throwing — `main()` cannot throw from these probes.
+## Test Results
+**Before implementation** (Step 2): ✅ FAIL — module not found (expected)
+**After implementation** (Step 4): ✅ PASS — 5/5 tests passing
+**Type safety** (Step 5): ✅ Clean — zero type errors after adding strict-mode casts in test assertions
+**Isomorphic check**: ✅ Pass — events.ts imports only `zod` and `./enums.ts`
 
-## Verification
+## Type-Safety Notes
+Test file required strict-mode casts per repo tsconfig (`noUncheckedIndexedAccess: true`):
+- Line 17: `e.type as string` (Zod-inferred discriminant is union type, literal string is concrete)
+- Lines 26, 36: Added `if (e.type === StatusEventType.X)` guards to narrow discriminated union for property access
+- Line 48: Added `as const` to object literal fields to preserve literal types through JSON round-trip
 
-- `bun test tests/cli/status.test.ts` → 1 pass, 0 fail.
-- `bun run typecheck` → clean.
-- `bun run lint` (full, biome) → 0 errors (ran `biome check --write` once to fix import-order/line-width formatting
-  in the two new files; the 14 remaining warnings are all pre-existing `noExplicitAny` in unrelated test files,
-  untouched by this task).
-- `bun run docs:check` → green (`src/cli` already a documented subsystem; no new subsystem added).
-- `bun run status` (live, eyeballed) → printed a real report against the actual local Ollama:
-  `agent-framework 0.2.0` / `ollama: reachable` / `models: (none resident)` / `budget: ~10 GB free`; exit 0.
+These casts are type-safety enforcement only; no intent is weakened.
 
 ## Concerns
+None. Task completed per spec, all gates green.
 
-- `pingOllamaReachable()` in `status.ts` duplicates (in ~8 lines) the fetch/timeout logic already in
-  `ollamaRuntime.isAvailable()` (`src/runtime/ollama.ts`) rather than calling it directly, since that method is only
-  reachable via the full `Runtime` interface. Flagging in case a later slice wants a shared standalone
-  `pingOllama()` export both call sites use instead of the small duplication.
-- Other files in the working tree (`.superpowers/sdd/task-{1,2,4-8}-*.md`, `progress.md`, `.remember/*`) show as
-  modified/untracked from concurrent SDD activity on this slice — left untouched; only `src/cli/status.ts`,
-  `tests/cli/status.test.ts`, and `package.json` were staged and committed for this task.
+## FIX WAVE (non-vacuous assertions)
+
+**Commit**: `9de669f` — test(contracts): make StatusEvent discriminant assertions non-vacuous
+
+**Problem**: Two test assertions were wrapped in type-guard `if` blocks and passed vacuously (no assertion ran when the guard was false).
+
+**Fix**: Added unconditional discriminant assertions before each type-guard block.
+
+**data-model-load test (lines 20–29)**:
+```ts
+test('parses a data-model-load event with an enum action', () => {
+  const e = StatusEventSchema.parse({
+    type: StatusEventType.ModelLoad,
+    model: 'qwen3.5:4b',
+    action: ModelLoadAction.Warm,
+  });
+  expect(e.type as string).toBe(StatusEventType.ModelLoad as string);  // NEW: unconditional discriminant
+  if (e.type === StatusEventType.ModelLoad) {
+    expect(e.action as string).toBe('warm');
+  }
+});
+```
+
+**data-confirm test (lines 31–41)**:
+```ts
+test('parses the bidirectional data-confirm ask', () => {
+  const e = StatusEventSchema.parse({
+    type: StatusEventType.Confirm,
+    promptId: 'cap-abc123',
+    kind: 'mcp-mount',
+    question: 'Mount github MCP server?',
+  });
+  expect(e.type as string).toBe(StatusEventType.Confirm as string);  // NEW: unconditional discriminant
+  if (e.type === StatusEventType.Confirm) {
+    expect(e.promptId).toBe('cap-abc123');
+  }
+});
+```
+
+**Verification**:
+- `bun run typecheck` — clean, no errors
+- `bun test tests/contracts/events.test.ts` — 5 pass, 7 expect() calls (was 5 before; 2 new unconditional assertions now run)

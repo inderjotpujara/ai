@@ -16,5 +16,6 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "types": ["bun"]
-  }
+  },
+  "exclude": ["scripts/spikes/**/*.tsx"]
 }

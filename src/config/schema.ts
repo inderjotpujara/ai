@@ -19,6 +19,13 @@ export type ConfigEntry = {
   kind: ConfigKind;
   def: number | boolean | string;
   doc: string;
+  /**
+   * Marks a default-OFF boolean whose REAL read site uses a stricter `=== '1'`
+   * check (e.g. AGENT_MCP_AUTO_APPROVE, AGENT_PROVISION_AUTO_YES). The schema
+   * `coerce` rule below is unchanged (any non-`0`/`false` reads true); this flag
+   * only lets a future settings UI surface the stricter real-world semantics.
+   */
+  strict?: boolean;
 };
 
 /**
@@ -256,6 +263,7 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     kind: 'boolean',
     def: false,
     doc: "Non-interactive auto-confirm for model provisioning prompts; real code only checks '1' exactly (cli/provision.ts, cli/chat.ts).",
+    strict: true,
   },
 
   // --- MCP (src/mcp/*) ---
@@ -264,6 +272,7 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     kind: 'boolean',
     def: false,
     doc: "Non-interactive auto-approve for new MCP server consent; real code only checks '1' exactly (mcp/mount.ts).",
+    strict: true,
   },
   {
     env: 'AGENT_MCP_CONFIG',
@@ -458,6 +467,27 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     kind: 'string',
     def: '',
     doc: "Voice transcriber impl selector; 'subprocess' forces the node stt-worker, anything else (default) runs in-process sherpa-onnx-node (voice/transcribe.ts createTranscriber).",
+  },
+
+  // --- Server / web BFF (Slice 30b) ---
+  {
+    env: 'AGENT_WEB_PORT',
+    kind: 'number',
+    def: 4130,
+    doc: 'Port the local web BFF (bun run web) listens on (server/main.ts). Distinct from Ollama :11434 (bun run serve).',
+  },
+  {
+    env: 'AGENT_WEB_ORIGIN_ALLOWLIST',
+    kind: 'string',
+    def: 'http://localhost,http://127.0.0.1',
+    doc: 'Comma-separated extra allowed Origins beyond localhost/127.0.0.1:PORT; config-driven so a Slice-24 tunnel can add its origin (server/security/origin.ts).',
+  },
+  {
+    env: 'AGENT_WEB_RECORD_IO',
+    kind: 'boolean',
+    def: false,
+    doc: "Record prompt/response IO into spans for SERVED (web) runs; default OFF for served/web mode per the Slice-30b web-perimeter hardening; only '1' enables. Distinct from AGENT_TELEMETRY_RECORD_IO (CLI, default on).",
+    strict: true,
   },
 ];
 

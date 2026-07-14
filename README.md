@@ -57,11 +57,42 @@ Mini.
 > lifecycle core + ops surface: per-run telemetry routing, cooperative
 > cancellation, signal-clean shutdown, concurrency-safe stores, structured
 > logging/config/status/usage/error-boundary, first CI pipeline — **shipped**)
-> and **Slice 30b** (the local web UI itself, stacking on 30a — next).
-> Next: **Slice 30b** — the local web UI. **Slices 23/24/25 remain held**
-> on the `ai@7` provider blocker. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> and **Slice 30b** (the local web UI itself, stacking on 30a — a multi-phase
+> slice). **Slice 30b Phase 1 — the web backend foundation — has landed**:
+> an isomorphic Zod wire protocol (`src/contracts/`) and a thin `Bun.serve`
+> BFF (`src/server/`) with the localhost security perimeter (per-session
+> bearer token, port-scoped Host/Origin allowlist, realpath media-path
+> confinement), `/api/health`, COOP/COEP static serving, and `bun run web`.
+> **No user-facing UI ships yet** — the React frontend, streaming chat, and
+> the rest of the surface are Phases 1b–8. Next: **Slice 30b Phase 1b** —
+> the frontend scaffold. **Slices 23/24/25 remain held** on the `ai@7`
+> provider blocker. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-> **Status:** Slice 30a complete — **concurrency & lifecycle core + ops
+> **Status:** Slice 30b **Phase 1 (web backend foundation) has landed** —
+> **not yet a user-facing UI.** **Contracts** (`src/contracts/`): an
+> isomorphic Zod wire protocol shared by the server and the future
+> browser — wire enums, read-model DTOs (`RunDTO`/`SpanDTO`/`DegradeDTO`/
+> `ChatMessageDTO`, forward-compat fields already present-and-required), a
+> transient-SSE `StatusEvent` discriminated union, and inbound request
+> schemas (`ChatRequest`/`RespondRequest`); kept dependency-free of the
+> engine and Node by `tests/contracts/isomorphic.test.ts`. **Server**
+> (`src/server/`): a thin, business-logic-free `Bun.serve` BFF — a
+> per-session bearer token (constant-time verify), a **port-scoped**
+> Host/Origin allowlist (closes a portless-loopback DNS-rebinding/CSRF
+> bypass a security-lens review caught in-slice), realpath media-path
+> confinement (defeats traversal + symlink escape), `/api/health`, COOP/COEP
+> static serving (readies a future sherpa-onnx-WASM `SharedArrayBuffer` for
+> barge-in voice), `server.request` telemetry, and typed-error→JSON degrade.
+> `bun run web` mints the token, injects it into the served HTML, and boots
+> the server. **Live-verified** against the real running server (curl +
+> Chrome): perimeter ordering (403 before auth), token guard, COOP/COEP,
+> `crossOriginIsolated === true`. **Explicitly not yet shipped:** the React
+> frontend (`web/`), the streaming chat/SSE handler, DTO mappers off real
+> engine data, and the crews/workflows/builders/library UI, persistence,
+> and voice surfaces — Phases 1b–8. Full suite 1161 pass/36 skip/0 fail.
+> See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server.
+>
+> **Previously:** Slice 30a — **concurrency & lifecycle core + ops
 > surface**, the production foundation the local web UI (Slice 30b) needs
 > before it can host multiple concurrent runs in one long-lived process.
 > **Concurrency/lifecycle:** collision-free run ids; a per-run telemetry
@@ -294,6 +325,35 @@ No manual steps. No API keys. Everything runs locally.
 
 **Concurrency & lifecycle core + ops surface (Slice 30a).** A production-readiness audit ahead of the local web UI (Slice 30b) found the whole engine assumed *one run, one process, exits when done* — a blocker for a long-lived host serving multiple concurrent runs. This slice closes that gap without touching the product surface. **Concurrency/lifecycle:** run ids are now collision-free (`newRunId()`, replacing `run-<pid>`, which collided under concurrent runs); telemetry moved from a **process-global** `setGlobalTracerProvider` swap (correct for one run, corrupting for two overlapping ones) to **one global provider fronted by a per-run routing processor** (`telemetry/run-router.ts`) that fans each span out by the run id bound into its OTel context, so concurrent runs' spans stay isolated; cancellation is now **cooperative**, not just a race — `withWallClock` actually aborts the work it times out (previously the timed-out call kept running in the background), and an `AbortSignal` threads the whole `runChat`→`runOrchestrator`→`runAgent`→`generateText` chain (wired end to end; nothing wires a live trigger like a Stop button into it yet — that's 30b's job); a **central child-process registry** + `SIGINT`/`SIGTERM` handler means Ctrl-C now drains every registered child (model servers, media-gen subprocesses, the voice mic/STT subprocess) instead of orphaning them; sqlite gained `WAL`+`busy_timeout` for concurrent reader/writer access; the model manager's admission section (`ensureReady`) is now serialized by a promise-chain mutex so two concurrent delegations can't race the same LRU-eviction decision; and the memory store's `ensureSpace` now **throws** on an embedder mismatch instead of silently serving a stale space (`reindex` is the explicit fix), with its schema now versioned via a shared `db/migrate.ts` runner. **Ops surface:** a structured, run-id-stamped logger (`log/logger.ts`, `AGENT_LOG_LEVEL`); a single documented schema for all 64 `AGENT_*` env knobs (`bun run config`); `bun run status` (Ollama reachability, loaded models, live RAM budget, app version); the app is now versioned (`0.2.0`, `bun run src/cli/start.ts --version`, plus a `bun run start` scaffold entry for 30b); a top-level error boundary maps every typed error to an actionable hint and best-effort persists `error.json` to the run dir; `bun run usage` rolls up token/latency usage from existing `spans.jsonl` telemetry (no new instrumentation); and the framework finally has a **CI pipeline** (`.github/workflows/ci.yml` — docs:check → typecheck → lint → the mock test suite on every push/PR to main). Full suite: 1108 pass / 36 skip / 0 fail. See [`docs/architecture.md`](docs/architecture.md) §§4 (admission mutex), 7 (telemetry router), 11 (migrations + embedder guard + WAL), 21 (cooperative cancellation), and the Process/DB/Config/Logging/Usage/Error-boundary rows in §2.
 
+**Local web UI — Phase 1: web backend foundation (Slice 30b).** The local web
+UI is a multi-phase slice; Phase 1 ships the **backend only** — there is
+**no user-facing UI yet**. Two new subsystems, both thin and
+business-logic-free. **Contracts** (`src/contracts/`) is the single source
+of truth for the wire protocol: **isomorphic** (importable by both the
+server and the future browser) and kept dependency-free of the engine —
+`tests/contracts/isomorphic.test.ts` allows only `zod` and sibling files.
+It holds wire enums, read-model DTOs (`RunDTO`/`SpanDTO`/`DegradeDTO`/
+`ChatMessageDTO`, with forward-compat fields for later slices already
+present-and-required today), a transient-SSE `StatusEvent` discriminated
+union (never a re-exported AI-SDK `UIMessage` part), and the inbound request
+schemas (`ChatRequest`/`RespondRequest`) the server validates at the
+perimeter. **Server** (`src/server/`) is a thin `Bun.serve` BFF: a
+per-session bearer token (constant-time verify), a **port-scoped**
+Host/Origin allowlist (a security-lens review caught and closed a
+portless-loopback DNS-rebinding/CSRF bypass in-slice), realpath media-path
+confinement (defeats path traversal and symlink escape), `/api/health`,
+COOP/COEP static serving (readies a future sherpa-onnx-WASM
+`SharedArrayBuffer` for barge-in voice), `server.request` telemetry, and
+typed-error→JSON degrade (never crashes). `bun run web` mints the token,
+injects it into the served HTML, and boots the server. **Live-verified**
+against the real running server (curl + Chrome): perimeter ordering (403
+before auth), the token guard, COOP/COEP headers, and
+`crossOriginIsolated === true`. **Explicitly not yet shipped:** the React
+frontend (`web/`), the streaming chat/SSE handler, DTO mappers reading real
+engine data, and the crews/workflows/builders/library UI, persistence, and
+voice surfaces — Phases 1b through 8. See
+[`docs/architecture.md`](docs/architecture.md) §Contracts, §Server.
+
 ---
 
 ## Quick start
@@ -498,7 +558,8 @@ higher concurrency via vMLX) can slot in the same way later. See
 | **28** | **Hardware-adaptive media generation + reachable gen degrade** (Slice-27 follow-on) — a **parallel gen-fit selector** (`generate/select.ts` `selectGenModel`) prescribes a machine-appropriate generation model per modality: env-pin authoritative (`AGENT_{IMAGE,VOICE,VIDEO}_MODEL`) → uncensored filter → **largest-that-fits** by footprint vs the live hardware budget (`weightsBytes`/`liveBudgetBytes`) → installed/consent walk (`isGenModelInstalled` honors `HF_HOME`; consent-gate a pull, decline → next-installed) → `undefined` on no-fit (graceful degrade, never crashes). Candidate ladders in `generate/catalog.ts` (`GenModelCandidate`, **not** a `ModelDeclaration` — gen has no runtime/`LanguageModel`, so it rides a path *parallel* to the main selector). Chosen repo is injected via the existing `GenOpts.model` seam (image/speech unchanged; `ltxStrategy` gains `--model`, Wan graph gains a checkpoint node). `createGenerateTools` now runs via **`runGenJob`** (engine→strategy map, video passes the other-engine `fallback` + `serverReachable`) so the one-shot↔server degrade + ComfyUI/Wan lane are reachable; `runGenJob` drops the engine-specific repo when degrading cross-engine. `gen.fit.*` telemetry (`recordGenFit`). **Live-verified:** image auto-fit → real FLUX-schnell-4bit PNG, speech auto-fit → real Kokoro WAV, video degrades gracefully (no fitting model cached — auto-renders once one is present). Adversarial review caught + fixed 2 real bugs (env-pin engine misroute; enum-cast fallback). See [`docs/architecture.md`](docs/architecture.md) §22 | ✅ Done |
 | **29** | **CLI voice input (STT), re-scoped** (Phase F) — new `src/voice/` subsystem: tap-to-toggle mic capture (`--voice`, ffmpeg `avfoundation` + `silencedetect` auto-stop) or file transcription (`--voice-in <path>`), transcribed via **sherpa-onnx** (moonshine-tiny model, `bun run setup:voice`) and spliced into the prompt exactly like `--audio`'s text-splice (§22). Transcription runs behind an execution seam — **in-process** `sherpa-onnx-node` (default, a day-1 spike confirmed it loads under Bun) or a **node-subprocess** worker (`AGENT_VOICE_EXEC=subprocess`) — chosen because the same recognizer family ships a browser-WASM build, reusable by Slice 30b's web UI. Auto-stop uses ffmpeg `silencedetect`, not a real-time VAD model — a disclosed refinement from the original re-scope. Degrade-never-crash: a missing model/addon, failed capture, or silence all warn + ledger rather than crash. Original "voice in/out + streaming CLI" scope was built and **reset** (archived on branch `slice-29-voice-streaming-cli`) — voice-out/barge-in/hold-to-talk deferred to Slice 30b's browser-native AEC. See [`docs/architecture.md`](docs/architecture.md) §23 | ✅ Done |
 | **30a** | **Concurrency & lifecycle core + ops surface** (Phase F/ops — production foundation ahead of the web UI, split out after a production-readiness audit) — **Concurrency & lifecycle:** collision-free run ids (`run/run-id.ts` `newRunId()`, replacing collision-prone `run-<pid>`); a **per-run telemetry router** (`telemetry/run-router.ts` — one global OTel provider fronted by a `RunRoutingSpanProcessor` that routes spans by run-id-in-context, replacing the old process-global `setGlobalTracerProvider` swap that corrupted concurrent runs); cooperative **cancellation** (`withWallClock(ms, fn(signal), external?)` now actually aborts the work it races, not just the timer; an `AbortSignal` threads `runChat`→`runOrchestrator`→`runDefinedAgent`→`runAgent`→`generateText` — wired end to end, no live trigger yet); a central child-process registry + signal-clean shutdown (`process/child-registry.ts` + `process/lifecycle.ts` — `SIGINT`/`SIGTERM` drains `onShutdown` callbacks then kills every registered child); sqlite `WAL`+`busy_timeout`; a model-manager admission mutex (serializes `ensureReady`, empirically closes a concurrent-load race); `db/migrate.ts` schema migrations + a memory embedder-mismatch guard (`ensureSpace` now throws instead of silently serving a stale embedder). **Ops surface:** a structured, run-id-stamped logger (`log/logger.ts`); a documented config schema (`config/schema.ts`, 64 `AGENT_*` entries, `bun run config`); `bun run status` (Ollama reachability, loaded models, live RAM, version); app versioning (`0.2.0`, `--version`, `bun run start` — the 30b web-UI scaffold entry point); a top-level error boundary (`errors/boundary.ts`, actionable hints + `error.json` persistence); a usage rollup (`bun run usage`, aggregates token/latency from existing `spans.jsonl`); and the **first CI pipeline** (`.github/workflows/ci.yml` — docs:check → typecheck → lint → test on every push/PR). Full suite 1108 pass/36 skip/0 fail. See [`docs/architecture.md`](docs/architecture.md) §§4, 7, 11, 21 | ✅ Done |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **F** local web UI (**Slice 30b**, stacks on 30a's production foundation — rich, interruptible voice lives here, on browser-native `getUserMedia` AEC + `keydown`/`keyup` hold-to-talk, completing what Slice 29's CLI STT started); **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) — held on the `ai@7` provider blocker (Slices 23/24/25); Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38) | Planned |
+| **30b** | **Local web UI — Phase 1 (web backend foundation)** (Phase F, multi-phase slice, stacks on 30a) — an isomorphic Zod wire protocol (`src/contracts/`: enums, read-model DTOs, transient-SSE `StatusEvent` union, inbound request schemas) + a thin `Bun.serve` BFF (`src/server/`: per-session bearer token, port-scoped Host/Origin allowlist, realpath media-path confinement, `/api/health`, COOP/COEP static serving, `server.request` telemetry, `bun run web`). Live-verified against the real running server (curl + Chrome). **No user-facing UI yet** — the frontend, streaming chat, DTO mappers off real data, and the crews/workflows/builders/library UI, persistence, and voice surfaces are Phases 1b–8. See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server | 🚧 In progress — Phase 1 landed |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **F** local web UI (**Slice 30b Phase 1b onward** — frontend scaffold, streaming chat, and the rest of the surface, stacking on Phase 1's backend foundation; rich, interruptible voice lives here, on browser-native `getUserMedia` AEC + `keydown`/`keyup` hold-to-talk, completing what Slice 29's CLI STT started); **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) — held on the `ai@7` provider blocker (Slices 23/24/25); Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:

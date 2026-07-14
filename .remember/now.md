@@ -1,2 +1,0 @@
-
-No durable facts to save. This was a tooling setup session — the investigation resolved where the all-time cost comes from (ccusage with caching strategy) and what the statusline JSON exposes (5h/7d limits). These are implementation details, not project constraints or user preferences that'll shape future work. The statusline itself doesn't exist yet; once you invoke statusline-setup to build it, the script is documentation enough. ✅

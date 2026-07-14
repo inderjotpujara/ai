@@ -1,117 +1,194 @@
-### Task 1: Structured leveled logger
+### Task 1: Contracts foundation — string enums + isomorphic-purity guard
 
 **Files:**
-- Create: `src/log/logger.ts`
-- Create: `tests/log/logger.test.ts`
-- Modify: `src/telemetry/run-router.ts` (export `currentRunId(): string | undefined`)
-- Modify: `src/cli/chat.ts` (replace the representative status `console.error` calls at `:191`, `:195` with `log.info(...)`)
+- Create: `src/contracts/enums.ts`
+- Test: `tests/contracts/enums.test.ts`, `tests/contracts/isomorphic.test.ts`
 
 **Interfaces:**
-- Consumes: OTel context run-id set by Plan 1's `withRunContext`.
-- Produces:
-  - `currentRunId(): string | undefined` (added to `run-router.ts`) — reads `RUN_ID_KEY` from the active context.
-  - `createLogger(name: string): Logger` where `Logger = { debug; info; warn; error }`, each `(msg: string, fields?: Record<string, unknown>) => void`. Emits one record to stderr: pretty (`HH:MM:SS LEVEL name msg`) when stderr is a TTY, else a JSON line `{ ts, level, name, runId, msg, ...fields }`. Level gate via `AGENT_LOG_LEVEL` (default `info`; order debug<info<warn<error).
-  - `setLogSink(fn: (line: string) => void): void` — test seam to capture output.
+- Consumes: nothing.
+- Produces: enums `RunOrigin`, `RunLifecycle`, `SpanStatus`, `ArtifactKind`, `DegradeKind`, `ChatRole`, `ModelLoadAction`, `StatusEventType` (all string enums). These are imported by Tasks 2–4.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing enum test**
 
 ```ts
-// tests/log/logger.test.ts
-import { afterEach, expect, test } from 'bun:test';
-import { createLogger, setLogSink } from '../../src/log/logger.ts';
-import { withRunContext } from '../../src/telemetry/run-router.ts';
+// tests/contracts/enums.test.ts
+import { expect, test } from 'bun:test';
+import {
+  DegradeKind,
+  RunLifecycle,
+  RunOrigin,
+  StatusEventType,
+} from '../../src/contracts/enums.ts';
 
-afterEach(() => { setLogSink(undefined); delete process.env.AGENT_LOG_LEVEL; });
-
-test('emits JSON with level, name, msg, fields and stamps runId from context', () => {
-  const lines: string[] = [];
-  setLogSink((l) => lines.push(l));
-  const log = createLogger('test');
-  withRunContext('run-xyz', () => log.info('hello', { k: 1 }));
-  const rec = JSON.parse(lines[0]);
-  expect(rec).toMatchObject({ level: 'info', name: 'test', msg: 'hello', k: 1, runId: 'run-xyz' });
+test('RunOrigin carries the reserved provenance values', () => {
+  expect(Object.values(RunOrigin)).toEqual([
+    'manual',
+    'schedule',
+    'webhook',
+    'api',
+    'remote',
+  ]);
 });
 
-test('respects AGENT_LOG_LEVEL gate', () => {
-  process.env.AGENT_LOG_LEVEL = 'warn';
-  const lines: string[] = [];
-  setLogSink((l) => lines.push(l));
-  const log = createLogger('t');
-  log.info('skip'); log.warn('keep');
-  expect(lines).toHaveLength(1);
-  expect(JSON.parse(lines[0]).msg).toBe('keep');
+test('RunLifecycle is not just terminal states', () => {
+  expect(RunLifecycle.PausedAwaitingInput).toBe('paused-awaiting-input');
+  expect(RunLifecycle.Resumable).toBe('resumable');
+});
+
+test('DegradeKind mirrors reliability ledger string values', () => {
+  expect(Object.values(DegradeKind)).toEqual([
+    'model_degraded',
+    'agent_dropped',
+    'tool_skipped',
+    'retried',
+    'circuit_open',
+  ]);
+});
+
+test('StatusEventType discriminants are the data-part names', () => {
+  expect(StatusEventType.Confirm).toBe('data-confirm');
+  expect(StatusEventType.RunStart).toBe('data-run-start');
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/log/logger.test.ts`
-Expected: FAIL — modules/exports missing.
+Run: `bun test tests/contracts/enums.test.ts`
+Expected: FAIL — cannot resolve `../../src/contracts/enums.ts`.
 
-- [ ] **Step 3: Add `currentRunId` to run-router**
-
-In `src/telemetry/run-router.ts`, export:
+- [ ] **Step 3: Write the enums**
 
 ```ts
-import { context } from '@opentelemetry/api'; // already imported
-// RUN_ID_KEY already defined in Plan 1
-export function currentRunId(): string | undefined {
-  return context.active().getValue(RUN_ID_KEY) as string | undefined;
+// src/contracts/enums.ts
+/**
+ * Every finite named value on the web wire. Isomorphic: this file imports
+ * nothing (not even zod). Enums (not string-literal unions) per repo style;
+ * discriminated unions elsewhere take their discriminant from `StatusEventType`.
+ */
+
+/** Run provenance (reserved; Slice 25 sets the non-`manual` values). */
+export enum RunOrigin {
+  Manual = 'manual',
+  Schedule = 'schedule',
+  Webhook = 'webhook',
+  Api = 'api',
+  Remote = 'remote',
+}
+
+/** Run lifecycle — not just terminal outcome (Slices 24/25/34/38 use the rest). */
+export enum RunLifecycle {
+  Queued = 'queued',
+  Running = 'running',
+  PausedAwaitingInput = 'paused-awaiting-input',
+  Done = 'done',
+  Failed = 'failed',
+  Resumable = 'resumable',
+}
+
+export enum SpanStatus {
+  Ok = 'ok',
+  Error = 'error',
+}
+
+/** Run-artifact classification (mapper-side readdir+classify; Slice 30b Phase 3). */
+export enum ArtifactKind {
+  Answer = 'answer',
+  Gap = 'gap',
+  Spans = 'spans',
+  Degradation = 'degradation',
+  Other = 'other',
+}
+
+/**
+ * Wire mirror of `src/reliability/ledger.ts` DegradeKind. The contract MUST NOT
+ * import reliability (isomorphic rule), so we redeclare the identical string
+ * values here; `tests/contracts/degrade-kind-parity.test.ts` guards they stay equal.
+ */
+export enum DegradeKind {
+  ModelDegraded = 'model_degraded',
+  AgentDropped = 'agent_dropped',
+  ToolSkipped = 'tool_skipped',
+  Retried = 'retried',
+  CircuitOpen = 'circuit_open',
+}
+
+export enum ChatRole {
+  User = 'user',
+  Assistant = 'assistant',
+  System = 'system',
+}
+
+/** Model-lifecycle transition carried by `data-model-load`. */
+export enum ModelLoadAction {
+  Pull = 'pull',
+  Evict = 'evict',
+  Warm = 'warm',
+}
+
+/** Transient SSE data-part discriminants (also the AI-SDK data-part type names). */
+export enum StatusEventType {
+  RunStart = 'data-run-start',
+  Provision = 'data-provision',
+  McpMount = 'data-mcp-mount',
+  Delegation = 'data-delegation',
+  ModelSelect = 'data-model-select',
+  ModelLoad = 'data-model-load',
+  Degrade = 'data-degrade',
+  Confirm = 'data-confirm',
+  RunEnd = 'data-run-end',
 }
 ```
 
-- [ ] **Step 4: Implement the logger**
+- [ ] **Step 4: Run enum test to verify it passes**
+
+Run: `bun test tests/contracts/enums.test.ts`
+Expected: PASS (4 tests).
+
+- [ ] **Step 5: Write the failing isomorphic-purity guard test**
 
 ```ts
-// src/log/logger.ts
-import { currentRunId } from '../telemetry/run-router.ts';
+// tests/contracts/isomorphic.test.ts
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { expect, test } from 'bun:test';
 
-export type Logger = {
-  debug: (msg: string, fields?: Record<string, unknown>) => void;
-  info: (msg: string, fields?: Record<string, unknown>) => void;
-  warn: (msg: string, fields?: Record<string, unknown>) => void;
-  error: (msg: string, fields?: Record<string, unknown>) => void;
-};
-const ORDER = { debug: 10, info: 20, warn: 30, error: 40 } as const;
-type Level = keyof typeof ORDER;
+const CONTRACTS_DIR = join(import.meta.dir, '../../src/contracts');
 
-let sink: ((line: string) => void) | undefined;
-export function setLogSink(fn: ((line: string) => void) | undefined): void { sink = fn; }
+/** Extract every module specifier from `import ... from '...'` / `export ... from '...'`. */
+function importSpecifiers(src: string): string[] {
+  const out: string[] = [];
+  const re = /(?:import|export)[^'"]*from\s*['"]([^'"]+)['"]/g;
+  let m: RegExpExecArray | null = re.exec(src);
+  while (m !== null) {
+    out.push(m[1]);
+    m = re.exec(src);
+  }
+  return out;
+}
 
-function level(): Level {
-  const v = (process.env.AGENT_LOG_LEVEL ?? 'info').toLowerCase();
-  return (v in ORDER ? v : 'info') as Level;
-}
-function emit(name: string, lvl: Level, msg: string, fields?: Record<string, unknown>) {
-  if (ORDER[lvl] < ORDER[level()]) return;
-  const rec = { ts: new Date().toISOString(), level: lvl, name, runId: currentRunId(), msg, ...fields };
-  const line = sink || !process.stderr.isTTY
-    ? JSON.stringify(rec)
-    : `${rec.ts.slice(11, 19)} ${lvl.toUpperCase().padEnd(5)} ${name}  ${msg}`;
-  (sink ?? ((l: string) => process.stderr.write(`${l}\n`)))(line);
-}
-export function createLogger(name: string): Logger {
-  return {
-    debug: (m, f) => emit(name, 'debug', m, f),
-    info: (m, f) => emit(name, 'info', m, f),
-    warn: (m, f) => emit(name, 'warn', m, f),
-    error: (m, f) => emit(name, 'error', m, f),
-  };
-}
+test('src/contracts imports only zod or sibling ./ files', () => {
+  const files = readdirSync(CONTRACTS_DIR).filter((f) => f.endsWith('.ts'));
+  expect(files.length).toBeGreaterThan(0);
+  for (const file of files) {
+    const src = readFileSync(join(CONTRACTS_DIR, file), 'utf8');
+    for (const spec of importSpecifiers(src)) {
+      const ok = spec === 'zod' || spec.startsWith('./');
+      expect(ok, `${file} has forbidden import "${spec}"`).toBe(true);
+    }
+  }
+});
 ```
 
-- [ ] **Step 5: Replace representative console calls in chat.ts + run tests**
+- [ ] **Step 6: Run the guard test to verify it passes**
 
-In `src/cli/chat.ts` add `const log = createLogger('chat');` (import from `../log/logger.ts`) and replace the two status `console.error(...)` at `:191`/`:195` with `log.info(...)`. (Leave the usage-error `console.error` at `:181` — that path exits before a logger is useful; the error boundary in Task 5 handles top-level errors.)
+Run: `bun test tests/contracts/isomorphic.test.ts`
+Expected: PASS — `enums.ts` has zero imports; the guard now protects every future contracts file.
 
-Run: `bun test tests/log/ && bun run typecheck`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/log/logger.ts tests/log/logger.test.ts src/telemetry/run-router.ts src/cli/chat.ts
-git commit -m "feat(log): structured leveled logger stamped with run-id (replaces ad-hoc console.* status)"
+git add src/contracts/enums.ts tests/contracts/enums.test.ts tests/contracts/isomorphic.test.ts
+git commit -m "feat(contracts): add wire enums + isomorphic-purity guard test"
 ```
 
 ---

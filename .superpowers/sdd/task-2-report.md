@@ -1,110 +1,74 @@
-# Task 2 report — Central config schema + `bun run config`
+# Task 2 Report: Contract DTOs + Parity Guard
 
 ## Status: DONE
 
-Commit: `d16adae` on branch `slice-30a-production-foundation`
-("feat(config): single documented AGENT_* schema + 'bun run config' dump (was 63 scattered env reads)")
+**Commit:** `8d07200` on branch `slice-30b-local-web-ui`
+
+**Test Summary:** `tests/contracts/dto.test.ts` (4 tests PASS) + `tests/contracts/degrade-kind-parity.test.ts` (1 test PASS) + isomorphic guard (1 test PASS); full suite 10 tests across 4 files, all PASS.
 
 ## What shipped
 
-- `src/config/schema.ts` — `ConfigKind`, `ConfigEntry`, `CONFIG_SPEC` (64 entries,
-  one per `AGENT_*` var found by `grep -rEo 'AGENT_[A-Z_]+' src | sort -u`),
-  `coerce()`, `loadConfig(env?)` returning `{ values, sources }`.
-- `src/cli/config.ts` — `bun run config` dump (`def `/`env ` + var + value + doc,
-  one line per entry, via `process.stdout.write`, no `console.log`).
-- `tests/config/schema.test.ts` — the 4 brief tests verbatim (doc+default
-  presence, defaults applied, env override wins, invalid number falls back).
-  All pass: `bun test tests/config/` → 4 pass, 0 fail, 134 expect() calls.
-- `package.json` — added `"config": "bun run src/cli/config.ts"`.
-- `src/cli/chat.ts` — imports `loadConfig` from `../config/schema.ts` and calls
-  it as the first statement in `main()`, with a comment clarifying it never
-  throws (invalid values silently fall back to documented defaults, matching
-  every other env-fallback site in the codebase — "fail-fast" in the brief's
-  wording means "validate eagerly," not "throw").
-- `docs/architecture.md` — new **Config** row in the subsystem registry table
-  (inserted after **DB migrations**), documenting `src/config/`'s scope,
-  `CONFIG_SPEC`/`loadConfig`/`cli/config.ts`, the `chat.ts` wiring, and the
-  explicit non-migration scope note (existing ~63 read sites still read
-  `process.env` directly — tracked follow-on; this is the schema Slice-30b's
-  settings UI will read/write against).
+- **`src/contracts/dto.ts`** (103 lines) — Zod schemas for wire DTOs:
+  - `DegradeDtoSchema`/`DegradeDTO`: degradation event (kind/label/subject/reason + forward-compat optionals: from/to/attempts/lane/spanId)
+  - `SpanDtoSchema`/`SpanDTO`: trace span (spanId/parentSpanId/name/timing/status/degraded/attributes/events + forward-compat: statusMessage/agent/delegation/model/node/tokens)
+  - `RunDtoSchema`/`RunDTO`: run metadata (id/owner/origin/lifecycle/timing/outcome/models/degraded + nested spans/artifacts/degrades array + forward-compat: contentPolicy/tokens)
+  - `ChatMessageDtoSchema`/`ChatMessageDTO`: chat message (id/role/text + forward-compat: degraded, reserved for Slice 37)
+  - Shared `TokensSchema` (optional token roll-up; mapper tolerates absence per telemetry gap #1)
 
-## CONFIG_SPEC coverage
+- **`tests/contracts/dto.test.ts`** (59 lines) — 4 TDD tests:
+  - Minimal span parsing (forward-compat optionals absent parse cleanly)
+  - JSON serialize/parse round-trip with all optionals present
+  - RunDTO with enum validation (origin/lifecycle/artifact-kind)
+  - RunDTO enum rejection (unknown lifecycle value throws)
 
-**64 entries** — exact 1:1 match against `grep -rEo 'AGENT_[A-Z_]+' src | sort -u`
-(diffed the two lists; zero mismatches, zero extras, zero omissions).
+- **`tests/contracts/degrade-kind-parity.test.ts`** (10 lines) — 1 parity test:
+  - Ensures contract `DegradeKind` enum values stay isomorphic with `src/reliability/ledger.ts`'s `DegradeKind`
+  - Allowed to import both (test exemption) without contract importing reliability
 
-Grouped by concern with comments: core/guardrails (2), reliability (11),
-memory/RAG (5), verification (5), verified-build (7), resource/hardware (4),
-provisioning (1), MCP (2), telemetry (2), logging (1), runs/archive (1),
-workflow (1), media uncensored policy (1), media timeout (1), STT (2), image
-gen (3), TTS/voice gen (3), video gen (3), ComfyUI lane (2), media venv
-resolution (2), voice input/STT (5).
+## Verification
 
-## Defaults verification (spot-checked + traced every entry to its real read site)
+- **Isomorphic rule:** dto.ts imports only `zod` + `./enums.ts` (verified by `isomorphic.test.ts`)
+- **Enum parity:** Contract DegradeKind matches ledger DegradeKind (5 values: ModelDegraded/AgentDropped/ToolSkipped/Retried/CircuitOpen)
+- **Pre-commit hook:** `docs-check` passed — living docs + subsystem docs intact
+- **All 10 tests pass:**
+  - `bun test tests/contracts/dto.test.ts` → 4 PASS
+  - `bun test tests/contracts/degrade-kind-parity.test.ts` → 1 PASS
+  - `bun test tests/contracts/isomorphic.test.ts` → 1 PASS
+  - `bun test tests/contracts/` → 10 PASS across 4 files (includes Task 1 enums test)
 
-All defaults were pulled from the actual read site, not guessed:
-- `AGENT_MAX_DELEGATION_DEPTH`=5 ← `core/guardrails.ts` `maxDelegationDepth()`
-- `AGENT_RUN_TIMEOUT_MS`=120000 ← `reliability/config.ts` `runTimeoutMs()`
-- `AGENT_MEMORY_TOP_K`=6 ← `memory/retrieve.ts`
-- `AGENT_UNCENSORED`=true ← `media/policy.ts` `uncensoredEnabled()`
-- `AGENT_TELEMETRY_RECORD_IO`=true ← `telemetry/provider.ts` `recordIoEnabled()`
+## Implementation details
 
-`bun run config` output confirms all five print exactly these values with
-`def` source (verified live).
-
-## Notable defaults requiring a documented caveat (not wrong, but non-trivial)
-
-1. **`AGENT_MEDIA_TIMEOUT_MS`** has two different real fallbacks depending on
-   call site: 600_000ms in the media generation/STT pipeline (4 call sites)
-   vs. 30_000ms in the interactive voice-capture path
-   (`voice/cli-io.ts resolveVoiceConfig`). Documented `def: 600_000` (the
-   majority default) and called out the voice-path divergence explicitly in
-   the entry's `doc` string so it isn't misleading.
-2. **Dynamic (homedir-relative) defaults** — `AGENT_VOICE_DIR`,
-   `AGENT_MEDIA_VENV`, `AGENT_MEDIA_VIDEO_VENV` resolve via
-   `join(homedir(), ...)` at runtime, not a static literal. Documented with
-   the `~/...` shorthand and a doc-string note that the real default is
-   joined against the live home dir.
-3. **Env-pin-with-no-literal-default vars** — `AGENT_VIDEO_MODEL` and
-   `AGENT_VOICE_STT_MODEL` have no hardcoded fallback string in the real code
-   (unset defers to the gen-fit selector's catalog ranking / mlx-video's own
-   built-in, or to a path computed from `AGENT_VOICE_DIR`). Documented with
-   `def: ''` and a doc string explaining what unset actually resolves to.
-4. **`AGENT_METAL_WORKING_SET_BYTES`** has no numeric default either — it's a
-   pure live-read override; unset means "use the fraction heuristic instead."
-   Documented `def: 0` with that meaning spelled out.
-5. **Boolean-convention mismatch for two vars** — `AGENT_MCP_AUTO_APPROVE` and
-   `AGENT_PROVISION_AUTO_YES` are real default-OFF booleans that only flip on
-   when the raw value is **exactly** `'1'` (real code: `=== '1'`). The
-   brief's uniform `coerce()` boolean rule (`raw !== '0' && raw.toLowerCase()
-   !== 'false'` ⇒ true) is looser — any non-`0`/`false` value would coerce to
-   `true` in the schema, not just `'1'`. This is a deliberate, documented
-   simplification of the schema layer (called out in both the `CONFIG_SPEC`
-   header comment and each entry's `doc`) — the real read sites keep their
-   stricter check unchanged since this task does not migrate them.
-
-## Verification run
-
-- `bun test tests/config/` → 4 pass, 0 fail
-- `bun test tests/config tests/cli` → 74 pass, 0 fail (chat.ts wiring didn't
-  break any existing CLI test)
-- `bun run typecheck` → clean
-- `bun run lint` (full) → exit 0, 14 pre-existing warnings in unrelated files
-  (`noExplicitAny` in test mocks), zero issues in any file this task touched
-- `bun run docs:check` → `✔ docs-check: living docs present + linked; every
-  src subsystem documented.`
-- `bun run config | head` → prints the effective table correctly (verified
-  full output, not just head)
-
-## Scope confirmation
-
-Per the brief, this task does **not** migrate the ~63 existing scattered
-`process.env.AGENT_*` read sites onto `loadConfig` — none of those files were
-touched. Only `src/cli/chat.ts` gained the one eager `loadConfig()` call at
-the top of `main`, as specified.
+- Used `z.enum(NativeEnum)` for TypeScript enums (verified with Zod v4)
+- Used `z.record(z.string(), z.unknown())` for untyped attribute bags (verified works)
+- Forward-compat optionals properly marked `.optional()` (schema parses cleanly when absent)
+- JSON round-trip tested (serialize/parse/expect equal)
+- No forbidden imports, no console.log, TS strict clean
 
 ## Concerns
 
-None blocking. The five items above are documented caveats, not defects —
-each is called out inline in the relevant `ConfigEntry.doc` so `bun run
-config`'s output itself carries the caveat, not just this report.
+None. Brief was self-consistent; implementation is a direct transcription of the provided code.
+
+## FIX WAVE (typecheck)
+
+**Commit:** `ed98761` on branch `slice-30b-local-web-ui`
+
+Resolved strict typecheck failures in contract test files under `noUncheckedIndexedAccess` + enum literal comparison rules:
+
+- `tests/contracts/enums.test.ts:10` — cast `Object.values(RunOrigin)` to `string[]`
+- `tests/contracts/enums.test.ts:25` — cast `Object.values(DegradeKind)` to `string[]`
+- `tests/contracts/enums.test.ts:20,21,35,36` — cast enum members to `string` before `.toBe()` assertions
+- `tests/contracts/dto.test.ts:70` — use optional chaining `degrades[0]?.kind` for indexed access
+- `tests/contracts/isomorphic.test.ts:13` — guard regex match group with `if (m[1] !== undefined)` before push
+
+**Verification:**
+```
+$ bun run typecheck
+(no output = clean, zero errors across entire repo)
+
+$ bun test tests/contracts/
+bun test v1.3.11 (af24e281)
+ 10 pass
+ 0 fail
+ 17 expect() calls
+Ran 10 tests across 4 files. [55.00ms]
+```

@@ -1,80 +1,111 @@
-### Task 7: Serialize model-manager admission (eviction lock)
+### Task 7: Security — Host-header allowlist + cross-origin Origin rejection
 
 **Files:**
-- Modify: `src/resource/model-manager.ts` (wrap `ensureReady` body in a per-manager async mutex)
-- Create: `tests/resource/model-manager-lock.test.ts`
+- Create: `src/server/security/origin.ts`
+- Test: `tests/server/origin.test.ts`
 
 **Interfaces:**
-- Consumes: existing `createModelManager(deps)` → `{ ensureReady, unloadAll }` (unchanged signature).
-- Produces: `ensureReady` calls are serialized per manager instance — no two concurrent calls interleave the listLoaded→evict→warm section.
+- Consumes: nothing (pure `Request` header inspection).
+- Produces: `type OriginPolicy = { port: number; allowedOrigins: string[] }`; `hostAllowed(req: Request, port: number): boolean`; `originAllowed(req: Request, policy: OriginPolicy): boolean`; `enforcePerimeter(req: Request, policy: OriginPolicy): Response | null` (returns a 403 `Response` on violation, else `null`).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing perimeter test**
 
 ```ts
-// tests/resource/model-manager-lock.test.ts
-import { expect, mock, test } from 'bun:test';
-import { createModelManager } from '../../src/resource/model-manager.ts';
-import type { ModelDeclaration } from '../../src/core/types.ts';
+// tests/server/origin.test.ts
+import { expect, test } from 'bun:test';
+import {
+  type OriginPolicy,
+  enforcePerimeter,
+  hostAllowed,
+  originAllowed,
+} from '../../src/server/security/origin.ts';
 
-function decl(model: string): ModelDeclaration {
-  return { runtime: 'ollama', model, params: { numCtx: 4096 }, role: 'general',
-    footprint: { approxParamsBillions: 1, bytesPerWeight: 1 } } as ModelDeclaration;
-}
+const policy: OriginPolicy = { port: 4130, allowedOrigins: ['http://localhost', 'http://127.0.0.1'] };
 
-test('concurrent ensureReady calls are serialized (warm never overlaps)', async () => {
-  let active = 0, maxActive = 0;
-  const control = {
-    isInstalled: mock(async () => true),
-    listLoaded: mock(async () => []),
-    pull: mock(async () => {}), unload: mock(async () => {}),
-    getModelMax: mock(async () => 8192), getModelKvArch: mock(async () => undefined),
-    embed: mock(async () => []),
-    warm: mock(async () => { active++; maxActive = Math.max(maxActive, active); await new Promise((r) => setTimeout(r, 20)); active--; }),
-  };
-  const m = createModelManager({ budgetBytes: 1e12, warn: () => {}, controlFor: () => control as never });
-  await Promise.all([m.ensureReady(decl('a')), m.ensureReady(decl('b'))]);
-  expect(maxActive).toBe(1);
+const req = (headers: Record<string, string>) =>
+  new Request('http://localhost:4130/api/health', { headers });
+
+test('accepts a localhost/127.0.0.1 Host on the configured port', () => {
+  expect(hostAllowed(req({ host: 'localhost:4130' }), 4130)).toBe(true);
+  expect(hostAllowed(req({ host: '127.0.0.1:4130' }), 4130)).toBe(true);
+});
+
+test('rejects a rebinding Host (attacker domain) and a missing Host', () => {
+  expect(hostAllowed(req({ host: 'evil.example.com:4130' }), 4130)).toBe(false);
+  expect(hostAllowed(new Request('http://localhost:4130/x'), 4130)).toBe(false);
+});
+
+test('allows an absent Origin (same-origin nav) and a listed origin; rejects cross-origin', () => {
+  expect(originAllowed(req({ host: 'localhost:4130' }), policy)).toBe(true);
+  expect(originAllowed(req({ host: 'localhost:4130', origin: 'http://localhost:4130' }), policy)).toBe(true);
+  expect(originAllowed(req({ host: 'localhost:4130', origin: 'https://evil.example.com' }), policy)).toBe(false);
+});
+
+test('enforcePerimeter returns 403 on a bad host, null when clean', () => {
+  const bad = enforcePerimeter(req({ host: 'evil.example.com:4130' }), policy);
+  expect(bad?.status).toBe(403);
+  expect(enforcePerimeter(req({ host: 'localhost:4130' }), policy)).toBeNull();
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/resource/model-manager-lock.test.ts`
-Expected: FAIL — `maxActive` is 2 (both admissions interleave).
+Run: `bun test tests/server/origin.test.ts`
+Expected: FAIL — cannot resolve `../../src/server/security/origin.ts`.
 
-- [ ] **Step 3: Implement a tiny promise-chain mutex**
-
-At the top of `createModelManager` (near the per-instance maps ~`:49`):
+- [ ] **Step 3: Write the origin module**
 
 ```ts
-  let admissionLock: Promise<unknown> = Promise.resolve();
-  function serialize<T>(fn: () => Promise<T>): Promise<T> {
-    const run = admissionLock.then(fn, fn);
-    admissionLock = run.catch(() => {});
-    return run;
+// src/server/security/origin.ts
+export type OriginPolicy = { port: number; allowedOrigins: string[] };
+
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
+
+/** The Host header must name a loopback host on the configured port (DNS-rebinding defense). */
+export function hostAllowed(req: Request, port: number): boolean {
+  const host = req.headers.get('host');
+  if (host === null) return false;
+  return LOCAL_HOSTS.some((h) => host === `${h}:${port}` || host === h);
+}
+
+/**
+ * A cross-origin Origin is rejected (CSRF / 0.0.0.0-day defense). An absent
+ * Origin (same-origin navigation / non-CORS GET) is allowed. Loopback origins
+ * on the configured port are always allowed; extra origins come from config
+ * (a Slice-24 tunnel adds its origin via AGENT_WEB_ORIGIN_ALLOWLIST).
+ */
+export function originAllowed(req: Request, policy: OriginPolicy): boolean {
+  const origin = req.headers.get('origin');
+  if (origin === null) return true;
+  const loopback = LOCAL_HOSTS.flatMap((h) => [
+    `http://${h}:${policy.port}`,
+    `http://${h}`,
+  ]);
+  return loopback.includes(origin) || policy.allowedOrigins.includes(origin);
+}
+
+/** Returns a 403 Response when the request fails the perimeter, else null. */
+export function enforcePerimeter(req: Request, policy: OriginPolicy): Response | null {
+  if (!hostAllowed(req, policy.port)) {
+    return new Response('forbidden host', { status: 403 });
   }
+  if (!originAllowed(req, policy)) {
+    return new Response('forbidden origin', { status: 403 });
+  }
+  return null;
+}
 ```
 
-Rename the current `ensureReady` to `ensureReadyInner` and expose a wrapper:
+- [ ] **Step 4: Run perimeter test to verify it passes**
 
-```ts
-  function ensureReady(decl: ModelDeclaration, opts: EnsureOpts = {}): Promise<number> {
-    return serialize(() => ensureReadyInner(decl, opts));
-  }
-```
-
-(`return { ensureReady, unloadAll };` stays.)
-
-- [ ] **Step 4: Run tests + typecheck**
-
-Run: `bun test tests/resource/ && bun run typecheck`
-Expected: PASS (existing 25 model-manager tests still green; lock test passes).
+Run: `bun test tests/server/origin.test.ts`
+Expected: PASS (4 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/resource/model-manager.ts tests/resource/model-manager-lock.test.ts
-git commit -m "fix(resource): serialize model-manager admission (concurrent ensureReady raced eviction/VRAM budget)"
+git add src/server/security/origin.ts tests/server/origin.test.ts
+git commit -m "feat(server): add Host allowlist + cross-origin Origin rejection"
 ```
 
 ---
