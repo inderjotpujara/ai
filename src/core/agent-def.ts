@@ -2,7 +2,7 @@ import type { ProviderOptions } from '@ai-sdk/provider-utils';
 import type { LanguageModel, ToolSet } from 'ai';
 import { resolveAttachments } from '../media/resolve.ts';
 import type { MediaStore } from '../media/store.ts';
-import { runAgent } from './agent.ts';
+import { runAgent, type StreamSink } from './agent.ts';
 import type { ModelDeclaration, ModelRequirement } from './types.ts';
 
 /** A reusable agent: its own model + system prompt + tools, plus a routing description. */
@@ -40,7 +40,7 @@ export async function runDefinedAgent(
   modelOverride?: LanguageModel,
   abortSignal?: AbortSignal,
   mediaStore?: MediaStore,
-  deps?: { runAgentImpl?: typeof runAgent },
+  deps?: { runAgentImpl?: typeof runAgent; stream?: StreamSink },
 ): ReturnType<typeof runAgent> {
   const runAgentImpl = deps?.runAgentImpl ?? runAgent;
   const attachments = mediaStore
@@ -55,5 +55,6 @@ export async function runDefinedAgent(
     providerOptions: ollamaCtxOptions(numCtx),
     functionId: agent.name,
     abortSignal,
+    stream: deps?.stream,
   });
 }
