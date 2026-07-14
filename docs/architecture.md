@@ -530,6 +530,7 @@ graph TD
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
 | **Contracts** | `src/contracts/` | Isomorphic web wire protocol (Slice 30b, Phase 1 — full section below): enums (`enums.ts`), read-model DTOs (`dto.ts`), the transient-SSE `StatusEvent` union (`events.ts`), inbound request schemas (`requests.ts`), barrel (`index.ts`). **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*` | `zod` only |
 | **Server** | `src/server/` | Thin `Bun.serve` web BFF, no business logic (Slice 30b, Phase 1 — full section below): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry. Streaming chat handler, DTO mappers, and remaining endpoints attach in later phases | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts` |
+| **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI scaffold, SCAFFOLD ONLY (Slice 30b, Phase 1b — full section below): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface. No live streaming/chat/voice yet — see the section below for exactly what's deferred | `@contracts` (`src/contracts/`), served as static assets by `src/server/` |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
@@ -3123,3 +3124,63 @@ so an endpoint degrades to a JSON error, never crashes.
 → route (/api/health | static) → JSON/HTML response`. Served-mode record-IO is
 OFF by default (`AGENT_WEB_RECORD_IO`), distinct from the CLI's
 `AGENT_TELEMETRY_RECORD_IO`.
+
+## Web frontend (browser UI scaffold — `web/`, Slice 30b Phase 1b)
+
+**Feature.** `web/` is the local web UI's browser code — a **scaffold only**:
+an app shell, a design-token system, and the interfaces the later phases wire
+real behavior into. It is its own Bun workspace member (own `package.json`,
+`tsconfig.json`, and Vitest config, separate from the root's), and is served
+as static assets by `src/server/` (§ "Server" above — `staticDir` + token
+injection into the served HTML + the COOP/COEP headers). Nothing in this
+section talks to a model, streams a response, or persists anything; that is
+explicitly deferred to Phases 2–8 (see "Not yet built" below).
+
+**Structure (feature-sliced, isolation-rule enforced).**
+- `web/src/main.tsx` — the entry point: mounts the app and wires the
+  providers (theme, router).
+- `web/src/app/` — the shell: `app-shell.tsx`, the TanStack Router route tree
+  (`router.tsx`, 7 nav areas + a run-detail route), and the ⌘K
+  command-palette skeleton (`command-palette.tsx` + `commands.ts`:
+  open/close/filter/keyboard-nav, wired to a command registry that navigates
+  via the router; no commands beyond navigation yet).
+- `web/src/shared/` — design tokens + `ThemeProvider` (light/dark toggle),
+  Base-UI primitives (`Button`/`Dialog`), `RegionErrorBoundary` (one per nav
+  area, so one broken region doesn't blank the shell), the contract client,
+  and the transport-port interface.
+- `web/src/features/*` — one stub module per nav area. **Isolation rule:** a
+  feature module may import only `shared/` and `@contracts` — never another
+  feature, never `src/` directly. Nothing enforces this with a lint rule yet;
+  it is a convention the code follows today.
+
+**Design system.** `shared/design/tokens.css` defines the Blueprint-Mono token
+set as a Tailwind v4 `@theme` block — both light and dark palettes, a
+`prefers-reduced-motion` variant, and Geist (sans + mono) via Fontsource with
+system-font fallbacks. Components reference tokens (`var(--color-*)` /
+Tailwind utility classes bound to the theme) — never raw hex.
+
+**Contract boundary.** `shared/contract/client.ts` reads the per-session token
+the server injected as `window.__AGENT_TOKEN__` (§ "Server" above), attaches
+it as `Authorization: Bearer <token>` on every request, and zod-parses the
+response against the schemas in `src/contracts/` (`@contracts` alias) — so a
+malformed or version-skewed response fails fast instead of flowing
+un-validated into UI state.
+
+**Transport port.** `shared/transport/types.ts` defines `ChatTransport` and
+`RunStream` — a bidirectional, resumable transport interface (per decision
+D14) that the real SSE adapter will implement in Phase 2. Today it is an
+interface plus a contract test only; nothing implements it against a live
+endpoint yet.
+
+**Testing.** `web/`'s component tests run under Vitest + `@testing-library/react`
+(happy-dom environment), invoked via `bun run check:web` (web typecheck +
+Vitest) from the `web/` workspace; `check:web` is folded into the root
+`bun run check`, so the web suite is part of the one gate CI and local
+development both run (§ "Testing strategy" below covers the full-repo
+picture).
+
+**Explicitly NOT yet built (scaffold phase).** Live SSE/`useChat` streaming;
+real feature screens (each nav area is a stub); `@visx`/`@xyflow` graph and
+chart rendering; any client-side persistence; voice input in the browser. All
+land in Phases 2–8 of the Slice-30b line — this section documents only what
+Phase 1b actually shipped.
