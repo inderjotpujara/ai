@@ -1,124 +1,99 @@
-# Task 7 Report: Security — Host-header allowlist + cross-origin Origin rejection
+# Task 7 report: ⌘K command-palette skeleton
 
 ## Status: DONE
 
-## Commit
-`a16fb9d` — feat(server): add Host allowlist + cross-origin Origin rejection
+## Files
+- Created: `web/src/app/commands.ts` — `Command` type + `navCommands` (7 nav-jump commands).
+- Created: `web/src/app/command-palette.tsx` — `CommandPalette` component.
+- Created: `web/src/app/command-palette.test.tsx` — 4 tests per brief.
+- Modified: `web/src/app/app-shell.tsx` — imports and mounts `<CommandPalette />` right after `<header>…</header>`.
 
-## What changed
-- **`src/server/security/origin.ts`** (37 lines, new file):
-  - `OriginPolicy` type: `{ port: number; allowedOrigins: string[] }`
-  - `hostAllowed(req, port)`: Validates Host header against loopback hosts (localhost/127.0.0.1/[::1]) on configured port; rejects rebinding attacks and missing Host.
-  - `originAllowed(req, policy)`: Allows absent Origin (same-origin navigation); rejects cross-origin unless loopback on port or allowlisted in policy.
-  - `enforcePerimeter(req, policy)`: Orchestrator; returns 403 Response on host/origin violation, null if clean.
-  - Pure `Request` header inspection; no external dependencies.
+Commit: `bd7f692` — "feat(web): ⌘K command-palette skeleton wired to router navigation"
 
-- **`tests/server/origin.test.ts`** (34 lines, new file):
-  - Test 1: Accepts localhost/127.0.0.1 Host on configured port.
-  - Test 2: Rejects rebinding Host (attacker domain) and missing Host.
-  - Test 3: Allows absent Origin and allowlisted origins; rejects cross-origin.
-  - Test 4: enforcePerimeter returns 403 on bad host, null when clean.
+## TDD
+- RED: wrote `command-palette.test.tsx` first, ran `cd web && bun run test src/app/command-palette.test.tsx` →
+  failed as expected: `Failed to resolve import "./command-palette.tsx"` (0 tests ran, 1 failed suite).
+- GREEN: added `commands.ts` + `command-palette.tsx` verbatim per brief, mounted in `app-shell.tsx`. Re-ran the
+  same test command → **4/4 passed on the first try**, no happy-dom/Base-UI portal workaround needed (the
+  existing `dialog.test.tsx` precedent already proved happy-dom handles the Base UI portal fine, and that held
+  here too — `findByRole('listbox')` resolved without any special query adaptation).
 
-## TDD flow
-1. Wrote test first (`tests/server/origin.test.ts`); ran `bun test tests/server/origin.test.ts` — failed with "Cannot find module" (expected).
-2. Implemented module exactly as specified in the brief.
-3. Re-ran test — **4 pass, 0 fail**.
+## Test-approach adaptation
+None needed. The brief's test file was used unmodified. All assertions (open-on-⌘K, filter narrows results,
+Enter navigates to the right route, Esc closes) pass as originally written against `document.body`-portaled
+content via `findByRole`/`getByRole`.
 
-## Verification
-- **Test results:**
-  ```
-  bun test tests/server/origin.test.ts
-   4 pass
-   0 fail
-   9 expect() calls
-  Ran 4 tests across 1 file. [13.00ms]
-  ```
+## Lint fix beyond the brief (a11y)
+The brief's sample code triggered two real biome a11y errors not anticipated by the "one biome-ignore for
+autofocus" note:
+1. `lint/a11y/useKeyWithClickEvents` — the option row had `onClick` but no keyboard equivalent.
+2. `lint/a11y/noNoninteractiveElementToInteractiveRole` — `<li role="option">` flagged as a non-interactive
+   element carrying an interactive role.
 
-- **Typecheck:** `bun run typecheck` → clean, no errors.
-  ```
-  $ tsc --noEmit
-  (exit 0)
-  ```
+Fixed properly (no suppression) rather than blanket-ignoring:
+- Changed the option row and its container from `<ul>/<li>` to `<div role="listbox">` / `<div role="option">`
+  (a widely-used pattern for combobox-style listboxes; role semantics are unaffected, and no test queries by
+  tag name — all query by role).
+- Added an `onKeyDown` handler on each option (Enter/Space runs the command), satisfying the
+  keyboard-equivalent rule without changing any tested behavior (ArrowUp/Down/Enter on the input already
+  drove selection+run in the tests; this adds the same affordance directly on the option row).
+- The brief's anticipated `biome-ignore lint/a11y/noAutofocus` comment on the input was not needed at all —
+  biome flagged it as an **unused suppression** (`suppressions/unused` warning), meaning that rule doesn't
+  fire for this JSX shape in this repo's biome config. Removed the dead comment rather than leave a
+  no-op suppression.
+- Ran `bunx biome check --write` on the 4 touched files to apply formatting (multi-line object literals,
+  ternary wrapping) — purely mechanical, no logic changes.
 
-- **Docs check (pre-commit hook):** Passed automatically on commit.
-  ```
-  ✔ docs-check: living docs present + linked; every src subsystem documented.
-  ```
+No repo-wide config changes were made.
 
-- No stray `console.log` introduced.
-- No regressions — existing server tests unaffected (this is a new subsystem addition).
+## Gate outputs
 
-## Self-review (per dispatch instructions)
-- **Host validation:** Loopback-only enforcement correct; missing Host rejected as expected.
-- **Origin validation:** Absent Origin allowed (same-origin navigation); cross-origin rejected; loopback and allowlisted origins accepted per policy.
-- **Perimeter enforcement:** Checks Host first (DNS-rebinding defense), then Origin (CSRF defense); returns appropriate 403 or null.
-- **Code style:** Follows project conventions (type over interface, early returns, small focused functions). TypeScript strict mode passed.
-- **Test coverage:** All 4 test groups cover the brief's semantic gates (loopback accept, rebinding reject, missing-host reject, absent-origin allow, cross-origin reject, enforcePerimeter behavior).
+1. `cd web && bun run test src/app/command-palette.test.tsx`
+   ```
+   Test Files  1 passed (1)
+        Tests  4 passed (4)
+   ```
+
+2. `cd web && bun run test` (full web suite)
+   ```
+   Test Files  9 passed (9)
+        Tests  26 passed (26)
+   ```
+
+3. `cd web && bun run typecheck`
+   ```
+   $ tsc --noEmit
+   (clean, no output)
+   ```
+
+4. `bun run lint` (root, full repo)
+   ```
+   Found 1 error.
+   Found 14 warnings.
+   ```
+   Confirmed via `bun run lint 2>&1 | grep -E "command-palette|commands\.ts|app-shell"` → **no output**, i.e.
+   zero errors/warnings attributable to any of the 4 task files. The 1 remaining error and 14 warnings are
+   pre-existing, in unrelated files (`web/src/features/runs/run-detail.tsx` formatting, an `any`-typed
+   transport file) not touched by this task.
+   Scoped check on just the task files: `bun run lint:file -- "web/src/app/command-palette.tsx"
+   "web/src/app/commands.ts" "web/src/app/app-shell.tsx" "web/src/app/command-palette.test.tsx"` →
+   `Checked 4 files in 4ms. No fixes applied.` (0 errors, 0 warnings).
+
+## Self-review
+- Registry (`commands.ts`) is data-only and pure — easy to extend later (Phase 8) without touching the
+  palette component.
+- `CommandPalette` keeps state local (open/query/selected), resets on close, global keydown listener is
+  cleaned up on unmount.
+- a11y contract preserved and slightly strengthened: `role="combobox"` input, `role="listbox"` container,
+  `role="option"` rows with `aria-selected`, plus now keyboard-operable per-row (Enter/Space), matching the
+  brief's intent without leaving an a11y lint gap.
+- Only the 7 wireable nav commands are present, matching the "no launch-agent/switch-model in 1b" scope
+  note baked into the comment in `commands.ts`.
 
 ## Concerns
-None. Implementation matches brief verbatim; all gates pass; semantics empirically validated by the test suite.
-
-## FIX WAVE (port-scoping bypass)
-
-### The finding
-A security review found a port-scoping bypass in both perimeter functions:
-- `hostAllowed`: the `|| host === h` disjunct accepted a bare (portless) `localhost`/`127.0.0.1`/`[::1]` Host header regardless of the configured port.
-- `originAllowed`: the loopback allow-list included bare `http://${h}` entries (implicit port 80), accepted regardless of `policy.port`.
-
-Impact: a non-browser local client, or a page served from `http://localhost` (port 80), could satisfy the Host/Origin check against a service running on a *different* configured port — defeating the port-scoped CSRF/rebinding defense the spec requires (loopback MUST be on the configured port).
-
-### The fix
-`src/server/security/origin.ts`:
-
-```ts
-/** The Host header must name a loopback host on the configured port (DNS-rebinding defense). */
-export function hostAllowed(req: Request, port: number): boolean {
-  const host = req.headers.get('host');
-  if (host === null) return false;
-  return LOCAL_HOSTS.some((h) => host === `${h}:${port}`);
-}
-
-/**
- * A cross-origin Origin is rejected (CSRF / 0.0.0.0-day defense). An absent
- * Origin (same-origin navigation / non-CORS GET) is allowed. Loopback origins
- * on the configured port are always allowed; extra origins come from config
- * (a Slice-24 tunnel adds its origin via AGENT_WEB_ORIGIN_ALLOWLIST).
- */
-export function originAllowed(req: Request, policy: OriginPolicy): boolean {
-  const origin = req.headers.get('origin');
-  if (origin === null) return true;
-  const loopback = LOCAL_HOSTS.map((h) => `http://${h}:${policy.port}`);
-  return loopback.includes(origin) || policy.allowedOrigins.includes(origin);
-}
-```
-
-- `hostAllowed`: dropped the bare fallback — accepts ONLY exact `host === \`${h}:${port}\`` for each loopback host. A portless Host is now rejected.
-- `originAllowed`: dropped the bare `http://${h}` entries — the loopback allow-list is now ONLY `http://${h}:${policy.port}`. `policy.allowedOrigins` still allows explicitly-configured extra origins (e.g. a Slice-24 tunnel), unchanged.
-- Exact-match (`===`/`Array.includes`) discipline preserved throughout; no substring/prefix matching introduced.
-
-### New tests added (`tests/server/origin.test.ts`)
-- `rejects a bare (portless) loopback Host` — `Host: localhost` (no port) → `hostAllowed` false.
-- `rejects a bare (portless) loopback Origin when not explicitly allowlisted` — `Origin: http://localhost` (no port), empty `allowedOrigins` → `originAllowed` false.
-- `rejects a loopback Host on the wrong port` — policy port 4130, `Host: localhost:9999` → false.
-- `accepts an IPv6 loopback Host on the configured port` — `Host: [::1]:4130` → true.
-- `accepts a distinct non-loopback origin configured via allowedOrigins` — `Origin: https://tunnel.example.com` in `policy.allowedOrigins`, not loopback → `originAllowed` true (proves the config path works independently of the loopback list).
-
-All previously-passing tests kept unchanged and still pass.
-
-### Verification
-```
-$ bun run typecheck
-$ tsc --noEmit
-(exit 0, clean)
-
-$ bun test tests/server/origin.test.ts
-bun test v1.3.11 (af24e281)
-
- 9 pass
- 0 fail
- 14 expect() calls
-Ran 9 tests across 1 file. [31.00ms]
-```
-
-### Commit
-`984d186` — fix(server): port-scope Host/Origin allowlist (drop portless loopback bypass)
+None blocking. Two minor, non-blocking notes for future phases:
+- The per-row `onKeyDown` (Enter/Space) duplicates the input-level Enter handling in effect (both can run
+  the command), which is intentional/standard for combobox+listbox patterns but worth knowing if a future
+  phase adds row-level focus management.
+- Pre-existing repo-wide lint findings (1 error in `run-detail.tsx`, 14 warnings including `any` usage in a
+  transport file) are untouched — out of scope for this task, flagged here only for visibility.

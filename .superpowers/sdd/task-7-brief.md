@@ -1,111 +1,212 @@
-### Task 7: Security — Host-header allowlist + cross-origin Origin rejection
+### Task 7: ⌘K command-palette skeleton
 
 **Files:**
-- Create: `src/server/security/origin.ts`
-- Test: `tests/server/origin.test.ts`
+- Create: `web/src/app/commands.ts`, `web/src/app/command-palette.tsx`
+- Modify: `web/src/app/app-shell.tsx` (mount the palette)
+- Test: `web/src/app/command-palette.test.tsx`
 
 **Interfaces:**
-- Consumes: nothing (pure `Request` header inspection).
-- Produces: `type OriginPolicy = { port: number; allowedOrigins: string[] }`; `hostAllowed(req: Request, port: number): boolean`; `originAllowed(req: Request, policy: OriginPolicy): boolean`; `enforcePerimeter(req: Request, policy: OriginPolicy): Response | null` (returns a 403 `Response` on violation, else `null`).
+- Consumes: `Dialog` (Task 4), `useNavigate` from `@tanstack/react-router`.
+- Produces: `type Command = { id: string; label: string; run: (nav: NavigateFn) => void }`, `navCommands: Command[]` (the 7 area jumps — the only wireable commands in 1b; launch-agent/switch-model land with their features), `CommandPalette` component: opens on ⌘K / Ctrl+K (global keydown), closes on Esc, `includes`-filters by label, ArrowUp/Down moves selection, Enter runs the selected command, has `role="listbox"` + `aria-selected` for a11y.
 
-- [ ] **Step 1: Write the failing perimeter test**
+- [ ] **Step 1: Write the failing test**
 
-```ts
-// tests/server/origin.test.ts
-import { expect, test } from 'bun:test';
-import {
-  type OriginPolicy,
-  enforcePerimeter,
-  hostAllowed,
-  originAllowed,
-} from '../../src/server/security/origin.ts';
+`web/src/app/command-palette.test.tsx`:
+```tsx
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
-const policy: OriginPolicy = { port: 4130, allowedOrigins: ['http://localhost', 'http://127.0.0.1'] };
+const navigate = vi.fn();
+vi.mock('@tanstack/react-router', () => ({ useNavigate: () => navigate }));
 
-const req = (headers: Record<string, string>) =>
-  new Request('http://localhost:4130/api/health', { headers });
+import { CommandPalette } from './command-palette.tsx';
 
-test('accepts a localhost/127.0.0.1 Host on the configured port', () => {
-  expect(hostAllowed(req({ host: 'localhost:4130' }), 4130)).toBe(true);
-  expect(hostAllowed(req({ host: '127.0.0.1:4130' }), 4130)).toBe(true);
-});
+describe('CommandPalette', () => {
+  it('is hidden until ⌘K, then opens', async () => {
+    render(<CommandPalette />);
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    await userEvent.keyboard('{Meta>}k{/Meta}');
+    expect(await screen.findByRole('listbox')).toBeInTheDocument();
+  });
 
-test('rejects a rebinding Host (attacker domain) and a missing Host', () => {
-  expect(hostAllowed(req({ host: 'evil.example.com:4130' }), 4130)).toBe(false);
-  expect(hostAllowed(new Request('http://localhost:4130/x'), 4130)).toBe(false);
-});
+  it('filters commands by typed text', async () => {
+    render(<CommandPalette />);
+    await userEvent.keyboard('{Meta>}k{/Meta}');
+    await userEvent.type(screen.getByRole('combobox'), 'runs');
+    expect(screen.getByText(/Go to Runs/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Go to Settings/i)).not.toBeInTheDocument();
+  });
 
-test('allows an absent Origin (same-origin nav) and a listed origin; rejects cross-origin', () => {
-  expect(originAllowed(req({ host: 'localhost:4130' }), policy)).toBe(true);
-  expect(originAllowed(req({ host: 'localhost:4130', origin: 'http://localhost:4130' }), policy)).toBe(true);
-  expect(originAllowed(req({ host: 'localhost:4130', origin: 'https://evil.example.com' }), policy)).toBe(false);
-});
+  it('runs the selected command on Enter and navigates', async () => {
+    render(<CommandPalette />);
+    await userEvent.keyboard('{Meta>}k{/Meta}');
+    await userEvent.type(screen.getByRole('combobox'), 'crews');
+    await userEvent.keyboard('{Enter}');
+    expect(navigate).toHaveBeenCalledWith({ to: '/crews' });
+  });
 
-test('enforcePerimeter returns 403 on a bad host, null when clean', () => {
-  const bad = enforcePerimeter(req({ host: 'evil.example.com:4130' }), policy);
-  expect(bad?.status).toBe(403);
-  expect(enforcePerimeter(req({ host: 'localhost:4130' }), policy)).toBeNull();
+  it('closes on Escape', async () => {
+    render(<CommandPalette />);
+    await userEvent.keyboard('{Meta>}k{/Meta}');
+    expect(await screen.findByRole('listbox')).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/server/origin.test.ts`
-Expected: FAIL — cannot resolve `../../src/server/security/origin.ts`.
+Run: `cd web && bun run test src/app/command-palette.test.tsx`
+Expected: FAIL — cannot resolve `./command-palette.tsx`.
 
-- [ ] **Step 3: Write the origin module**
+- [ ] **Step 3: Write the registry + palette, mount in the shell**
 
+`web/src/app/commands.ts`:
 ```ts
-// src/server/security/origin.ts
-export type OriginPolicy = { port: number; allowedOrigins: string[] };
+import type { useNavigate } from '@tanstack/react-router';
 
-const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
+type NavigateFn = ReturnType<typeof useNavigate>;
 
-/** The Host header must name a loopback host on the configured port (DNS-rebinding defense). */
-export function hostAllowed(req: Request, port: number): boolean {
-  const host = req.headers.get('host');
-  if (host === null) return false;
-  return LOCAL_HOSTS.some((h) => host === `${h}:${port}` || host === h);
-}
+export type Command = {
+  id: string;
+  label: string;
+  run: (nav: NavigateFn) => void;
+};
 
-/**
- * A cross-origin Origin is rejected (CSRF / 0.0.0.0-day defense). An absent
- * Origin (same-origin navigation / non-CORS GET) is allowed. Loopback origins
- * on the configured port are always allowed; extra origins come from config
- * (a Slice-24 tunnel adds its origin via AGENT_WEB_ORIGIN_ALLOWLIST).
- */
-export function originAllowed(req: Request, policy: OriginPolicy): boolean {
-  const origin = req.headers.get('origin');
-  if (origin === null) return true;
-  const loopback = LOCAL_HOSTS.flatMap((h) => [
-    `http://${h}:${policy.port}`,
-    `http://${h}`,
-  ]);
-  return loopback.includes(origin) || policy.allowedOrigins.includes(origin);
-}
+// Phase 1b: only navigation commands are wireable. Launch-agent/crew/workflow,
+// jump-to-run, and switch-model land with their features (⌘K completeness = Phase 8).
+export const navCommands: Command[] = [
+  { id: 'go-chat', label: 'Go to Chat', run: (n) => n({ to: '/' }) },
+  { id: 'go-crews', label: 'Go to Crews', run: (n) => n({ to: '/crews' }) },
+  { id: 'go-workflows', label: 'Go to Workflows', run: (n) => n({ to: '/workflows' }) },
+  { id: 'go-builders', label: 'Go to Builders', run: (n) => n({ to: '/builders' }) },
+  { id: 'go-runs', label: 'Go to Runs', run: (n) => n({ to: '/runs' }) },
+  { id: 'go-library', label: 'Go to Library', run: (n) => n({ to: '/library' }) },
+  { id: 'go-settings', label: 'Go to Settings', run: (n) => n({ to: '/settings' }) },
+];
+```
 
-/** Returns a 403 Response when the request fails the perimeter, else null. */
-export function enforcePerimeter(req: Request, policy: OriginPolicy): Response | null {
-  if (!hostAllowed(req, policy.port)) {
-    return new Response('forbidden host', { status: 403 });
+`web/src/app/command-palette.tsx`:
+```tsx
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from '@tanstack/react-router';
+import { Dialog } from '../shared/ui/dialog.tsx';
+import { navCommands, type Command } from './commands.ts';
+
+export function CommandPalette() {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState(0);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setOpen((o) => !o);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const results = useMemo<Command[]>(() => {
+    const q = query.trim().toLowerCase();
+    return q ? navCommands.filter((c) => c.label.toLowerCase().includes(q)) : navCommands;
+  }, [query]);
+
+  function reset() {
+    setQuery('');
+    setSelected(0);
   }
-  if (!originAllowed(req, policy)) {
-    return new Response('forbidden origin', { status: 403 });
+
+  function onOpenChange(next: boolean) {
+    setOpen(next);
+    if (!next) reset();
   }
-  return null;
+
+  function onInputKey(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSelected((s) => Math.min(s + 1, results.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSelected((s) => Math.max(s - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const cmd = results[selected];
+      if (cmd) {
+        cmd.run(navigate);
+        onOpenChange(false);
+      }
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange} title="Command palette">
+      {/* biome-ignore lint/a11y/noAutofocus: command palettes focus their input on open */}
+      <input
+        role="combobox"
+        aria-expanded="true"
+        aria-controls="cmdk-list"
+        aria-label="Command palette"
+        autoFocus
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setSelected(0);
+        }}
+        onKeyDown={onInputKey}
+        placeholder="Type a command…"
+        className="w-full bg-transparent font-mono text-sm text-[var(--color-fg)] outline-none"
+      />
+      <ul id="cmdk-list" role="listbox" className="mt-3 max-h-80 overflow-auto">
+        {results.map((c, i) => (
+          <li
+            key={c.id}
+            role="option"
+            aria-selected={i === selected}
+            className={`cursor-pointer rounded px-2 py-1.5 font-mono text-sm ${
+              i === selected
+                ? 'bg-[var(--color-accent)] text-[var(--color-bg)]'
+                : 'text-[var(--color-fg)]'
+            }`}
+            onMouseEnter={() => setSelected(i)}
+            onClick={() => {
+              c.run(navigate);
+              onOpenChange(false);
+            }}
+          >
+            {c.label}
+          </li>
+        ))}
+      </ul>
+    </Dialog>
+  );
 }
 ```
 
-- [ ] **Step 4: Run perimeter test to verify it passes**
+Mount it in `web/src/app/app-shell.tsx` — add the import and render it inside the root `<div>` (it portals, so placement is cosmetic):
+```tsx
+import { CommandPalette } from './command-palette.tsx';
+// ...inside AppShell's returned tree, e.g. right after <header>…</header>:
+<CommandPalette />
+```
 
-Run: `bun test tests/server/origin.test.ts`
-Expected: PASS (4 tests).
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd web && bun run test src/app/command-palette.test.tsx`
+Expected: PASS (4 tests). Then `bun run typecheck` + `bun run test` (full web suite green).
+
+_If Base UI's Dialog blocks the `role="combobox"` query under happy-dom (portal timing), assert via `findByRole` and ensure the Dialog portal renders into `document.body` (happy-dom supports portals)._
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/security/origin.ts tests/server/origin.test.ts
-git commit -m "feat(server): add Host allowlist + cross-origin Origin rejection"
+git add web/src/app/commands.ts web/src/app/command-palette.tsx web/src/app/app-shell.tsx
+git commit -m "feat(web): ⌘K command-palette skeleton wired to router navigation"
 ```
 
 ---
