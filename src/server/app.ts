@@ -1,5 +1,8 @@
 import { explain } from '../errors/boundary.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
+import { handleChat } from './chat/handler.ts';
+import type { RunChatTurn } from './chat/run-turn.ts';
+import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
@@ -15,12 +18,7 @@ export type ServerDeps = {
   staticDir?: string;
   recordIo: boolean;
   indexHtml: string;
-};
-
-/** COOP/COEP so the frontend can later use sherpa WASM SharedArrayBuffer. */
-const ISOLATION_HEADERS: Record<string, string> = {
-  'cross-origin-opener-policy': 'same-origin',
-  'cross-origin-embedder-policy': 'require-corp',
+  runChatTurn: RunChatTurn;
 };
 
 function json(body: unknown, status = 200): Response {
@@ -48,7 +46,7 @@ export function buildFetch(
       const url = new URL(req.url);
       if (url.pathname.startsWith('/api')) {
         if (!guard.verify(req)) return json({ error: 'unauthorized' }, 401);
-        return await handleApi(req, url);
+        return await handleApi(req, url, deps);
       }
       return await serveStatic(url, deps);
     } catch (err) {
@@ -57,7 +55,11 @@ export function buildFetch(
   };
 }
 
-async function handleApi(req: Request, url: URL): Promise<Response> {
+async function handleApi(
+  req: Request,
+  url: URL,
+  deps: ServerDeps,
+): Promise<Response> {
   return withServerRequestSpan(
     { route: url.pathname, method: req.method },
     async (rec) => {
@@ -65,6 +67,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         if (url.pathname === '/api/health') {
           rec.status(200);
           return json({ ok: true });
+        }
+        if (req.method === 'POST' && url.pathname === '/api/chat') {
+          rec.status(200);
+          return handleChat(req, deps);
         }
         rec.status(404);
         return json({ error: 'not found' }, 404);

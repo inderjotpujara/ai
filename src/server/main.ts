@@ -1,5 +1,6 @@
 import { loadConfig } from '../config/schema.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
+import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { mintSessionToken } from './security/token.ts';
 
 /**
@@ -45,12 +46,17 @@ export function startWebServer(opts: StartOptions = {}): {
   const token = opts.token ?? mintSessionToken();
 
   const policy = { port, allowedOrigins };
+  // Lazy engine: nothing (registry build, model manager, MCP mount) runs at
+  // boot — only on the FIRST `/api/chat` request — so server startup and the
+  // perimeter/health tests stay Ollama-free.
+  const runChatTurn = createRealRunChatTurn(createLazyEngine('runs'));
   const deps: ServerDeps = {
     token,
     policy,
     recordIo,
     staticDir: opts.staticDir,
     indexHtml: renderIndexHtml(token),
+    runChatTurn,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });
