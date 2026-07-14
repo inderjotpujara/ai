@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { explain } from '../errors/boundary.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
-import { type OriginPolicy, enforcePerimeter } from './security/origin.ts';
+import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
 
 /**
@@ -26,11 +26,16 @@ const ISOLATION_HEADERS: Record<string, string> = {
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...ISOLATION_HEADERS },
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      ...ISOLATION_HEADERS,
+    },
   });
 }
 
-export function buildFetch(deps: ServerDeps): (req: Request) => Promise<Response> {
+export function buildFetch(
+  deps: ServerDeps,
+): (req: Request) => Promise<Response> {
   const guard = createTokenGuard(deps.token);
   return async (req) => {
     const blocked = enforcePerimeter(req, deps.policy);
@@ -46,20 +51,23 @@ export function buildFetch(deps: ServerDeps): (req: Request) => Promise<Response
 }
 
 async function handleApi(req: Request, url: URL): Promise<Response> {
-  return withServerRequestSpan({ route: url.pathname, method: req.method }, async (rec) => {
-    try {
-      if (url.pathname === '/api/health') {
-        rec.status(200);
-        return json({ ok: true });
+  return withServerRequestSpan(
+    { route: url.pathname, method: req.method },
+    async (rec) => {
+      try {
+        if (url.pathname === '/api/health') {
+          rec.status(200);
+          return json({ ok: true });
+        }
+        rec.status(404);
+        return json({ error: 'not found' }, 404);
+      } catch (err) {
+        // Never crash the handler: map the typed error to an actionable JSON body.
+        rec.status(500);
+        return json({ error: explain(err).title }, 500);
       }
-      rec.status(404);
-      return json({ error: 'not found' }, 404);
-    } catch (err) {
-      // Never crash the handler: map the typed error to an actionable JSON body.
-      rec.status(500);
-      return json({ error: explain(err).title }, 500);
-    }
-  });
+    },
+  );
 }
 
 async function serveStatic(url: URL, deps: ServerDeps): Promise<Response> {
@@ -79,5 +87,8 @@ async function serveStatic(url: URL, deps: ServerDeps): Promise<Response> {
       return new Response(file, { headers: { ...ISOLATION_HEADERS } });
     }
   }
-  return new Response('not found', { status: 404, headers: { ...ISOLATION_HEADERS } });
+  return new Response('not found', {
+    status: 404,
+    headers: { ...ISOLATION_HEADERS },
+  });
 }

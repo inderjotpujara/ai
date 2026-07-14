@@ -1,77 +1,176 @@
-### Task 3: `bun run status`
+### Task 3: Contract status events — the transient-SSE discriminated union
 
 **Files:**
-- Create: `src/cli/status.ts`
-- Create: `tests/cli/status.test.ts`
-- Modify: `package.json` (`"status": "bun run src/cli/status.ts"`)
+- Create: `src/contracts/events.ts`
+- Test: `tests/contracts/events.test.ts`
 
 **Interfaces:**
-- Produces:
-  - `collectStatus(deps: StatusDeps): Promise<StatusReport>` where `StatusDeps = { ollamaReachable: () => Promise<boolean>; loadedModels: () => Promise<string[]>; freeBudgetBytes: () => Promise<number>; version: string }` and `StatusReport = { version: string; ollama: boolean; loaded: string[]; freeGb: number }`.
-  - `renderStatus(r: StatusReport): string` — a compact human summary.
+- Consumes: `StatusEventType`, `DegradeKind`, `ModelLoadAction` from `./enums.ts`.
+- Produces: `StatusEventSchema`/`StatusEvent` (discriminated union) plus the per-variant schemas (`RunStartEventSchema`, `ProvisionEventSchema`, `McpMountEventSchema`, `DelegationEventSchema`, `ModelSelectEventSchema`, `ModelLoadEventSchema`, `DegradeEventSchema`, `ConfirmEventSchema`, `RunEndEventSchema`).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing status-event test**
 
 ```ts
-// tests/cli/status.test.ts
+// tests/contracts/events.test.ts
 import { expect, test } from 'bun:test';
-import { collectStatus, renderStatus } from '../../src/cli/status.ts';
+import {
+  DegradeKind,
+  ModelLoadAction,
+  StatusEventType,
+} from '../../src/contracts/enums.ts';
+import { StatusEventSchema } from '../../src/contracts/events.ts';
 
-test('collectStatus assembles a report from injected probes', async () => {
-  const r = await collectStatus({
-    ollamaReachable: async () => true,
-    loadedModels: async () => ['qwen2.5:14b'],
-    freeBudgetBytes: async () => 12_000_000_000,
-    version: '0.2.0',
+test('parses a data-delegation event and discriminates on type', () => {
+  const e = StatusEventSchema.parse({
+    type: StatusEventType.Delegation,
+    agent: 'researcher',
+    depth: 1,
+    parentAgent: 'router',
+    ancestors: ['router'],
   });
-  expect(r).toEqual({ version: '0.2.0', ollama: true, loaded: ['qwen2.5:14b'], freeGb: 12 });
-  expect(renderStatus(r)).toContain('qwen2.5:14b');
+  expect(e.type).toBe('data-delegation');
+});
+
+test('parses a data-model-load event with an enum action', () => {
+  const e = StatusEventSchema.parse({
+    type: StatusEventType.ModelLoad,
+    model: 'qwen3.5:4b',
+    action: ModelLoadAction.Warm,
+  });
+  expect(e.type === StatusEventType.ModelLoad && e.action).toBe('warm');
+});
+
+test('parses the bidirectional data-confirm ask', () => {
+  const e = StatusEventSchema.parse({
+    type: StatusEventType.Confirm,
+    promptId: 'cap-abc123',
+    kind: 'mcp-mount',
+    question: 'Mount github MCP server?',
+  });
+  expect(e.type === StatusEventType.Confirm && e.promptId).toBe('cap-abc123');
+});
+
+test('data-degrade survives a JSON round-trip', () => {
+  const src = {
+    type: StatusEventType.Degrade,
+    kind: DegradeKind.CircuitOpen,
+    subject: 'ollama',
+    reason: 'threshold hit',
+    spanId: 's7',
+  };
+  const wire = JSON.parse(JSON.stringify(StatusEventSchema.parse(src)));
+  expect(StatusEventSchema.parse(wire)).toEqual(src);
+});
+
+test('rejects an unknown event type', () => {
+  expect(() => StatusEventSchema.parse({ type: 'data-nope' })).toThrow();
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/cli/status.test.ts`
-Expected: FAIL — module missing.
+Run: `bun test tests/contracts/events.test.ts`
+Expected: FAIL — cannot resolve `../../src/contracts/events.ts`.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Write the status-event schemas**
 
 ```ts
-// src/cli/status.ts
-export type StatusDeps = {
-  ollamaReachable: () => Promise<boolean>;
-  loadedModels: () => Promise<string[]>;
-  freeBudgetBytes: () => Promise<number>;
-  version: string;
-};
-export type StatusReport = { version: string; ollama: boolean; loaded: string[]; freeGb: number };
+// src/contracts/events.ts
+import { z } from 'zod';
+import { DegradeKind, ModelLoadAction, StatusEventType } from './enums.ts';
 
-export async function collectStatus(deps: StatusDeps): Promise<StatusReport> {
-  const [ollama, loaded, free] = await Promise.all([deps.ollamaReachable(), deps.loadedModels(), deps.freeBudgetBytes()]);
-  return { version: deps.version, ollama, loaded, freeGb: Math.round(free / 1e9) };
-}
-export function renderStatus(r: StatusReport): string {
-  return [
-    `agent-framework ${r.version}`,
-    `ollama:  ${r.ollama ? 'reachable' : 'DOWN'}`,
-    `models:  ${r.loaded.length ? r.loaded.join(', ') : '(none resident)'}`,
-    `budget:  ~${r.freeGb} GB free`,
-  ].join('\n');
-}
+export const RunStartEventSchema = z.object({
+  type: z.literal(StatusEventType.RunStart),
+  runId: z.string(),
+  task: z.string().optional(),
+});
+
+export const ProvisionEventSchema = z.object({
+  type: z.literal(StatusEventType.Provision),
+  phase: z.string(),
+  model: z.string().optional(),
+});
+
+export const McpMountEventSchema = z.object({
+  type: z.literal(StatusEventType.McpMount),
+  server: z.string(),
+  outcome: z.string(),
+});
+
+export const DelegationEventSchema = z.object({
+  type: z.literal(StatusEventType.Delegation),
+  agent: z.string(),
+  depth: z.number(),
+  parentAgent: z.string().optional(),
+  ancestors: z.array(z.string()),
+});
+
+export const ModelSelectEventSchema = z.object({
+  type: z.literal(StatusEventType.ModelSelect),
+  agent: z.string(),
+  model: z.string(),
+  numCtx: z.number().optional(),
+  footprintBytes: z.number().optional(),
+  install: z.boolean().optional(),
+  degraded: z.boolean().optional(),
+});
+
+export const ModelLoadEventSchema = z.object({
+  type: z.literal(StatusEventType.ModelLoad),
+  model: z.string(),
+  action: z.enum(ModelLoadAction),
+});
+
+export const DegradeEventSchema = z.object({
+  type: z.literal(StatusEventType.Degrade),
+  kind: z.enum(DegradeKind),
+  subject: z.string(),
+  reason: z.string(),
+  spanId: z.string().optional(),
+});
+
+/**
+ * `kind` is a free string, not an enum: consent kinds come from many engine
+ * seams (mcp-mount, provision, build, reuse, archive, gen-download, clone, mic,
+ * disk-shortfall…) and grow per future slice, so a closed enum would churn.
+ */
+export const ConfirmEventSchema = z.object({
+  type: z.literal(StatusEventType.Confirm),
+  promptId: z.string(),
+  kind: z.string(),
+  question: z.string(),
+});
+
+export const RunEndEventSchema = z.object({
+  type: z.literal(StatusEventType.RunEnd),
+  runId: z.string(),
+  outcome: z.string(),
+});
+
+export const StatusEventSchema = z.discriminatedUnion('type', [
+  RunStartEventSchema,
+  ProvisionEventSchema,
+  McpMountEventSchema,
+  DelegationEventSchema,
+  ModelSelectEventSchema,
+  ModelLoadEventSchema,
+  DegradeEventSchema,
+  ConfirmEventSchema,
+  RunEndEventSchema,
+]);
+export type StatusEvent = z.infer<typeof StatusEventSchema>;
 ```
 
-Wire a `main()` that builds real deps (Ollama version ping via `src/runtime/ollama.ts`, `listLoaded` via `runtimeFor('ollama').control`, `liveBudgetBytes`, version from Task 4's `APP_VERSION`) and prints `renderStatus`. Add the `status` script to `package.json`.
+- [ ] **Step 4: Run status-event test to verify it passes**
 
-- [ ] **Step 4: Run tests + typecheck**
-
-Run: `bun test tests/cli/status.test.ts && bun run typecheck`
-Expected: PASS.
+Run: `bun test tests/contracts/events.test.ts`
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/cli/status.ts tests/cli/status.test.ts package.json
-git commit -m "feat(cli): 'bun run status' — Ollama/models/budget/version at a glance (feeds the 30b live panel)"
+git add src/contracts/events.ts tests/contracts/events.test.ts
+git commit -m "feat(contracts): add StatusEvent transient-SSE discriminated union"
 ```
 
 ---

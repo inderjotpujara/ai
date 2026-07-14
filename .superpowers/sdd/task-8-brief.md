@@ -1,115 +1,101 @@
-### Task 8: Schema migrations + embedder-mismatch guard
+### Task 8: Security — media-path confinement (realpath ∈ dir)
 
 **Files:**
-- Create: `src/db/migrate.ts`
-- Create: `tests/db/migrate.test.ts`
-- Modify: `src/memory/sqlite-store.ts` (run migrations instead of bare `CREATE TABLE IF NOT EXISTS`)
-- Modify: `src/memory/store.ts:34` (`ensureSpace` embedder guard)
-- Create: `tests/memory/ensure-space-guard.test.ts`
+- Create: `src/server/security/media-path.ts`
+- Test: `tests/server/media-path.test.ts`
 
 **Interfaces:**
-- Consumes: `bun:sqlite` `Database`.
-- Produces:
-  - `migrate(db: Database, migrations: Migration[]): number` — applies migrations whose index ≥ `PRAGMA user_version`, bumps `user_version`, returns the new version. `type Migration = { name: string; up: (db: Database) => void }`.
-  - `ensureSpace` now throws `MemoryError` when a space exists but its stored `embedModel` differs from the configured one (instead of silently returning the stale space).
+- Consumes: `node:fs`, `node:path`, `node:os` (test only).
+- Produces: `class MediaPathError extends Error`; `confineToDir(candidate: string, root: string): string` — returns the realpath when it resolves inside `root`, else throws `MediaPathError`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing confinement test**
 
 ```ts
-// tests/db/migrate.test.ts
+// tests/server/media-path.test.ts
+import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, test } from 'bun:test';
-import { Database } from 'bun:sqlite';
-import { migrate } from '../../src/db/migrate.ts';
+import { MediaPathError, confineToDir } from '../../src/server/security/media-path.ts';
 
-test('migrate applies pending migrations once and is idempotent', () => {
-  const db = new Database(':memory:');
-  const ms = [
-    { name: 'init', up: (d: Database) => d.run('CREATE TABLE t (id INTEGER)') },
-    { name: 'add-col', up: (d: Database) => d.run('ALTER TABLE t ADD COLUMN v TEXT') },
-  ];
-  expect(migrate(db, ms)).toBe(2);
-  expect(migrate(db, ms)).toBe(2); // no-op second time
-  const cols = db.query('PRAGMA table_info(t)').all() as { name: string }[];
-  expect(cols.map((c) => c.name)).toEqual(['id', 'v']);
+test('a file inside the root resolves to its realpath', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mp-'));
+  writeFileSync(join(root, 'upload.png'), 'x');
+  expect(confineToDir('upload.png', root)).toBe(join(root, 'upload.png'));
+});
+
+test('a ../ traversal is rejected', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mp-'));
+  expect(() => confineToDir('../../etc/passwd', root)).toThrow(MediaPathError);
+});
+
+test('an absolute path outside the root is rejected', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mp-'));
+  expect(() => confineToDir('/etc/hosts', root)).toThrow(MediaPathError);
+});
+
+test('a symlink escaping the root is rejected', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mp-'));
+  const outside = mkdtempSync(join(tmpdir(), 'out-'));
+  writeFileSync(join(outside, 'secret.txt'), 's');
+  symlinkSync(join(outside, 'secret.txt'), join(root, 'link.txt'));
+  expect(() => confineToDir('link.txt', root)).toThrow(MediaPathError);
 });
 ```
 
-```ts
-// tests/memory/ensure-space-guard.test.ts
-import { afterEach, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
-import { createMemoryStore } from '../../src/memory/store.ts';
+- [ ] **Step 2: Run test to verify it fails**
 
-const DIR = '/tmp/embguard-test';
-afterEach(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch {} });
+Run: `bun test tests/server/media-path.test.ts`
+Expected: FAIL — cannot resolve `../../src/server/security/media-path.ts`.
 
-function deps(dim: number) {
-  return { embedTexts: async () => [], embedQuery: async () => [],
-    probe: async () => ({ dim, maxInput: 512 }) };
-}
-test('ensureSpace refuses a configured embedder that differs from the stored one', async () => {
-  const a = createMemoryStore({ path: DIR, embedModel: 'model-a' }, deps(8));
-  await a.remember('hello', { space: 'default' }); a.close();
-  const b = createMemoryStore({ path: DIR, embedModel: 'model-b' }, deps(8));
-  await expect(b.remember('again', { space: 'default' })).rejects.toThrow(/embedder/i);
-  b.close();
-});
-```
-
-- [ ] **Step 2: Run to verify failure**
-
-Run: `bun test tests/db/migrate.test.ts tests/memory/ensure-space-guard.test.ts`
-Expected: FAIL — `migrate` missing; the guard test currently *passes silently corrupting* (no throw), so it fails the `rejects`.
-
-- [ ] **Step 3: Implement the migration runner**
+- [ ] **Step 3: Write the media-path module**
 
 ```ts
-// src/db/migrate.ts
-import type { Database } from 'bun:sqlite';
-export type Migration = { name: string; up: (db: Database) => void };
+// src/server/security/media-path.ts
+import { realpathSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 
-/** Apply migrations past the DB's user_version, in order, in a transaction each. Returns new version. */
-export function migrate(db: Database, migrations: Migration[]): number {
-  const row = db.query('PRAGMA user_version').get() as { user_version: number };
-  let version = row.user_version;
-  for (let i = version; i < migrations.length; i++) {
-    const tx = db.transaction(() => { migrations[i].up(db); });
-    tx();
-    version = i + 1;
-    db.run(`PRAGMA user_version = ${version}`);
+/** A network-supplied media path resolved outside its allowed directory. */
+export class MediaPathError extends Error {
+  constructor(readonly candidate: string) {
+    super(`media path escapes the allowed directory: ${candidate}`);
+    this.name = 'MediaPathError';
   }
-  return version;
+}
+
+/**
+ * Resolve `candidate` (relative to `root`, or absolute) and assert its REALPATH
+ * is `root` itself or a descendant of it — defeating `../` traversal and symlink
+ * escapes. Used to confine network-supplied media to the run/upload dir; the
+ * server also disables `ingestMedia`'s filesystem auto-detect (that wiring lands
+ * with the chat/media endpoints in a later phase — this util is its primitive).
+ */
+export function confineToDir(candidate: string, root: string): string {
+  const realRoot = realpathSync(resolve(root));
+  let real: string;
+  try {
+    real = realpathSync(resolve(realRoot, candidate));
+  } catch {
+    throw new MediaPathError(candidate);
+  }
+  const prefix = realRoot.endsWith(sep) ? realRoot : `${realRoot}${sep}`;
+  if (real !== realRoot && !real.startsWith(prefix)) {
+    throw new MediaPathError(candidate);
+  }
+  return real;
 }
 ```
 
-- [ ] **Step 4: Use migrations in SqliteStore + add the guard**
+- [ ] **Step 4: Run confinement test to verify it passes**
 
-In `src/memory/sqlite-store.ts`, replace the two `CREATE TABLE IF NOT EXISTS` calls with `migrate(this.db, MEMORY_MIGRATIONS)` where `MEMORY_MIGRATIONS` (module const) wraps the two existing `CREATE TABLE` statements as migration `up`s (v1). Import `migrate`.
+Run: `bun test tests/server/media-path.test.ts`
+Expected: PASS (4 tests).
 
-In `src/memory/store.ts` `ensureSpace`, change the early return:
-
-```ts
-    const existing = sql.getSpace(space);
-    if (existing) {
-      if (existing.embedModel !== cfg.embedModel) {
-        throw new MemoryError(
-          `space '${space}' was built with embedder '${existing.embedModel}' but '${cfg.embedModel}' is configured — run 'memory reindex ${space} ${cfg.embedModel}' (destructive) or restore the original embedder.`,
-        );
-      }
-      return existing;
-    }
-```
-
-- [ ] **Step 5: Run tests + typecheck**
-
-Run: `bun test tests/db/ tests/memory/ && bun run typecheck`
-Expected: PASS (existing memory tests unaffected — v1 migration reproduces the same schema).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/db/migrate.ts tests/db/migrate.test.ts src/memory/sqlite-store.ts src/memory/store.ts tests/memory/ensure-space-guard.test.ts
-git commit -m "feat(db): user_version migration runner + memory embedder-mismatch guard (was silent corruption)"
+git add src/server/security/media-path.ts tests/server/media-path.test.ts
+git commit -m "feat(server): add realpath media-path confinement util"
 ```
 
 ---

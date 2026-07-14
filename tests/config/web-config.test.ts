@@ -19,6 +19,10 @@ test('strict flag marks the === "1" default-off booleans', () => {
 
 test('loadConfig behavior is unchanged: web record-IO defaults off, env overrides', () => {
   expect(loadConfig({}).values.AGENT_WEB_RECORD_IO).toBe(false);
-  expect(loadConfig({ AGENT_WEB_RECORD_IO: '1' }).values.AGENT_WEB_RECORD_IO).toBe(true);
-  expect(loadConfig({ AGENT_WEB_PORT: '5555' }).values.AGENT_WEB_PORT).toBe(5555);
+  expect(
+    loadConfig({ AGENT_WEB_RECORD_IO: '1' }).values.AGENT_WEB_RECORD_IO,
+  ).toBe(true);
+  expect(loadConfig({ AGENT_WEB_PORT: '5555' }).values.AGENT_WEB_PORT).toBe(
+    5555,
+  );
 });

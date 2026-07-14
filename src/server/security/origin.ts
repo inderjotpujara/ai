@@ -23,7 +23,10 @@ export function originAllowed(req: Request, policy: OriginPolicy): boolean {
 }
 
 /** Returns a 403 Response when the request fails the perimeter, else null. */
-export function enforcePerimeter(req: Request, policy: OriginPolicy): Response | null {
+export function enforcePerimeter(
+  req: Request,
+  policy: OriginPolicy,
+): Response | null {
   if (!hostAllowed(req, policy.port)) {
     return new Response('forbidden host', { status: 403 });
   }

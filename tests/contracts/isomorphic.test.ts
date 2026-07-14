@@ -1,6 +1,6 @@
+import { expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { expect, test } from 'bun:test';
 
 const CONTRACTS_DIR = join(import.meta.dir, '../../src/contracts');
 

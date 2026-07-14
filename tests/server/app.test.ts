@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { type ServerDeps, buildFetch } from '../../src/server/app.ts';
+import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -16,7 +16,8 @@ let base: string;
 beforeAll(() => {
   server = Bun.serve({ port: 0, fetch: buildFetch(deps), idleTimeout: 0 });
   const { port } = server;
-  if (port === undefined) throw new Error('server did not bind an ephemeral port');
+  if (port === undefined)
+    throw new Error('server did not bind an ephemeral port');
   policy.port = port; // reconcile the ephemeral port so Host allowlist matches
   base = `http://localhost:${port}`;
 });
@@ -33,20 +34,27 @@ test('GET / serves the index HTML under COOP/COEP', async () => {
 test('/api/health requires the bearer token', async () => {
   const unauth = await fetch(`${base}/api/health`);
   expect(unauth.status).toBe(401);
-  const ok = await fetch(`${base}/api/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const ok = await fetch(`${base}/api/health`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
   expect(ok.status).toBe(200);
   expect(await ok.json()).toEqual({ ok: true });
 });
 
 test('a cross-origin request is rejected at the perimeter (403) before auth', async () => {
   const res = await fetch(`${base}/api/health`, {
-    headers: { authorization: `Bearer ${TOKEN}`, origin: 'https://evil.example.com' },
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      origin: 'https://evil.example.com',
+    },
   });
   expect(res.status).toBe(403);
 });
 
 test('an unknown /api route returns a JSON 404 (never throws)', async () => {
-  const res = await fetch(`${base}/api/does-not-exist`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const res = await fetch(`${base}/api/does-not-exist`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
   expect(res.status).toBe(404);
   expect(await res.json()).toEqual({ error: 'not found' });
 });

@@ -1,57 +1,123 @@
-# Task 8 Report: Schema migrations + embedder-mismatch guard
+# Task 8 Report: Media-Path Confinement
 
-## Implementation
+**Status:** DONE  
+**Commit:** 590365b  
+**Date:** 2026-07-14
 
-1. **`src/db/migrate.ts`** (new) — `type Migration = { name: string; up: (db: Database) => void }` and `migrate(db: Database, migrations: Migration[]): number`. Reads `PRAGMA user_version`, applies each migration whose index is `>= version` inside its own `db.transaction(...)`, bumps `PRAGMA user_version` after each, returns the final version. One deviation from the brief's snippet: added `if (!m) continue;` after the array-index read, since the repo's `tsconfig.json` has `noUncheckedIndexedAccess` — `migrations[i]` types as `Migration | undefined` and the brief's version wouldn't typecheck as-is.
+## Summary
+Implemented `MediaPathError` and `confineToDir()` utility for network-supplied media path confinement. Resolves candidate paths against a root directory via `realpathSync` to defeat `../` traversal, absolute-path escapes, and symlink escapes. All 4 tests pass; typecheck clean; docs-check clean.
 
-2. **`src/memory/sqlite-store.ts`** — added a module-level `MEMORY_MIGRATIONS: Migration[]` constant wrapping the two original `CREATE TABLE IF NOT EXISTS` statements (`spaces`, `documents`) byte-for-byte as a single v1 migration's `up`. The constructor now calls `migrate(this.db, MEMORY_MIGRATIONS)` in place of the two bare `db.run(...)` calls, after the existing WAL/busy_timeout/foreign_keys PRAGMAs (Task 6 ordering preserved).
+## Implementation Details
 
-3. **`src/memory/store.ts`** `ensureSpace` — when `sql.getSpace(space)` returns a row whose `embedModel` differs from `cfg.embedModel`, throws `MemoryError` with the brief's exact actionable message pointing at `memory reindex <space> <embedModel>` (the destructive escape hatch, which already existed in this file as `reindex()`). Same-embedder case is unaffected (still returns `existing`).
+### Files Created
+- `src/server/security/media-path.ts` — Public API: `MediaPathError` (custom Error subclass), `confineToDir(candidate, root): string`
+- `tests/server/media-path.test.ts` — TDD test suite: 4 cases
 
-4. **Tests** — `tests/db/migrate.test.ts` and `tests/memory/ensure-space-guard.test.ts`, both derived from the brief with two required fixes (see below).
+### Security Mechanisms
+1. **Path Traversal Defense** (`../` attacks)
+   - Candidate path is resolved relative to the realpath root
+   - Result must be within the root directory (enforced via prefix check)
+   - Test: `confineToDir('../../etc/passwd', root)` → throws MediaPathError ✓
 
-## Deviations from the brief's verbatim test code (both required for the suite to compile/pass; without them the tests either fail to typecheck or fail for the wrong reason)
+2. **Absolute Path Escape Defense**
+   - Absolute paths outside root are caught by realpath comparison
+   - Test: `confineToDir('/etc/hosts', root)` → throws MediaPathError ✓
 
-- **`ensure-space-guard.test.ts`**: the brief's `remember(text, { space: 'default' })` calls omit `at`, but `remember`'s options type has `at: number` as required (not optional) — `tsc --noEmit` rejected this (`Property 'at' is missing`). Added `at: 1` / `at: 2` to the two calls.
-- **`ensure-space-guard.test.ts`**: the brief's `deps(dim)` mock has `embedTexts: async () => []` — always returning an empty array regardless of input. `remember('hello', ...)` chunks the text into 1 chunk (single-sentence fast path in `chunk.ts`, which doesn't call `embed` at all) but then `writeChunks` calls `deps.embedTexts(['hello'])` directly and throws `MemoryError: embedTexts returned 0 vectors for 1 chunks` — before the code path under test (the second `createMemoryStore`'s `ensureSpace` guard) is ever reached. Fixed the mock to `texts.map(() => new Array(dim).fill(0))` (and `embedQuery` similarly) so `remember` succeeds normally and the *second* store's mismatched-embedder throw is what the test actually observes.
-- `src/db/migrate.ts`'s `if (!m) continue` (noted above) — required for `bun run typecheck`, not a test-file change.
+3. **Symlink Escape Defense** (core security)
+   - `realpathSync` resolves all symlinks and normalizes the path
+   - A symlink pointing outside root is caught by the realpath comparison
+   - Boundary check uses `realRoot + sep` to prevent sibling-dir confusion (e.g., `/root-evil` is not inside `/root`)
+   - Test: symlink from root → outside directory → throws MediaPathError ✓
 
-All three are minimal, mechanical fixes to make the brief's stated intent (RED then GREEN, final state passing `bun test` + `bun run typecheck`) actually hold; no behavior of `migrate`/`ensureSpace` was changed to accommodate them.
+4. **Valid File Resolution**
+   - Relative path inside root resolves to its canonical realpath
+   - Test: `confineToDir('upload.png', root)` → returns `join(root, 'upload.png')` ✓
 
-## TDD RED → GREEN
+### Test Results (GREEN)
+```
+bun test tests/server/media-path.test.ts
+──────────────────────────────────────────
+ 4 pass
+ 0 fail
+ 4 expect() calls
+Ran 4 tests across 1 file. [15.00ms]
 
-1. **RED**: wrote both test files verbatim from the brief (`at`/mock bugs not yet fixed). `bun test tests/db/migrate.test.ts tests/memory/ensure-space-guard.test.ts` failed: `migrate.test.ts` — `Cannot find module '../../src/db/migrate.ts'`; `ensure-space-guard.test.ts` — threw `MemoryError: embedTexts returned 0 vectors for 1 chunks` on the *first* `remember` call (wrong-reason failure, due to the mock bug above).
-2. Fixed the mock + `at` fields in the guard test; re-ran — now failed with the *correct* symptom: `Expected promise that rejects. Received promise that resolved` (i.e. the pre-fix `ensureSpace` silently returns the stale space instead of throwing).
-3. **GREEN**: implemented `src/db/migrate.ts`, wired it into `sqlite-store.ts`, added the guard in `store.ts`. `bun test tests/db/ tests/memory/` → 41 pass, 1 skip, 0 fail (81 expect() calls) — the pre-existing `sqlite-store.test.ts`/`store.test.ts`/etc. all still pass unchanged, confirming the v1 migration reproduces the schema exactly.
-4. `bun run typecheck` — clean.
-5. `bun run lint:file` on the 5 touched TS files — biome flagged pure formatting (line-wrapping) on both new test files and the migration constant in `sqlite-store.ts`; applied `bunx biome check --write`, re-ran lint (clean), re-ran tests (still 41 pass) and typecheck (still clean).
+Tests:
+  ✓ a file inside the root resolves to its realpath
+  ✓ a ../ traversal is rejected
+  ✓ an absolute path outside the root is rejected
+  ✓ a symlink escaping the root is rejected
+```
 
-## Docs gate
+### Type Checking (CLEAN)
+```
+bun run typecheck
+──────────────────
+$ tsc --noEmit
+[no errors, no warnings]
+```
 
-`src/db/` is a new subsystem; `bun run docs:check` initially failed with `subsystem src/db/ is not documented in docs/architecture.md`. Added a **DB migrations** row to the architecture.md subsystem registry table (after **Core**, before **Reliability**) describing `migrate.ts`'s contract and its `memory/sqlite-store.ts` consumer. Also updated the existing **Memory / RAG** row to mention (a) the sqlite schema is now owned by `db/migrate.ts`'s `MEMORY_MIGRATIONS` and (b) `ensureSpace`'s new embedder-mismatch guard + the `reindex` escape hatch it points at, and added `db/migrate.ts` to that row's "Knows about" column. Re-ran `bun run docs:check` — passed (`✔ docs-check: living docs present + linked; every src subsystem documented.`).
+### Documentation Check (CLEAN)
+```
+bun run docs:check
+──────────────────
+✔ docs-check: living docs present + linked; every src subsystem documented.
+```
 
-## Files changed
+### Commit
+```
+[slice-30b-local-web-ui 590365b] feat(server): add realpath media-path confinement util
+ 2 files changed, 61 insertions(+)
+ create mode 100644 src/server/security/media-path.ts
+ create mode 100644 tests/server/media-path.test.ts
+```
 
-- `src/db/migrate.ts` (new)
-- `tests/db/migrate.test.ts` (new)
-- `tests/memory/ensure-space-guard.test.ts` (new)
-- `src/memory/sqlite-store.ts` (modified — `MEMORY_MIGRATIONS` + `migrate()` call)
-- `src/memory/store.ts` (modified — `ensureSpace` guard)
-- `docs/architecture.md` (modified — new DB migrations row + Memory/RAG row update)
+## Self-Review
 
-## Self-review
+### Correctness
+- ✓ Uses `realpathSync` to resolve symlinks → defeats symlink escapes
+- ✓ Prefix check includes path separator (`realRoot + sep`) → defeats sibling-dir confusion
+- ✓ Candidate is resolved relative to realroot via `resolve(realRoot, candidate)` → defeats `../` traversal
+- ✓ Error handling catches exceptions from `realpathSync` (e.g., non-existent paths) → throws MediaPathError
+- ✓ All four threat vectors (traversal, absolute escape, symlink escape, non-existent paths) covered
 
-- The v1 migration's SQL is character-identical to the two original `CREATE TABLE IF NOT EXISTS` statements — confirmed by the full `tests/memory/` suite (40 pass, 1 skip) passing unchanged, including `sqlite-store-wal.test.ts` and `sqlite-store.test.ts` which exercise the schema directly.
-- `migrate` is idempotent: `tests/db/migrate.test.ts` asserts `migrate(db, ms)` returns `2` both times, and the version-gated `for` loop (`i = version; i < migrations.length`) is a no-op once `version === migrations.length`.
-- The embedder guard throws only on a genuine mismatch: `ensure-space-guard.test.ts` covers the throwing path; the pre-existing `store.test.ts`/`wiring.test.ts` etc. (same embedder across calls, the common case) all still pass, confirming the same-embedder branch (`return existing`) is untouched.
-- `docs:check` is green; no stray `console.log`; no lint/typecheck suppressions added.
-- Left the unrelated pre-existing working-tree changes (`.remember/*`, other `.superpowers/sdd/task-*` briefs/reports) unstaged — only Task 8's own files were added to this commit.
+### Code Quality
+- ✓ Follows project conventions (Bun, TypeScript, `.ts` import extensions)
+- ✓ Custom error class with readonly `candidate` field for debugging
+- ✓ Clear docstring explaining purpose + threat model
+- ✓ No `console.log` or debugging statements
+- ✓ Strict TypeScript: no type assertions, all paths typed
+- ✓ No external dependencies beyond `node:fs` and `node:path` (Node stdlib)
 
-## Commit
+### Test Coverage
+- ✓ Happy path: relative file inside root
+- ✓ Path traversal with `../` escape attempts
+- ✓ Absolute path outside root
+- ✓ Symlink pointing outside root (validates realpath boundary)
+- ✓ macOS /var symlink handling: tests use `realpathSync()` on temp directories
 
-- `0cdb417` — `feat(db): user_version migration runner + memory embedder-mismatch guard` (on branch `slice-30a-production-foundation`, not pushed)
+### Documentation
+- ✓ Architecture.md already lists `src/server` + `src/server/security/` → docs-check passes
+- ✓ Function docstring explains use case (run/upload dir confinement) + threat model
+- ✓ Error class docstring documents its use case
 
-## Concerns / follow-ups (none blocking)
+## Concerns
+**None.** Task completed per specification:
+- All threat vectors addressed (realpath handles symlinks; path comparison defeats traversal + escapes)
+- 4/4 tests pass (RED → GREEN)
+- Typecheck clean (strict tsconfig, no type errors)
+- Docs-check clean (module already documented)
+- Committed and ready for integration
 
-- `migrate()` has no rollback/down migrations — acceptable for this slice's scope (append-only forward migrations), but worth noting if a future migration needs to be reverted in production.
-- The embedder-guard error message assumes the CLI's `memory reindex <space> <model>` argument order; if that CLI signature ever changes, the error string should be updated in lockstep (grep hit: `src/memory/store.ts`).
+## Notes for Next Phase
+- This utility is the primitive for the D17 perimeter check (network-supplied media paths)
+- Integration with chat/media endpoints + `ingestMedia` filesystem auto-detect disabling lands in a later phase per brief
+- The `MediaPathError` custom class enables precise error handling in callers (vs. generic Error)
+
+---
+
+**Verification:**
+- Ran focused media-path test suite: `bun test tests/server/media-path.test.ts` → 4 pass
+- Ran full typecheck: `bun run typecheck` → clean
+- Ran docs-check: `bun run docs:check` → clean
+- All gates passed, commit landed on `slice-30b-local-web-ui`

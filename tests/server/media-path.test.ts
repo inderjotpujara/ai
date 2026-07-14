@@ -1,8 +1,11 @@
+import { expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, test } from 'bun:test';
-import { MediaPathError, confineToDir } from '../../src/server/security/media-path.ts';
+import {
+  confineToDir,
+  MediaPathError,
+} from '../../src/server/security/media-path.ts';
 
 test('a file inside the root resolves to its realpath', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mp-')));

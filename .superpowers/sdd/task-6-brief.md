@@ -1,83 +1,88 @@
-### Task 6: Usage/cost rollup + `bun run usage`
+### Task 6: Security — per-session bearer token mint + guard
 
 **Files:**
-- Create: `src/usage/aggregate.ts`
-- Create: `src/cli/usage.ts`
-- Create: `tests/usage/aggregate.test.ts`
-- Modify: `package.json` (`"usage": "bun run src/cli/usage.ts"`)
+- Create: `src/server/security/token.ts`
+- Test: `tests/server/token.test.ts`
 
 **Interfaces:**
-- Consumes: `readSpans` from `src/run/run-trace.ts` (returns `{ spans: SpanRecord[] }`); span attrs `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `span.durationMs`.
-- Produces:
-  - `aggregateSpans(spans: SpanRecord[]): UsageRow[]` where `UsageRow = { model: string; inputTokens: number; outputTokens: number; durationMs: number; calls: number }` (grouped by model; tolerant of missing token attrs — treats absent as 0).
-  - `renderUsage(rows: UsageRow[]): string`.
+- Consumes: `node:crypto`.
+- Produces: `mintSessionToken(): string`; `type TokenGuard = { verify(req: Request): boolean }`; `createTokenGuard(token: string): TokenGuard`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing token test**
 
 ```ts
-// tests/usage/aggregate.test.ts
+// tests/server/token.test.ts
 import { expect, test } from 'bun:test';
-import { aggregateSpans } from '../../src/usage/aggregate.ts';
-import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
+import { createTokenGuard, mintSessionToken } from '../../src/server/security/token.ts';
 
-function span(model: string, inp?: number, out?: number, dur = 100): SpanRecord {
-  return { name: 'agent.delegation', kind: 0, traceId: 't', spanId: 's', parentSpanId: null,
-    startUnixNano: 0, endUnixNano: 0, durationMs: dur, status: { code: 0 },
-    attributes: { 'gen_ai.request.model': model, ...(inp !== undefined ? { 'gen_ai.usage.input_tokens': inp } : {}), ...(out !== undefined ? { 'gen_ai.usage.output_tokens': out } : {}) },
-    events: [] };
-}
-test('aggregates tokens + duration + calls by model, tolerating missing tokens', () => {
-  const rows = aggregateSpans([span('qwen2.5:14b', 100, 50), span('qwen2.5:14b'), span('qwen-fast', 10, 5, 40)]);
-  const big = rows.find((r) => r.model === 'qwen2.5:14b');
-  expect(big).toEqual({ model: 'qwen2.5:14b', inputTokens: 100, outputTokens: 50, durationMs: 200, calls: 2 });
+const withAuth = (value: string) =>
+  new Request('http://localhost:4130/api/health', { headers: { authorization: value } });
+
+test('mintSessionToken returns a 64-char hex string, unique per call', () => {
+  const a = mintSessionToken();
+  const b = mintSessionToken();
+  expect(a).toMatch(/^[0-9a-f]{64}$/);
+  expect(a).not.toBe(b);
+});
+
+test('guard accepts the exact bearer token', () => {
+  const token = mintSessionToken();
+  expect(createTokenGuard(token).verify(withAuth(`Bearer ${token}`))).toBe(true);
+});
+
+test('guard rejects a wrong, missing, or non-bearer token', () => {
+  const guard = createTokenGuard(mintSessionToken());
+  expect(guard.verify(withAuth(`Bearer ${mintSessionToken()}`))).toBe(false);
+  expect(guard.verify(withAuth('deadbeef'))).toBe(false);
+  expect(guard.verify(new Request('http://localhost:4130/api/health'))).toBe(false);
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/usage/aggregate.test.ts`
-Expected: FAIL — module missing.
+Run: `bun test tests/server/token.test.ts`
+Expected: FAIL — cannot resolve `../../src/server/security/token.ts`.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Write the token module**
 
 ```ts
-// src/usage/aggregate.ts
-import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
-export type UsageRow = { model: string; inputTokens: number; outputTokens: number; durationMs: number; calls: number };
+// src/server/security/token.ts
+import { Buffer } from 'node:buffer';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 
-export function aggregateSpans(spans: SpanRecord[]): UsageRow[] {
-  const by = new Map<string, UsageRow>();
-  for (const s of spans) {
-    const model = s.attributes['gen_ai.request.model'] as string | undefined;
-    if (!model) continue;
-    const row = by.get(model) ?? { model, inputTokens: 0, outputTokens: 0, durationMs: 0, calls: 0 };
-    row.inputTokens += Number(s.attributes['gen_ai.usage.input_tokens'] ?? 0);
-    row.outputTokens += Number(s.attributes['gen_ai.usage.output_tokens'] ?? 0);
-    row.durationMs += s.durationMs;
-    row.calls += 1;
-    by.set(model, row);
-  }
-  return [...by.values()].sort((a, b) => b.durationMs - a.durationMs);
+/** Mint a per-session bearer token at launch (256 bits of entropy, hex). */
+export function mintSessionToken(): string {
+  return randomBytes(32).toString('hex');
 }
-export function renderUsage(rows: UsageRow[]): string {
-  const head = 'MODEL                         IN      OUT     MS      CALLS';
-  const body = rows.map((r) => `${r.model.padEnd(28)}  ${String(r.inputTokens).padEnd(6)}  ${String(r.outputTokens).padEnd(6)}  ${String(r.durationMs).padEnd(6)}  ${r.calls}`);
-  return [head, ...body].join('\n');
+
+export type TokenGuard = { verify(req: Request): boolean };
+
+/** Constant-time bearer verification against the session token. */
+export function createTokenGuard(token: string): TokenGuard {
+  const expected = Buffer.from(token);
+  const prefix = 'Bearer ';
+  return {
+    verify(req) {
+      const header = req.headers.get('authorization');
+      if (header === null || !header.startsWith(prefix)) return false;
+      const got = Buffer.from(header.slice(prefix.length));
+      if (got.length !== expected.length) return false;
+      return timingSafeEqual(got, expected);
+    },
+  };
 }
 ```
 
-`src/cli/usage.ts`: `readdir(AGENT_RUNS_ROOT)`, `readSpans` each, flat-map, `aggregateSpans`, print `renderUsage`. Add the `usage` script.
+- [ ] **Step 4: Run token test to verify it passes**
 
-- [ ] **Step 4: Run tests + typecheck**
-
-Run: `bun test tests/usage/ && bun run typecheck`
-Expected: PASS.
+Run: `bun test tests/server/token.test.ts`
+Expected: PASS (3 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/usage/aggregate.ts src/cli/usage.ts tests/usage/aggregate.test.ts package.json
-git commit -m "feat(usage): aggregate token/latency by model + 'bun run usage' (from existing span data)"
+git add src/server/security/token.ts tests/server/token.test.ts
+git commit -m "feat(server): add per-session bearer token mint + constant-time guard"
 ```
 
 ---

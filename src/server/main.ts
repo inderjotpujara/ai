@@ -1,5 +1,5 @@
 import { loadConfig } from '../config/schema.ts';
-import { type ServerDeps, buildFetch } from './app.ts';
+import { buildFetch, type ServerDeps } from './app.ts';
 import { mintSessionToken } from './security/token.ts';
 
 /**

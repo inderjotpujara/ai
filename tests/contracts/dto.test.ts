@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { RunDtoSchema, SpanDtoSchema } from '../../src/contracts/dto.ts';
 import {
   ArtifactKind,
   DegradeKind,
@@ -6,10 +7,6 @@ import {
   RunOrigin,
   SpanStatus,
 } from '../../src/contracts/enums.ts';
-import {
-  RunDtoSchema,
-  SpanDtoSchema,
-} from '../../src/contracts/dto.ts';
 
 const minimalSpan = {
   spanId: 's1',
@@ -36,7 +33,13 @@ test('SpanDTO survives a JSON serialize/parse round-trip with optionals present'
     statusMessage: 'ok',
     agent: 'researcher',
     delegation: { target: 'researcher', depth: 1, ancestors: ['router'] },
-    model: { id: 'qwen3.5:4b', provider: 'ollama', numCtx: 8192, footprintBytes: 42, runtimeDegraded: false },
+    model: {
+      id: 'qwen3.5:4b',
+      provider: 'ollama',
+      numCtx: 8192,
+      footprintBytes: 42,
+      runtimeDegraded: false,
+    },
     tokens: { input: 10, output: 20 },
     node: 'reserved-slice-31',
     attributes: { 'crew.id': 'x' },
@@ -57,7 +60,15 @@ test('RunDTO parses with reserved owner + lifecycle + origin and nested spans', 
     outcome: 'answer',
     models: ['qwen3.5:4b'],
     degraded: true,
-    degrades: [{ kind: DegradeKind.Retried, label: 'retried', subject: 'ollama', reason: 'timeout', attempts: 2 }],
+    degrades: [
+      {
+        kind: DegradeKind.Retried,
+        label: 'retried',
+        subject: 'ollama',
+        reason: 'timeout',
+        attempts: 2,
+      },
+    ],
     malformedSpans: 0,
     spanCount: 1,
     roots: ['s1'],

@@ -17,7 +17,9 @@ test('a minimal UIMessage-like body validates (no AI-SDK types)', () => {
 
 test('ChatRequest validates a messages array + optional sessionId', () => {
   const parsed = ChatRequestSchema.parse({
-    messages: [{ id: 'm1', role: ChatRole.User, parts: [{ type: 'text', text: 'hi' }] }],
+    messages: [
+      { id: 'm1', role: ChatRole.User, parts: [{ type: 'text', text: 'hi' }] },
+    ],
   });
   expect(parsed.messages.length).toBe(1);
   expect(parsed.sessionId).toBeUndefined();
@@ -28,7 +30,10 @@ test('ChatRequest rejects a malformed body (missing messages)', () => {
 });
 
 test('RespondRequest requires a promptId and accepts an opaque value', () => {
-  const parsed = RespondRequestSchema.parse({ promptId: 'cap-x', value: { ok: true } });
+  const parsed = RespondRequestSchema.parse({
+    promptId: 'cap-x',
+    value: { ok: true },
+  });
   expect(parsed.promptId).toBe('cap-x');
   expect(() => RespondRequestSchema.parse({ value: 1 })).toThrow();
 });

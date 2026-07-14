@@ -17,7 +17,9 @@ test('RunOrigin carries the reserved provenance values', () => {
 });
 
 test('RunLifecycle is not just terminal states', () => {
-  expect(RunLifecycle.PausedAwaitingInput as string).toBe('paused-awaiting-input');
+  expect(RunLifecycle.PausedAwaitingInput as string).toBe(
+    'paused-awaiting-input',
+  );
   expect(RunLifecycle.Resumable as string).toBe('resumable');
 });
 

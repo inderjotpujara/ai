@@ -1,94 +1,131 @@
-### Task 5: Top-level error boundary + persisted `error.json`
+### Task 5: Config — `ConfigEntry.strict?` flag + server (`AGENT_WEB_*`) entries
 
 **Files:**
-- Create: `src/errors/boundary.ts`
-- Create: `tests/errors/boundary.test.ts`
-- Modify: `src/cli/chat.ts:407-412` (replace `main().catch(console.error)`)
+- Modify: `src/config/schema.ts`
+- Test: `tests/config/web-config.test.ts`
 
 **Interfaces:**
-- Consumes: the exported error classes from `src/core/errors.ts` (`ProviderError`, `ToolError`, `ResourceError`, `WorkflowError`, `CrewError`, `MemoryError`, `VerificationError`, `MaxStepsError`).
-- Produces:
-  - `explain(err: unknown): { title: string; hint: string }` — maps a `FrameworkError` subclass to an actionable message; unknown errors get a generic pair.
-  - `handleTopLevel(err: unknown, deps?: { runDir?: string; write?: (path: string, data: string) => void; log?: (s: string) => void }): number` — logs the explained error, persists `error.json` to `runDir` if provided, returns exit code `1`.
+- Consumes: existing `ConfigEntry`, `CONFIG_SPEC`, `loadConfig` from `src/config/schema.ts`.
+- Produces: `ConfigEntry` gains optional `strict?: boolean`; three new entries `AGENT_WEB_PORT` (number, 4130), `AGENT_WEB_ORIGIN_ALLOWLIST` (string), `AGENT_WEB_RECORD_IO` (boolean, false, `strict: true`); `strict: true` added to `AGENT_MCP_AUTO_APPROVE` and `AGENT_PROVISION_AUTO_YES`. No behavior change in `coerce`/`loadConfig`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing config test**
 
 ```ts
-// tests/errors/boundary.test.ts
+// tests/config/web-config.test.ts
 import { expect, test } from 'bun:test';
-import { explain, handleTopLevel } from '../../src/errors/boundary.ts';
-import { ResourceError, ProviderError } from '../../src/core/errors.ts';
+import { CONFIG_SPEC, loadConfig } from '../../src/config/schema.ts';
 
-test('explain maps typed errors to actionable hints', () => {
-  expect(explain(new ResourceError('no fit')).title).toMatch(/memory budget|resource/i);
-  expect(explain(new ProviderError('ollama down')).hint).toMatch(/ollama|provider/i);
-  expect(explain(new Error('weird')).title).toBeDefined();
+const byEnv = (env: string) => CONFIG_SPEC.find((e) => e.env === env);
+
+test('the three AGENT_WEB_* entries exist with documented defaults', () => {
+  expect(byEnv('AGENT_WEB_PORT')?.def).toBe(4130);
+  expect(byEnv('AGENT_WEB_ORIGIN_ALLOWLIST')?.kind).toBe('string');
+  expect(byEnv('AGENT_WEB_RECORD_IO')?.def).toBe(false);
 });
-test('handleTopLevel persists error.json and returns exit 1', () => {
-  const writes: Record<string, string> = {};
-  const code = handleTopLevel(new ProviderError('x'), { runDir: '/tmp/r', write: (p, d) => { writes[p] = d; }, log: () => {} });
-  expect(code).toBe(1);
-  expect(JSON.parse(writes['/tmp/r/error.json'])).toMatchObject({ name: 'ProviderError' });
+
+test('strict flag marks the === "1" default-off booleans', () => {
+  expect(byEnv('AGENT_WEB_RECORD_IO')?.strict).toBe(true);
+  expect(byEnv('AGENT_MCP_AUTO_APPROVE')?.strict).toBe(true);
+  expect(byEnv('AGENT_PROVISION_AUTO_YES')?.strict).toBe(true);
+  // A default-on boolean carries no strict flag.
+  expect(byEnv('AGENT_TELEMETRY_RECORD_IO')?.strict).toBeUndefined();
+});
+
+test('loadConfig behavior is unchanged: web record-IO defaults off, env overrides', () => {
+  expect(loadConfig({}).values.AGENT_WEB_RECORD_IO).toBe(false);
+  expect(loadConfig({ AGENT_WEB_RECORD_IO: '1' }).values.AGENT_WEB_RECORD_IO).toBe(true);
+  expect(loadConfig({ AGENT_WEB_PORT: '5555' }).values.AGENT_WEB_PORT).toBe(5555);
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/errors/boundary.test.ts`
-Expected: FAIL — module missing.
+Run: `bun test tests/config/web-config.test.ts`
+Expected: FAIL — `AGENT_WEB_PORT` entry not found (`?.def` is `undefined`).
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Add the `strict?` flag to the `ConfigEntry` type**
+
+In `src/config/schema.ts`, replace the `ConfigEntry` type:
 
 ```ts
-// src/errors/boundary.ts
-import { join } from 'node:path';
-import { writeFileSync } from 'node:fs';
-import { ProviderError, ToolError, ResourceError, WorkflowError, CrewError, MemoryError, VerificationError, MaxStepsError } from '../core/errors.ts';
-
-export function explain(err: unknown): { title: string; hint: string } {
-  if (err instanceof ResourceError) return { title: 'No model fits the memory budget', hint: 'Free memory, pick a smaller model, or run `bun run provision`.' };
-  if (err instanceof ProviderError) return { title: 'A model provider/runtime failed', hint: 'Check the provider (e.g. Ollama running: `bun run status`).' };
-  if (err instanceof ToolError) return { title: 'A tool failed', hint: 'Check the tool/MCP server; see the run trace with `bun run runs`.' };
-  if (err instanceof MemoryError) return { title: 'A memory/RAG error', hint: 'Check the space/embedder; a reindex may be required.' };
-  if (err instanceof VerificationError) return { title: 'Verification was misused', hint: 'Ensure a memory store is configured for --verify.' };
-  if (err instanceof WorkflowError || err instanceof CrewError) return { title: 'A workflow/crew error', hint: 'Inspect the failing step with `bun run runs`.' };
-  if (err instanceof MaxStepsError) return { title: 'The agent hit its step ceiling', hint: 'The task may need a crew/workflow, or a higher step budget.' };
-  return { title: 'Unexpected error', hint: 'See the stack below; re-run with AGENT_LOG_LEVEL=debug for detail.' };
-}
-
-export function handleTopLevel(err: unknown, deps: { runDir?: string; write?: (path: string, data: string) => void; log?: (s: string) => void } = {}): number {
-  const write = deps.write ?? ((p, d) => writeFileSync(p, d));
-  const log = deps.log ?? ((s) => process.stderr.write(`${s}\n`));
-  const { title, hint } = explain(err);
-  const name = err instanceof Error ? err.name : 'Error';
-  const message = err instanceof Error ? err.message : String(err);
-  log(`✖ ${title}: ${message}\n  → ${hint}`);
-  if (deps.runDir) {
-    try { write(join(deps.runDir, 'error.json'), JSON.stringify({ name, title, message, hint, at: new Date().toISOString() }, null, 2)); } catch { /* best-effort */ }
-  }
-  return 1;
-}
+export type ConfigEntry = {
+  env: string;
+  kind: ConfigKind;
+  def: number | boolean | string;
+  doc: string;
+  /**
+   * Marks a default-OFF boolean whose REAL read site uses a stricter `=== '1'`
+   * check (e.g. AGENT_MCP_AUTO_APPROVE, AGENT_PROVISION_AUTO_YES). The schema
+   * `coerce` rule below is unchanged (any non-`0`/`false` reads true); this flag
+   * only lets a future settings UI surface the stricter real-world semantics.
+   */
+  strict?: boolean;
+};
 ```
 
-- [ ] **Step 4: Wire into chat.ts + run tests**
+- [ ] **Step 4: Add `strict: true` to the two existing default-off booleans**
 
-Replace `src/cli/chat.ts:407-412` with:
+In `src/config/schema.ts`, the `AGENT_PROVISION_AUTO_YES` entry — add the flag:
 
 ```ts
-if (import.meta.main) {
-  main().catch((err) => { process.exit(handleTopLevel(err)); });
-}
+  {
+    env: 'AGENT_PROVISION_AUTO_YES',
+    kind: 'boolean',
+    def: false,
+    doc: "Non-interactive auto-confirm for model provisioning prompts; real code only checks '1' exactly (cli/provision.ts, cli/chat.ts).",
+    strict: true,
+  },
 ```
-(import `handleTopLevel` from `../errors/boundary.ts`.)
 
-Run: `bun test tests/errors/ && bun run typecheck`
-Expected: PASS.
+The `AGENT_MCP_AUTO_APPROVE` entry — add the flag:
 
-- [ ] **Step 5: Commit**
+```ts
+  {
+    env: 'AGENT_MCP_AUTO_APPROVE',
+    kind: 'boolean',
+    def: false,
+    doc: "Non-interactive auto-approve for new MCP server consent; real code only checks '1' exactly (mcp/mount.ts).",
+    strict: true,
+  },
+```
+
+- [ ] **Step 5: Add the server (web BFF) config group**
+
+In `src/config/schema.ts`, insert a new group in `CONFIG_SPEC` immediately before the closing `];`:
+
+```ts
+  // --- Server / web BFF (Slice 30b) ---
+  {
+    env: 'AGENT_WEB_PORT',
+    kind: 'number',
+    def: 4130,
+    doc: 'Port the local web BFF (bun run web) listens on (server/main.ts). Distinct from Ollama :11434 (bun run serve).',
+  },
+  {
+    env: 'AGENT_WEB_ORIGIN_ALLOWLIST',
+    kind: 'string',
+    def: 'http://localhost,http://127.0.0.1',
+    doc: 'Comma-separated extra allowed Origins beyond localhost/127.0.0.1:PORT; config-driven so a Slice-24 tunnel can add its origin (server/security/origin.ts).',
+  },
+  {
+    env: 'AGENT_WEB_RECORD_IO',
+    kind: 'boolean',
+    def: false,
+    doc: "Record prompt/response IO into spans for SERVED (web) runs; default OFF, only '1' enables (D17). Distinct from AGENT_TELEMETRY_RECORD_IO (CLI, default on).",
+    strict: true,
+  },
+```
+
+- [ ] **Step 6: Run config test + typecheck to verify pass**
+
+Run: `bun test tests/config/web-config.test.ts && bun run typecheck`
+Expected: PASS (3 tests) and no type errors.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/errors/boundary.ts tests/errors/boundary.test.ts src/cli/chat.ts
-git commit -m "feat(errors): top-level boundary maps typed errors to actionable hints + persists error.json"
+git add src/config/schema.ts tests/config/web-config.test.ts
+git commit -m "feat(config): add ConfigEntry.strict flag + AGENT_WEB_* server entries"
 ```
 
 ---
