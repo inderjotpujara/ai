@@ -1,119 +1,180 @@
-### Task 4: Contract inbound request schemas + barrel
+### Task 4: Region error boundary + Base-UI primitives
 
 **Files:**
-- Create: `src/contracts/requests.ts`, `src/contracts/index.ts`
-- Test: `tests/contracts/requests.test.ts`
+- Create: `web/src/shared/ui/error-boundary.tsx`, `web/src/shared/ui/button.tsx`, `web/src/shared/ui/dialog.tsx`
+- Test: `web/src/shared/ui/error-boundary.test.tsx`, `web/src/shared/ui/dialog.test.tsx`
 
 **Interfaces:**
-- Consumes: `ChatRole` from `./enums.ts`.
-- Produces: `UiMessagePartSchema`, `UiMessageLikeSchema`/`UiMessageLike`, `ChatRequestSchema`/`ChatRequest`, `RespondRequestSchema`/`RespondRequest`; barrel `src/contracts/index.ts` re-exporting `./enums.ts`, `./dto.ts`, `./events.ts`, `./requests.ts`.
+- Consumes: `@base-ui-components/react`.
+- Produces: `RegionErrorBoundary` (props `{ region: string; children: ReactNode }`, renders a fallback with the region name on throw), `Button` (props extend native button + `variant?: 'default' | 'accent'`), `Dialog` (`{ open, onOpenChange, title, children }` wrapping Base UI's Dialog with focus trap + Esc-close).
 
-- [ ] **Step 1: Write the failing inbound-request test**
+- [ ] **Step 1: Write the failing tests**
 
-```ts
-// tests/contracts/requests.test.ts
-import { expect, test } from 'bun:test';
-import { ChatRole } from '../../src/contracts/enums.ts';
-import {
-  ChatRequestSchema,
-  RespondRequestSchema,
-  UiMessageLikeSchema,
-} from '../../src/contracts/requests.ts';
+`web/src/shared/ui/error-boundary.test.tsx`:
+```tsx
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import { RegionErrorBoundary } from './error-boundary.tsx';
 
-test('a minimal UIMessage-like body validates (no AI-SDK types)', () => {
-  const parsed = UiMessageLikeSchema.parse({
-    id: 'm1',
-    role: ChatRole.User,
-    parts: [{ type: 'text', text: 'hello' }],
+function Boom(): never {
+  throw new Error('kaboom');
+}
+
+describe('RegionErrorBoundary', () => {
+  it('renders children normally', () => {
+    render(
+      <RegionErrorBoundary region="Chat">
+        <span>ok</span>
+      </RegionErrorBoundary>,
+    );
+    expect(screen.getByText('ok')).toBeInTheDocument();
   });
-  expect(parsed.parts[0].text).toBe('hello');
-});
 
-test('ChatRequest validates a messages array + optional sessionId', () => {
-  const parsed = ChatRequestSchema.parse({
-    messages: [{ id: 'm1', role: ChatRole.User, parts: [{ type: 'text', text: 'hi' }] }],
+  it('catches a throwing child and shows a region-scoped fallback', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(
+      <RegionErrorBoundary region="Chat">
+        <Boom />
+      </RegionErrorBoundary>,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent(/Chat/);
   });
-  expect(parsed.messages.length).toBe(1);
-  expect(parsed.sessionId).toBeUndefined();
-});
-
-test('ChatRequest rejects a malformed body (missing messages)', () => {
-  expect(() => ChatRequestSchema.parse({ foo: 1 })).toThrow();
-});
-
-test('RespondRequest requires a promptId and accepts an opaque value', () => {
-  const parsed = RespondRequestSchema.parse({ promptId: 'cap-x', value: { ok: true } });
-  expect(parsed.promptId).toBe('cap-x');
-  expect(() => RespondRequestSchema.parse({ value: 1 })).toThrow();
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+`web/src/shared/ui/dialog.test.tsx`:
+```tsx
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import { Dialog } from './dialog.tsx';
 
-Run: `bun test tests/contracts/requests.test.ts`
-Expected: FAIL — cannot resolve `../../src/contracts/requests.ts`.
+describe('Dialog', () => {
+  it('renders its title and content when open', () => {
+    render(
+      <Dialog open title="Palette" onOpenChange={vi.fn()}>
+        <p>body</p>
+      </Dialog>,
+    );
+    expect(screen.getByText('Palette')).toBeInTheDocument();
+    expect(screen.getByText('body')).toBeInTheDocument();
+  });
 
-- [ ] **Step 3: Write the request schemas + barrel**
-
-```ts
-// src/contracts/requests.ts
-import { z } from 'zod';
-import { ChatRole } from './enums.ts';
-
-/**
- * A minimal, structural UIMessage-like shape. We deliberately do NOT import
- * AI-SDK's UIMessage type (Slice 23 forward-compat). The Phase-2 chat handler
- * `await convertToModelMessages(...)` (async in AI SDK v6.0.217) on the parsed
- * value; Phase 1 only validates the wire body before any engine call.
- */
-export const UiMessagePartSchema = z.object({
-  type: z.string(),
-  text: z.string().optional(),
+  it('renders nothing when closed', () => {
+    render(
+      <Dialog open={false} title="Palette" onOpenChange={vi.fn()}>
+        <p>body</p>
+      </Dialog>,
+    );
+    expect(screen.queryByText('body')).not.toBeInTheDocument();
+  });
 });
-
-export const UiMessageLikeSchema = z.object({
-  id: z.string(),
-  role: z.enum(ChatRole),
-  parts: z.array(UiMessagePartSchema),
-});
-export type UiMessageLike = z.infer<typeof UiMessageLikeSchema>;
-
-export const ChatRequestSchema = z.object({
-  messages: z.array(UiMessageLikeSchema),
-  sessionId: z.string().optional(),
-});
-export type ChatRequest = z.infer<typeof ChatRequestSchema>;
-
-export const RespondRequestSchema = z.object({
-  promptId: z.string(),
-  value: z.unknown(),
-});
-export type RespondRequest = z.infer<typeof RespondRequestSchema>;
 ```
 
-```ts
-// src/contracts/index.ts
-export * from './enums.ts';
-export * from './dto.ts';
-export * from './events.ts';
-export * from './requests.ts';
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd web && bun run test src/shared/ui/`
+Expected: FAIL — cannot resolve `./error-boundary.tsx` / `./dialog.tsx`.
+
+- [ ] **Step 3: Write the primitives**
+
+`web/src/shared/ui/error-boundary.tsx`:
+```tsx
+import { Component, type ErrorInfo, type ReactNode } from 'react';
+
+type Props = { region: string; children: ReactNode };
+type State = { error: Error | null };
+
+export class RegionErrorBoundary extends Component<Props, State> {
+  override state: State = { error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo): void {
+    // Local-first: log to console; a telemetry sink lands in a later phase.
+    console.error(`[region:${this.props.region}]`, error, info.componentStack);
+  }
+
+  override render(): ReactNode {
+    if (this.state.error) {
+      return (
+        <div role="alert" className="p-6 font-mono text-sm text-[var(--color-muted)]">
+          <strong className="text-[var(--color-fg)]">{this.props.region}</strong> failed to
+          render. {this.state.error.message}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 ```
 
-- [ ] **Step 4: Run request test to verify it passes**
+`web/src/shared/ui/button.tsx`:
+```tsx
+import type { ButtonHTMLAttributes } from 'react';
 
-Run: `bun test tests/contracts/requests.test.ts`
-Expected: PASS (4 tests).
+type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: 'default' | 'accent';
+};
 
-- [ ] **Step 5: Confirm the isomorphic guard still passes over all 5 contract files**
+export function Button({ variant = 'default', className = '', ...rest }: Props) {
+  const accent = variant === 'accent';
+  return (
+    <button
+      type="button"
+      className={`rounded-md border border-[var(--color-border)] px-3 py-1.5 font-mono text-sm transition-colors ${
+        accent
+          ? 'bg-[var(--color-accent)] text-[var(--color-bg)]'
+          : 'bg-[var(--color-surface)] text-[var(--color-fg)] hover:border-[var(--color-accent)]'
+      } ${className}`}
+      {...rest}
+    />
+  );
+}
+```
 
-Run: `bun test tests/contracts/isomorphic.test.ts`
-Expected: PASS — every file imports only `zod` / `./` siblings.
+`web/src/shared/ui/dialog.tsx`:
+```tsx
+import { Dialog as BaseDialog } from '@base-ui-components/react/dialog';
+import type { ReactNode } from 'react';
 
-- [ ] **Step 6: Commit**
+type Props = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  children: ReactNode;
+};
+
+export function Dialog({ open, onOpenChange, title, children }: Props) {
+  return (
+    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+      <BaseDialog.Portal>
+        <BaseDialog.Backdrop className="fixed inset-0 bg-black/50" />
+        <BaseDialog.Popup className="fixed left-1/2 top-24 w-[36rem] max-w-[90vw] -translate-x-1/2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-2xl">
+          <BaseDialog.Title className="mb-2 font-mono text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            {title}
+          </BaseDialog.Title>
+          {children}
+        </BaseDialog.Popup>
+      </BaseDialog.Portal>
+    </BaseDialog.Root>
+  );
+}
+```
+
+_If the installed `@base-ui-components/react` subpath export differs, import `{ Dialog as BaseDialog } from '@base-ui-components/react'` and use `BaseDialog.Root` etc. Verify the exact export against the installed version's `package.json` `exports` before finalizing._
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd web && bun run test src/shared/ui/`
+Expected: PASS (4 tests). Then `bun run typecheck`.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/contracts/requests.ts src/contracts/index.ts tests/contracts/requests.test.ts
-git commit -m "feat(contracts): add inbound request schemas + barrel export"
+git add web/src/shared/ui/
+git commit -m "feat(web): RegionErrorBoundary + Base-UI Button/Dialog primitives"
 ```
 
 ---

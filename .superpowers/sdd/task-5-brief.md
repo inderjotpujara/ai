@@ -1,131 +1,197 @@
-### Task 5: Config — `ConfigEntry.strict?` flag + server (`AGENT_WEB_*`) entries
+### Task 5: Contract client + transport port interface
 
 **Files:**
-- Modify: `src/config/schema.ts`
-- Test: `tests/config/web-config.test.ts`
+- Create: `web/src/shared/contract/client.ts`, `web/src/shared/transport/types.ts`
+- Test: `web/src/shared/contract/client.test.ts`, `web/src/shared/transport/types.test.ts`
 
 **Interfaces:**
-- Consumes: existing `ConfigEntry`, `CONFIG_SPEC`, `loadConfig` from `src/config/schema.ts`.
-- Produces: `ConfigEntry` gains optional `strict?: boolean`; three new entries `AGENT_WEB_PORT` (number, 4130), `AGENT_WEB_ORIGIN_ALLOWLIST` (string), `AGENT_WEB_RECORD_IO` (boolean, false, `strict: true`); `strict: true` added to `AGENT_MCP_AUTO_APPROVE` and `AGENT_PROVISION_AUTO_YES`. No behavior change in `coerce`/`loadConfig`.
+- Consumes: `@contracts` (the isomorphic Zod schemas + types from `src/contracts/index.ts`), `window.__AGENT_TOKEN__`.
+- Produces:
+  - `sessionToken(): string` — reads `window.__AGENT_TOKEN__`, `''` if absent (dev).
+  - `apiFetch<T>(path: string, opts: { schema: ZodType<T>; method?: string; body?: unknown; signal?: AbortSignal }): Promise<T>` — prefixes `/api`, sets `Authorization: Bearer <token>`, JSON-encodes body, throws `ApiError` on non-2xx, zod-parses the response.
+  - `getHealth(): Promise<{ ok: boolean }>`.
+  - `class ApiError extends Error { status: number }`.
+  - Transport port types: `ChatTransport`, `RunStream`, `TransportEvent` (all `type`, no `ai` import) shaped for bidirectional + resumable per D14.
 
-- [ ] **Step 1: Write the failing config test**
+- [ ] **Step 1: Write the failing tests**
 
+`web/src/shared/contract/client.test.ts`:
 ```ts
-// tests/config/web-config.test.ts
-import { expect, test } from 'bun:test';
-import { CONFIG_SPEC, loadConfig } from '../../src/config/schema.ts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { apiFetch, ApiError, sessionToken } from './client.ts';
 
-const byEnv = (env: string) => CONFIG_SPEC.find((e) => e.env === env);
-
-test('the three AGENT_WEB_* entries exist with documented defaults', () => {
-  expect(byEnv('AGENT_WEB_PORT')?.def).toBe(4130);
-  expect(byEnv('AGENT_WEB_ORIGIN_ALLOWLIST')?.kind).toBe('string');
-  expect(byEnv('AGENT_WEB_RECORD_IO')?.def).toBe(false);
+afterEach(() => {
+  vi.unstubAllGlobals();
+  // biome-ignore lint/suspicious/noExplicitAny: test cleanup of injected global
+  delete (globalThis as any).window;
 });
 
-test('strict flag marks the === "1" default-off booleans', () => {
-  expect(byEnv('AGENT_WEB_RECORD_IO')?.strict).toBe(true);
-  expect(byEnv('AGENT_MCP_AUTO_APPROVE')?.strict).toBe(true);
-  expect(byEnv('AGENT_PROVISION_AUTO_YES')?.strict).toBe(true);
-  // A default-on boolean carries no strict flag.
-  expect(byEnv('AGENT_TELEMETRY_RECORD_IO')?.strict).toBeUndefined();
-});
+function stubToken(token: string) {
+  vi.stubGlobal('window', { __AGENT_TOKEN__: token });
+}
 
-test('loadConfig behavior is unchanged: web record-IO defaults off, env overrides', () => {
-  expect(loadConfig({}).values.AGENT_WEB_RECORD_IO).toBe(false);
-  expect(loadConfig({ AGENT_WEB_RECORD_IO: '1' }).values.AGENT_WEB_RECORD_IO).toBe(true);
-  expect(loadConfig({ AGENT_WEB_PORT: '5555' }).values.AGENT_WEB_PORT).toBe(5555);
+describe('contract client', () => {
+  it('reads the session token from window, empty string when absent', () => {
+    vi.stubGlobal('window', {});
+    expect(sessionToken()).toBe('');
+    stubToken('abc123');
+    expect(sessionToken()).toBe('abc123');
+  });
+
+  it('sends the bearer token and zod-parses the response', async () => {
+    stubToken('secret');
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await apiFetch('/health', { schema: z.object({ ok: z.boolean() }) });
+    expect(result).toEqual({ ok: true });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('/api/health');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer secret');
+  });
+
+  it('throws ApiError with the status on non-2xx', async () => {
+    stubToken('secret');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('nope', { status: 401 })),
+    );
+    await expect(
+      apiFetch('/health', { schema: z.object({ ok: z.boolean() }) }),
+    ).rejects.toMatchObject({ name: 'ApiError', status: 401 } satisfies Partial<ApiError>);
+  });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/config/web-config.test.ts`
-Expected: FAIL — `AGENT_WEB_PORT` entry not found (`?.def` is `undefined`).
-
-- [ ] **Step 3: Add the `strict?` flag to the `ConfigEntry` type**
-
-In `src/config/schema.ts`, replace the `ConfigEntry` type:
-
+`web/src/shared/transport/types.test.ts`:
 ```ts
-export type ConfigEntry = {
-  env: string;
-  kind: ConfigKind;
-  def: number | boolean | string;
-  doc: string;
-  /**
-   * Marks a default-OFF boolean whose REAL read site uses a stricter `=== '1'`
-   * check (e.g. AGENT_MCP_AUTO_APPROVE, AGENT_PROVISION_AUTO_YES). The schema
-   * `coerce` rule below is unchanged (any non-`0`/`false` reads true); this flag
-   * only lets a future settings UI surface the stricter real-world semantics.
-   */
-  strict?: boolean;
+import { describe, expect, it } from 'vitest';
+import type { ChatTransport, RunStream } from './types.ts';
+import { StatusEventType } from '@contracts';
+
+describe('transport port', () => {
+  it('a stub adapter satisfies the ChatTransport contract (compile + shape)', () => {
+    const stub: ChatTransport = {
+      async *stream() {
+        yield { type: StatusEventType.RunStart, eventId: '1', data: { runId: 'r1' } };
+      },
+      async respond() {
+        /* back-channel — Phase 2 */
+      },
+    };
+    expect(typeof stub.stream).toBe('function');
+    expect(typeof stub.respond).toBe('function');
+  });
+
+  it('RunStream carries a resume cursor', () => {
+    const rs: RunStream = { runId: 'r1', cursor: null };
+    expect(rs.cursor).toBeNull();
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd web && bun run test src/shared/contract/ src/shared/transport/`
+Expected: FAIL — cannot resolve `./client.ts` / `./types.ts`.
+
+- [ ] **Step 3: Write the client + transport types**
+
+`web/src/shared/transport/types.ts`:
+```ts
+import type { RespondRequest, StatusEvent } from '@contracts';
+
+/** A transport event = a wire StatusEvent tagged with an SSE event id for resume. */
+export type TransportEvent = StatusEvent & { eventId: string };
+
+/**
+ * Bidirectional + resumable transport (spec D14). Adapter is SSE now
+ * (Last-Event-ID reconnect); the interface leaves room for WS/resumable later.
+ */
+export type ChatTransport = {
+  /** server→client stream; `fromCursor` replays after a Last-Event-ID reconnect. */
+  stream(runId?: string, fromCursor?: string | null): AsyncIterable<TransportEvent>;
+  /** client→server back-channel: POST /api/runs/:id/respond (consent / human-in-loop). */
+  respond(runId: string, payload: RespondRequest): Promise<void>;
+};
+
+/** A live run handle carrying the resume cursor (last seen event id). */
+export type RunStream = {
+  runId: string;
+  cursor: string | null;
 };
 ```
 
-- [ ] **Step 4: Add `strict: true` to the two existing default-off booleans**
-
-In `src/config/schema.ts`, the `AGENT_PROVISION_AUTO_YES` entry — add the flag:
-
+`web/src/shared/contract/client.ts`:
 ```ts
-  {
-    env: 'AGENT_PROVISION_AUTO_YES',
-    kind: 'boolean',
-    def: false,
-    doc: "Non-interactive auto-confirm for model provisioning prompts; real code only checks '1' exactly (cli/provision.ts, cli/chat.ts).",
-    strict: true,
-  },
+import type { ZodType } from 'zod';
+
+export class ApiError extends Error {
+  override name = 'ApiError';
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+/** The BFF injects window.__AGENT_TOKEN__ into the served HTML (empty in Vite dev). */
+export function sessionToken(): string {
+  const w = globalThis as { window?: { __AGENT_TOKEN__?: string } };
+  return w.window?.__AGENT_TOKEN__ ?? '';
+}
+
+type FetchOpts<T> = {
+  schema: ZodType<T>;
+  method?: string;
+  body?: unknown;
+  signal?: AbortSignal;
+};
+
+export async function apiFetch<T>(path: string, opts: FetchOpts<T>): Promise<T> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${sessionToken()}`,
+  };
+  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+
+  const res = await fetch(`/api${path}`, {
+    method: opts.method ?? (opts.body === undefined ? 'GET' : 'POST'),
+    headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    signal: opts.signal,
+  });
+
+  if (!res.ok) throw new ApiError(`request to ${path} failed`, res.status);
+  return opts.schema.parse(await res.json());
+}
 ```
 
-The `AGENT_MCP_AUTO_APPROVE` entry — add the flag:
-
+Add `getHealth` (imports a schema from `@contracts` when Phase 1 exposes one; until then a local literal schema is fine — health is not in `src/contracts`):
 ```ts
-  {
-    env: 'AGENT_MCP_AUTO_APPROVE',
-    kind: 'boolean',
-    def: false,
-    doc: "Non-interactive auto-approve for new MCP server consent; real code only checks '1' exactly (mcp/mount.ts).",
-    strict: true,
-  },
+import { z } from 'zod';
+export function getHealth(): Promise<{ ok: boolean }> {
+  return apiFetch('/health', { schema: z.object({ ok: z.boolean() }) });
+}
 ```
 
-- [ ] **Step 5: Add the server (web BFF) config group**
+- [ ] **Step 4: Run tests to verify they pass**
 
-In `src/config/schema.ts`, insert a new group in `CONFIG_SPEC` immediately before the closing `];`:
+Run: `cd web && bun run test src/shared/contract/ src/shared/transport/`
+Expected: PASS (5 tests). Confirms the `@contracts` alias resolves cross-boundary. Then `bun run typecheck`.
 
-```ts
-  // --- Server / web BFF (Slice 30b) ---
-  {
-    env: 'AGENT_WEB_PORT',
-    kind: 'number',
-    def: 4130,
-    doc: 'Port the local web BFF (bun run web) listens on (server/main.ts). Distinct from Ollama :11434 (bun run serve).',
-  },
-  {
-    env: 'AGENT_WEB_ORIGIN_ALLOWLIST',
-    kind: 'string',
-    def: 'http://localhost,http://127.0.0.1',
-    doc: 'Comma-separated extra allowed Origins beyond localhost/127.0.0.1:PORT; config-driven so a Slice-24 tunnel can add its origin (server/security/origin.ts).',
-  },
-  {
-    env: 'AGENT_WEB_RECORD_IO',
-    kind: 'boolean',
-    def: false,
-    doc: "Record prompt/response IO into spans for SERVED (web) runs; default OFF, only '1' enables (D17). Distinct from AGENT_TELEMETRY_RECORD_IO (CLI, default on).",
-    strict: true,
-  },
-```
-
-- [ ] **Step 6: Run config test + typecheck to verify pass**
-
-Run: `bun test tests/config/web-config.test.ts && bun run typecheck`
-Expected: PASS (3 tests) and no type errors.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/config/schema.ts tests/config/web-config.test.ts
-git commit -m "feat(config): add ConfigEntry.strict flag + AGENT_WEB_* server entries"
+git add web/src/shared/contract/ web/src/shared/transport/
+git commit -m "feat(web): token'd contract client + bidirectional transport port interface"
 ```
 
 ---

@@ -1,194 +1,223 @@
-### Task 1: Contracts foundation — string enums + isomorphic-purity guard
+### Task 1: Bun workspace + `web/` toolchain bootstrap
+
+Deliverable: `bun run check:web` runs one green Vitest test inside `web/`, and the root gate is extended to invoke it. All build/config scaffolding folds into this task.
 
 **Files:**
-- Create: `src/contracts/enums.ts`
-- Test: `tests/contracts/enums.test.ts`, `tests/contracts/isomorphic.test.ts`
+- Modify: `package.json` (root), `tsconfig.json` (root)
+- Create: `web/package.json`, `web/tsconfig.json`, `web/vite.config.ts`, `web/vitest.config.ts`, `web/index.html`, `web/src/test/setup.ts`
+- Test: `web/src/test/harness.test.tsx`
 
 **Interfaces:**
-- Consumes: nothing.
-- Produces: enums `RunOrigin`, `RunLifecycle`, `SpanStatus`, `ArtifactKind`, `DegradeKind`, `ChatRole`, `ModelLoadAction`, `StatusEventType` (all string enums). These are imported by Tasks 2–4.
+- Consumes: nothing (bootstrap).
+- Produces: the `web/` workspace, the `@contracts` alias resolving to `../src/contracts/index.ts`, a working Vitest+happy-dom harness, root scripts `check:web` and an extended `check`.
 
-- [ ] **Step 1: Write the failing enum test**
+- [ ] **Step 1: Write the failing test**
 
-```ts
-// tests/contracts/enums.test.ts
-import { expect, test } from 'bun:test';
-import {
-  DegradeKind,
-  RunLifecycle,
-  RunOrigin,
-  StatusEventType,
-} from '../../src/contracts/enums.ts';
+`web/src/test/harness.test.tsx`:
+```tsx
+import { describe, expect, it } from 'vitest';
+import { render, screen } from '@testing-library/react';
 
-test('RunOrigin carries the reserved provenance values', () => {
-  expect(Object.values(RunOrigin)).toEqual([
-    'manual',
-    'schedule',
-    'webhook',
-    'api',
-    'remote',
-  ]);
-});
+describe('web test harness', () => {
+  it('renders a DOM node and jest-dom matchers work', () => {
+    render(<button type="button">ping</button>);
+    expect(screen.getByRole('button', { name: 'ping' })).toBeInTheDocument();
+  });
 
-test('RunLifecycle is not just terminal states', () => {
-  expect(RunLifecycle.PausedAwaitingInput).toBe('paused-awaiting-input');
-  expect(RunLifecycle.Resumable).toBe('resumable');
-});
-
-test('DegradeKind mirrors reliability ledger string values', () => {
-  expect(Object.values(DegradeKind)).toEqual([
-    'model_degraded',
-    'agent_dropped',
-    'tool_skipped',
-    'retried',
-    'circuit_open',
-  ]);
-});
-
-test('StatusEventType discriminants are the data-part names', () => {
-  expect(StatusEventType.Confirm).toBe('data-confirm');
-  expect(StatusEventType.RunStart).toBe('data-run-start');
+  it('runs under a cross-origin-isolation-aware DOM', () => {
+    // happy-dom provides window; crossOriginIsolated may be undefined in jsdom-likes.
+    expect(typeof window).toBe('object');
+  });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/contracts/enums.test.ts`
-Expected: FAIL — cannot resolve `../../src/contracts/enums.ts`.
+Run: `cd web && bun run test 2>&1 | head -20` (or from root once scripts exist: `bun run check:web`)
+Expected: FAIL — `web/package.json` / vitest not present ("script not found" / "vitest: command not found").
 
-- [ ] **Step 3: Write the enums**
+- [ ] **Step 3: Write the workspace + config**
 
-```ts
-// src/contracts/enums.ts
-/**
- * Every finite named value on the web wire. Isomorphic: this file imports
- * nothing (not even zod). Enums (not string-literal unions) per repo style;
- * discriminated unions elsewhere take their discriminant from `StatusEventType`.
- */
-
-/** Run provenance (reserved; Slice 25 sets the non-`manual` values). */
-export enum RunOrigin {
-  Manual = 'manual',
-  Schedule = 'schedule',
-  Webhook = 'webhook',
-  Api = 'api',
-  Remote = 'remote',
+Root `package.json` — add the workspaces field (top level) and scripts:
+```jsonc
+{
+  // ...existing...
+  "workspaces": ["web"],
+  "scripts": {
+    // ...existing scripts unchanged...
+    "check:web": "cd web && bun run typecheck && bun run test",
+    "check": "bun run docs:check && bun run typecheck && bun run lint && bun run check:web && bun run test"
+  }
 }
+```
+Move `react`, `react-dom`, `@ai-sdk/react` OUT of root `devDependencies` (they go to `web/package.json` below). Leave `ai` and `zod` in root `dependencies` (used by `src/`).
 
-/** Run lifecycle — not just terminal outcome (Slices 24/25/34/38 use the rest). */
-export enum RunLifecycle {
-  Queued = 'queued',
-  Running = 'running',
-  PausedAwaitingInput = 'paused-awaiting-input',
-  Done = 'done',
-  Failed = 'failed',
-  Resumable = 'resumable',
-}
-
-export enum SpanStatus {
-  Ok = 'ok',
-  Error = 'error',
-}
-
-/** Run-artifact classification (mapper-side readdir+classify; Slice 30b Phase 3). */
-export enum ArtifactKind {
-  Answer = 'answer',
-  Gap = 'gap',
-  Spans = 'spans',
-  Degradation = 'degradation',
-  Other = 'other',
-}
-
-/**
- * Wire mirror of `src/reliability/ledger.ts` DegradeKind. The contract MUST NOT
- * import reliability (isomorphic rule), so we redeclare the identical string
- * values here; `tests/contracts/degrade-kind-parity.test.ts` guards they stay equal.
- */
-export enum DegradeKind {
-  ModelDegraded = 'model_degraded',
-  AgentDropped = 'agent_dropped',
-  ToolSkipped = 'tool_skipped',
-  Retried = 'retried',
-  CircuitOpen = 'circuit_open',
-}
-
-export enum ChatRole {
-  User = 'user',
-  Assistant = 'assistant',
-  System = 'system',
-}
-
-/** Model-lifecycle transition carried by `data-model-load`. */
-export enum ModelLoadAction {
-  Pull = 'pull',
-  Evict = 'evict',
-  Warm = 'warm',
-}
-
-/** Transient SSE data-part discriminants (also the AI-SDK data-part type names). */
-export enum StatusEventType {
-  RunStart = 'data-run-start',
-  Provision = 'data-provision',
-  McpMount = 'data-mcp-mount',
-  Delegation = 'data-delegation',
-  ModelSelect = 'data-model-select',
-  ModelLoad = 'data-model-load',
-  Degrade = 'data-degrade',
-  Confirm = 'data-confirm',
-  RunEnd = 'data-run-end',
+Root `tsconfig.json` — add `"web"` to `exclude`:
+```jsonc
+{
+  // ...
+  "exclude": ["scripts/spikes/**/*.tsx", "web"]
 }
 ```
 
-- [ ] **Step 4: Run enum test to verify it passes**
-
-Run: `bun test tests/contracts/enums.test.ts`
-Expected: PASS (4 tests).
-
-- [ ] **Step 5: Write the failing isomorphic-purity guard test**
-
-```ts
-// tests/contracts/isomorphic.test.ts
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { expect, test } from 'bun:test';
-
-const CONTRACTS_DIR = join(import.meta.dir, '../../src/contracts');
-
-/** Extract every module specifier from `import ... from '...'` / `export ... from '...'`. */
-function importSpecifiers(src: string): string[] {
-  const out: string[] = [];
-  const re = /(?:import|export)[^'"]*from\s*['"]([^'"]+)['"]/g;
-  let m: RegExpExecArray | null = re.exec(src);
-  while (m !== null) {
-    out.push(m[1]);
-    m = re.exec(src);
+`web/package.json`:
+```json
+{
+  "name": "@local-agents/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "^19",
+    "react-dom": "^19",
+    "@ai-sdk/react": "^3",
+    "@tanstack/react-router": "^1",
+    "@base-ui-components/react": "^1",
+    "@fontsource-variable/geist": "^5",
+    "@fontsource-variable/geist-mono": "^5"
+  },
+  "devDependencies": {
+    "vite": "^8",
+    "@vitejs/plugin-react": "^6",
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4",
+    "vitest": "^4",
+    "happy-dom": "^15",
+    "@testing-library/react": "^16",
+    "@testing-library/jest-dom": "^6",
+    "@testing-library/user-event": "^14",
+    "typescript": "^5.9.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19"
   }
-  return out;
 }
+```
 
-test('src/contracts imports only zod or sibling ./ files', () => {
-  const files = readdirSync(CONTRACTS_DIR).filter((f) => f.endsWith('.ts'));
-  expect(files.length).toBeGreaterThan(0);
-  for (const file of files) {
-    const src = readFileSync(join(CONTRACTS_DIR, file), 'utf8');
-    for (const spec of importSpecifiers(src)) {
-      const ok = spec === 'zod' || spec.startsWith('./');
-      expect(ok, `${file} has forbidden import "${spec}"`).toBe(true);
-    }
-  }
+`web/tsconfig.json`:
+```jsonc
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"],
+    "paths": { "@contracts": ["../src/contracts/index.ts"] }
+  },
+  "include": ["src", "vite.config.ts", "vitest.config.ts"]
+}
+```
+
+`web/vite.config.ts`:
+```ts
+import { resolve } from 'node:path';
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+
+const isolation = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp',
+};
+
+export default defineConfig({
+  base: '/',
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: { '@contracts': resolve(import.meta.dirname, '../src/contracts/index.ts') },
+  },
+  server: { headers: isolation, fs: { allow: ['..'] } },
+  preview: { headers: isolation },
 });
 ```
 
-- [ ] **Step 6: Run the guard test to verify it passes**
+`web/vitest.config.ts`:
+```ts
+import { resolve } from 'node:path';
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
 
-Run: `bun test tests/contracts/isomorphic.test.ts`
-Expected: PASS — `enums.ts` has zero imports; the guard now protects every future contracts file.
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: { '@contracts': resolve(import.meta.dirname, '../src/contracts/index.ts') },
+  },
+  test: {
+    environment: 'happy-dom',
+    globals: true,
+    setupFiles: ['./src/test/setup.ts'],
+  },
+});
+```
 
-- [ ] **Step 7: Commit**
+`web/index.html`:
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Agents</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+```
+
+`web/src/test/setup.ts`:
+```ts
+import '@testing-library/jest-dom/vitest';
+import { beforeEach, vi } from 'vitest';
+
+// happy-dom does not implement matchMedia; ThemeProvider (Task 3) depends on it.
+beforeEach(() => {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+});
+```
+
+- [ ] **Step 4: Install and run the test to verify it passes**
+
+Run: `bun install && bun run check:web`
+Expected: `bun run typecheck` clean, then Vitest PASS (2 tests). If Biome later flags `web/`, run `bun run lint` and fix.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/contracts/enums.ts tests/contracts/enums.test.ts tests/contracts/isomorphic.test.ts
-git commit -m "feat(contracts): add wire enums + isomorphic-purity guard test"
+git add package.json tsconfig.json web/
+git commit -m "chore(web): bootstrap web/ workspace — Vite 8 + Vitest 4 + happy-dom harness"
 ```
 
 ---

@@ -1,8 +1,9 @@
 # Dependencies
 node_modules/
 
-# Run artifacts (per-run dirs + journals)
-runs/
+# Run artifacts (per-run dirs + journals). Anchored to the repo root so
+# src/features/runs/ (web UI feature area) stays tracked — see /memory/ below.
+/runs/
 
 # Memory datastore (LanceDB tables + bun:sqlite; local, never committed). See docs/architecture.md §11
 # Anchored to the repo root so src/memory/ + tests/memory/ stay tracked.
@@ -17,6 +18,9 @@ model-images/*
 # travels across machines: .superpowers/ (SDD ledger + task briefs/reports),
 # .remember/ (session-memory .md buffers), .claude/settings.local.json, .githooks/.
 # Only truly-transient junk stays ignored (below + .remember/{logs,tmp}).
+
+# Vite build output (web/ workspace member); never committed
+web/dist/
 
 # Misc
 *.log

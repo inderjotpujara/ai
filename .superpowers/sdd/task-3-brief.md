@@ -1,176 +1,157 @@
-### Task 3: Contract status events — the transient-SSE discriminated union
+### Task 3: ThemeProvider + light/dark toggle
 
 **Files:**
-- Create: `src/contracts/events.ts`
-- Test: `tests/contracts/events.test.ts`
+- Create: `web/src/shared/design/theme.tsx`
+- Test: `web/src/shared/design/theme.test.tsx`
 
 **Interfaces:**
-- Consumes: `StatusEventType`, `DegradeKind`, `ModelLoadAction` from `./enums.ts`.
-- Produces: `StatusEventSchema`/`StatusEvent` (discriminated union) plus the per-variant schemas (`RunStartEventSchema`, `ProvisionEventSchema`, `McpMountEventSchema`, `DelegationEventSchema`, `ModelSelectEventSchema`, `ModelLoadEventSchema`, `DegradeEventSchema`, `ConfirmEventSchema`, `RunEndEventSchema`).
+- Consumes: `matchMedia`, `localStorage`.
+- Produces: `ThemeProvider` (React component), `useTheme(): { theme: 'light' | 'dark'; toggle: () => void; set: (t: 'light' | 'dark') => void }`, and a `Theme` string enum `{ Light='light', Dark='dark' }`. Applies/removes the `light` class + `data-theme` attribute on `document.documentElement`; persists to `localStorage['agent-theme']`; initial = stored value ?? (`prefers-color-scheme: light` → light, else dark).
 
-- [ ] **Step 1: Write the failing status-event test**
+- [ ] **Step 1: Write the failing test**
 
-```ts
-// tests/contracts/events.test.ts
-import { expect, test } from 'bun:test';
-import {
-  DegradeKind,
-  ModelLoadAction,
-  StatusEventType,
-} from '../../src/contracts/enums.ts';
-import { StatusEventSchema } from '../../src/contracts/events.ts';
+`web/src/shared/design/theme.test.tsx`:
+```tsx
+import { describe, expect, it, beforeEach } from 'vitest';
+import { render, screen, act } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { ThemeProvider, useTheme, Theme } from './theme.tsx';
 
-test('parses a data-delegation event and discriminates on type', () => {
-  const e = StatusEventSchema.parse({
-    type: StatusEventType.Delegation,
-    agent: 'researcher',
-    depth: 1,
-    parentAgent: 'router',
-    ancestors: ['router'],
+function Probe() {
+  const { theme, toggle } = useTheme();
+  return (
+    <button type="button" onClick={toggle}>
+      theme:{theme}
+    </button>
+  );
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  document.documentElement.className = '';
+});
+
+describe('ThemeProvider', () => {
+  it('defaults to dark when no stored value and OS is not light', () => {
+    render(<ThemeProvider><Probe /></ThemeProvider>);
+    expect(screen.getByRole('button')).toHaveTextContent('theme:dark');
+    expect(document.documentElement).toHaveClass('dark');
+    expect(document.documentElement).not.toHaveClass('light');
   });
-  expect(e.type).toBe('data-delegation');
-});
 
-test('parses a data-model-load event with an enum action', () => {
-  const e = StatusEventSchema.parse({
-    type: StatusEventType.ModelLoad,
-    model: 'qwen3.5:4b',
-    action: ModelLoadAction.Warm,
+  it('toggles to light, applies the class, and persists', async () => {
+    render(<ThemeProvider><Probe /></ThemeProvider>);
+    await userEvent.click(screen.getByRole('button'));
+    expect(screen.getByRole('button')).toHaveTextContent('theme:light');
+    expect(document.documentElement).toHaveClass('light');
+    expect(document.documentElement).not.toHaveClass('dark');
+    expect(localStorage.getItem('agent-theme')).toBe(Theme.Light);
   });
-  expect(e.type === StatusEventType.ModelLoad && e.action).toBe('warm');
-});
 
-test('parses the bidirectional data-confirm ask', () => {
-  const e = StatusEventSchema.parse({
-    type: StatusEventType.Confirm,
-    promptId: 'cap-abc123',
-    kind: 'mcp-mount',
-    question: 'Mount github MCP server?',
+  it('restores the persisted theme on mount', () => {
+    localStorage.setItem('agent-theme', Theme.Light);
+    render(<ThemeProvider><Probe /></ThemeProvider>);
+    expect(screen.getByRole('button')).toHaveTextContent('theme:light');
   });
-  expect(e.type === StatusEventType.Confirm && e.promptId).toBe('cap-abc123');
-});
-
-test('data-degrade survives a JSON round-trip', () => {
-  const src = {
-    type: StatusEventType.Degrade,
-    kind: DegradeKind.CircuitOpen,
-    subject: 'ollama',
-    reason: 'threshold hit',
-    spanId: 's7',
-  };
-  const wire = JSON.parse(JSON.stringify(StatusEventSchema.parse(src)));
-  expect(StatusEventSchema.parse(wire)).toEqual(src);
-});
-
-test('rejects an unknown event type', () => {
-  expect(() => StatusEventSchema.parse({ type: 'data-nope' })).toThrow();
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/contracts/events.test.ts`
-Expected: FAIL — cannot resolve `../../src/contracts/events.ts`.
+Run: `cd web && bun run test src/shared/design/theme.test.tsx`
+Expected: FAIL — cannot resolve `./theme.tsx`.
 
-- [ ] **Step 3: Write the status-event schemas**
+- [ ] **Step 3: Write `theme.tsx`**
 
-```ts
-// src/contracts/events.ts
-import { z } from 'zod';
-import { DegradeKind, ModelLoadAction, StatusEventType } from './enums.ts';
+`web/src/shared/design/theme.tsx`:
+```tsx
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from 'react';
 
-export const RunStartEventSchema = z.object({
-  type: z.literal(StatusEventType.RunStart),
-  runId: z.string(),
-  task: z.string().optional(),
-});
+export enum Theme {
+  Light = 'light',
+  Dark = 'dark',
+}
 
-export const ProvisionEventSchema = z.object({
-  type: z.literal(StatusEventType.Provision),
-  phase: z.string(),
-  model: z.string().optional(),
-});
+const STORAGE_KEY = 'agent-theme';
 
-export const McpMountEventSchema = z.object({
-  type: z.literal(StatusEventType.McpMount),
-  server: z.string(),
-  outcome: z.string(),
-});
+type ThemeContextValue = {
+  theme: Theme;
+  toggle: () => void;
+  set: (t: Theme) => void;
+};
 
-export const DelegationEventSchema = z.object({
-  type: z.literal(StatusEventType.Delegation),
-  agent: z.string(),
-  depth: z.number(),
-  parentAgent: z.string().optional(),
-  ancestors: z.array(z.string()),
-});
+const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-export const ModelSelectEventSchema = z.object({
-  type: z.literal(StatusEventType.ModelSelect),
-  agent: z.string(),
-  model: z.string(),
-  numCtx: z.number().optional(),
-  footprintBytes: z.number().optional(),
-  install: z.boolean().optional(),
-  degraded: z.boolean().optional(),
-});
+function initialTheme(): Theme {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === Theme.Light || stored === Theme.Dark) return stored;
+  } catch {
+    // localStorage unavailable → fall through to OS preference
+  }
+  const prefersLight =
+    typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: light)').matches;
+  return prefersLight ? Theme.Light : Theme.Dark;
+}
 
-export const ModelLoadEventSchema = z.object({
-  type: z.literal(StatusEventType.ModelLoad),
-  model: z.string(),
-  action: z.enum(ModelLoadAction),
-});
+function apply(theme: Theme): void {
+  const root = document.documentElement;
+  // Set BOTH classes explicitly. `.dark` must be present in dark mode so
+  // Tailwind's `dark:` variant (@custom-variant dark → `.dark` ancestor) fires;
+  // tokens.css also keeps the dark palette on bare :root as a fallback.
+  root.classList.toggle('dark', theme === Theme.Dark);
+  root.classList.toggle('light', theme === Theme.Light);
+  root.setAttribute('data-theme', theme);
+}
 
-export const DegradeEventSchema = z.object({
-  type: z.literal(StatusEventType.Degrade),
-  kind: z.enum(DegradeKind),
-  subject: z.string(),
-  reason: z.string(),
-  spanId: z.string().optional(),
-});
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setTheme] = useState<Theme>(initialTheme);
 
-/**
- * `kind` is a free string, not an enum: consent kinds come from many engine
- * seams (mcp-mount, provision, build, reuse, archive, gen-download, clone, mic,
- * disk-shortfall…) and grow per future slice, so a closed enum would churn.
- */
-export const ConfirmEventSchema = z.object({
-  type: z.literal(StatusEventType.Confirm),
-  promptId: z.string(),
-  kind: z.string(),
-  question: z.string(),
-});
+  useEffect(() => {
+    apply(theme);
+    try {
+      localStorage.setItem(STORAGE_KEY, theme);
+    } catch {
+      // ignore persistence failure — theme still applies for the session
+    }
+  }, [theme]);
 
-export const RunEndEventSchema = z.object({
-  type: z.literal(StatusEventType.RunEnd),
-  runId: z.string(),
-  outcome: z.string(),
-});
+  const set = useCallback((t: Theme) => setTheme(t), []);
+  const toggle = useCallback(
+    () => setTheme((t) => (t === Theme.Dark ? Theme.Light : Theme.Dark)),
+    [],
+  );
 
-export const StatusEventSchema = z.discriminatedUnion('type', [
-  RunStartEventSchema,
-  ProvisionEventSchema,
-  McpMountEventSchema,
-  DelegationEventSchema,
-  ModelSelectEventSchema,
-  ModelLoadEventSchema,
-  DegradeEventSchema,
-  ConfirmEventSchema,
-  RunEndEventSchema,
-]);
-export type StatusEvent = z.infer<typeof StatusEventSchema>;
+  return (
+    <ThemeContext.Provider value={{ theme, toggle, set }}>{children}</ThemeContext.Provider>
+  );
+}
+
+export function useTheme(): ThemeContextValue {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme must be used within <ThemeProvider>');
+  return ctx;
+}
 ```
 
-- [ ] **Step 4: Run status-event test to verify it passes**
+- [ ] **Step 4: Run test to verify it passes**
 
-Run: `bun test tests/contracts/events.test.ts`
-Expected: PASS (5 tests).
+Run: `cd web && bun run test src/shared/design/theme.test.tsx`
+Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Typecheck + commit**
 
 ```bash
-git add src/contracts/events.ts tests/contracts/events.test.ts
-git commit -m "feat(contracts): add StatusEvent transient-SSE discriminated union"
+cd web && bun run typecheck && cd ..
+git add web/src/shared/design/theme.tsx web/src/shared/design/theme.test.tsx
+git commit -m "feat(web): ThemeProvider with persisted light/dark toggle"
 ```
 
 ---
