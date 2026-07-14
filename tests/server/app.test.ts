@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
@@ -134,5 +134,57 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     expect(encodedTraversal.status).toBe(404);
   } finally {
     confinedServer.stop(true);
+  }
+});
+
+test('serveStatic confineToDir blocks symlink escapes (real regression guard)', async () => {
+  // Create a temp staticDir with a legit file.
+  const staticDir = mkdtempSync(join(tmpdir(), 'app-static-secure-'));
+  writeFileSync(join(staticDir, 'ok.txt'), 'allowed content');
+
+  // Create a separate "outside" dir with a secret file (the escape target).
+  const outsideDir = mkdtempSync(join(tmpdir(), 'app-outside-'));
+  const secretMarker = 'SECRET_DATA_42';
+  writeFileSync(join(outsideDir, 'secret.txt'), secretMarker);
+
+  // Plant a symlink inside staticDir pointing to the outside secret.
+  const symlinkPath = join(staticDir, 'leak.txt');
+  const targetPath = join(outsideDir, 'secret.txt');
+  symlinkSync(targetPath, symlinkPath);
+
+  // Boot a server with confined staticDir.
+  const symlinkPolicy = { port: 0, allowedOrigins: [] as string[] };
+  const symlinkDeps: ServerDeps = {
+    token: TOKEN,
+    policy: symlinkPolicy,
+    staticDir,
+    recordIo: false,
+    indexHtml: '<!doctype html><title>t</title>',
+  };
+  const symlinkServer = Bun.serve({
+    port: 0,
+    fetch: buildFetch(symlinkDeps),
+    idleTimeout: 0,
+  });
+
+  try {
+    const { port } = symlinkServer;
+    if (port === undefined) throw new Error('server did not bind a port');
+    symlinkPolicy.port = port;
+    const symlinkBase = `http://localhost:${port}`;
+
+    // Normal file serves correctly through confineToDir.
+    const okRes = await fetch(`${symlinkBase}/ok.txt`);
+    expect(okRes.status).toBe(200);
+    expect(await okRes.text()).toBe('allowed content');
+
+    // Symlink escape is blocked by confineToDir → MediaPathError → 404.
+    // The secret must NOT appear in the response.
+    const leakRes = await fetch(`${symlinkBase}/leak.txt`);
+    expect(leakRes.status).toBe(404);
+    const leakBody = await leakRes.text();
+    expect(leakBody).not.toContain(secretMarker);
+  } finally {
+    symlinkServer.stop(true);
   }
 });
