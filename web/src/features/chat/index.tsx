@@ -39,14 +39,21 @@ export function ChatArea() {
 
   const isBusy = status === 'streaming' || status === 'submitted';
 
-  function handleSend(text: string) {
+  function handleSend(text: string, uploadIds: string[]) {
     if (editDraft) {
       // Edit+resend: drop the edited message and everything after it, then
       // resend the edited text as a fresh turn.
       setMessages((msgs) => msgs.slice(0, editDraft.index));
       setEditDraft(undefined);
     }
-    sendMessage({ text });
+    // Media-by-reference (Task 16): only thread a `body` override when
+    // there's actually an attachment — keeps the plain-text send path
+    // byte-for-byte the same call AI SDK's `useChat().sendMessage` sees.
+    if (uploadIds.length > 0) {
+      sendMessage({ text }, { body: { uploadIds } });
+    } else {
+      sendMessage({ text });
+    }
   }
 
   function handleCopy(message: UIMessage) {

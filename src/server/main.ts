@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
@@ -47,10 +48,11 @@ export function startWebServer(opts: StartOptions = {}): {
   const token = opts.token ?? mintSessionToken();
 
   const policy = { port, allowedOrigins };
+  const runsRoot = 'runs';
   // Lazy engine: nothing (registry build, model manager, MCP mount) runs at
   // boot — only on the FIRST `/api/chat` request — so server startup and the
   // perimeter/health tests stay Ollama-free.
-  const runChatTurn = createRealRunChatTurn(createLazyEngine('runs'));
+  const runChatTurn = createRealRunChatTurn(createLazyEngine(runsRoot));
   const consent = createConsentRegistry();
   const deps: ServerDeps = {
     token,
@@ -60,6 +62,10 @@ export function startWebServer(opts: StartOptions = {}): {
     indexHtml: renderIndexHtml(token),
     runChatTurn,
     consent,
+    // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
+    // across the per-request `/api/chat` run lifecycle since the upload and
+    // the chat turn that references it are two separate HTTP requests.
+    uploadsDir: join(runsRoot, '_uploads'),
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

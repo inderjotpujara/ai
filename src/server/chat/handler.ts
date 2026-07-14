@@ -2,12 +2,17 @@ import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { ChatRequestSchema } from '../../contracts/requests.ts';
 import type { StreamSink } from '../../core/agent.ts';
 import type { EventSink } from '../../core/events.ts';
+import type { IngestFlags } from '../../media/ingest.ts';
 import { withUiStreamSpan } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
+import { confineToDir, MediaPathError } from '../security/media-path.ts';
 import type { RunChatTurn } from './run-turn.ts';
 import { buildTaskFromMessages } from './task.ts';
 
-export type ChatHandlerDeps = { runChatTurn: RunChatTurn };
+/** `uploadsDir` is optional so existing fakes/tests that never send
+ *  `uploadIds` (and so never touch upload-path resolution) don't need to
+ *  supply it; the real server (`src/server/main.ts`) always sets it. */
+export type ChatHandlerDeps = { runChatTurn: RunChatTurn; uploadsDir?: string };
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -39,6 +44,44 @@ export async function handleChat(
 
   const task = buildTaskFromMessages(body.messages);
 
+  // Media-by-reference (Task 16): the browser sends opaque ids minted by a
+  // PRIOR `POST /api/upload`, never a raw filesystem path. Resolve each id
+  // back to an absolute path through the SAME `confineToDir` primitive the
+  // upload endpoint validates its write with — this is the read-side half of
+  // that defense-in-depth pair. A bad/escaping id 400s the whole request
+  // before any engine work starts (no partial media, no silent drop).
+  let media: IngestFlags | undefined;
+  if (body.uploadIds && body.uploadIds.length > 0) {
+    if (!deps.uploadsDir) {
+      return json(
+        { error: 'invalid chat request: uploads are not configured' },
+        400,
+      );
+    }
+    const images: string[] = [];
+    for (const uploadId of body.uploadIds) {
+      try {
+        images.push(confineToDir(uploadId, deps.uploadsDir));
+      } catch (err) {
+        if (err instanceof MediaPathError) {
+          return json(
+            { error: 'invalid chat request: unknown upload id' },
+            400,
+          );
+        }
+        throw err;
+      }
+    }
+    media = {
+      images,
+      audios: [],
+      videos: [],
+      paste: false,
+      voice: false,
+      voiceIn: [],
+    };
+  }
+
   // The `ui.stream` span MUST wrap the work INSIDE `execute` — not the outer
   // handler body. `createUIMessageStream` does NOT await its `execute`
   // callback, so an outer wrap would return (building the Response) in ~1
@@ -62,6 +105,7 @@ export async function handleChat(
         try {
           const result = await deps.runChatTurn({
             task,
+            media,
             events,
             stream: streamSink,
             signal: req.signal,

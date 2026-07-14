@@ -6,7 +6,11 @@ import { type EventSink, noopEventSink } from '../core/events.ts';
 import type { OrchestratorResult } from '../core/orchestrator.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import type { MountedRegistry } from '../mcp/mount.ts';
-import { type IngestFlags, ingestMedia } from '../media/ingest.ts';
+import {
+  type IngestDeps,
+  type IngestFlags,
+  ingestMedia,
+} from '../media/ingest.ts';
 import type { MediaStore } from '../media/store.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
 import type { RunHandle } from '../run/run-store.ts';
@@ -27,6 +31,14 @@ export type ChatSessionDeps = {
 export type ChatSessionInput = {
   task: string; // raw prompt (post-voice for CLI; from-messages for server)
   media?: IngestFlags; // when set, ingest media/markers via mediaStore
+  /**
+   * Passed to `ingestMedia` as its 4th arg. The SERVER path sets
+   * `{ exists: () => false }` to disable the prompt-text filesystem
+   * auto-detect (D17 — over HTTP the task text is attacker-controlled). The
+   * CLI leaves it undefined so auto-detect stays on for the trusted local
+   * caller (dragged-in paths in the terminal prompt still resolve).
+   */
+  ingestDeps?: IngestDeps;
   events?: EventSink;
   stream?: StreamSink;
   signal?: AbortSignal;
@@ -59,7 +71,12 @@ export async function runChatSession(
   let task = input.task;
   const warnings: string[] = [];
   if (input.media) {
-    const ingested = await ingestMedia(task, input.media, deps.mediaStore);
+    const ingested = await ingestMedia(
+      task,
+      input.media,
+      deps.mediaStore,
+      input.ingestDeps,
+    );
     task = ingested.prompt;
     warnings.push(...ingested.warnings);
   }

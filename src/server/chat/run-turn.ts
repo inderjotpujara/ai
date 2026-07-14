@@ -8,6 +8,7 @@ import type { OrchestratorResult } from '../../core/orchestrator.ts';
 import type { ResourceCapture } from '../../core/resource-capture.ts';
 import type { ModelDeclaration } from '../../core/types.ts';
 import { buildRegistry } from '../../discovery/build-registry.ts';
+import type { IngestFlags } from '../../media/ingest.ts';
 import { createMediaStore } from '../../media/store.ts';
 import { createModelManager } from '../../resource/model-manager.ts';
 import { listLoadedModels } from '../../resource/ollama-control.ts';
@@ -19,6 +20,11 @@ import { newRunId } from '../../run/run-id.ts';
  *  fake so `handler.ts` is exercised without booting Ollama/MCP. */
 export type RunChatTurn = (input: {
   task: string;
+  /** Media-by-reference (Task 16): pre-resolved absolute paths under the
+   *  confined uploads dir, built by `handleChat` from the request's
+   *  `uploadIds`. `runChatSession` ingests these the same way the CLI's
+   *  `--image` flag does. */
+  media?: IngestFlags;
   events: EventSink;
   stream: StreamSink;
   signal?: AbortSignal;
@@ -78,7 +84,7 @@ export function createLazyEngine(runsRoot: string): LazyEngine {
  *  covered by live-verify, not unit tests (it composes real MCP mount +
  *  engine wiring, which unit tests would only mock away). */
 export function createRealRunChatTurn(engine: LazyEngine): RunChatTurn {
-  return async ({ task, events, stream, signal }) => {
+  return async ({ task, media, events, stream, signal }) => {
     const registry = await engine.registry();
     return withMcpRun(
       { runsRoot: engine.runsRoot, runId: newRunId() },
@@ -95,6 +101,14 @@ export function createRealRunChatTurn(engine: LazyEngine): RunChatTurn {
         const store = createMediaStore(run.dir);
         const { result } = await runChatSession({
           task,
+          media,
+          // D17: DISABLE the prompt-text filesystem auto-detect on the server
+          // path. `media` (confined uploadId→path handoff) is the ONLY way the
+          // browser attaches a file; the task text itself is attacker-
+          // controlled over HTTP, so scanning it for real host paths + reading
+          // them would be an arbitrary-file-read hole. `() => false` makes
+          // `autoDetectPaths` a no-op without touching `flags.images`.
+          ingestDeps: { exists: () => false },
           events,
           stream,
           signal,

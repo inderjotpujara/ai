@@ -9,6 +9,7 @@ import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
+import { handleUpload } from './upload.ts';
 
 /**
  * The thin BFF's dependencies. It owns NO business logic: it enforces the
@@ -23,6 +24,8 @@ export type ServerDeps = {
   indexHtml: string;
   runChatTurn: RunChatTurn;
   consent: ConsentRegistry;
+  /** Durable dir confined-uploads are written to/read from (Task 16). */
+  uploadsDir: string;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -75,6 +78,10 @@ async function handleApi(
         if (req.method === 'POST' && url.pathname === '/api/chat') {
           rec.status(200);
           return handleChat(req, deps);
+        }
+        if (req.method === 'POST' && url.pathname === '/api/upload') {
+          rec.status(200);
+          return handleUpload(req, deps);
         }
         const respondMatch = url.pathname.match(
           /^\/api\/runs\/([^/]+)\/respond$/,
