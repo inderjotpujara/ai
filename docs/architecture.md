@@ -528,8 +528,8 @@ graph TD
 |---|---|---|---|
 | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14); agent-builder entry (`agent-builder.ts`, `bun run agent-builder "<need>" [--yes] [--force]`, Slice 17; `--force` commits a failed verify gate at `unverified` and prints a WARNING, §20) plus a TTY-gated capability-gap offer wired into `chat.ts`'s `{kind:'gap'}` branch (§18); crew-builder entry (`crew-builder.ts`, `bun run crew-builder "<need>" [--yes] [--force]`, Slice 19; same `--force` semantics) plus the `offer-crew.ts` multi-step gap-offer heuristic (§19); archive entry (`archive.ts`, `bun run archive [--prune]`, Slice 20 — reports idle near-duplicate generated artifacts per registry, `--prune` archives each behind a per-candidate consent prompt); a per-run telemetry scope for CLIs that mount no MCP servers (`with-run.ts`, Slice 20) — `withRunTelemetry(opts, body)` owns `createRun` → `initRunTelemetry` → `body` → `finally{tel.shutdown()}` for the builder + archive CLIs, so their `agent.build`/`crew.build`/`build.verify`/`build.archive` spans land in `runs/<id>/spans.jsonl` instead of hitting the no-op provider; and `chat.ts`'s informational reuse hint (`reuseHintText`, shown on a gap before any build offer, §20) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
-| **Contracts** | `src/contracts/` | Isomorphic wire protocol (Slice 30b, Phase 1): finite named values (`enums.ts` — string enums `RunOrigin`/`RunLifecycle`/`SpanStatus`/`ArtifactKind`/`DegradeKind`/`ChatRole`/`ModelLoadAction`/`StatusEventType`); discriminated unions and Zod schemas consumed by Tasks 2–4. **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*`. This purity ensures the contract can be exposed to the browser without pulling in server dependencies | `zod` only |
-| **Server** | `src/server/` | Slice 30b Phase 1 web BFF security perimeter (Tasks 6+): per-session bearer token mint + constant-time verification (`security/token.ts` — `mintSessionToken()` / `createTokenGuard(token)` with `timingSafeEqual`-protected `verify(req)`) | `node:crypto` only |
+| **Contracts** | `src/contracts/` | Isomorphic web wire protocol (Slice 30b, Phase 1 — full section below): enums (`enums.ts`), read-model DTOs (`dto.ts`), the transient-SSE `StatusEvent` union (`events.ts`), inbound request schemas (`requests.ts`), barrel (`index.ts`). **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*` | `zod` only |
+| **Server** | `src/server/` | Thin `Bun.serve` web BFF, no business logic (Slice 30b, Phase 1 — full section below): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry. Streaming chat handler, DTO mappers, and remaining endpoints attach in later phases | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts` |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
@@ -3063,3 +3063,60 @@ above). Only interactive real-microphone capture (`captureFromMic`'s actual
 `avfoundation` tap-to-toggle flow) remains a manual, human-in-the-loop
 verification step — it can't be automated the way `say` automates the file
 path.
+
+---
+
+## Contracts (web wire protocol — `src/contracts/`, Slice 30b Phase 1)
+
+**Feature.** `src/contracts/` is the single source of truth for the local web
+UI's wire protocol: Zod schemas plus their inferred TypeScript types. It is
+**isomorphic** — imported by both the server (`src/server/`) and the future
+browser (`web/`) — and depends on **nothing but `zod`** (a test,
+`tests/contracts/isomorphic.test.ts`, enforces this; no `node:*`, no engine,
+no AI-SDK types, per Slice-23 forward-compat).
+
+**Mechanism.** `enums.ts` holds the finite named sets (`RunOrigin`,
+`RunLifecycle`, `SpanStatus`, `ArtifactKind`, `DegradeKind`, `ChatRole`,
+`ModelLoadAction`, `StatusEventType`). `dto.ts` defines the read-model DTOs
+(`RunDTO`/`SpanDTO`/`DegradeDTO`/`ChatMessageDTO`) with forward-compat fields
+optional (reserved `owner`, run `lifecycle`/`origin`, span `degraded`/`node`,
+token roll-ups). `events.ts` defines the transient-SSE `StatusEvent`
+discriminated union (`data-run-start` … `data-confirm` … `data-run-end`) —
+OUR types, never re-exported AI-SDK `UIMessage` parts. `requests.ts` defines the
+inbound bodies the server validates before any engine call (`ChatRequest` over a
+minimal structural `UiMessageLike`, and `RespondRequest` for the consent
+back-channel). `index.ts` is the barrel.
+
+**Data flow.** browser/server ⇄ `contracts` schemas: the server parses inbound
+requests (`ChatRequestSchema.parse`) at the perimeter and (later phases) maps
+engine spans → `RunDTO`/`SpanDTO` and writes `StatusEvent`s as transient SSE
+data-parts. The `DegradeKind` wire enum mirrors `src/reliability/ledger.ts` by
+value (guarded by `tests/contracts/degrade-kind-parity.test.ts`) without
+importing it.
+
+## Server (web BFF — `src/server/`, Slice 30b Phase 1)
+
+**Feature.** `src/server/` is a thin, transport-agnostic `Bun.serve` BFF that
+owns **no business logic** — it adapts the engine to HTTP and enforces the
+localhost security perimeter (D17). Phase 1 ships the perimeter, `/api/health`,
+static serving, and the `bun run web` entry; the streaming chat handler, DTO
+mappers, and remaining endpoints attach in later phases.
+
+**Mechanism.** `main.ts` (`bun run web`) reads the `AGENT_WEB_*` config, mints a
+per-session bearer token, injects it into the served HTML, and boots
+`Bun.serve({ idleTimeout: 0 })`. `app.ts` (`buildFetch`) is the request
+pipeline: **perimeter → token → route**. `security/origin.ts` enforces a
+Host-header allowlist (`localhost`/`127.0.0.1:PORT`) plus cross-origin `Origin`
+rejection (DNS-rebinding/CSRF defense); `security/token.ts` mints + constant-time
+verifies the bearer; `security/media-path.ts` confines network-supplied media
+paths to a realpath inside the run/upload dir. Static assets are served under
+**COOP/COEP** (`same-origin` / `require-corp`) for future sherpa WASM
+`SharedArrayBuffer`. Every `/api` handler is wrapped in a `server.request`
+telemetry span (`src/telemetry/spans.ts`, with a reserved `server.principal`
+attribute) and typed-error handling via `explain()` (`src/errors/boundary.ts`) —
+so an endpoint degrades to a JSON error, never crashes.
+
+**Data flow.** `request → enforcePerimeter → token guard → withServerRequestSpan
+→ route (/api/health | static) → JSON/HTML response`. Served-mode record-IO is
+OFF by default (`AGENT_WEB_RECORD_IO`), distinct from the CLI's
+`AGENT_TELEMETRY_RECORD_IO`.
