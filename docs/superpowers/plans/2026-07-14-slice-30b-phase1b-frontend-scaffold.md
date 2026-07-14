@@ -462,6 +462,7 @@ describe('ThemeProvider', () => {
   it('defaults to dark when no stored value and OS is not light', () => {
     render(<ThemeProvider><Probe /></ThemeProvider>);
     expect(screen.getByRole('button')).toHaveTextContent('theme:dark');
+    expect(document.documentElement).toHaveClass('dark');
     expect(document.documentElement).not.toHaveClass('light');
   });
 
@@ -470,6 +471,7 @@ describe('ThemeProvider', () => {
     await userEvent.click(screen.getByRole('button'));
     expect(screen.getByRole('button')).toHaveTextContent('theme:light');
     expect(document.documentElement).toHaveClass('light');
+    expect(document.documentElement).not.toHaveClass('dark');
     expect(localStorage.getItem('agent-theme')).toBe(Theme.Light);
   });
 
@@ -528,6 +530,10 @@ function initialTheme(): Theme {
 
 function apply(theme: Theme): void {
   const root = document.documentElement;
+  // Set BOTH classes explicitly. `.dark` must be present in dark mode so
+  // Tailwind's `dark:` variant (@custom-variant dark → `.dark` ancestor) fires;
+  // tokens.css also keeps the dark palette on bare :root as a fallback.
+  root.classList.toggle('dark', theme === Theme.Dark);
   root.classList.toggle('light', theme === Theme.Light);
   root.setAttribute('data-theme', theme);
 }
@@ -1421,15 +1427,30 @@ git commit -m "feat(web): ⌘K command-palette skeleton wired to router navigati
 
 ---
 
-### Task 8: Architecture docs + full gate
+### Task 8: Architecture docs + CI-greening + full gate
 
 **Files:**
-- Modify: `docs/architecture.md`
+- Modify: `docs/architecture.md`, `.github/workflows/ci.yml`, `tests/media/consent-label.test.ts`
 - (Verify) root gate green.
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: an accurate `docs/architecture.md` section for the `web/` frontend scaffold; a green `bun run check`.
+- Produces: an accurate `docs/architecture.md` section for the `web/` frontend scaffold; a CI workflow that exercises the `web/` workspace; a portable (CI-deterministic) media test; a green `bun run check`.
+
+**Context — two CI-greening fixes fold into this task (see the CI diagnosis in the SDD ledger):**
+Main's CI has been red since Slice 30a because of ONE environment-dependent test, and the raw `bun test` CI step does not yet know about the `web/` workspace. Both are fixed here so main's CI goes green when Phase-1b lands.
+
+- [ ] **Step 0a: Make the media test CI-deterministic (portability fix)**
+
+`tests/media/consent-label.test.ts` has two `generate_speech` tests that inject a `spawn` seam but NOT a `selectModel` seam, so they fall back to the real `selectGenModel(Audio)`, which returns `undefined` on the model-less Linux CI runner → the tool's graceful-degrade message (no `.wav`) → `toMatch(/\.wav$/)` fails. The sibling `tests/media/generate-tools.test.ts` already avoids this by injecting `selectModel` (see its `fakeCandidate` helper + comment).
+
+Fix: inject a `selectModel` seam into BOTH speech tests, preserving each test's consent semantics — the candidate's `repo` must map (via `resolveVoiceModel`) to a model that `requiresCloneConsent` correctly classifies: the "clone-consent" test needs a repo that requires consent (matching the `AGENT_VOICE_MODEL='csm-1b'` intent it already sets), the "default Kokoro" test needs a Kokoro repo that does NOT require consent. Mirror `generate-tools.test.ts`'s `fakeCandidate(MediaKind.Audio, GenEngine.MlxAudio)` pattern, setting `repo` appropriately per test. After the fix, run `bun test tests/media/consent-label.test.ts` locally — it must still pass (it passed before on macOS via installed models; now it passes deterministically everywhere). Do NOT weaken the `.wav` assertions.
+
+- [ ] **Step 0b: Teach CI about the `web/` workspace**
+
+`.github/workflows/ci.yml`'s final step is raw `bun test`, which (a) lacks the `--path-ignore-patterns 'web/**'` guard the root `test` script now carries, so it would discover and fail the `web/` Vitest files under Bun's runner, and (b) never runs the `web/` component suite or web typecheck. `bun install --frozen-lockfile` already installs the `web/` workspace (Bun workspaces).
+
+Fix: replace the granular `docs:check`/`typecheck`/`lint`/`bun test` steps with a single `- run: bun run check` step (which now runs `docs:check && typecheck && lint && check:web && test` — the exact local gate, including the web typecheck+Vitest and the path-ignored root tests). Keep the `checkout` + `setup-bun` + `bun install --frozen-lockfile` steps. Update the workflow's header comment to note it now also runs the `web/` gate. This keeps CI and the local `bun run check` identical (single source of truth).
 
 - [ ] **Step 1: Update `docs/architecture.md`**
 
@@ -1452,11 +1473,16 @@ Expected: PASS (no orphaned/undocumented living surfaces). If it flags `web/` as
 - [ ] **Step 3: Run the full gate**
 
 Run: `bun run check`
-Expected: `docs:check` ✔ · `typecheck` ✔ (root, excludes `web/`) · `lint` ✔ (Biome, includes `web/` tsx) · `check:web` ✔ (web typecheck + Vitest, all web tests green) · `test` ✔ (root `bun test`, unchanged count).
+Expected: `docs:check` ✔ · `typecheck` ✔ (root, excludes `web/`) · `lint` ✔ (Biome, includes `web/` tsx) · `check:web` ✔ (web typecheck + Vitest, all web tests green) · `test` ✔ (root `bun test`, path-ignoring `web/**`; the media test now passes deterministically). Note: the Linux-only CI failure cannot be reproduced on macOS, but the media-test seam makes the test model-independent, so it now passes on both; the `ci.yml` change is verified by inspection + by `bun run check` being the exact command CI runs.
 
 - [ ] **Step 4: Commit**
 
+Commit as logically-grouped conventional commits (the harness appends the `Co-Authored-By` trailer):
 ```bash
+git add tests/media/consent-label.test.ts
+git commit -m "fix(media): inject selectModel seam so speech tests are CI-deterministic"
+git add .github/workflows/ci.yml
+git commit -m "ci: run the full bun run check (incl. web workspace gate)"
 git add docs/architecture.md
 git commit -m "docs(architecture): web/ frontend scaffold (Slice 30b Phase 1b)"
 ```
