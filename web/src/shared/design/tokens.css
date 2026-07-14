@@ -5,15 +5,11 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* Blueprint-Mono tokens → :root vars + Tailwind utilities.
-   Palette literals live ONLY here. */
+   Theme-invariant tokens only; theme-varying palette literals live in :root
+   below (not here — @theme emits into a layer that :root would win over anyway). */
 @theme {
-  --color-bg: #0B0C0E;          /* near-black canvas */
-  --color-surface: #14161A;
-  --color-fg: #E6E8EC;
-  --color-muted: #8A8F98;
   --color-accent: #4C8DFF;      /* blueprint-blue — live/interactive only */
   --color-signal: #35D0C0;      /* signal teal */
-  --color-border: #23262D;
 
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;

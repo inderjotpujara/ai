@@ -9,8 +9,15 @@
   },
   "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "css": {
-    "parser": { "cssModules": false, "tailwindDirectives": true },
-    "linter": { "enabled": false },
-    "formatter": { "enabled": false }
-  }
+    "parser": { "cssModules": false, "tailwindDirectives": true }
+  },
+  "overrides": [
+    {
+      "includes": ["web/src/shared/design/tokens.css"],
+      "css": {
+        "formatter": { "enabled": false },
+        "linter": { "enabled": false }
+      }
+    }
+  ]
 }
