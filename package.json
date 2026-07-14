@@ -3,17 +3,21 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
     "serve": "bash scripts/serve.sh",
     "web": "bun run src/server/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "test:file": "bun test",
+    "test": "bun test --path-ignore-patterns 'web/**'",
+    "test:file": "bun test --path-ignore-patterns 'web/**'",
     "lint": "biome check .",
     "lint:file": "biome check",
     "lint:claude": "bun run lint",
     "docs:check": "bun run scripts/docs-check.ts",
-    "check": "bun run docs:check && bun run typecheck && bun run lint && bun run test",
+    "check:web": "cd web && bun run typecheck && bun run test",
+    "check": "bun run docs:check && bun run typecheck && bun run lint && bun run check:web && bun run test",
     "setup": "git config core.hooksPath .githooks && chmod +x .githooks/* && echo 'git hooks activated (.githooks)'",
     "setup:media": "bun run scripts/setup-media.ts",
     "setup:voice": "bun run scripts/setup-voice.ts",
@@ -35,6 +39,7 @@
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.56",
     "@ai-sdk/openai-compatible": "^1",
+    "@ai-sdk/provider-utils": "^4.0.34",
     "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "0.30.0",
     "@lmstudio/sdk": "^1.5.0",
@@ -53,11 +58,8 @@
   },
   "devDependencies": {
     "typescript": "^5.9.0",
-    "@ai-sdk/react": "^3",
     "@biomejs/biome": "2.5.1",
-    "@types/bun": "^1.3.14",
-    "react": "^19",
-    "react-dom": "^19"
+    "@types/bun": "^1.3.14"
   },
   "trustedDependencies": [
     "onnxruntime-node",
