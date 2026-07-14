@@ -1,10 +1,27 @@
+import { useChat } from '@ai-sdk/react';
+import { DefaultChatTransport } from 'ai';
+import { sessionToken } from '../../shared/contract/client.ts';
+import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
+import { Composer } from './composer.tsx';
+import { MessageList } from './message-list.tsx';
+
 export function ChatArea() {
+  const { messages, sendMessage, status } = useChat({
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+      headers: () => ({ Authorization: `Bearer ${sessionToken()}` }),
+    }),
+  });
+
   return (
-    <section data-testid="area-chat" className="p-8">
-      <h1 className="font-mono text-lg text-[var(--color-fg)]">Chat</h1>
-      <p className="mt-2 text-sm text-[var(--color-muted)]">
-        Streaming chat lands in Phase 2.
-      </p>
-    </section>
+    <RegionErrorBoundary region="Chat">
+      <section data-testid="area-chat" className="flex h-full flex-col">
+        <MessageList messages={messages} />
+        <Composer
+          onSend={(text) => sendMessage({ text })}
+          disabled={status !== 'ready'}
+        />
+      </section>
+    </RegionErrorBoundary>
   );
 }
