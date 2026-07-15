@@ -4,6 +4,7 @@ import {
   ChatRole,
   CrewProcess,
   DegradeKind,
+  RunKind,
   RunLifecycle,
   RunOrigin,
   SpanStatus,
@@ -74,6 +75,7 @@ export const RunDtoSchema = z.object({
   /** Reserved now, constant "local"; backfilling ownership later (Slices 24/33). */
   owner: z.string(),
   origin: z.enum(RunOrigin),
+  kind: z.enum(RunKind),
   lifecycle: z.enum(RunLifecycle),
   startMs: z.number(),
   durationMs: z.number(),
@@ -106,6 +108,7 @@ export const RunListItemDtoSchema = z.object({
   outcome: z.string(),
   lifecycle: z.enum(RunLifecycle),
   origin: z.enum(RunOrigin),
+  kind: z.enum(RunKind),
   models: z.array(z.string()),
   degraded: z.boolean(),
   spanCount: z.number(),
