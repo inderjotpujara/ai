@@ -3235,7 +3235,12 @@ rejection (DNS-rebinding/CSRF defense); `security/token.ts` mints + constant-tim
 verifies the bearer; `security/media-path.ts` confines network-supplied media
 paths to a realpath inside the run/upload dir. Static assets are served under
 **COOP/COEP** (`same-origin` / `require-corp`) for future sherpa WASM
-`SharedArrayBuffer`. Every `/api` handler is wrapped in a `server.request`
+`SharedArrayBuffer`. `serveStatic` also has an SPA fallback: a GET/HEAD to a
+non-`/api` path that has no file extension and matches no real file (e.g.
+`/runs`, `/runs/:id`) returns `indexHtml` instead of a 404, so a hard reload
+or deep link into a client-router route boots the app; extension-looking
+paths (assets) still 404 on a miss, and non-GET/HEAD requests are never given
+the HTML fallback. Every `/api` handler is wrapped in a `server.request`
 telemetry span (`src/telemetry/spans.ts`, with a reserved `server.principal`
 attribute) and typed-error handling via `explain()` (`src/errors/boundary.ts`) —
 so an endpoint degrades to a JSON error, never crashes.

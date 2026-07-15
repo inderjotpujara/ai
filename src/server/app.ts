@@ -60,7 +60,7 @@ export function buildFetch(
         if (!guard.verify(req)) return json({ error: 'unauthorized' }, 401);
         return await handleApi(req, url, deps);
       }
-      return await serveStatic(url, deps);
+      return await serveStatic(req, url, deps);
     } catch (err) {
       return json({ error: explain(err).title }, 500);
     }
@@ -138,15 +138,25 @@ async function handleApi(
   );
 }
 
-async function serveStatic(url: URL, deps: ServerDeps): Promise<Response> {
+const INDEX_HTML_HEADERS = {
+  'content-type': 'text/html; charset=utf-8',
+  'cache-control': 'no-store',
+  ...ISOLATION_HEADERS,
+};
+
+// A pathname with a trailing `.ext` (e.g. /assets/x.js, /foo.css) is treated
+// as a real asset request: a miss stays a 404, never masked by the SPA
+// fallback. Extensionless paths (client routes like /runs, /runs/run-x) are
+// eligible for the fallback below.
+const HAS_EXTENSION = /\.[a-zA-Z0-9]+$/;
+
+async function serveStatic(
+  req: Request,
+  url: URL,
+  deps: ServerDeps,
+): Promise<Response> {
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    return new Response(deps.indexHtml, {
-      headers: {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
-        ...ISOLATION_HEADERS,
-      },
-    });
+    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
   }
   if (deps.staticDir) {
     try {
@@ -167,6 +177,17 @@ async function serveStatic(url: URL, deps: ServerDeps): Promise<Response> {
     } catch (err) {
       if (!(err instanceof MediaPathError)) throw err;
     }
+  }
+  // SPA fallback: a GET/HEAD to an extensionless path that matched no real
+  // file is a client-router route (e.g. /runs, /runs/:id) being hard-loaded,
+  // reloaded, or deep-linked — boot the app instead of 404ing so the router
+  // can resolve it client-side. Non-GET/HEAD and asset-looking (has an
+  // extension) paths never get this treatment.
+  if (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    !HAS_EXTENSION.test(url.pathname)
+  ) {
+    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
   }
   return new Response('not found', {
     status: 404,
