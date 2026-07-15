@@ -116,3 +116,22 @@ test('paginates via limit + opaque cursor', async () => {
   expect(p2.items.map((i) => i.id)).toEqual(['c']);
   expect(p2.nextCursor).toBeUndefined();
 });
+
+test('missing/unreadable runsRoot → 200 with empty list (degrade, never crash)', async () => {
+  const res = await handleRunList(new URLSearchParams(''), {
+    runsRoot: join(root, 'does-not-exist'),
+  });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as RunListResponse;
+  expect(body).toEqual({ items: [], total: 0 });
+  expect(body.nextCursor).toBeUndefined();
+});
+
+test('stale cursor id → resets to page 1 (never throws)', async () => {
+  await writeRun('a', 2_000_000_000, { 'agent.outcome': 'answer' });
+  await writeRun('b', 1_000_000_000, { 'agent.outcome': 'answer' });
+  const staleCursor = Buffer.from('999:ghost').toString('base64url');
+  const page = await list(`limit=25&cursor=${encodeURIComponent(staleCursor)}`);
+  expect(page.items.length).toBe(2);
+  expect(page.items.map((i) => i.id)).toEqual(['a', 'b']);
+});
