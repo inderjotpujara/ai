@@ -75,10 +75,12 @@ export function createSseTransport(): ChatTransport {
       runId?: string,
       fromCursor?: string | null,
       schema?: ZodType<T>,
+      signal?: AbortSignal,
     ): AsyncIterable<T & { eventId: string }> {
       const payloadSchema = (schema ?? StatusEventSchema) as ZodType<T>;
       const path = runId ? `/api/runs/${runId}/stream` : '/api/chat';
       const res = await fetch(path, {
+        signal,
         headers: {
           Authorization: `Bearer ${sessionToken()}`,
           Accept: 'text/event-stream',

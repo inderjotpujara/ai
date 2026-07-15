@@ -8,6 +8,7 @@ function jsonResponse(body: unknown): Response {
     headers: { 'content-type': 'application/json' },
   });
 }
+
 function emptyStream(): Response {
   const body = new ReadableStream<Uint8Array>({
     start(c) {
@@ -18,6 +19,29 @@ function emptyStream(): Response {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
   });
+}
+
+/** An SSE Response whose body stays open until `push`/`close` are called. */
+function controllableStream(): {
+  response: Response;
+  push: (frame: string) => void;
+  close: () => void;
+} {
+  const encoder = new TextEncoder();
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+  });
+  return {
+    response: new Response(body, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }),
+    push: (frame) => controller?.enqueue(encoder.encode(frame)),
+    close: () => controller?.close(),
+  };
 }
 
 const dto = {
@@ -51,6 +75,11 @@ const dto = {
   ],
 };
 
+function spanFrame(spanId: string, eventId: string): string {
+  const span = { ...dto.spans[0], spanId, offsetMs: 5, durationMs: 2 };
+  return `id: ${eventId}\ndata: ${JSON.stringify(span)}\n\n`;
+}
+
 describe('RunDetail', () => {
   it('renders the snapshot waterfall for a run', async () => {
     vi.stubGlobal(
@@ -69,11 +98,13 @@ describe('RunDetail', () => {
 
   it('shows a busy indicator while the run is running', async () => {
     const runningDto = { ...dto, lifecycle: 'running' };
+    // Stream stays open (run still in progress) → busy must remain visible.
+    const stream = controllableStream();
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string) =>
         String(input).includes('/stream')
-          ? emptyStream()
+          ? stream.response
           : jsonResponse(runningDto),
       ),
     );
@@ -81,43 +112,41 @@ describe('RunDetail', () => {
     await waitFor(() =>
       expect(screen.getByTestId('run-busy')).toBeInTheDocument(),
     );
+    stream.close();
     vi.unstubAllGlobals();
   });
 
-  it('live-tails a streamed span onto the waterfall', async () => {
-    const extraSpan = {
-      spanId: 'b',
-      parentSpanId: 'a',
-      name: 'tool.call',
-      offsetMs: 5,
-      durationMs: 2,
-      depth: 1,
-      status: 'ok',
-      degraded: false,
-      attributes: {},
-      events: [],
-    };
-    function streamedSpanResponse(): Response {
-      const encoder = new TextEncoder();
-      const body = new ReadableStream<Uint8Array>({
-        start(c) {
-          c.enqueue(
-            encoder.encode(`id: e1\ndata: ${JSON.stringify(extraSpan)}\n\n`),
-          );
-          c.close();
-        },
-      });
-      return new Response(body, {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      });
-    }
+  it('clears the busy indicator once the run finishes and the stream closes', async () => {
+    const runningDto = { ...dto, lifecycle: 'running' };
+    const stream = controllableStream();
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string) =>
         String(input).includes('/stream')
-          ? streamedSpanResponse()
-          : jsonResponse(dto),
+          ? stream.response
+          : jsonResponse(runningDto),
+      ),
+    );
+    renderAt('/runs/run-1');
+    await waitFor(() =>
+      expect(screen.getByTestId('run-busy')).toBeInTheDocument(),
+    );
+    // Run finishes → server closes the stream → busy must disappear.
+    stream.close();
+    await waitFor(() =>
+      expect(screen.queryByTestId('run-busy')).not.toBeInTheDocument(),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it('live-tails a streamed span onto the waterfall', async () => {
+    const stream = controllableStream();
+    stream.push(spanFrame('b', 'e1'));
+    stream.close();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) =>
+        String(input).includes('/stream') ? stream.response : jsonResponse(dto),
       ),
     );
     renderAt('/runs/run-1');
@@ -130,47 +159,38 @@ describe('RunDetail', () => {
     vi.unstubAllGlobals();
   });
 
-  it('stops tailing once the component unmounts (no crash on late frames)', async () => {
-    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-    const encoder = new TextEncoder();
-    const openStream = new ReadableStream<Uint8Array>({
-      start(c) {
-        controller = c;
-      },
-    });
-    const streamResponse = new Response(openStream, {
-      status: 200,
-      headers: { 'content-type': 'text/event-stream' },
-    });
+  it('aborts the stream fetch on unmount and ingests no post-unmount frames', async () => {
+    const stream = controllableStream();
+    let streamSignal: AbortSignal | undefined;
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: string) =>
-        String(input).includes('/stream') ? streamResponse : jsonResponse(dto),
-      ),
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (String(input).includes('/stream')) {
+          streamSignal = init?.signal ?? undefined;
+          return stream.response;
+        }
+        return jsonResponse(dto);
+      }),
     );
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const result = renderAt('/runs/run-1');
     await waitFor(() =>
       expect(screen.getByTestId('bar-a')).toBeInTheDocument(),
     );
+    // Stream is open with no pending frame — the idle-between-frames case.
+    expect(streamSignal?.aborted).toBe(false);
 
     result.unmount();
 
-    // A frame delivered after unmount must not crash or log a stream failure —
-    // the cancelled flag makes the `for await` loop return before ingesting.
-    const lateSpan = { ...dto.spans[0], spanId: 'late' };
-    controller?.enqueue(
-      encoder.encode(`id: e2\ndata: ${JSON.stringify(lateSpan)}\n\n`),
-    );
-    controller?.close();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Cleanup must abort the fetch immediately, even while idle.
+    expect(streamSignal?.aborted).toBe(true);
 
-    expect(errorSpy).not.toHaveBeenCalledWith(
-      '[run-detail] live-tail stream failed',
-      expect.anything(),
-    );
-    errorSpy.mockRestore();
+    // A frame delivered after unmount must never reach the waterfall.
+    stream.push(spanFrame('late', 'e2'));
+    stream.close();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(screen.queryByTestId('bar-late')).not.toBeInTheDocument();
+
     vi.unstubAllGlobals();
   });
 });

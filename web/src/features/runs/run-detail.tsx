@@ -15,19 +15,24 @@ import { Waterfall } from './waterfall.tsx';
  * emitted after the snapshot was taken — the first real consumer of the
  * resumable transport port. Two effects: snapshot fetch (cancelled-flag
  * guarded) and the stream loop (started only once the snapshot resolves,
- * stopped via a cancelled flag on unmount/navigation so the `for await`
- * never runs past the component's lifetime).
+ * torn down on unmount/navigation by both a cancelled flag AND an
+ * `AbortController.abort()` — the abort is what stops an idle stream between
+ * frames, since a flag alone is only re-checked after the next frame yields).
  */
 export function RunDetail() {
   const { runId } = useParams({ from: '/runs/$runId' });
   const [snapshot, setSnapshot] = useState<RunDTO | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
+  // Set once the live-tail stream closes on its own (run finished → the server
+  // ends the stream), so a snapshot captured mid-run stops showing "busy".
+  const [streamEnded, setStreamEnded] = useState(false);
   const { spans, cursor, ingest } = useRunTrace(snapshot?.spans ?? []);
 
   useEffect(() => {
     let cancelled = false;
     setSnapshot(undefined);
     setError(undefined);
+    setStreamEnded(false);
     apiFetch(`/runs/${runId}`, { schema: RunDtoSchema })
       .then((result) => {
         if (!cancelled) setSnapshot(result);
@@ -59,23 +64,40 @@ export function RunDetail() {
   useEffect(() => {
     if (!snapshot) return;
     let cancelled = false;
+    const controller = new AbortController();
 
     async function tail() {
-      const stream = createSseTransport().stream(runId, cursor, SpanDtoSchema);
-      for await (const span of stream) {
-        if (cancelled) return;
-        ingest(span, span.eventId);
+      const stream = createSseTransport().stream(
+        runId,
+        cursor,
+        SpanDtoSchema,
+        controller.signal,
+      );
+      try {
+        for await (const span of stream) {
+          if (cancelled) return;
+          ingest(span, span.eventId);
+        }
+        // Loop finished without an abort → the server closed the stream
+        // because the run is no longer running; clear the busy indicator.
+        if (!cancelled) setStreamEnded(true);
+      } catch (err: unknown) {
+        // A cleanup-triggered abort surfaces as an AbortError — expected, swallow it.
+        if (
+          cancelled ||
+          (err instanceof DOMException && err.name === 'AbortError')
+        ) {
+          return;
+        }
+        console.error('[run-detail] live-tail stream failed', err);
       }
     }
 
-    tail().catch((err: unknown) => {
-      if (!cancelled) {
-        console.error('[run-detail] live-tail stream failed', err);
-      }
-    });
+    void tail();
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [runId, snapshot]);
 
@@ -85,7 +107,7 @@ export function RunDetail() {
         <h1 className="font-mono text-lg text-[var(--color-fg)]">
           Run {runId}
         </h1>
-        {snapshot?.lifecycle === RunLifecycle.Running && (
+        {snapshot?.lifecycle === RunLifecycle.Running && !streamEnded && (
           <p
             data-testid="run-busy"
             className="mt-1 text-xs text-[var(--color-accent)]"
