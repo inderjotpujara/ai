@@ -17,3 +17,14 @@ test('GET /api/workflows/:id returns detail with edges, or 404', async () => {
   expect(body.edges.length).toBeGreaterThan(0);
   expect(handleWorkflowDetail('nope').status).toBe(404);
 });
+
+test('GET /api/workflows/:id — prototype keys 404, not an Object.prototype bypass', () => {
+  for (const key of [
+    '__proto__',
+    'constructor',
+    'toString',
+    'hasOwnProperty',
+  ]) {
+    expect(handleWorkflowDetail(key).status).toBe(404);
+  }
+});

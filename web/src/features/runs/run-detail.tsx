@@ -8,7 +8,7 @@ import {
 } from '@contracts';
 import { useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
-import { apiFetch } from '../../shared/contract/client.ts';
+import { ApiError, apiFetch } from '../../shared/contract/client.ts';
 import { DagView } from '../../shared/dag/dag-view.tsx';
 import type { DagModel } from '../../shared/dag/types.ts';
 import { workflowGraph } from '../../shared/dag/workflow-graph.ts';
@@ -85,15 +85,37 @@ function RunDetailView({ runId }: { runId: string }) {
     setStreamEnded(false);
     setDagModel(undefined);
     setView('waterfall');
-    apiFetch(`/runs/${runId}`, { schema: RunDtoSchema })
-      .then((result) => {
-        if (!cancelled) setSnapshot(result);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'failed to load run');
+
+    // A freshly-launched run's dir is PRE-CREATED by the launch handler before
+    // any span flushes, so `GET /api/runs/:id` → mapRunToDto → undefined → 404
+    // for a brief window (~50-200ms, until the first `mcp.mount` span lands).
+    // On the launch→watch flow that 404 would otherwise stick as "failed to
+    // load" forever (this effect fires once, no retry). So treat a snapshot 404
+    // as "run is still starting" and retry with bounded backoff (~10 × 300ms ≈
+    // 3s); any non-404 (401/500/…) is a real error and surfaces immediately.
+    const MAX_ATTEMPTS = 10;
+    const RETRY_MS = 300;
+    async function load() {
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        try {
+          const result = await apiFetch(`/runs/${runId}`, {
+            schema: RunDtoSchema,
+          });
+          if (!cancelled) setSnapshot(result);
+          return;
+        } catch (err: unknown) {
+          if (cancelled) return;
+          const stillStarting = err instanceof ApiError && err.status === 404;
+          if (!stillStarting || attempt === MAX_ATTEMPTS - 1) {
+            setError(err instanceof Error ? err.message : 'failed to load run');
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+          if (cancelled) return;
         }
-      });
+      }
+    }
+    void load();
     return () => {
       cancelled = true;
     };

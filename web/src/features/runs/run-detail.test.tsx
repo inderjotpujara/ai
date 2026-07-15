@@ -112,6 +112,57 @@ describe('RunDetail', () => {
     vi.unstubAllGlobals();
   });
 
+  it('retries a snapshot 404 (run still starting) then renders the run', async () => {
+    // A freshly-launched run's dir is pre-created but span-less for a brief
+    // window → mapRunToDto → 404. The page must retry (not surface "failed to
+    // load") and render once the snapshot becomes available.
+    let runFetchCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes('/stream')) return emptyStream();
+        runFetchCount += 1;
+        if (runFetchCount <= 2) {
+          return new Response(JSON.stringify({ error: 'not found' }), {
+            status: 404,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return jsonResponse(dto);
+      }),
+    );
+    renderAt('/runs/run-1');
+    await waitFor(
+      () => expect(screen.getByTestId('bar-a')).toBeInTheDocument(),
+      { timeout: 3000 },
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(runFetchCount).toBeGreaterThanOrEqual(3);
+    vi.unstubAllGlobals();
+  });
+
+  it('surfaces a non-404 snapshot error immediately (no retry)', async () => {
+    let runFetchCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes('/stream')) return emptyStream();
+        runFetchCount += 1;
+        return new Response(JSON.stringify({ error: 'boom' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+    renderAt('/runs/run-1');
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    // A 500 is real — it must NOT be retried like a 404.
+    expect(runFetchCount).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
   it('shows a busy indicator while the run is running', async () => {
     const runningDto = { ...dto, lifecycle: 'running' };
     // Stream stays open (run still in progress) → busy must remain visible.

@@ -312,6 +312,28 @@ async function hasErrorArtifact(runDir: string): Promise<boolean> {
   }
 }
 
+/** List twin of `mapRunToDto`'s no-spans+error.json rescue: a run that died
+ *  before any span flushed (no spans.jsonl at all) still has error.json as its
+ *  real terminal state. The list must project it as Failed — returning
+ *  `undefined` at the spans.jsonl stat gate would hide it here while
+ *  `mapRunToDto` rescues it in detail, so list and detail would disagree
+ *  (visible ⇔ invisible) for the same run. Mirrors mapRunToDto's projection for
+ *  this case (deriveRunKind([]) === Chat, no spans/models/tokens). */
+function earlyFailedListItem(id: string): RunListItemDTO {
+  return RunListItemDtoSchema.parse({
+    id,
+    startMs: 0,
+    durationMs: 0,
+    outcome: 'error',
+    lifecycle: RunLifecycle.Failed,
+    origin: RunOrigin.Manual,
+    kind: deriveRunKind([]),
+    models: [],
+    degraded: false,
+    spanCount: 0,
+  });
+}
+
 // why: mtime-keyed summary cache. The list view would otherwise be
 // O(runs × spans/run) disk reads on every request (a keystroke-driven search
 // re-lists constantly); a real persisted index is Phase 6 — this in-process
@@ -350,10 +372,34 @@ export async function summarizeRunListItem(
   try {
     mtimeMs = (await stat(join(runDir, 'spans.jsonl'))).mtimeMs;
   } catch {
-    return undefined; // no spans.jsonl → not a started/completed run
+    // I2: no spans.jsonl — but the detached-catch handler may have written
+    // error.json before any span ever flushed. mapRunToDto rescues that as a
+    // Failed run; the list must too, or the run is invisible here while the
+    // detail view shows it (list/detail divergence).
+    if (await hasErrorArtifact(runDir)) return earlyFailedListItem(id);
+    return undefined; // genuinely not a started/completed run
   }
   const cached = summaryCache.get(runDir);
-  if (cached && cached.mtimeMs === mtimeMs) return cached.item;
+  if (cached && cached.mtimeMs === mtimeMs) {
+    // I1: a cached `running` summary goes stale silently — error.json is
+    // written WITHOUT touching spans.jsonl, so the mtime key never invalidates
+    // and the list would show `running` forever while detail shows `failed`.
+    // Re-check the cheap error artifact on a cached Running item and derive the
+    // terminal Failed state if it now exists (then refresh the cache entry).
+    if (
+      cached.item.lifecycle === RunLifecycle.Running &&
+      (await hasErrorArtifact(runDir))
+    ) {
+      const item = RunListItemDtoSchema.parse({
+        ...cached.item,
+        lifecycle: RunLifecycle.Failed,
+        outcome: 'error',
+      });
+      summaryCache.set(runDir, { mtimeMs, item });
+      return item;
+    }
+    return cached.item;
+  }
 
   const { spans } = await readSpans(runDir);
   const tree = buildTree(spans);

@@ -18,3 +18,17 @@ test('GET /api/crews/:name returns detail or 404', async () => {
   expect(missing.status).toBe(404);
   expect(await missing.json()).toEqual({ error: 'not found' });
 });
+
+test('GET /api/crews/:name — prototype keys 404, not an Object.prototype bypass', () => {
+  // A plain `CREWS[name]` returns truthy Object.prototype members for these
+  // keys, slipping past the `if (!def)` 404 guard; the Object.hasOwn guard
+  // must reject them.
+  for (const key of [
+    '__proto__',
+    'constructor',
+    'toString',
+    'hasOwnProperty',
+  ]) {
+    expect(handleCrewDetail(key).status).toBe(404);
+  }
+});

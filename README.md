@@ -210,7 +210,7 @@ Mini.
 > launch→watch flow via a URL-param handoff (the def id rides
 > `?graphKind=&graphId=` from the Run button, so the graph is visible from
 > `t=0`), leaving only a cold-open (opened from the Runs list) still
-> waiting on it. Full suite: 1325 pass/36 skip/0 fail (root) + 115 pass
+> waiting on it. Full suite: 1328 pass/37 skip/0 fail (root) + 118 pass
 > (web, Vitest/happy-dom). See [`docs/architecture.md`](docs/architecture.md)
 > §Contracts, §Server, §"Crews & Workflows".
 >

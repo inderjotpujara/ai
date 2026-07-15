@@ -27,7 +27,14 @@ export type RunGraphSource = { kind: 'workflow' | 'crew'; id: string };
 export function findRunGraphSource(
   spans: SpanDTO[],
 ): RunGraphSource | undefined {
-  const root = spans.find((s) => RUN_GRAPH_ROOTS.has(s.name));
+  // Prefer a `crew.run` root over a `workflow.run` root when both are present.
+  // A sequential crew emits a nested `workflow.run` (whose `workflow.id` is the
+  // crew id) that can sort ahead of the outer `crew.run` mid-tail — picking the
+  // first-by-offset root would then resolve to `GET /api/workflows/<crewId>`,
+  // a transient 404. Scanning for `crew.run` first makes the outer crew win.
+  const root =
+    spans.find((s) => s.name === 'crew.run') ??
+    spans.find((s) => RUN_GRAPH_ROOTS.has(s.name));
   if (!root) return undefined;
   const workflowId = root.attributes['workflow.id'];
   if (typeof workflowId === 'string') {

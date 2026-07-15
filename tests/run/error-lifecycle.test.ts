@@ -101,6 +101,32 @@ test('summarizeRunListItem: error.json + spans.jsonl with only a non-root span �
   expect(item?.outcome).toBe('error');
 });
 
+test('summarizeRunListItem: error.json + NO spans.jsonl at all → Failed (not hidden from the list)', async () => {
+  // I2: the spans.jsonl stat gate returned undefined here, hiding a run that
+  // failed before any span flushed — while mapRunToDto rescued it in detail.
+  await writeErrorJson('run-early-list-nospans');
+  const item = await summarizeRunListItem(root, 'run-early-list-nospans');
+  expect(item).toBeDefined();
+  expect(item?.lifecycle).toBe(RunLifecycle.Failed);
+  expect(item?.outcome).toBe('error');
+  expect(item?.spanCount).toBe(0);
+});
+
+test('summarizeRunListItem: a stale cached Running is rescued to Failed when error.json appears', async () => {
+  // I1: error.json is written WITHOUT touching spans.jsonl, so the mtime cache
+  // key never invalidates; a cached Running item would otherwise stick forever.
+  const dir = join(root, 'run-stale-cache');
+  await mkdir(dir, { recursive: true });
+  await writeSpans(dir, [span({ name: 'mcp.mount', spanId: 'm1' })]);
+  const first = await summarizeRunListItem(root, 'run-stale-cache');
+  expect(first?.lifecycle).toBe(RunLifecycle.Running); // caches Running
+  // No spans change — only error.json is added.
+  await writeFile(join(dir, 'error.json'), JSON.stringify({ error: 'boom' }));
+  const second = await summarizeRunListItem(root, 'run-stale-cache');
+  expect(second?.lifecycle).toBe(RunLifecycle.Failed);
+  expect(second?.outcome).toBe('error');
+});
+
 test('summarizeRunListItem: a completed agent.run root wins over a coincidental error.json', async () => {
   const dir = await writeErrorJson('run-list-completed-with-error');
   await writeSpans(dir, [

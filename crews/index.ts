@@ -9,5 +9,9 @@ export const CREWS: Record<string, CrewDef> = {
 };
 
 export function getCrew(name: string): CrewDef | undefined {
-  return CREWS[name];
+  // `Object.hasOwn` guard — a plain `CREWS[name]` would return truthy
+  // Object.prototype members for `__proto__`/`constructor`/`toString`, letting
+  // those keys slip past every `if (!def)` 404/lookup guard (a spurious 500, or
+  // a minted run dir for a non-existent crew).
+  return Object.hasOwn(CREWS, name) ? CREWS[name] : undefined;
 }

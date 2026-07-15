@@ -52,6 +52,30 @@ describe('findRunGraphSource', () => {
       id: 'research-crew',
     });
   });
+
+  it('prefers the crew.run root over a nested workflow.run that sorts ahead of it', () => {
+    // A sequential crew nests a workflow.run (workflow.id === the crew id) that
+    // can appear before the outer crew.run mid-tail; picking the first root
+    // by offset would resolve to GET /api/workflows/<crewId> (a 404).
+    const spans = [
+      span({
+        spanId: 'nested-wf',
+        name: 'workflow.run',
+        offsetMs: 1,
+        attributes: { 'workflow.id': 'research-crew' },
+      }),
+      span({
+        spanId: 'crew-root',
+        name: 'crew.run',
+        offsetMs: 0,
+        attributes: { 'crew.id': 'research-crew' },
+      }),
+    ];
+    expect(findRunGraphSource(spans)).toEqual({
+      kind: 'crew',
+      id: 'research-crew',
+    });
+  });
 });
 
 describe('stepStatusOverlay', () => {

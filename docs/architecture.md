@@ -791,7 +791,7 @@ sequenceDiagram
     participant Store as run/run-store.ts
     participant Engine as crew/engine.ts + workflow/engine.ts
     participant Stream as server/runs/stream.ts (Phase 3, unchanged)
-    participant DagLib as shared/dag/ (workflowGraph/crewGraph)
+    participant DagLib as workflowGraph (shared/dag/) + crewGraph (features/crews/)
     participant Overlay as features/runs/run-dag.ts
 
     Browser->>App: GET /api/crews or /api/workflows (Bearer token)
@@ -807,8 +807,8 @@ sequenceDiagram
 
     Browser->>App: POST /api/crews/:name/run or /api/workflows/:id/run {input}
     App->>Run: handleCrewRun(req, deps, name) or handleWorkflowRun(req, deps, id)
-    Run->>Run: CrewRunRequestSchema or WorkflowRunRequestSchema.parse(body) — 400 on bad body
     Run->>Run: registry lookup — 404 if unknown
+    Run->>Run: CrewRunRequestSchema or WorkflowRunRequestSchema.parse(body) — 400 on bad body
     Run->>Store: newRunId() → createRun(runsRoot, runId) — dir PRE-CREATED before any response
     Run->>Turns: void runCrewTurn({def, input, runId}) or runWorkflowTurn(...) — DETACHED, not awaited
     Turns->>Engine: withMcpRun → createSelectionRuntime → runCrewCli or runFlow (same path as bun run crew / bun run flow)
@@ -3933,8 +3933,8 @@ new `run.ts`):
   disk; a plain map-miss is the whole guard.
 - **`POST /api/crews/:name/run`** / **`POST /api/workflows/:id/run`** —
   `handleCrewRun`/`handleWorkflowRun`, the **fire-and-watch launch**
-  contract (D4): zod-parse the body (`{input}`, 400 on a `ZodError`, generic
-  message, no echo) → registry lookup (404 if unknown) → `newRunId()` →
+  contract (D4): registry lookup (404 if unknown) → zod-parse the body
+  (`{input}`, 400 on a `ZodError`, generic message, no echo) → `newRunId()` →
   **`createRun(runsRoot, runId)` pre-creates the run directory before any
   response is sent**, so the browser's immediate follow-up
   `GET /api/runs/:runId/stream` never 404s on a race → `void
@@ -3962,10 +3962,13 @@ new `run.ts`):
   `runCrewCli`/`runFlow` — **the exact same path** `bun run crew`/
   `bun run flow`'s CLI `main()` uses (workflow additionally builds the
   `agents` map from the `AGENTS` registry, mirroring `flow.ts`). Both are
-  built from the **same `createLazyEngine(runsRoot)`** Phase-2 chat uses
-  (D6) — nothing (registry build, model manager, MCP mount) runs at server
-  boot, only on the first launch request, so startup/health/perimeter tests
-  stay Ollama-free. Like `createRealRunChatTurn`, this seam is thin
+  built from the **bare `runsRoot`** (not `createLazyEngine` — that is the
+  chat-only path), yet uphold the **same lazy invariant** Phase-2 chat relies
+  on (D6): all work is deferred to call time inside the returned closure
+  (which composes `withMcpRun` + `createSelectionRuntime` +
+  `runCrewCli`/`runFlow`), so nothing (registry build, model manager, MCP
+  mount) runs at server boot — only on the first launch request — and
+  startup/health/perimeter tests stay Ollama-free. Like `createRealRunChatTurn`, this seam is thin
   composition covered by live-verify, not unit tests (which would only mock
   the composition away).
 - **Routing** (`app.ts`) — `GET /api/crews`, `GET /api/crews/:name`,
