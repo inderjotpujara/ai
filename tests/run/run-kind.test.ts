@@ -1,0 +1,11 @@
+import { expect, test } from 'bun:test';
+import { RunKind } from '../../src/contracts/enums.ts';
+import { deriveRunKind } from '../../src/run/run-dto.ts';
+
+test('deriveRunKind maps root span names to a RunKind', () => {
+  expect(deriveRunKind(['crew.run'])).toBe(RunKind.Crew);
+  expect(deriveRunKind(['workflow.run'])).toBe(RunKind.Workflow);
+  expect(deriveRunKind(['agent.run'])).toBe(RunKind.Agent);
+  expect(deriveRunKind([])).toBe(RunKind.Chat); // ui.stream / no recognized root
+  expect(deriveRunKind(['ui.stream'])).toBe(RunKind.Chat);
+});

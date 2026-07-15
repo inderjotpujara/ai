@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import {
   ChatRole,
   FeedbackRating,
+  RunKind,
   RunLifecycle,
   RunOrigin,
 } from '../../src/contracts/enums.ts';
@@ -169,6 +170,7 @@ test('RunListResponse validates items + pagination', () => {
         outcome: 'answer',
         lifecycle: RunLifecycle.Done,
         origin: RunOrigin.Manual,
+        kind: RunKind.Chat,
         models: [],
         degraded: false,
         spanCount: 1,

@@ -6,6 +6,7 @@ import {
   DegradeKind,
   type RunDTO,
   RunDtoSchema,
+  RunKind,
   RunLifecycle,
   type RunListItemDTO,
   RunListItemDtoSchema,
@@ -30,6 +31,16 @@ const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
   'crew.run',
   'workflow.run',
 ]);
+
+/** Derive what a run IS from the names of its root spans. A crew/workflow root
+ *  wins over an agent root (a crew nests agent runs); everything else (chat's
+ *  ui.stream, or no recognized root) is Chat. */
+export function deriveRunKind(rootSpanNames: string[]): RunKind {
+  if (rootSpanNames.includes('crew.run')) return RunKind.Crew;
+  if (rootSpanNames.includes('workflow.run')) return RunKind.Workflow;
+  if (rootSpanNames.includes('agent.run')) return RunKind.Agent;
+  return RunKind.Chat;
+}
 
 /** Human label per DegradeKind (mapper-side; the ledger's LABEL map is not exported). */
 const DEGRADE_LABEL: Record<DegradeKind, string> = {
@@ -246,6 +257,7 @@ export async function mapRunToDto(
     id,
     owner: 'local',
     origin: RunOrigin.Manual,
+    kind: deriveRunKind(tree.map((n) => n.span.name)),
     lifecycle,
     startMs,
     durationMs,
@@ -334,6 +346,7 @@ export async function summarizeRunListItem(
     outcome,
     lifecycle,
     origin: RunOrigin.Manual,
+    kind: deriveRunKind(tree.map((n) => n.span.name)),
     models: [...models],
     degraded,
     spanCount: spans.length,
