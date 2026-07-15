@@ -1,119 +1,194 @@
-### Task 9: Telemetry — `server.request` span helper
+### Task 9: `handleRunList` — `GET /api/runs` filtered/sorted/paginated list
 
 **Files:**
-- Modify: `src/telemetry/spans.ts`
-- Test: `tests/telemetry/server-request-span.test.ts`
+- Create: `src/server/runs/list.ts`
+- Test: `tests/server/runs-list.test.ts`
 
 **Interfaces:**
-- Consumes: existing `inSpan`, `ATTR`, `trace`, `SpanStatusCode` in `src/telemetry/spans.ts`; test uses `tests/helpers/otel-test-provider.ts` `registerTestProvider()`.
-- Produces: new `ATTR` keys `SERVER_ROUTE`/`SERVER_METHOD`/`SERVER_STATUS`/`SERVER_DURATION_MS`/`SERVER_PRINCIPAL`; `withServerRequestSpan<T>(info: { route: string; method: string; principal?: string }, fn: (rec: { status: (code: number) => void }) => Promise<T>): Promise<T>`.
+- Consumes: `RunListQuerySchema`, `RunListResponseSchema` from `../../contracts/index.ts`; `summarizeRunListItem` (Task 6); `readdir` from `node:fs/promises`; `RunsDeps` from `./detail.ts`; `ISOLATION_HEADERS`.
+- Produces: `handleRunList(params: URLSearchParams, deps: RunsDeps): Promise<Response>` — build a raw object from `params`, `RunListQuerySchema.parse` it, `readdir(runsRoot)` for directories, `summarizeRunListItem` each (cache-fronted), filter (`search` case-insensitive substring over `id` + `models.join(' ')` + `outcome`; `outcome` exact facet; `degraded` exact facet), **sort desc by `startMs`**, then paginate via an opaque cursor. `total` = filtered count; `nextCursor` set when more remain. 200 JSON `RunListResponse`.
+- Cursor helpers: `encodeCursor(item) = base64url(`${item.startMs}:${item.id}`)`; `decodeCursor(s)` → `{ startMs, id }`. Pagination: after the desc sort, if a cursor is given, drop items up to and including the one whose `id` matches the cursor's `id`; then take `limit`.
 
-- [ ] **Step 1: Write the failing span test**
+- [ ] **Step 1: Write the failing test** — `tests/server/runs-list.test.ts`:
 
 ```ts
-// tests/telemetry/server-request-span.test.ts
-import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { SpanStatusCode } from '@opentelemetry/api';
-import { registerTestProvider } from '../helpers/otel-test-provider.ts';
-import { withServerRequestSpan } from '../../src/telemetry/spans.ts';
+import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { RunListResponse } from '../../src/contracts/requests.ts';
+import { handleRunList } from '../../src/server/runs/list.ts';
+import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
 
-// registerTestProvider() returns { exporter, provider }; shutdown is on .provider.
-let h: ReturnType<typeof registerTestProvider>;
-beforeAll(() => {
-  h = registerTestProvider();
+function span(p: Partial<SpanRecord> & { name: string; spanId: string }): SpanRecord {
+  return { kind: 0, traceId: 't', parentSpanId: null, startUnixNano: 0, endUnixNano: 1_000_000, durationMs: 1, status: { code: 0 }, attributes: {}, events: [], ...p };
+}
+
+let root: string;
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'list-'));
 });
-afterAll(() => h.provider.shutdown());
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
 
-test('withServerRequestSpan emits a server.request span with route/method/status/principal', async () => {
-  await withServerRequestSpan({ route: '/api/health', method: 'GET' }, async (rec) => {
-    rec.status(200);
+async function writeRun(id: string, startNano: number, attrs: Record<string, unknown>, extraSpans: SpanRecord[] = []) {
+  const dir = join(root, id);
+  await mkdir(dir, { recursive: true });
+  const spans = [span({ name: 'agent.run', spanId: `${id}-a`, startUnixNano: startNano, attributes: attrs }), ...extraSpans];
+  await writeFile(join(dir, 'spans.jsonl'), `${spans.map((s) => JSON.stringify(s)).join('\n')}\n`);
+}
+
+async function list(qs: string): Promise<RunListResponse> {
+  const res = await handleRunList(new URLSearchParams(qs), { runsRoot: root });
+  expect(res.status).toBe(200);
+  return (await res.json()) as RunListResponse;
+}
+
+test('sorts newest-first by startMs and reports total', async () => {
+  await writeRun('old', 1_000_000_000, { 'agent.outcome': 'answer', 'gen_ai.request.model': 'qwen' });
+  await writeRun('new', 5_000_000_000, { 'agent.outcome': 'answer', 'gen_ai.request.model': 'llama' });
+  const page = await list('');
+  expect(page.total).toBe(2);
+  expect(page.items.map((i) => i.id)).toEqual(['new', 'old']);
+});
+
+test('search filters over id/models/outcome (case-insensitive)', async () => {
+  await writeRun('run-a', 2_000_000_000, { 'agent.outcome': 'answer', 'gen_ai.request.model': 'qwen3.5:9b' });
+  await writeRun('run-b', 1_000_000_000, { 'agent.outcome': 'gap', 'gen_ai.request.model': 'llama' });
+  expect((await list('search=QWEN')).items.map((i) => i.id)).toEqual(['run-a']);
+  expect((await list('search=gap')).items.map((i) => i.id)).toEqual(['run-b']);
+});
+
+test('outcome + degraded facets filter', async () => {
+  await writeRun('r-ok', 3_000_000_000, { 'agent.outcome': 'answer' });
+  await writeRun('r-gap', 2_000_000_000, { 'agent.outcome': 'gap' });
+  await writeRun('r-deg', 1_000_000_000, { 'agent.outcome': 'answer' }, [
+    span({ name: 'agent.delegation', spanId: 'd', events: [{ name: 'reliability.degrade', timeUnixNano: 0 }] }),
+  ]);
+  expect((await list('outcome=gap')).items.map((i) => i.id)).toEqual(['r-gap']);
+  expect((await list('degraded=true')).items.map((i) => i.id)).toEqual(['r-deg']);
+});
+
+test('paginates via limit + opaque cursor', async () => {
+  await writeRun('a', 3_000_000_000, { 'agent.outcome': 'answer' });
+  await writeRun('b', 2_000_000_000, { 'agent.outcome': 'answer' });
+  await writeRun('c', 1_000_000_000, { 'agent.outcome': 'answer' });
+  const p1 = await list('limit=2');
+  expect(p1.items.map((i) => i.id)).toEqual(['a', 'b']);
+  expect(p1.nextCursor).toBeDefined();
+  const p2 = await list(`limit=2&cursor=${encodeURIComponent(p1.nextCursor as string)}`);
+  expect(p2.items.map((i) => i.id)).toEqual(['c']);
+  expect(p2.nextCursor).toBeUndefined();
+});
+```
+
+- [ ] **Step 2: Run to fail** — `bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts` → FAIL (module missing).
+
+- [ ] **Step 3: Minimal impl** — `src/server/runs/list.ts`:
+
+```ts
+import { readdir } from 'node:fs/promises';
+import type { RunListItemDTO } from '../../contracts/index.ts';
+import {
+  RunListQuerySchema,
+  RunListResponseSchema,
+} from '../../contracts/index.ts';
+import { summarizeRunListItem } from '../../run/run-dto.ts';
+import { ISOLATION_HEADERS } from '../isolation-headers.ts';
+import type { RunsDeps } from './detail.ts';
+
+function json(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      ...ISOLATION_HEADERS,
+    },
   });
-  const span = h.exporter.getFinishedSpans().find((s) => s.name === 'server.request');
-  expect(span).toBeDefined();
-  expect(span?.attributes['server.route']).toBe('/api/health');
-  expect(span?.attributes['http.request.method']).toBe('GET');
-  expect(span?.attributes['http.response.status_code']).toBe(200);
-  expect(span?.attributes['server.principal']).toBe('local');
-  expect(typeof span?.attributes['server.duration_ms']).toBe('number');
-});
+}
 
-test('a throwing handler records an error status and still ends the span', async () => {
-  await expect(
-    withServerRequestSpan({ route: '/api/boom', method: 'POST' }, async () => {
-      throw new Error('kaboom');
+function encodeCursor(item: RunListItemDTO): string {
+  return Buffer.from(`${item.startMs}:${item.id}`).toString('base64url');
+}
+function decodeCursorId(cursor: string): string | undefined {
+  try {
+    const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+    const idx = decoded.indexOf(':');
+    return idx === -1 ? undefined : decoded.slice(idx + 1);
+  } catch {
+    return undefined;
+  }
+}
+
+function matchesSearch(item: RunListItemDTO, search: string): boolean {
+  const hay = `${item.id} ${item.models.join(' ')} ${item.outcome}`.toLowerCase();
+  return hay.includes(search.toLowerCase());
+}
+
+export async function handleRunList(
+  params: URLSearchParams,
+  deps: RunsDeps,
+): Promise<Response> {
+  const query = RunListQuerySchema.parse({
+    search: params.get('search') ?? undefined,
+    outcome: params.get('outcome') ?? undefined,
+    degraded: params.get('degraded') ?? undefined,
+    limit: params.get('limit') ?? undefined,
+    cursor: params.get('cursor') ?? undefined,
+  });
+
+  let ids: string[];
+  try {
+    const entries = await readdir(deps.runsRoot, { withFileTypes: true });
+    ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return json(RunListResponseSchema.parse({ items: [], total: 0 }), 200);
+  }
+
+  const summaries: RunListItemDTO[] = [];
+  for (const id of ids) {
+    const item = await summarizeRunListItem(deps.runsRoot, id);
+    if (item) summaries.push(item);
+  }
+
+  const filtered = summaries
+    .filter((s) => (query.search ? matchesSearch(s, query.search) : true))
+    .filter((s) => (query.outcome ? s.outcome === query.outcome : true))
+    .filter((s) =>
+      query.degraded === undefined ? true : s.degraded === query.degraded,
+    )
+    .sort((a, b) => b.startMs - a.startMs);
+
+  let start = 0;
+  if (query.cursor) {
+    const cursorId = decodeCursorId(query.cursor);
+    const idx = filtered.findIndex((s) => s.id === cursorId);
+    start = idx === -1 ? 0 : idx + 1;
+  }
+  const page = filtered.slice(start, start + query.limit);
+  const hasMore = start + query.limit < filtered.length;
+  const last = page[page.length - 1];
+
+  return json(
+    RunListResponseSchema.parse({
+      items: page,
+      total: filtered.length,
+      nextCursor: hasMore && last ? encodeCursor(last) : undefined,
     }),
-  ).rejects.toThrow('kaboom');
-  const span = h.exporter.getFinishedSpans().find((s) => s.name === 'server.request' && s.attributes['server.route'] === '/api/boom');
-  expect(span?.status.code).toBe(SpanStatusCode.ERROR);
-});
-```
-
-(Verified 2026-07-14: `registerTestProvider()` in `tests/helpers/otel-test-provider.ts` returns `{ exporter: InMemorySpanExporter; provider }` — read spans via `h.exporter.getFinishedSpans()`, shut down via `h.provider.shutdown()`, exactly as above.)
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/telemetry/server-request-span.test.ts`
-Expected: FAIL — `withServerRequestSpan` is not exported.
-
-- [ ] **Step 3: Add the server ATTR constants**
-
-In `src/telemetry/spans.ts`, inside the `ATTR` object, add (alongside the other groups, e.g. after the `VOICE_*` block, before the closing `} as const;`):
-
-```ts
-  // Server / web BFF (Slice 30b)
-  SERVER_ROUTE: 'server.route',
-  SERVER_METHOD: 'http.request.method',
-  SERVER_STATUS: 'http.response.status_code',
-  SERVER_DURATION_MS: 'server.duration_ms',
-  /** Request principal/owner; reserved "local" now, upgrades to audit-grade in Slice 35. */
-  SERVER_PRINCIPAL: 'server.principal',
-```
-
-- [ ] **Step 4: Add the `withServerRequestSpan` helper**
-
-In `src/telemetry/spans.ts`, append (near the other `with*Span` helpers, e.g. after `withRunSpan`):
-
-```ts
-/**
- * Span for one HTTP request handled by the web BFF (Slice 30b). Follows the
- * recorder-callback pattern (`withRuntimeSpan`): opens a `server.request` span,
- * sets route/method + the reserved principal, runs `fn` (which reports the final
- * status via `rec.status`), records the duration in a `finally`, and — via
- * `inSpan` — records an error status if `fn` throws.
- */
-export function withServerRequestSpan<T>(
-  info: { route: string; method: string; principal?: string },
-  fn: (rec: { status: (code: number) => void }) => Promise<T>,
-): Promise<T> {
-  return inSpan('server.request', async (span) => {
-    const startedAt = performance.now();
-    span.setAttribute(ATTR.SERVER_ROUTE, info.route);
-    span.setAttribute(ATTR.SERVER_METHOD, info.method);
-    span.setAttribute(ATTR.SERVER_PRINCIPAL, info.principal ?? 'local');
-    try {
-      return await fn({
-        status: (code) => span.setAttribute(ATTR.SERVER_STATUS, code),
-      });
-    } finally {
-      span.setAttribute(
-        ATTR.SERVER_DURATION_MS,
-        Math.round(performance.now() - startedAt),
-      );
-    }
-  });
+    200,
+  );
 }
 ```
 
-- [ ] **Step 5: Run span test + typecheck to verify pass**
+- [ ] **Step 4: Run to pass** — `bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts` → PASS.
 
-Run: `bun test tests/telemetry/server-request-span.test.ts && bun run typecheck`
-Expected: PASS (2 tests) and no type errors.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-git add src/telemetry/spans.ts tests/telemetry/server-request-span.test.ts
-git commit -m "feat(telemetry): add server.request span helper for the web BFF"
+bun run typecheck && bun run lint:file -- "src/server/runs/list.ts" "tests/server/runs-list.test.ts"
+git add src/server/runs/list.ts tests/server/runs-list.test.ts
+git commit -m "feat(server): handleRunList — filtered/sorted/paginated GET /api/runs"
 ```
 
 ---

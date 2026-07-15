@@ -1,3 +1,4 @@
+import { SpanDtoSchema } from '@contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSseTransport } from './sse-adapter.ts';
 
@@ -121,5 +122,38 @@ describe('createSseTransport', () => {
         value: true,
       });
     });
+  });
+});
+
+describe('createSseTransport stream() payload schema', () => {
+  it('parses SpanDTO frames when a SpanDtoSchema is supplied', async () => {
+    const spanFrame = {
+      spanId: 's1',
+      parentSpanId: null,
+      name: 'agent.run',
+      offsetMs: 0,
+      durationMs: 5,
+      depth: 0,
+      status: 'ok',
+      degraded: false,
+      attributes: {},
+      events: [],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([`id: s1\ndata: ${JSON.stringify(spanFrame)}\n\n`]),
+      ),
+    );
+    const out = [];
+    for await (const ev of createSseTransport().stream(
+      'r1',
+      null,
+      SpanDtoSchema,
+    )) {
+      out.push(ev);
+    }
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ spanId: 's1', eventId: 's1' });
   });
 });

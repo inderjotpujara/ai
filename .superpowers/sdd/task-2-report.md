@@ -1,186 +1,63 @@
-# Task 2 Report: Blueprint-Mono Design Tokens (Light + Dark)
+# Task 2 report — RunListItemDTO — list-cheap run summary DTO
 
-## Status
-**DONE** — All gates passed; commit landed on `slice-30b-phase1b-frontend`.
+## Status: DONE — GREEN, committed
 
-## Deliverables Created
+## TDD Cycle
 
-1. **`web/src/shared/design/tokens.css`** — 64 lines
-   - Imports Tailwind v4 (`@import "tailwindcss"`)
-   - Declares class-toggled dark variant: `@custom-variant dark (&:where(.dark, .dark *))`
-   - Defines `@theme` block with Blueprint-Mono palette tokens
-   - Dark base at `:root` (home theme)
-   - Light override at `:root:where(.light)` with functional light palette
-   - Body styles: Blueprint dot-grid background, Geist font stack
-   - `prefers-reduced-motion` accessibility guard (uses `!important` per WCAG best practice)
+**RED** — Added two failing tests to `tests/contracts/dto.test.ts`:
+1. `RunListItemDTO parses a minimal summary (tokens optional, no spans/artifacts)` — verifies parsing without optional fields and confirms no `spans`/`artifacts` properties exist
+2. `RunListItemDTO round-trips with a token roll-up present` — confirms optional token object round-trips correctly
 
-2. **`web/src/shared/design/tokens.test.ts`** — 39 lines
-   - 4-test contract suite verifying:
-     - Tailwind v4 import + dark variant declaration
-     - Locked palette hex literals (`#0B0C0E`, `#4C8DFF`, `#35D0C0`)
-     - Both dark base and functional light theme via `@theme` + `.dark` selectors
-     - `prefers-reduced-motion` media query present
-
-## TDD Progression
-
-### RED Phase (Test Fails)
-```bash
-$ cd web && bun run test src/shared/design/tokens.test.ts
-# Error: ENOENT: no such file or directory, open '...tokens.css'
-# ✗ 0 tests, 1 failed suite
+Ran focused test:
 ```
-
-### GREEN Phase (Test Passes)
-After creating `tokens.css`:
-```bash
-$ cd web && bun run test src/shared/design/tokens.test.ts
-✓ Test Files  1 passed
-✓ Tests       4 passed
+bun test tests/contracts/dto.test.ts
 ```
+Failed as expected: `RunListItemDtoSchema` not yet exported (import error in test file).
 
-## Gate Compliance (All Clean)
+**Implementation** — Exactly per brief (`/.superpowers/sdd/task-2-brief.md`):
+- `src/contracts/dto.ts`: Appended `RunListItemDtoSchema` and `RunListItemDTO` type alias after `RunDtoSchema`. Schema defines 9 required fields (`id`, `startMs`, `durationMs`, `outcome`, `lifecycle`, `origin`, `models`, `degraded`, `spanCount`) and 1 optional field (`tokens`), reusing the module-local `TokensSchema` already declared at file top. No `spans`, `artifacts`, or `degrades` fields (the core optimization for list cache). Used `.enum(RunLifecycle)` and `.enum(RunOrigin)` to reference the existing enums from `enums.ts`.
+- `tests/contracts/dto.test.ts`: Imported `RunListItemDtoSchema` from dto, appended the two test cases verbatim.
+- `src/contracts/index.ts`: No changes needed — barrel already exports `* from './dto.ts'`.
 
-### Gate 1: Test
-```bash
-$ cd web && bun run test src/shared/design/tokens.test.ts
-  Test Files  1 passed (1)
-  Tests       4 passed (4)
-  ✓ Status: PASS
+**GREEN**:
 ```
-
-### Gate 2: Typecheck
-```bash
-$ cd web && bun run typecheck
-$ tsc --noEmit
-  ✓ Status: CLEAN (no output)
+bun test tests/contracts/dto.test.ts
+ 10 pass / 0 fail / 19 expect() calls
 ```
+All 10 tests pass (8 pre-existing + 2 new for RunListItemDTO).
 
-### Gate 3: Lint
-```bash
-$ bun run lint
-  Checked 552 files in 154ms.
-  Found 14 warnings (pre-existing; none from tokens.css or tokens.test.ts)
-  ✓ Status: CLEAN for new files
-```
+## Gate
 
-## Configuration Changes
-
-Updated `biome.json` to enable Tailwind CSS support:
-- Added CSS parser config with `tailwindDirectives: true`
-- Disabled CSS formatting (to preserve uppercase hex palette values, which are test-asserted)
-- Disabled CSS linting (to avoid noImportantStyles warnings on accessibility-critical `prefers-reduced-motion` rule)
-
-**Rationale:** The test explicitly asserts the hex literals in uppercase (`#0B0C0E`, `#4C8DFF`, `#35D0C0`). Biome's CSS formatter lowercases hex values by default. Since the test requires exact case match, CSS formatting was disabled to preserve the asserted tokens.
+- `bun run typecheck` → clean (no output from `tsc --noEmit`).
+- `bun run lint:file -- "src/contracts/dto.ts" "tests/contracts/dto.test.ts"` → `Checked 2 files in 3ms. No fixes applied.`
+- Pre-commit hook ran automatically on `git commit` → `✔ docs-check: living docs present + linked; every src subsystem documented.`
 
 ## Commit
+
 ```
-Commit: 8363a36
-Subject: feat(web): Blueprint-Mono design tokens — light+dark, reduced-motion, Geist
-Branch: slice-30b-phase1b-frontend
-Docs-check: ✓ passed (pre-commit hook)
-Files:
-  - web/src/shared/design/tokens.css (new)
-  - web/src/shared/design/tokens.test.ts (new)
-  - biome.json (updated)
+db4425a feat(contracts): RunListItemDTO — list-cheap run summary (no spans/artifacts)
 ```
+
+Commit message body:
+```
+Add RunListItemDtoSchema and RunListItemDTO type to provide a lightweight
+summary projection for run history lists. The DTO excludes spans, artifacts,
+and degrades to optimize for list performance. Includes minimal fields: id,
+timing, outcome, lifecycle, origin, models, degradation flag, and optional
+token roll-up. Tested with minimal and full-tokens variants.
+```
+
+## Files Changed
+- `src/contracts/dto.ts` — added `RunListItemDtoSchema` (z.object) + `RunListItemDTO` type infer (45 lines total, 16 new).
+- `tests/contracts/dto.test.ts` — imported `RunListItemDtoSchema`, appended 2 new test cases (35 new lines).
 
 ## Self-Review
+- **Schema completeness**: All 9 fields match the brief exactly. `RunLifecycle` and `RunOrigin` enum references use `.enum(...)` matching the existing `RunDtoSchema` pattern (not hardcoded strings).
+- **Optional field handling**: `tokens: TokensSchema` correctly makes tokens optional since `TokensSchema` is already `.optional()` at declaration.
+- **No heavy arrays**: Confirmed test assertions that `'spans' in parsed` and `'artifacts' in parsed` both return false — the schema has no such properties.
+- **Export barrel**: No changes needed; auto-exported via existing `export * from './dto.ts'` in `src/contracts/index.ts`.
+- **Forward-compat**: Tests verify both the absent-tokens case and the present-tokens case, matching the forward-compat pattern used in `SpanDtoSchema` and `RunDtoSchema`.
+- **Code style consistency**: Schema uses same formatting, optional placement, and enum reference pattern as existing `RunDtoSchema` in the same file. Type alias follows the same `type X = z.infer<typeof XSchema>` pattern.
 
-✓ Code matches brief verbatim (no inventions/redesigns)
-✓ Test contract guarding palette literals enforced
-✓ Both dark (home) and light themes declared per spec
-✓ Accessibility safeguard: prefers-reduced-motion with !important
-✓ Geist font stack configured (fonts to be imported in Task 6 main.tsx)
-✓ Tailwind v4 CSS-first directives functional (@theme, @custom-variant)
-✓ All three gates pass
-✓ No new files beyond brief scope
-
-## Concerns & Resolutions
-
-**Concern:** Biome's CSS formatter would lowercase hex palette values, breaking test assertions.
-**Resolution:** Disabled CSS formatting globally in biome.json. The asserted test literals (`#0B0C0E`, `#4C8DFF`, `#35D0C0`) are preserved in uppercase. Pre-existing linting errors (14 warnings in other files) remain untouched and pre-date this task.
-
-**Concern:** `!important` in prefers-reduced-motion rule flagged by Biome linter.
-**Resolution:** Disabled CSS linting in biome.json. Per WCAG, `!important` on reduced-motion overrides is the recommended pattern to ensure animations cannot be re-enabled by higher-specificity rules. The implementation is correct and intentional.
-
-## Next Steps (Task 3)
-Task 3 will implement the `ThemeProvider` to toggle the `.light` class on `<html>` and wire up the dark mode toggle UI.
-
----
-
-## Post-Review Fixes (2026-07-14)
-
-Two review findings on the Task-2 commit were fixed in a follow-up commit on the same branch (`slice-30b-phase1b-frontend`), no new branch created.
-
-### Fix 1 (Medium) — scope the biome.json CSS disable to `tokens.css` only
-
-The original commit disabled `css.linter.enabled` and `css.formatter.enabled` **repo-wide**, silently turning off CSS lint/format for every current and future `web/` CSS file. Verified against the installed Biome (`bunx @biomejs/biome --version` → `2.5.1`, matching the `$schema` in `biome.json`) that `overrides[].includes` (glob array) + a nested `css` config is the correct syntax for this version (checked `configuration_schema.json`'s `OverridePattern` definition — `includes: OverrideGlobs`, `css: CssConfiguration`). Rewrote `biome.json`:
-
-```json
-"css": {
-  "parser": { "cssModules": false, "tailwindDirectives": true }
-},
-"overrides": [
-  {
-    "includes": ["web/src/shared/design/tokens.css"],
-    "css": {
-      "formatter": { "enabled": false },
-      "linter": { "enabled": false }
-    }
-  }
-]
-```
-
-`parser.tailwindDirectives: true` stays global (needed for Biome to parse Tailwind v4 `@theme`/`@custom-variant` in any CSS file); only the linter/formatter disable is scoped to `tokens.css`, preserving its intentional uppercase hex literals and WCAG `!important`.
-
-### Fix 2 (Low) — removed @theme / :root palette duplication footgun
-
-`tokens.css` declared five theme-varying tokens (`--color-bg`, `--color-surface`, `--color-fg`, `--color-muted`, `--color-border`) both inside `@theme {}` and again inside `:root {}` / `:root:where(.light) {}`. Because `@theme` emits into a Tailwind CSS `@layer` and the un-layered `:root` copy wins in the cascade, editing only the `@theme` copy would silently have no effect. Removed those five tokens from `@theme {}`, keeping only the theme-invariant tokens there (`--color-accent`, `--color-signal`, `--font-*`, `--spacing-rail`, motion tokens). The theme-varying tokens now live only in `:root` (dark defaults) and `:root:where(.light)` (light overrides). Also corrected the now-stale comment above `@theme` ("Palette literals live ONLY here") to reflect the new split.
-
-### Final `biome.json` css + overrides section
-
-```json
-"css": {
-  "parser": { "cssModules": false, "tailwindDirectives": true }
-},
-"overrides": [
-  {
-    "includes": ["web/src/shared/design/tokens.css"],
-    "css": {
-      "formatter": { "enabled": false },
-      "linter": { "enabled": false }
-    }
-  }
-]
-```
-
-Confirmed via `grep -n "css" biome.json`: no top-level `css.linter.enabled:false` / `css.formatter.enabled:false` remain — CSS linting and formatting are enabled globally; the disable applies only to `web/src/shared/design/tokens.css`.
-
-### Gate outputs
-
-**Gate 1 — `cd web && bun run test src/shared/design/tokens.test.ts`**
-```
- Test Files  1 passed (1)
-      Tests  4 passed (4)
-```
-PASS 4/4.
-
-**Gate 2 — `cd web && bun run typecheck`**
-```
-$ tsc --noEmit
-```
-Clean, no output (no TS files were changed by this fix).
-
-**Gate 3 — `bun run lint` (from repo root)**
-```
-Checked 552 files in 156ms. No fixes applied.
-Found 14 warnings.
-```
-Exit code 0. The 14 warnings are pre-existing, in unrelated files (`src/memory/chunk.ts`, `tests/mcp/pack.test.ts`, `tests/provisioning/provisioner.test.ts`, `tests/resource/ollama-control.test.ts`) — none in `biome.json` or `tokens.css`. Ran `bunx @biomejs/biome check web/src/shared/design/tokens.css biome.json` directly as an extra check: `Checked 2 files in 2ms. No fixes applied.` — fully clean.
-
-### Post-fix literal/structure check on `tokens.css`
-
-Confirmed all required elements still present: `#0B0C0E` (in `:root`), `#4C8DFF` + `#35D0C0` (in `@theme`), `@import "tailwindcss"`, `@custom-variant dark`, `@theme`, `:root:where(.light)`, and the `prefers-reduced-motion` block.
-
-### Commit
-Committed both files together per instruction: `fix(web): scope biome CSS disable to tokens.css + de-dup @theme/:root palette` (see repo log on `slice-30b-phase1b-frontend` for the SHA).
+## Concerns
+None. Scope was straightforward; implementation follows the brief exactly (schema + tests + export). No ambiguity; no deviations from the specified code.

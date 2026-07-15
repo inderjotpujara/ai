@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RunListItemDtoSchema } from './dto.ts';
 import { ChatRole, FeedbackRating } from './enums.ts';
 
 /**
@@ -46,3 +47,25 @@ export const FeedbackRequestSchema = z.object({
   rating: z.enum(FeedbackRating),
 });
 export type FeedbackRequest = z.infer<typeof FeedbackRequestSchema>;
+
+/** `GET /api/runs?search=&outcome=&degraded=&limit=&cursor=` query. Values are
+ *  raw query strings, so `limit`/`degraded` coerce; `limit` carries a default. */
+export const RunListQuerySchema = z.object({
+  search: z.string().optional(),
+  outcome: z.string().optional(),
+  degraded: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  limit: z.coerce.number().int().positive().max(200).default(25),
+  cursor: z.string().optional(),
+});
+export type RunListQuery = z.infer<typeof RunListQuerySchema>;
+
+/** `GET /api/runs` response — a page of run summaries + a cursor when more remain. */
+export const RunListResponseSchema = z.object({
+  items: z.array(RunListItemDtoSchema),
+  nextCursor: z.string().optional(),
+  total: z.number(),
+});
+export type RunListResponse = z.infer<typeof RunListResponseSchema>;

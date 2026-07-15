@@ -1,75 +1,154 @@
-# Task 19 report — Slice 26 documentation sweep
+# Task 19 report — Docs (architecture / README / ROADMAP) — Slice 30b Phase 3
 
-STATUS: complete. All four hard-line doc surfaces updated and audited claim-by-claim against the shipped code (not the task brief). `bun run docs:check` PASSES. No `src/**` files touched — only `README.md`, `docs/ROADMAP.md`, `docs/architecture.md`. Left unstaged/uncommitted for the controller (Task 20) to review, commit, update the SDD ledger, and regenerate the Artifact snapshot.
+**Commit:** `26d70ab` on branch `slice-30b-phase3-runs` (base: `3ca50a8`, the
+Task-18 landing).
 
-## Files changed
+**Scope respected:** only `docs/architecture.md`, `README.md`,
+`docs/ROADMAP.md` touched (`git diff --cached --stat` confirmed before
+commit). `.superpowers/sdd/progress.md` was **not** edited — read-only, per
+the controller's explicit instruction (that's the controller's own ledger to
+maintain).
 
-- `/Users/inderjotsingh/ai/docs/architecture.md`
-- `/Users/inderjotsingh/ai/README.md`
-- `/Users/inderjotsingh/ai/docs/ROADMAP.md`
+**Gate:** `bun run docs:check` → `✔ docs-check: living docs present +
+linked; every src subsystem documented.` (PASS, run standalone and again
+inside the pre-commit hook). `bun run typecheck` → clean (docs-only diff,
+sanity check). Root full suite re-run for the README's test-count claim:
+**1273 pass / 36 skip / 1 fail (3043 expect() calls, 1310 tests, 314 files)**
+— the 1 fail is consistent with the SDD ledger's own note of a documented
+pre-existing `verification.live` grounding-judge flake (real-Ollama
+nondeterminism; the ledger records the same flake reproducing on a rerun at
+the server-group gate — 1274→1273 pass is that one flaky test toggling, not a
+regression from this docs change). Web suite: **83 pass (83), 21 files** —
+matches Task 18's expected total (82 after Task 17's fix + 1 from Task 18's
+nav-command test).
 
-## What I verified against code before writing (read, not assumed)
+## Every substantive claim added to `docs/architecture.md` (for the docs-accuracy reviewer)
 
-- `src/core/types.ts` — confirmed `RuntimeKind.LlamaCpp` added; `ProviderKind` unchanged.
-- `src/core/kind-map.ts` — confirmed `downloadKindFor` now maps `LlamaCpp → HfGguf`.
-- `src/runtime/managed-openai-compatible.ts` — confirmed `createManagedRuntime(strategy, deps)`, `ContextCapability = 'relaunch'|'reload'|'fixed'`, `breakerFor('runtime:'+kind)`, `/models` reads for `listLoaded`/`getModelMax`, `RuntimeStrategy.launch`/`daemonLoad`/`daemonUnload`.
-- `src/runtime/process-supervisor.ts` — confirmed spawn + health-poll + `withWallClock` timeout + `SIGTERM` kill; fresh-port-per-relaunch comes from the caller's `portAlloc` in `managed-openai-compatible.ts`'s `freePort()`.
-- `src/runtime/strategies/llamacpp.ts`, `strategies/mlx.ts`, `strategies/lmstudio.ts` — confirmed exact `contextCapability` per runtime, the `-hf`/`-m` branching logic, the `@lmstudio/sdk` lazy-client rationale (the file's own doc comment explains the eager-WebSocket-log problem, which I echoed in architecture.md), and LM Studio's `daemonLoad`/`daemonUnload` (no `launch`).
-- `src/runtime/mlx-server.ts` — confirmed the external-baseUrl-vs-spawn branch: `createMlxServerRuntime` uses `externalServerStrategy` (no-spawn `daemonLoad`) when `MLX_BASE_URL`/`deps.baseUrl` is set, else falls through to the shared `createManagedRuntime(mlxStrategy, ...)` spawn path. This directly falsified the OLD architecture.md line "server owns lifecycle" as a blanket claim — corrected in §5 and §6 to describe both paths.
-- `src/runtime/registry.ts` — confirmed all 4 runtimes registered (`ollamaRuntime`, `mlxServerRuntime`, `llamaCppRuntime`, `lmStudioRuntime`).
-- `src/cli/select-hook.ts` — confirmed the new `if (rt.kind !== RuntimeKind.Ollama) await rt.control.warm(...)` block via `git diff main...HEAD` (new on this branch), and that the returned `numCtx` is still Ollama-only.
-- `src/telemetry/spans.ts` — confirmed `RUNTIME_KIND`/`RUNTIME_CONTEXT_CAPABILITY`/`RUNTIME_CONTEXT_REQUESTED`/`RUNTIME_CONTEXT_APPLIED`/`RUNTIME_WARM_OUTCOME` + `withRuntimeSpan`, and `MCP_AUTH_OUTCOME`/`MCP_AUTH_KIND` + `withMcpMountSpan`'s `recordAuth` callback. Used `git log --all -S` to confirm both are new **on this branch** (commits `25c22da` runtime spans, `e05c34b` mcp.auth.* events), not pre-existing.
-- `src/provisioning/providers/lmstudio.ts` — confirmed the poll URL is `/api/v1/models/download/status/${job.job_id}`, matching the brief's claimed fix.
-- `src/mcp/token-store.ts`, `loopback.ts`, `oauth-provider.ts` — read in full; documented the exact method surface (`tokens`/`saveTokens`/`codeVerifier`/`saveCodeVerifier`/`state`/`saveState`/`storedState`/`clientInformation`/`saveClientInformation`/`authorizationServerInformation`/`saveAuthorizationServerInformation`/`redirectToAuthorization`/`waitForRedirect`), the 0600/atomic-write behavior, and why `oauth-provider.ts` implements its own loopback listener rather than reusing `awaitOAuthRedirect` (a provider's redirect+callback must share one bound port across two separate SDK calls).
-- `src/mcp/client.ts` — confirmed `connectMcpClient`'s `UnauthorizedError` → `waitForRedirect()` → `auth()` → retry-once flow, and `hasWaitForRedirect`'s duck-typing guard.
-- `src/cli/with-mcp-run.ts` — confirmed `buildAuthProviders(config)` was previously absent (the "OAuth always silently degraded" bug this slice fixes) and `recordAuthOutcomes` for the `static-key`/`token-reused`/`authenticated` telemetry values.
-- `src/mcp/types.ts` — confirmed `scopes`/`clientId` were already present on `httpAuthSchema`/`HttpServerEntry['auth']` (pre-existing, not new fields to document as new).
-- `scripts/docs-check.ts` — read to confirm it only enforces living-doc presence/links + per-subsystem-directory mention in architecture.md (no new top-level `src/` directory was added this slice, so no new subsystem-coverage requirement — `strategies/` nests under `src/runtime/`, already documented).
+**System-map table (§2) + top Mermaid (`graph TD`):**
+- Server row: added the 3 new GET endpoints (`/api/runs`, `/api/runs/:id`,
+  `/api/runs/:id/stream`), `confineToDir` on `:id` for **both** detail and
+  stream, the new `runsRoot` `ServerDeps` field wired from `main.ts`, and
+  `run/run-dto.ts` added to the "knows about" column.
+- Run-store row: added `run-dto.ts` (`mapRunToDto`/`summarizeRunListItem`,
+  mtime-cached, shared `runRootSummary` helper) and `artifacts.ts`
+  (`readRunArtifacts`).
+- Mermaid `RUN` subgraph: added `rundto` and `runartifacts` nodes + edges
+  (`rundto --> runtrace`, `rundto --> runartifacts`, `runartifacts -->
+  spansfile`). **Judgment call:** I did *not* add Server/Contracts/web nodes
+  to this top module-map graph — Phases 1/1b/2 never added them either (the
+  graph has zero Server/Contracts/web representation today), so adding only
+  Phase 3's 3 routes would have created a worse, inconsistent partial picture
+  than the established convention of documenting Slice-30b subsystems via
+  prose sections + their own sequence diagrams. Flagging this in case the
+  reviewer wants the top graph made comprehensive as a separate follow-up.
 
-## Claims I could NOT independently verify (flagged, not blocking)
+**New §3d sequence diagram** ("Runs history + live trace waterfall") — added
+right after §3c, before §4: browser → `GET /api/runs` (list, cache-fronted) /
+`GET /api/runs/:id` (detail, confineToDir) / `GET /api/runs/:id/stream`
+(stream, poll+SSE) → `run/run-dto.ts` mapper → `runs/<id>/*.jsonl` disk, plus
+the Last-Event-ID resume note.
 
-- **Exact test count** — resolved: I ran the full suite myself once it wasn't blocking anything else: `bun test` → **897 pass / 18 skip / 0 fail** (2008 `expect()` calls, 219 files, 223s). Close to but not identical to the brief's "~898/17" estimate (off by one on both pass and skip — plausibly one more/different gated live test skip in this environment). I did not embed this number in any doc (none of the three needed a hardcoded count), so no edit was needed there; passing it along here for Task 20's Artifact-footer regeneration.
-- **Stale code comment I did NOT touch** (out of scope — it's `src/**`, not a doc, and the brief said not to touch code): `src/mcp/types.ts`'s `McpAuthKind` JSDoc still says *"Live OAuth token exchange is deferred (contract-tested only — see docs/architecture.md §14)"*. That's no longer true as of this slice. Flagging for the controller or a follow-up commit to fix as a one-line comment update.
-- **The 3 gated live suites** (`ALTRUNTIME_LIVE`, `MCP_OAUTH_LIVE`, `GITHUB_PAT`) — I did not re-run them myself (no installed llama-server/LM Studio/real GitHub PAT/Linear OAuth app in this docs-only task's environment). I narrated the brief's stated live-verify results (llama.cpp `/props` n_ctx=8192, LM Studio ctx=4096, MLX confirmed fixed, Linear 47 tools + token-store reuse with no browser, GitHub PAT) as given, the same way architecture.md's existing "Live-verify" subsections for other slices narrate a slice's own live pass rather than being independently re-run by a later docs task.
+**Contracts § edits:**
+- `ArtifactKind` extension: named the 6 new members (`Result`/`Resource`/
+  `Unverified`/`Failed`/`Error`/`Media`) alongside the 5 original.
+- `RunListItemDTO` added to the DTO list, described as spans/artifacts/
+  degrades-free.
+- `RunListQuerySchema`/`RunListResponseSchema` added to the requests
+  paragraph, with the coercion details (degraded string→bool, limit
+  coerced/clamped/defaulted).
+- Added a sentence that Phase 3's mapper still emits `origin` as the
+  constant `RunOrigin.Manual` — the reservation is unchanged, only the DTO
+  now has a real reader.
+- Added the "three telemetry-gap closures" paragraph (token roll-up,
+  lifecycle synthesis, artifact classification) with the CLI-vs-web
+  divergence note (`run-trace.ts`'s `summarizeRun` only ever recognized
+  `agent.run`).
 
-## docs:check result
+**New `## Runs (web UI — Slice 30b Phase 3)` section** (end of file), with:
+- Feature paragraph naming it the first real transport-port consumer and
+  first RunDTO/SpanDTO emitter/parser.
+- `### Server` subsection: exact route list, the ordering requirement
+  (stream regex before bare-`:id`), the confineToDir/404-indistinguishable
+  guarantee, poll/pollMs/maxWaitMs/Last-Event-ID-resume mechanics for the
+  stream route, `RunsDeps = {runsRoot}`.
+- `### The src/run mapper` subsection: `mapRunToDto` mechanics (flatten,
+  project, sum tokens, degrade tolerance via safeParse), the
+  `runRootSummary` shared-helper fix narrative (crew/workflow root bug,
+  caught adversarially), `summarizeRunListItem` + the mtime-cache rationale
+  (keyed on `spans.jsonl` mtime, not dir mtime — explicit "Phase 6 real
+  index" note), `readRunArtifacts` classification + media roll-up + missing-dir
+  tolerance.
+- `### Web` subsection: `RunsArea` (search/facets/cursor pagination/empty/error
+  states), `RunDetail` (snapshot+live-tail, the two-effect structure, the
+  adversarially-caught-and-fixed missing-AbortController leak, the
+  streamEnded busy-indicator fix), `use-run-trace.ts`'s `foldSpan` reducer,
+  `Waterfall` (`@visx` Gantt mechanics, color precedence, D1 no-`@xyflow`
+  note).
+- `### Telemetry`: `withRunStreamSpan` mirrors `withUiStreamSpan`, the 5
+  `RUN_STREAM_*` attrs (chunks/bytes/resumes/outcome/run_id), list/detail
+  ride the existing `server.request` span (no dedicated span).
+- `### What's still deferred`: SessionStore/persisted index → Phase 6,
+  `@xyflow` (D1), reserved `SpanDTO.node`/`RunDTO.origin`/`server.principal`,
+  retention GC (Tier-2 backlog), a11y/⌘K → Phase 8, voice → Phase 7.
+- Two honest minor caveats called out explicitly (not hidden): resume
+  reseeds via flattened DFS order not append order (an edge case on
+  overlapping siblings); `RUN_STREAM_BYTES` counts UTF-16 units, not UTF-8
+  bytes (telemetry approximation).
+- Updated the stale Phase-2 "what's still deferred" bullet that pointed
+  forward to "Phase 3 (Runs)" — now marked shipped with a pointer to the
+  new section, since it would otherwise read as still-open even though the
+  code landed.
 
-```
-$ bun run scripts/docs-check.ts
-✔ docs-check: living docs present + linked; every src subsystem documented.
-```
-Ran clean after every edit round (checked 4 times through the sweep, and once more at the end).
+## README.md changes
+- Top overview blockquote: replaced the forward-looking "Next: Slice 30b
+  Phase 3" line with a landed-Phase-3 paragraph + "Next: Slice 30b Phase 4".
+- Status blockquote: extended the phases-landed list to include Phase 3,
+  changed "Phases 3–8 remain" → "Phases 4–8 remain", trimmed the stale
+  "not yet shipped" bullet (Runs was in that list), inserted a full new
+  Phase-3 paragraph mirroring the existing Phase-2 paragraph's depth, with
+  the corrected/rerun test counts and the flake footnote.
+- Slice-status table: extended the `30b` row's phase list and prose to
+  cover Phase 3 (routes, mapper, web), changed the Status cell to "Phases 1,
+  1b, 2 & 3 landed"; **slice-30b capability marker intentionally left as
+  🚧 In progress** (not flipped to ✅) per the partial-slice instruction.
+- "Next (product line)" row: now points at "Slice 30b Phase 4 onward"
+  instead of "Phase 3 onward", dropped the now-shipped Runs bullet from the
+  description.
 
-## Section-by-section summary of edits
+## docs/ROADMAP.md changes
+- Phase F table row ("TUI / local web UI"): extended the phases-landed
+  clause to include Phase 3, changed "the run-history browser (Phase 3) …
+  not yet functional" to "now works too", added a Phase-3 mechanism summary
+  sentence, added a `§"Runs"` architecture.md pointer.
+- Recommended-sequence bullet list (item 21, Slice 30b): replaced the single
+  "Phases 3–8 — … not yet started" placeholder with a full shipped Phase-3
+  sub-bullet (mirroring the existing Phase 1/1b/2 sub-bullet depth and
+  style) plus a trimmed "Phases 4–8 — … not yet started" successor bullet.
+- **Judgment call on brief wording:** the brief said "gap table + phase
+  table + recommended sequence." I interpreted "phase table" as the Phase F
+  items table (only place Slice 30b's phases are itemized) and did not touch
+  the separate n8n/CrewAI-concept "honest gap" table near the top of the
+  file (lines ~94–111) — it has no web-UI-specific row today and adding one
+  there would be a new addition, not a flip, and isn't mentioned as a target
+  by the SDD ledger. Flagging in case the reviewer expected that table
+  touched too.
 
-### `docs/architecture.md`
-
-- **§2 System map**: added 5 new mermaid nodes to the `RT` subgraph (`managed`, `procsup`, `stratllama`, `stratmlx`, `stratlm`) and 3 to the `MCP` subgraph (`mcpoauth`, `mcptokens`, `mcploopback`), plus ~13 new edges wiring them into the existing graph (`reg --> stratllama/stratlm`, `stratllama/stratmlx/stratlm --> managed`, `managed --> procsup`, `managed --> relbreaker`, `mlx --> stratmlx`, `selhook --> reg`, `mcpclient --> mcpoauth --> mcptokens`/`mcploopback`). Verified bracket/subgraph/end counts balance (159/159 brackets, 20/20 subgraph-end pairs) since mermaid isn't linted by tooling.
-- **§2 layer table**: rewrote the **Runtime** row (4 adapters, managed base, process-supervisor, corrected mlx-server.ts description) and the **Tools/MCP** row (added the live-OAuth summary).
-- **§5 "Discovery & runtimes"**: rewrote the section header + opening paragraph (4 adapters, not "Ollama + MLX"); added a new **"Managed runtimes — shared base + per-runtime strategy"** paragraph with a `contextCapability` table (relaunch/reload/fixed); added **"Context delivery, end to end"** describing the new `select-hook.ts` `warm()` call; rewrote the **MLX runtime** paragraph to correct the stale "server owns lifecycle" claim (now correctly scoped to the external-baseUrl path only) and describe the Slice-26 rewrite onto the managed base; extended the **"Download vs inference"** paragraph for `LlamaCpp → HfGguf`; added a **LM Studio download adapter fix** paragraph; added a new **"### Runtime telemetry (Slice 26)"** subsection describing `withRuntimeSpan` + all 5 `RUNTIME_*` attrs; updated the **Four axes** table's `RuntimeKind` row.
-- **§6 "Why Ollama"**: fixed the stale "can slot behind the same interface" framing (llama.cpp/LM Studio/MLX already do, not hypothetically).
-- **§14 MCP section**: updated the `mount.ts` bullet (Slice-18-wiring → Slice-26-live), added 3 new bullets for `oauth-provider.ts`/`loopback.ts`/`token-store.ts`, rewrote the `client.ts` bullet to describe the completed handshake; added a new **"MCP auth telemetry"** paragraph inside the existing Telemetry subsection; added a new **"### Live OAuth (Slice 26)"** subsection narrating the `buildAuthProviders` bug fix + the full handshake flow + token-store persistence; corrected the stale "GitHub not live-verified" closing line and added a new **"### Live-verify (Slice 26 — OAuth + GitHub-PAT)"** subsection.
-
-### `README.md`
-
-- Top blurb (`> Where this is going`): added the Slice 26 sentence, updated the "Next" pointer to Slice 24 (daemon) since Slices 22/23 are deferred/held, not next-up.
-- **Status/Previously blockquote**: promoted a new detailed **Status: Slice 26** paragraph (runtime + OAuth narrative, live-verify results, gated-test env vars); compressed the old Slice-21 Status paragraph down into the new **Previously: Slice 21** slot (verbatim content, just retitled), and folded the old detailed Slice-20 paragraph into a short one-liner appended to the "Also shipped" tail (matching how Slices 19/18/17/etc. are already summarized there). Also corrected the Slice-14 mention inside that rollup ("live-verify completed in Slice 26").
-- **Slice status table**: added row **26** (following the existing verbose-row convention used for Slices 18/19/20/21); updated the **Next (product line)** row to reflect Slice 24/25 as next, Slice 22/38 deferred, Slice 23 held.
-- **"What it does (today)"**: added a new **Slice 26** paragraph after the existing Slice 20 paragraph (note: Slice 21 itself has no such paragraph — reliability wasn't given one either — so this isn't strictly required by precedent, but I added it since Slice 26 changes user-facing behavior: which runtimes actually run inference, and live remote-MCP OAuth).
-- **Project structure table**: updated the `src/runtime/` row (4 adapters + managed base + process-supervisor) and `src/mcp/` row (added `oauth-provider.ts`/`token-store.ts`/`loopback.ts`, corrected `client.ts` description).
-- **"Why Ollama (and where llama.cpp fits)"**: fixed the stale "if we ever need... we can add a raw llama.cpp-server or MLX-server adapter" framing — now describes them as already shipped (Slice 26) alongside LM Studio.
-
-### `docs/ROADMAP.md`
-
-- **Recommended-sequence item 17**: flipped from a pending bullet to `✅ shipped, Slice 26` with the full narrative (managed base, 3 strategies, live-verify results, OAuth completion).
-- **"Alternate runtimes & the Mac Mini era"** section: rewrote the blockquote intro (Slice 14 → 18 → 26 arc) and all 3 per-runtime bullets (MLX/LM Studio/llama.cpp) to `✅ shipped` status, keeping the honest MLX-fixed-context caveat visible.
-- **Slice 14 follow-ons**: flipped the two still-outstanding bullets ("Live-verify the LM Studio/llama.cpp download adapters", "Stand up LM Studio & llama.cpp as full inference runtimes") to `~~strikethrough~~ ✅ shipped (Slice 26)`, matching the existing convention for resolved Slice-14 debt items in the same list.
-- **Slice 15 follow-ons**: flipped "OAuth for remote servers" and "GitHub remote-HTTP live-verify" to `~~strikethrough~~ ✅ shipped`, same convention.
-- Did **not** touch the user's own backlog rows 31–38, the gap table (n8n/CrewAI concept table — Slice 26 is a debt/completion slice, not a new product-line capability, so it has no natural row there, consistent with how Slices 16/18 also got no gap-table row), or any Slice 24/25 status (those remain not-yet-shipped, unaffected by Slice 26 landing out of numeric order).
-
-## Artifact (interactive snapshot) — node/edge/footer changes needed for Task 20
-
-Not a repo file — noting what the controller's regeneration needs, mirroring the mermaid changes above:
-- **New nodes**: Runtime subsystem — `managed-openai-compatible.ts`, `process-supervisor.ts`, `strategies/llamacpp.ts`, `strategies/mlx.ts`, `strategies/lmstudio.ts` (5 nodes, inside the existing Runtime subsystem box). MCP subsystem — `oauth-provider.ts`, `token-store.ts`, `loopback.ts` (3 nodes, inside the existing MCP subsystem box).
-- **New edges**: registry → llama.cpp/LM Studio strategies; the 3 strategies → the managed base; managed base → process-supervisor + the reliability circuit breaker; MLX adapter → its strategy; select-hook → runtime registry; MCP client → oauth-provider → token-store + loopback.
-- **Footer**: bump the slice count to include Slice 26 and update the test-count figure once Task 20 has the final `bun test` number (deliberately not blocked on here per the brief).
+## Where I was unsure of the truth (self-flagged, not hidden)
+- The exact current root full-suite pass/fail count is a live, slightly
+  moving target because of the pre-existing flaky live-verification test;
+  I ran it live and reported the observed 1273/36/1 with the flake caveat
+  rather than copying the ledger's 1274/36/0, on the theory that a number I
+  personally re-ran is more trustworthy than transcribing an older number —
+  but if a fresh run shows a clean 0-fail count, that's the more
+  representative one to cite going forward.
+- I did not independently re-verify the Task-17 "adversarial review caught a
+  missing AbortController" narrative against the actual diff between
+  commits `3141f2b` (initial) and `91d61c8` (fix) — I took the ledger's
+  account of that fix at face value since it matches what I read in the
+  *current* `run-detail.tsx` (which does have the AbortController + abort()
+  cleanup + AbortError swallow), so the current-state description is
+  verified even if the historical "before" state is ledger-sourced.
+- Note: this file previously held a stale Slice-26 documentation-sweep
+  report (a much earlier "Task 19" from a different slice's numbering) —
+  it has been fully overwritten with this Phase-3 report; nothing from the
+  old content was preserved or merged.

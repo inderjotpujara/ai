@@ -1,84 +1,100 @@
-### Task 14 (Slice 26): Wire `deps.authProviders` in `withMcpRun` — Report
+### Task 14 (Slice 30b Phase 3 — Runs): `use-run-trace` — pure `foldSpan` + `useRunTrace` hook — Report
 
 **Status:** DONE, GREEN.
 
-**Commit:** `91b86b6` — `feat(mcp): populate deps.authProviders for OAuth entries in withMcpRun`
-(branch `slice-26-altruntime-remote-auth`, 2 files changed: `src/cli/with-mcp-run.ts`,
-`tests/cli/with-mcp-run.test.ts`. Staged only these 2 files explicitly; verified via
-`git status` before committing that no other repo-wide modified files — `.remember/*`,
-`.superpowers/sdd/task-*-brief.md`, `docs/ROADMAP.md`, other in-flight tasks' edits —
-were swept in. Pre-commit `docs-check` hook ran and passed.)
+**Note:** This file previously held a report for an unrelated Task 14 from
+Slice 30b Phase 2 (the live agent/model status rail, `use-status-events.ts` /
+`live-rail.tsx`). That content is superseded by this report — see git history
+for the prior content if needed.
 
-**What changed**
+## What was built
 
-`src/cli/with-mcp-run.ts`:
-- Added `buildAuthProviders(config: McpConfig): Record<string, OAuthClientProvider>` —
-  iterates `config.entries`; for every entry where `entry.kind === McpTransportKind.Http`
-  and `entry.auth?.kind === McpAuthKind.OAuth`, calls
-  `createOAuthProvider(entry.name, { scopes: entry.auth.scopes, clientId: entry.auth.clientId })`
-  and keys the result by `entry.name`. Non-OAuth and stdio entries are skipped — no
-  provider built for them.
-- In `withMcpRun`, before the existing `withMcpMountSpan`/`mountAll` call: builds
-  `authProviders = { ...buildAuthProviders(config), ...opts.mountDeps?.authProviders }`
-  (caller-supplied wins on key collision via spread order — auto-built spread first,
-  caller's spread second) and calls `mountAll(config, { ...opts.mountDeps, authProviders })`.
-- Ordering invariant (createRun → initRunTelemetry → mount) is unchanged: the
-  authProviders map is built synchronously right before the existing `mountAll`
-  call site inside the same `withMcpMountSpan` closure; nothing was reordered.
+- `web/src/features/runs/use-run-trace.ts` — `RunTraceState` type
+  (`{ spans: SpanDTO[]; cursor: string | null }`), pure `foldSpan(state, span,
+  eventId?)` reducer, and `useRunTrace(initial: SpanDTO[])` hook returning
+  `{ spans, cursor, ingest }`. Implemented exactly per the brief's sample:
+  `foldSpan` filters out any existing span with the same `spanId` (de-dupe /
+  replace-in-place), pushes the new span onto that filtered (new) array,
+  sorts by `offsetMs`, and sets `cursor = eventId ?? state.cursor`.
+  `useRunTrace` seeds state by folding the `initial` snapshot array through
+  `foldSpan`, then mirrors `use-status-events.ts`'s `useState` +
+  stable `useCallback` shape for `ingest`.
+- `web/src/features/runs/use-run-trace.test.ts` — the brief's exact test,
+  verbatim: appends+sorts+cursor-tracks; de-dupes by `spanId` (replace, not
+  duplicate).
 
-**TDD cycle**
-- RED: added two tests to `tests/cli/with-mcp-run.test.ts` first (a shared
-  `OAUTH_HTTP_CONFIG` with one Http entry, `auth: { kind: oauth, scopes: ['read'],
-  clientId: 'cid' }`, and a spy `mount` injected via `mountDeps.mount`). Ran
-  `bun test tests/cli/with-mcp-run.test.ts` → 1 fail: `received?.authProvider`
-  was `undefined`, with the console warning
-  `"MCP server \"oauth-server\" declares OAuth but no authProvider is registered —
-  live OAuth is deferred; mounting without auth"` (mount.ts's existing degrade path
-  firing, exactly the bug this task fixes).
-- GREEN: implemented `buildAuthProviders` + the merge/pass-through in
-  `withMcpRun`. Re-ran → both new tests pass.
-- Second test asserts a caller-supplied `mountDeps.authProviders: { 'oauth-server':
-  callerProvider }` wins: `spec.authProvider` is `toBe(callerProvider)`, not the
-  auto-built one.
-- No disk I/O concern: verified `createOAuthProvider`'s construction (in
-  `src/mcp/oauth-provider.ts`) is side-effect-free — `tokenStorePath()` /
-  `getServerAuth` / `setServerAuth` are only invoked inside methods like
-  `tokens()`/`saveTokens()`/`redirectToAuthorization()`, never at construction
-  time. The tests never call those methods on the auto-built provider, so
-  nothing touches `~/.config/ai/mcp-tokens.json`.
+Confirmed `SpanDTO` (from `src/contracts/dto.ts`'s `SpanDtoSchema`, re-exported
+via the `@contracts` barrel) matches the test fixture's shape (`spanId`,
+`parentSpanId`, `name`, `offsetMs`, `durationMs`, `depth`, `status`,
+`degraded`, `attributes`, `events`) — no signature mismatch, no escalation
+needed. The `web/tsconfig.json` / `vite.config.ts` `@contracts` path alias
+resolves to `../src/contracts/index.ts`; the runs feature directory already
+existed (`index.tsx`, `run-detail.tsx` from earlier phase tasks).
 
-**Verification run**
-- `bun test tests/cli/with-mcp-run.test.ts tests/mcp/mount-all.test.ts` → 20 pass, 0 fail.
-- `bun test tests/cli/ tests/mcp/` (full directories, regression check) → 153 pass, 0 fail.
-- `bun run typecheck` → clean (`tsc --noEmit`, no errors).
-- `bun run lint:file src/cli/with-mcp-run.ts tests/cli/with-mcp-run.test.ts` → clean
-  (one biome import-order/format autofix applied to the test file via
-  `bunx biome check --write`, then re-verified clean with `lint:file`).
+## Non-mutation confirmation (per the brief's explicit ask)
 
-**Self-review**
-- Existing `withMcpRun` tests (ordering/span, close-after-body, stdio transport tag)
-  all still pass unmodified — `buildAuthProviders` returns `{}` for configs with no
-  OAuth entries, a no-op for every prior test's config (`EMPTY_CONFIG`,
-  `ONE_SERVER_CONFIG`, both stdio-only).
-- Static-header (non-OAuth) HTTP entries are unaffected: `buildAuthProviders` only
-  inserts a key when `auth?.kind === McpAuthKind.OAuth`; `mount-all.test.ts`'s
-  "static-key HTTP entry (no auth field) is unchanged" case still passes untouched.
-- The ordering invariant documented in `withMcpRun`'s own comment
-  (createRun → initRunTelemetry → mount) is preserved — the new code only adds a
-  synchronous map-build step immediately before the pre-existing `mountAll` call.
-- Scope respected per the brief's explicit boundary: this task only constructs and
-  registers providers into the map. It does NOT drive the live browser-redirect
-  handshake (SDK returning `'REDIRECT'`, calling `waitForRedirect()`, re-invoking
-  `auth()`) — that is Task 18's concern.
+`state.spans.filter((s) => s.spanId !== span.spanId)` returns a **brand-new**
+array (`next`); the subsequent `next.push(span)` and `next.sort(...)` mutate
+only that new array, never `state.spans` itself. So `foldSpan` is pure and
+safe for React state identity — the previous `state` object and its `.spans`
+array are left untouched, and callers (`setState((prev) => foldSpan(prev, ...))`)
+always get a genuinely new object/array pair back, which is what triggers a
+correct re-render.
 
-**Concerns**
-- None blocking. One structural note for whoever picks up Task 18 (live handshake
-  orchestration): `withMcpRun` currently builds providers once, synchronously,
-  before mount. If the live-handshake flow needs the redirect wait to happen
-  concurrently with mount, or needs access to the run's telemetry span, it may
-  need to reach back into this function or restructure how/when providers are
-  built. Not a problem for Task 14's scope, but worth flagging since this task
-  wasn't designed with that reuse in mind.
-- This file previously held a report for a different, unrelated "Task 14" from
-  an earlier slice (Slice 21, agent wall-clock timeout). That content is
-  superseded by this report — see git history for the prior report if needed.
+## TDD RED → GREEN
+
+1. Wrote `use-run-trace.test.ts` first (brief's exact test).
+2. `cd web && bun run test src/features/runs/use-run-trace.test.ts` →
+   **FAIL** — `Failed to resolve import "./use-run-trace.ts"` (module
+   missing), confirming the test exercises real code, not a stub.
+3. Wrote `use-run-trace.ts` (brief's exact sample impl).
+4. Re-ran the same test → **PASS**, `Test Files 1 passed (1)`, `Tests 2
+   passed (2)`.
+
+## Gate results
+
+- `cd web && bun run test src/features/runs/use-run-trace.test.ts` → **PASS**,
+  1 file / 2 tests (`appends new spans sorted by offsetMs and tracks the
+  cursor`, `de-dupes by spanId (replace, not duplicate)`).
+- `cd web && bun run typecheck` (`tsc --noEmit`) → clean, no errors.
+- `bun run lint:file -- "web/src/features/runs/use-run-trace.ts"
+  "web/src/features/runs/use-run-trace.test.ts"` → root Biome linter **does**
+  cover `web/`. First pass flagged one formatting error in the test file (the
+  brief's sample crammed two fields onto compressed lines inside the `span()`
+  fixture's return object — not multi-line per Biome's formatter rules).
+  Fixed via `bunx biome check --write` on both files (reformatted the
+  `span()` return object onto one field per line; no logic change). Re-ran
+  `lint:file` → clean, no fixes applied, 0 errors. Re-ran the vitest test and
+  `tsc --noEmit` after the reformat to confirm nothing regressed — both still
+  green/clean.
+
+## Commit
+
+`ee0c7d4 feat(web): use-run-trace — pure foldSpan reducer + useRunTrace hook
+(snapshot+stream merge)` — staged only the 2 task files explicitly (`git add
+web/src/features/runs/use-run-trace.ts web/src/features/runs/use-run-trace.test.ts`,
+not `-A`). `git status --short` before committing showed numerous unrelated
+in-flight files modified by other concurrent tasks (`.remember/*`, other
+`.superpowers/sdd/task-*-brief.md`/`report.md`, `docs/superpowers/plans/*`) —
+none of those were staged or committed here. `git show --stat HEAD`: 2 files
+changed, 71 insertions(+) — exactly the files this task owns. Pre-commit
+`docs-check` hook ran and passed (`✔ docs-check: living docs present +
+linked; every src subsystem documented`) — this is a `web/` UI addition
+inside the already-documented Slice 30b Phase 3 runs subsystem; no new
+`src/` subsystem was introduced, so no `architecture.md` edit was required at
+this task-level granularity (phase-level doc updates are the
+controller's/final-review's job per the slice plan).
+
+## Concerns
+
+- None blocking. `useRunTrace` itself has no dedicated hook-level test (only
+  `foldSpan` is unit-tested, per the brief's exact scope) — the hook is a
+  thin `useState`/`useCallback` wrapper around the already-tested pure
+  reducer, consistent with how `use-status-events.ts`'s `useStatusEvents`
+  is tested only indirectly (via `renderHook` in a sibling task) rather than
+  directly. If a later task wires `useRunTrace` into a live SSE-consuming run
+  view, that integration point would be the place to add a `renderHook`-based
+  test exercising `ingest` end-to-end.
+- `foldSpan`'s de-dupe is O(n) per call (full array filter + re-sort); fine
+  for typical single-run trace sizes, but if a run ever streams a very large
+  number of spans this could be revisited (out of scope for this task).

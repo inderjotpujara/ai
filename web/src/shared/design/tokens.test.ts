@@ -22,3 +22,15 @@ describe('Blueprint-Mono tokens', () => {
     expect(css).toContain('prefers-reduced-motion');
   });
 });
+
+describe('design tokens', () => {
+  it('defines --color-danger in both the dark and light scopes', () => {
+    const dark = css.slice(
+      css.indexOf(':root {'),
+      css.indexOf(':root:where(.light)'),
+    );
+    const light = css.slice(css.indexOf(':root:where(.light)'));
+    expect(dark).toContain('--color-danger');
+    expect(light).toContain('--color-danger');
+  });
+});

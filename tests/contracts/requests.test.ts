@@ -1,9 +1,16 @@
 import { expect, test } from 'bun:test';
-import { ChatRole, FeedbackRating } from '../../src/contracts/enums.ts';
+import {
+  ChatRole,
+  FeedbackRating,
+  RunLifecycle,
+  RunOrigin,
+} from '../../src/contracts/enums.ts';
 import {
   ChatRequestSchema,
   FeedbackRequestSchema,
   RespondRequestSchema,
+  RunListQuerySchema,
+  RunListResponseSchema,
   UiMessageLikeSchema,
   UploadResponseSchema,
 } from '../../src/contracts/requests.ts';
@@ -89,4 +96,87 @@ test('FeedbackRequest rejects an invalid rating enum value', () => {
 test('FeedbackRequest rejects a missing messageId', () => {
   const result = FeedbackRequestSchema.safeParse({ rating: 'up' });
   expect(result.success).toBe(false);
+});
+
+test('RunListQuery coerces string query params and defaults limit', () => {
+  const parsed = RunListQuerySchema.parse({
+    search: 'qwen',
+    outcome: 'answer',
+    degraded: 'true',
+    limit: '10',
+  });
+  expect(parsed).toEqual({
+    search: 'qwen',
+    outcome: 'answer',
+    degraded: true,
+    limit: 10,
+  });
+});
+
+test('RunListQuery applies the default limit when omitted', () => {
+  const parsed = RunListQuerySchema.parse({});
+  expect(parsed.limit).toBe(25);
+  expect(parsed.degraded).toBeUndefined();
+});
+
+test('RunListQuery coerces a numeric-string limit to a number', () => {
+  const parsed = RunListQuerySchema.parse({ limit: '10' });
+  expect(parsed.limit).toBe(10);
+});
+
+test('RunListQuery rejects a non-numeric limit', () => {
+  expect(() => RunListQuerySchema.parse({ limit: 'abc' })).toThrow();
+});
+
+test('RunListQuery rejects a zero limit (must be positive)', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '0' })).toThrow();
+});
+
+test('RunListQuery rejects a negative limit', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '-5' })).toThrow();
+});
+
+test('RunListQuery rejects a limit above the max of 200', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '201' })).toThrow();
+});
+
+test('RunListQuery rejects a non-integer limit', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '10.5' })).toThrow();
+});
+
+test('RunListQuery rejects a degraded value that is neither true nor false', () => {
+  expect(() => RunListQuerySchema.parse({ degraded: 'yes' })).toThrow();
+  expect(() => RunListQuerySchema.parse({ degraded: '1' })).toThrow();
+});
+
+test('RunListResponse rejects a payload missing the required total', () => {
+  const result = RunListResponseSchema.safeParse({ items: [] });
+  expect(result.success).toBe(false);
+});
+
+test('RunListResponse rejects a payload missing the required items', () => {
+  const result = RunListResponseSchema.safeParse({ total: 0 });
+  expect(result.success).toBe(false);
+});
+
+test('RunListResponse validates items + pagination', () => {
+  const parsed = RunListResponseSchema.parse({
+    items: [
+      {
+        id: 'run-1',
+        startMs: 1,
+        durationMs: 2,
+        outcome: 'answer',
+        lifecycle: RunLifecycle.Done,
+        origin: RunOrigin.Manual,
+        models: [],
+        degraded: false,
+        spanCount: 1,
+      },
+    ],
+    nextCursor: 'abc',
+    total: 1,
+  });
+  expect(parsed.items).toHaveLength(1);
+  expect(parsed.nextCursor).toBe('abc');
 });

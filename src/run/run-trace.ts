@@ -3,6 +3,35 @@ import { join } from 'node:path';
 import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
 import { ATTR } from '../telemetry/spans.ts';
 
+/**
+ * A JSON-valid line whose SHAPE the projection cannot consume — e.g. `{}` (no
+ * `attributes`/`name`/`status`/…) — must be isolated as malformed, NOT pushed:
+ * otherwise the mapper does `undefined[ATTR.x]` / reads `.status.code` off
+ * nothing and throws a `TypeError`, which (before this guard) 500'd the whole
+ * `GET /api/runs` list because ONE bad line in ANY run's spans.jsonl bubbled
+ * out. We validate exactly the fields the mappers touch (`spanId`, `name`,
+ * `startUnixNano`, `durationMs`, `status.code`, `attributes`, `events`); a
+ * record missing any of them is counted toward `malformed`, same as an
+ * unparseable line.
+ */
+function isValidSpanRecord(v: unknown): v is SpanRecord {
+  if (typeof v !== 'object' || v === null) return false;
+  const s = v as Record<string, unknown>;
+  const status = s.status as { code?: unknown } | undefined;
+  return (
+    typeof s.spanId === 'string' &&
+    typeof s.name === 'string' &&
+    typeof s.startUnixNano === 'number' &&
+    typeof s.durationMs === 'number' &&
+    typeof status === 'object' &&
+    status !== null &&
+    typeof status.code === 'number' &&
+    typeof s.attributes === 'object' &&
+    s.attributes !== null &&
+    Array.isArray(s.events)
+  );
+}
+
 export async function readSpans(
   runDir: string,
 ): Promise<{ spans: SpanRecord[]; malformed: number }> {
@@ -16,11 +45,17 @@ export async function readSpans(
   let malformed = 0;
   for (const line of raw.split('\n')) {
     if (line.length === 0) continue;
+    let parsed: unknown;
     try {
-      spans.push(JSON.parse(line) as SpanRecord);
+      parsed = JSON.parse(line);
     } catch {
       malformed += 1;
+      continue;
     }
+    // JSON-valid but wrong-shaped (e.g. `{}`) → isolate, don't let the mapper
+    // dereference a missing field and throw.
+    if (isValidSpanRecord(parsed)) spans.push(parsed);
+    else malformed += 1;
   }
   return { spans, malformed };
 }

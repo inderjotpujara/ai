@@ -95,6 +95,22 @@ export const RunDtoSchema = z.object({
 });
 export type RunDTO = z.infer<typeof RunDtoSchema>;
 
+/** Lightweight list summary — no `spans`/`artifacts`/`degrades` (that is the
+ *  whole point of the mtime summary cache; Slice 30b Phase 3, Layer ②). */
+export const RunListItemDtoSchema = z.object({
+  id: z.string(),
+  startMs: z.number(),
+  durationMs: z.number(),
+  outcome: z.string(),
+  lifecycle: z.enum(RunLifecycle),
+  origin: z.enum(RunOrigin),
+  models: z.array(z.string()),
+  degraded: z.boolean(),
+  spanCount: z.number(),
+  tokens: TokensSchema,
+});
+export type RunListItemDTO = z.infer<typeof RunListItemDtoSchema>;
+
 export const ChatMessageDtoSchema = z.object({
   id: z.string(),
   role: z.enum(ChatRole),

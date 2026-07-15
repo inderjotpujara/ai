@@ -77,6 +77,7 @@ export function startWebServer(opts: StartOptions = {}): {
     runChatTurn,
     consent,
     uploadsDir,
+    runsRoot,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

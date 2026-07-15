@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import {
+  ArtifactKind,
   DegradeKind,
   RunLifecycle,
   RunOrigin,
@@ -13,6 +14,22 @@ test('RunOrigin carries the reserved provenance values', () => {
     'webhook',
     'api',
     'remote',
+  ]);
+});
+
+test('ArtifactKind carries the Phase-3 classification members (additive)', () => {
+  expect(Object.values(ArtifactKind) as string[]).toEqual([
+    'answer',
+    'gap',
+    'spans',
+    'degradation',
+    'other',
+    'result',
+    'resource',
+    'unverified',
+    'failed',
+    'error',
+    'media',
   ]);
 });
 

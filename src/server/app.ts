@@ -6,6 +6,9 @@ import type { ConsentRegistry } from './consent/registry.ts';
 import { handleRespond } from './consent/respond.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleRunDetail } from './runs/detail.ts';
+import { handleRunList } from './runs/list.ts';
+import { handleRunStream } from './runs/stream.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
@@ -26,6 +29,8 @@ export type ServerDeps = {
   consent: ConsentRegistry;
   /** Durable dir confined-uploads are written to/read from (Task 16). */
   uploadsDir: string;
+  /** Root dir the Runs endpoints read on-disk spans/artifacts from (Phase 3). */
+  runsRoot: string;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -55,7 +60,7 @@ export function buildFetch(
         if (!guard.verify(req)) return json({ error: 'unauthorized' }, 401);
         return await handleApi(req, url, deps);
       }
-      return await serveStatic(url, deps);
+      return await serveStatic(req, url, deps);
     } catch (err) {
       return json({ error: explain(err).title }, 500);
     }
@@ -95,6 +100,33 @@ async function handleApi(
           rec.status(200);
           return handleFeedback(req);
         }
+        if (req.method === 'GET' && url.pathname === '/api/runs') {
+          rec.status(200);
+          return handleRunList(new URLSearchParams(url.search), deps);
+        }
+        // Stream match MUST precede the bare-:id detail match so that
+        // `/api/runs/:id/stream` opens an event-stream rather than being
+        // captured as a detail lookup (which would return JSON instead).
+        const streamMatch = url.pathname.match(
+          /^\/api\/runs\/([^/]+)\/stream$/,
+        );
+        if (req.method === 'GET' && streamMatch?.[1]) {
+          // handleRunStream can return a synchronous 404 (path-escaping id)
+          // before it ever streams; reflect the REAL status in telemetry
+          // (a 200 streaming body still reports 200).
+          const res = await handleRunStream(streamMatch[1], deps, {
+            lastEventId: req.headers.get('Last-Event-ID') ?? undefined,
+            signal: req.signal,
+          });
+          rec.status(res.status);
+          return res;
+        }
+        const detailMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+        if (req.method === 'GET' && detailMatch?.[1]) {
+          const res = await handleRunDetail(detailMatch[1], deps);
+          rec.status(res.status); // may be 404 — reflect the actual status
+          return res;
+        }
         rec.status(404);
         return json({ error: 'not found' }, 404);
       } catch (err) {
@@ -106,15 +138,25 @@ async function handleApi(
   );
 }
 
-async function serveStatic(url: URL, deps: ServerDeps): Promise<Response> {
+const INDEX_HTML_HEADERS = {
+  'content-type': 'text/html; charset=utf-8',
+  'cache-control': 'no-store',
+  ...ISOLATION_HEADERS,
+};
+
+// A pathname with a trailing `.ext` (e.g. /assets/x.js, /foo.css) is treated
+// as a real asset request: a miss stays a 404, never masked by the SPA
+// fallback. Extensionless paths (client routes like /runs, /runs/run-x) are
+// eligible for the fallback below.
+const HAS_EXTENSION = /\.[a-zA-Z0-9]+$/;
+
+async function serveStatic(
+  req: Request,
+  url: URL,
+  deps: ServerDeps,
+): Promise<Response> {
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    return new Response(deps.indexHtml, {
-      headers: {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
-        ...ISOLATION_HEADERS,
-      },
-    });
+    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
   }
   if (deps.staticDir) {
     try {
@@ -135,6 +177,17 @@ async function serveStatic(url: URL, deps: ServerDeps): Promise<Response> {
     } catch (err) {
       if (!(err instanceof MediaPathError)) throw err;
     }
+  }
+  // SPA fallback: a GET/HEAD to an extensionless path that matched no real
+  // file is a client-router route (e.g. /runs, /runs/:id) being hard-loaded,
+  // reloaded, or deep-linked — boot the app instead of 404ing so the router
+  // can resolve it client-side. Non-GET/HEAD and asset-looking (has an
+  // extension) paths never get this treatment.
+  if (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    !HAS_EXTENSION.test(url.pathname)
+  ) {
+    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
   }
   return new Response('not found', {
     status: 404,

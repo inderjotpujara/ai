@@ -11,6 +11,9 @@ const policy = { port: 0, allowedOrigins: [] as string[] };
 // None of these tests exercise POST /api/upload or an /api/chat body with
 // uploadIds, so a plain (never-read) confined dir suffices.
 const uploadsDir = mkdtempSync(join(tmpdir(), 'app-uploads-'));
+// None of these tests exercise a Runs endpoint (Phase 3), so a plain
+// (never-read) confined dir suffices here too.
+const runsRoot = mkdtempSync(join(tmpdir(), 'app-runs-'));
 // None of these tests exercise POST /api/chat — a fake that throws if ever
 // invoked keeps the fixtures honest about what's actually under test here.
 const unusedRunChatTurn: RunChatTurn = async () => {
@@ -24,6 +27,7 @@ const deps: ServerDeps = {
   runChatTurn: unusedRunChatTurn,
   consent: createConsentRegistry(),
   uploadsDir,
+  runsRoot,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -90,6 +94,7 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     runChatTurn: unusedRunChatTurn,
     consent: createConsentRegistry(),
     uploadsDir,
+    runsRoot,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -127,6 +132,7 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     runChatTurn: unusedRunChatTurn,
     consent: createConsentRegistry(),
     uploadsDir,
+    runsRoot,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -143,17 +149,54 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     expect(ok.status).toBe(200);
     expect(await ok.text()).toBe('hi there');
 
+    // The HTTP layer normalizes ".." out of the pathname before the server
+    // ever sees it (both here and over the wire), so these requests arrive
+    // as the plain, extensionless "/etc/passwd" — confineToDir still never
+    // reads outside staticDir (no MediaPathError bubbles a real file), but
+    // an extensionless miss now qualifies for the SPA fallback (200,
+    // indexHtml) rather than a bare 404. The security invariant that
+    // matters — the real /etc/passwd is never read or leaked — still
+    // holds: assert the response is the safe indexHtml, not the escape
+    // target's content.
     const traversal = await fetch(`${confinedBase}/../../../../etc/passwd`);
-    expect(traversal.status).toBe(404);
-    expect(await traversal.text()).not.toContain('root:');
+    expect(traversal.status).toBe(200);
+    const traversalBody = await traversal.text();
+    expect(traversalBody).toBe(confinedDeps.indexHtml);
+    expect(traversalBody).not.toContain('root:');
 
     const encodedTraversal = await fetch(
       `${confinedBase}/%2e%2e/%2e%2e/etc/passwd`,
     );
-    expect(encodedTraversal.status).toBe(404);
+    expect(encodedTraversal.status).toBe(200);
+    expect(await encodedTraversal.text()).toBe(confinedDeps.indexHtml);
   } finally {
     confinedServer.stop(true);
   }
+});
+
+test('GET /runs (extensionless client route) falls back to the index HTML', async () => {
+  const res = await fetch(`${base}/runs`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get('content-type')).toContain('text/html');
+  expect(res.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+  expect(await res.text()).toBe(deps.indexHtml);
+});
+
+test('GET /runs/run-abc (nested extensionless client route) falls back to the index HTML', async () => {
+  const res = await fetch(`${base}/runs/run-abc`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get('content-type')).toContain('text/html');
+  expect(await res.text()).toBe(deps.indexHtml);
+});
+
+test('GET /assets/does-not-exist.js (extension, no matching file) still 404s — asset miss not masked', async () => {
+  const res = await fetch(`${base}/assets/does-not-exist.js`);
+  expect(res.status).toBe(404);
+});
+
+test('POST to an extensionless non-/api path does not get the HTML fallback (still 404)', async () => {
+  const res = await fetch(`${base}/runs`, { method: 'POST' });
+  expect(res.status).toBe(404);
 });
 
 test('serveStatic confineToDir blocks symlink escapes (real regression guard)', async () => {
@@ -182,6 +225,7 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     runChatTurn: unusedRunChatTurn,
     consent: createConsentRegistry(),
     uploadsDir,
+    runsRoot,
   };
   const symlinkServer = Bun.serve({
     port: 0,

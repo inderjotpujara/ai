@@ -1,94 +1,115 @@
-# Task 6 report — TanStack Router app shell + feature-area stubs + root render
+# Task 6 report: `summarizeRunListItem` + mtime-keyed summary cache
 
-_(Slice-30b Phase-1b frontend-scaffold plan. Note: a prior, unrelated "Task 6" report — the
-per-session bearer-token security work from Phase 1 — previously occupied this file; that work
-already landed on main and is documented in `docs/architecture.md`. This file now documents the
-Phase-1b frontend task per the current brief.)_
+_(Slice-30b Phase-3 runs plan. Note: a prior, unrelated "Task 6" report — the Phase-2
+`runChatSession` CLI/server-parity extraction — previously occupied this file; that work
+already landed on main. This file now documents the Phase-3 list-projection task per the
+current brief/controller spec.)_
 
-## Files created
+**Status:** Done. Typecheck clean, lint clean, focused tests green.
 
-- `web/src/app/router.tsx` — route tree (`rootRoute.addChildren([...])`), `router` instance, `Register` module augmentation.
-- `web/src/app/app-shell.tsx` — `AppShell` layout: top nav (7 areas) + `SessionsSidebar` + `Outlet` wrapped in `RegionErrorBoundary` + theme toggle `Button`.
-- `web/src/app/app-shell.test.tsx` — RED→GREEN test (4 assertions per brief, unmodified assertions).
-- `web/src/main.tsx` — `StrictMode > ThemeProvider > RouterProvider` root render; imports Geist fonts + `tokens.css`.
-- `web/src/features/chat/index.tsx` → `ChatArea` (`area-chat`)
-- `web/src/features/crews/index.tsx` → `CrewsArea` (`area-crews`)
-- `web/src/features/workflows/index.tsx` → `WorkflowsArea` (`area-workflows`)
-- `web/src/features/builders/index.tsx` → `BuildersArea` (`area-builders`)
-- `web/src/features/runs/index.tsx` → `RunsArea` (`area-runs`)
-- `web/src/features/runs/run-detail.tsx` → `RunDetail` (`run-detail`, reads `useParams({ from: '/runs/$runId' })`)
-- `web/src/features/library/index.tsx` → `LibraryArea` (`area-library`)
-- `web/src/features/settings/index.tsx` → `SettingsArea` (`area-settings`)
-- `web/src/features/sessions/index.tsx` → `SessionsSidebar` (`sessions-sidebar`)
+**Commit:** `0e18909` — `feat(run): summarizeRunListItem + mtime-keyed summary cache`
 
-All exactly match the brief's stub pattern (near-identical by design — one component per feature area, intended feature-slicing, not duplication to abstract away).
+## What was built
 
-## Verified TanStack Router v1 API (installed: `@tanstack/react-router@1.170.18`, `@tanstack/router-core@1.171.15` via bun's hoisted store)
+`src/run/run-dto.ts` gained:
 
-Checked the installed `.d.ts` files directly (`node_modules/@tanstack/react-router/dist/esm/index.d.ts`, `route.d.ts`, `router.d.ts`, `RouterProvider.d.ts`) before writing any code:
+1. **Shared `runRootSummary(tree: TraceNode[])` helper** (private, not exported) — derives
+   `{ startMs, durationMs, outcome, lifecycle, contentPolicy }` from the top-level trace roots,
+   name-agnostic across `agent.run` / `crew.run` / `workflow.run` (earliest recognized root in
+   the existing `RUN_ROOT_NAMES` set, which `mapRunToDto` already used). **Both `mapRunToDto`
+   and `summarizeRunListItem` now call this one function** — `mapRunToDto` was refactored to
+   replace its inline root-derivation logic (previously ~25 lines computing `rootSpan`,
+   `runRootPresent`, `outcomeSource`, `outcome`, `lifecycle` directly in the function body) with
+   a single `const { startMs, durationMs, outcome, lifecycle, contentPolicy } = runRootSummary(tree)`
+   call. This is the "genuinely shared, not replicated" path the task demanded: there is exactly
+   one place that decides lifecycle/duration/outcome/startMs from a trace tree, so the list and
+   detail projections cannot drift, and neither can inherit the bug in `run-trace.ts`'s
+   `summarizeRun` (which does `spans.find(s => s.name === 'agent.run')` and reports completed
+   crew.run/workflow.run runs as durationMs 0 / lifecycle Running). `run-trace.ts` was **not**
+   touched — confirmed via `git show --stat 0e18909`, only `src/run/run-dto.ts` and the new test
+   file changed.
 
-- `createRootRoute`, `createRoute`, `createRouter`, `RootRoute`, `Route` — all re-exported from `./route.js` / `./router.js`, matching the brief exactly.
-- `createMemoryHistory` — re-exported from `@tanstack/history`, matches.
-- `Link` (with `activeOptions`), `Outlet`, `useParams` — all present and match the brief's usage.
-- `Register` interface lives in `@tanstack/router-core` (`router.d.ts:23`); the brief's `declare module '@tanstack/react-router' { interface Register { router } }` pattern is the documented augmentation point and works (module augmentation is visible in `@tanstack/react-router` because it re-exports the core types).
-- `RouterProvider` props: `{ router: TRouter } & RouterOptions...` — matches brief's `<RouterProvider router={router} />` usage exactly, no adaptation needed.
+2. **`summarizeRunListItem(runsRoot, id): Promise<RunListItemDTO | undefined>`** — reads
+   `spans.jsonl` only (no artifacts readdir, no degradation.jsonl read), builds the tree via the
+   existing `buildTree`, calls `runRootSummary`, then does a single pass over the raw
+   `SpanRecord[]` to collect `models` (from `ATTR.MODEL_ID`), summed `tokens` (from
+   `ATTR.USAGE_INPUT_TOKENS`/`USAGE_OUTPUT_TOKENS`), and `degraded` (`true` if any span carries a
+   `reliability.degrade` event — already present in spans.jsonl, so no separate degradation.jsonl
+   read is needed, which is the whole point of this projection being cheap). Output is validated
+   through `RunListItemDtoSchema.parse` before returning, matching `mapRunToDto`'s
+   fail-loudly-here convention.
 
-**Two adaptations vs. the brief's literal code** (both anticipated by the brief's own caveat about the `route` helper's `JSX.Element` typing):
+3. **Module-level `summaryCache: Map<string, { mtimeMs: number; item: RunListItemDTO }>`** keyed
+   on **`runDir` → `{mtimeMs of spans.jsonl, item}`** — the approved deviation from the brief's
+   literal directory-mtime wording. A `// why:` comment on the declaration explains: a directory's
+   mtime does not change on file append (only on entry add/remove/rename), so keying on the run
+   directory would leave an in-flight run's list summary stale as spans stream in; keying on
+   `spans.jsonl`'s own `mtimeMs` (read via `stat`) is what actually invalidates on append. A cache
+   miss (file absent) returns `undefined` immediately without ever calling `readSpans`.
+   `__summaryCacheSize()` is exported test-only so cache-hit-vs-miss can be asserted by entry count
+   rather than a spy/mock.
 
-1. **`route()` helper's component parameter type.** The brief's `component: () => JSX.Element` doesn't satisfy `createRoute`'s `component?: RouteComponent` option (`RouteComponent = AsyncRouteComponent<{}>`, a more specific function-component-like type, not any 0-arg function returning `JSX.Element`). Fixed by importing `type { RouteComponent }` from `@tanstack/react-router` and typing the helper's second parameter as `RouteComponent` directly instead of `ComponentType` or `() => JSX.Element`.
-2. **`route()` helper's path parameter needed to stay a literal type.** With `path: string` (widened), `createRoute`'s path-literal-driven `RouteIds` inference collapsed to just `"__root__"`, and `useParams({ from: '/runs/$runId' })` in `run-detail.tsx` failed to typecheck (`Type '"/runs/$runId"' is not assignable to type '"__root__"'`) because the registered router's route-id union no longer included `/runs/$runId`. Fixed by making the helper generic: `const route = <TPath extends string>(path: TPath, component: RouteComponent) => ...` — this preserves the path as a literal type through `createRoute`, restoring correct `RouteIds` inference for the whole tree (including the dynamic `/runs/$runId` route) and clearing the `useParams` error with no `any`.
+## Tests — `tests/run/run-summary.test.ts` (new, 7 tests)
 
-No other API reshaping was needed — `createRouter({ routeTree })`, `RouterProvider`, `Link`/`Outlet`, and `useParams({ from })` all match the brief's code verbatim.
+- `summarizes an agent.run without spans/artifacts arrays` — brief's base case, plus explicit
+  `'spans' in item` / `'artifacts' in item` assertions (both `false`) to prove the projection is
+  genuinely list-cheap in shape, not just by omission of fields in the type.
+- **Guardrail (required by the task, not present in the brief's literal sample code):**
+  `completed crew.run (no agent.run) gets Done lifecycle + non-zero duration, NOT the agent.run-only
+  bug` — asserts `lifecycle: Done`, `durationMs: 42`, `outcome: 'answer'`, `startMs: 2000` for a
+  `crew.run` root with a `workflow.step` child and no `agent.run` span anywhere. This is exactly the
+  fixture shape that would report `durationMs: 0` / `lifecycle: Running` under the old
+  `spans.find(s => s.name === 'agent.run')` logic pattern.
+- Guardrail: `completed workflow.run (no agent.run) gets Done lifecycle + non-zero duration` —
+  `durationMs: 33`, `lifecycle: Done`.
+- Guardrail: `crew.run root with resource outcome → Failed lifecycle`.
+- `degraded=true derived from span reliability.degrade events (no degrades-file read)` — proves
+  `degraded` detection works without a `degradation.jsonl` on disk at all.
+- **Cache invalidation-on-append (the mechanism under test in the brief):** writes run `r2` with 1
+  span, calls `summarizeRunListItem` once, snapshots `__summaryCacheSize()`, calls it again and
+  asserts the cache size is unchanged (a hit — no new entry) while also asserting the returned
+  item's `spanCount` is still 1 (proves the hit returns a *correct* memoized value, not just "some"
+  value). Then sleeps 10ms and **overwrites** `spans.jsonl` with 2 spans (content shape identical to
+  what a real append produces), which bumps the file's real `mtimeMs`, and asserts the next call
+  returns `spanCount: 2` — proving the recompute path fires on a genuine mtime change.
+- `undefined for a run with no spans`.
 
-## TDD
+## Gate output
 
-- **RED:** Wrote `web/src/app/app-shell.test.tsx` verbatim from the brief first. Ran `cd web && bun run test src/app/app-shell.test.tsx` → failed as expected: `Failed to resolve import "./router.tsx"` (file did not exist yet).
-- **GREEN:** Implemented the 8 feature stubs, `run-detail.tsx`, `app-shell.tsx`, `router.tsx`, `main.tsx` per the brief (with the two adaptations above). Re-ran the same test command → 4/4 passed on the first attempt after the router-typing fixes (no assertions weakened; all `findByRole`/`findByTestId` queries kept as-is, matching the real 7 areas + theme toggle + run-detail's `$runId` interpolation).
-
-## Gate outputs (verbatim)
-
-**1. `cd web && bun run test src/app/app-shell.test.tsx`**
 ```
-$ vitest run src/app/app-shell.test.tsx
- RUN  v4.1.10 /Users/inderjotsingh/ai/web
- Test Files  1 passed (1)
-      Tests  4 passed (4)
+bun test --path-ignore-patterns 'web/**' tests/run/run-summary.test.ts tests/run/run-dto.test.ts
+  21 pass / 0 fail / 77 expect() calls
+bun test --path-ignore-patterns 'web/**' tests/run/
+  34 pass / 0 fail / 110 expect() calls   (full run/ directory — nothing else regressed)
+bun run typecheck
+  tsc --noEmit — clean (noUncheckedIndexedAccess)
+bun run lint:file -- "src/run/run-dto.ts" "tests/run/run-summary.test.ts"
+  Checked 2 files. No fixes applied.  (one bunx biome check --write formatting pass needed first —
+  two multi-line-wrap reflows, no logic change)
 ```
 
-**2. `cd web && bun run test`** (full web suite)
-```
-$ vitest run
- RUN  v4.1.10 /Users/inderjotsingh/ai/web
- Test Files  8 passed (8)
-      Tests  22 passed (22)
-```
-(8 suites = the 4 pre-existing Task 1-5 suites + this task's `app-shell.test.tsx`, all green — nothing broken by adding `main.tsx`/router.)
+TDD sequence followed: wrote `tests/run/run-summary.test.ts` first, ran it, confirmed it failed
+with `Export named 'summarizeRunListItem' not found in module '.../src/run/run-dto.ts'` (0 pass / 1
+fail / 1 error), then implemented, then reran to green.
 
-**3. `cd web && bun run typecheck`**
-```
-$ tsc --noEmit
-```
-Clean — no output, exit 0.
+## Self-review / concerns
 
-**4. `bun run lint`** (from repo root)
-```
-Checked 574 files in 121ms. No fixes applied.
-Found 14 warnings.
-```
-0 errors. The 14 warnings are all pre-existing `noExplicitAny` warnings in unrelated files (`tests/provisioning/provisioner.test.ts`, `tests/resource/ollama-control.test.ts`, etc.) — none in any file touched by this task. Ran `bunx biome check --write` scoped to the 13 new/changed web files first, which auto-fixed import-order and one JSX-formatting issue (5 files reformatted: `router.tsx`, `app-shell.tsx`, `app-shell.test.tsx`, `main.tsx`, `sessions/index.tsx` — alphabetized imports, wrapped the sessions-sidebar `<p>` text) — no `// biome-ignore` needed anywhere, no repo-wide config changes.
-
-## Self-review
-
-- All 7 nav areas + run-detail render behind real routes; `AppShell` composes `SessionsSidebar`, `RegionErrorBoundary`-wrapped `Outlet`, and the theme-toggle `Button` exactly as specified.
-- `main.tsx` matches `index.html`'s existing `<script type="module" src="/src/main.tsx">` mount point — no changes needed there.
-- Feature stub near-duplication (8 near-identical components) is intentional feature-slicing per the task's explicit instruction, not abstracted away.
-- No `any` introduced; the two router-typing adaptations (`RouteComponent` type import, generic `route<TPath>` helper) are minimal, correctly typed fixes with no test-assertion weakening.
-- Confirmed via `.d.ts` inspection (not guesswork) that every TanStack Router API surface used matches the installed 1.170.18/1.171.15 versions before finalizing.
-
-## Concerns
-
-- None blocking. One note for future tasks: the `route()` helper in `router.tsx` is a small local abstraction — if a later phase needs route-specific options (loaders, search-param validators, etc.), it will likely need to move to calling `createRoute` directly per route rather than through this generic wrapper, since the wrapper only threads `path`/`component`.
-
-## Unplanned fix: `.gitignore` `runs/` collision with the new feature area
-
-`git add web/src/features/runs/` silently failed — both the tracked `.gitignore` (line 5: `runs/`) and the local, untracked `.git/info/exclude` (line 8: `runs/`) had an **unanchored** rule meant for the repo-root run-artifacts directory (`./runs/agent-builder-*`), which also matched any nested `runs/` folder, including this task's new `web/src/features/runs/`. Fixed both by anchoring to `/runs/` (matching the existing, correctly-anchored `/memory/` convention two lines below in `.gitignore`) — confirmed via `git check-ignore -v` before and after that this only unignores `web/src/features/runs/*` and does NOT unignore the real `./runs/` artifacts directory. This one-line `.gitignore` fix is included in this task's commit; the `.git/info/exclude` fix is local-only (untracked, not part of any commit) and only affects this machine's checkout.
+1. **How the run-root logic is shared:** literally one function (`runRootSummary`), called from
+   both `mapRunToDto` and `summarizeRunListItem` — not two hand-copied implementations. This was
+   verified by re-reading the diff after the edit: `mapRunToDto`'s body no longer contains any
+   `RUN_ROOT_NAMES.has(...)` check or `outcomeSource`/`runRootPresent` local logic — that entire
+   block was deleted and replaced with the destructured call. There is now no code path in this
+   file that computes lifecycle/duration/outcome from a trace tree except through
+   `runRootSummary`, so a future edit to one caller's expectations can't silently diverge from the
+   other's.
+2. **How cache invalidation-on-append was tested:** no mock of `fs.stat` or the clock — a real
+   10ms sleep followed by a real file rewrite, then asserting the *content* of the recomputed
+   summary (`spanCount: 2`) changed, not just that recompute was *attempted*. This proves both that
+   the mtime comparison correctly detects the change and that the recompute path produces a
+   correct result, not merely that some new object was returned.
+3. Did not add a live end-to-end smoke test against a real orchestrator run — out of scope for
+   this task (pure projection over on-disk spans.jsonl fixtures, same style as the existing
+   `run-dto.test.ts` and `run-trace.test.ts`).
+4. `run-trace.ts`'s `summarizeRun` (the CLI path with the known agent.run-only bug) was
+   deliberately left untouched per the task's explicit instruction — it is out of scope here and
+   is not depended on by the new code.

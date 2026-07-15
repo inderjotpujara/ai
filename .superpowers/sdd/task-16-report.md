@@ -1,47 +1,132 @@
-# Task 16 report — GitHub-PAT gated live-verify
+# Task 16 report: `RunsArea` — rich searchable/faceted/paginated list
 
-## Status: DONE
+Slice 30b Phase 3 (Runs), web layer. Status: **DONE, gate green, committed.**
 
-## What was built
-
-Created `tests/integration/github-mcp.live.test.ts`:
-
-- Gate: `const HAS_PAT = !!process.env.GITHUB_PAT;` → `describe.skipIf(!HAS_PAT)('github mcp live-verify', ...)`.
-- Inside the gated `test(...)` (120_000ms timeout):
-  1. `mkdtemp` a scratch dir (`node:os` tmpdir + `node:fs/promises`).
-  2. Writes a temp `mcp.json` containing only the `github` pack server:
-     `{ mcpServers: { github: { type: 'http', url: 'https://api.githubcopilot.com/mcp/', headers: { Authorization: 'Bearer ${GITHUB_PAT}' } } } }`
-     (matches `src/mcp/pack.ts`'s `github` entry exactly).
-  3. `loadMcpConfig(configPath)` — env expansion pulls the real `GITHUB_PAT` from `process.env` (default `env` param); asserts `config.dormant` is empty and `github` is in `config.entries`.
-  4. `mountAll(config, { consent: { autoYes: true }, approvalsFile: <tmp path> })` — `autoYes` bypasses the TTY consent prompt (`ensureConsent` short-circuits on `deps.autoYes`, no hang); `approvalsFile` points into the same tmp dir so the run never touches the repo's real `.mcp-approvals.json`.
-  5. Asserts `registry.mounted` includes `'github'`, `registry.skipped` is empty, and `Object.keys(registry.merged).length > 0` (≥1 tool exposed).
-- `afterEach` closes the registry (`reg.close()`, swallowing errors) and `rm`s the tmp dir recursively — cleans up both the temp `mcp.json` and the temp approvals file; the repo's own `.mcp-approvals.json` is never referenced or mutated.
-
-## Verification performed
-
-- `bun test tests/integration/github-mcp.live.test.ts` **without** `GITHUB_PAT` → `0 pass, 1 skip, 0 fail`. Confirmed the describe block is skipped, not silently passing.
-- `bun run typecheck` → clean (whole repo).
-- `bun run lint:file tests/integration/github-mcp.live.test.ts` → clean after two fixes:
-  - reordered the `mount.ts` import (`type MountedRegistry` before `mountAll`) per Biome's `organizeImports`.
-  - added a `biome-ignore lint/suspicious/noTemplateCurlyInString` comment on the `Authorization: 'Bearer ${GITHUB_PAT}'` literal (same pattern already used in `src/mcp/pack.ts` for the same string — it's deliberately unexpanded at write-time, expanded later by `loadMcpConfig`).
-- Re-ran the skip test after lint fixes to confirm still green.
-- `git status` before commit confirmed no stray `.mcp-approvals.json` or other artifact was created by the (skipped) test run.
-
-## Self-review
-
-- **Gating correct**: `HAS_PAT` is a plain env check; `describe.skipIf` is the idiom already used in `tests/integration/reliability-live.test.ts` and `tests/integration/fetch-mount.live.test.ts`.
-- **Shapes match real signatures**: verified against `src/mcp/config.ts` (`loadMcpConfig(path?, env?)`, default `env = process.env`) and `src/mcp/mount.ts` (`mountAll(config, deps): Promise<MountedRegistry>`, `MountAllDeps.consent?: Partial<ConsentDeps>`, `MountAllDeps.approvalsFile?: string`). No mocking of `mount` — a real network mount occurs when run with a PAT (Task 18's job).
-- **No hang / no repo pollution**: `consent.autoYes: true` avoids the interactive TTY prompt path in `ensureConsent`; `approvalsFile` is redirected into the mkdtemp'd scratch dir, so a live run cannot write to the project's real `.mcp-approvals.json`. The scratch dir (config + approvals file) is removed in `afterEach` regardless of pass/fail.
-- Only committed the new test file — left other in-flight, unrelated working-tree changes (other parallel tasks' briefs/reports/docs) untouched.
+(Note: this overwrites a stale `task-16-report.md` from an earlier
+task-numbering pass in Phase 2 of this same slice — an unrelated
+"composer drag-drop + paste-image upload" report — per the numbering-reuse
+convention already applied to this file once before.)
 
 ## Commit
 
-`ab59b35` — `test(mcp): gated GitHub-PAT remote MCP live-verify` (branch `slice-26-altruntime-remote-auth`)
+`5de53d9885c05210701d4da1740025496875e2f2` —
+`feat(web): RunsArea — searchable/faceted/paginated runs history list`
 
-## Concerns
+## What was built
 
-- None blocking. The brief's "Interfaces" line also mentions "a benign read tool call succeeds," but the concrete Step 1–2 scope (and the parent task instructions) only require proving the mount + ≥1 tool exposed here; actually invoking a GitHub tool is left to Task 18's live pass, where a real PAT is available to choose a safe read-only call (e.g. `get_me` or similar) without hardcoding assumptions about which tools the remote server currently exposes.
+Replaced the Phase-1b stub (`web/src/features/runs/index.tsx`, previously
+just a static "Streaming chat lands in Phase 2" placeholder) with a real,
+working component:
 
-## Note
+- Search input (`data-testid="runs-search"`), an outcome facet `<select>`
+  (`runs-outcome-filter`, options sourced from the actual outcome strings
+  `src/run/run-dto.ts` emits — `answer`/`error`/`resource`/`gap`/`unknown`
+  — plus an "All outcomes" escape hatch, since `outcome` is a free-form
+  `z.string()` in `RunListItemDtoSchema`, not a closed enum), and a
+  degraded facet `<select>` (`runs-degraded-filter`: All / Degraded only /
+  Clean only).
+- State (`search`, `outcome`, `degraded`) is assembled into a query string
+  via `URLSearchParams` in a pure `toQueryString(query, cursor)` helper; a
+  `useEffect` keyed on `[query, cursor]` calls
+  `apiFetch('/runs?<qs>', { schema: RunListResponseSchema })`. Changing any
+  facet/search resets the cursor stack (a fresh query goes back to page 1).
+- Rows render as `<Link to="/runs/$runId" params={{ runId: item.id }}>`
+  (route confirmed present in `web/src/app/router.tsx`), showing
+  id / outcome / lifecycle / models (joined) / tokens
+  (`(tokens?.input ?? 0) + (tokens?.output ?? 0)`, since `TokensSchema` in
+  `src/contracts/dto.ts` makes the whole `tokens` object optional) / a
+  "degraded" badge when `item.degraded`.
+- Cursor pagination: a `cursors: string[]` stack. "Next" pushes
+  `page.nextCursor` (rendered only when present); "First page" pops back to
+  the empty stack (rendered only once you've paged forward). Matches what
+  `RunListResponseSchema` actually exposes — a `nextCursor`, no
+  `prevCursor` — so there's no arbitrary jump-to-page, only forward + reset.
+- Empty page → "No runs yet"; fetch failure → a `role="alert"` in-region
+  message. This error state is handled as component-local `useState`, not
+  via `RegionErrorBoundary` — that boundary only catches render-time throws
+  through `componentDidCatch`, not async/promise rejections from the
+  `useEffect` fetch (verified by reading
+  `web/src/shared/ui/error-boundary.tsx`). The whole component is still
+  wrapped in `<RegionErrorBoundary region="Runs">` for genuine render
+  errors, matching `ChatArea`'s pattern.
+- Styled with `var(--color-*)` tokens matching `ChatArea`/`Button`
+  (`--color-fg`, `--color-muted`, `--color-surface`, `--color-border`,
+  `--color-accent`).
 
-This overwrites a stale `task-16-report.md` from an earlier task-numbering pass (an unrelated "MCP tool-call breaker wrap" report) per the brief's "Overwrite stale report" instruction.
+## Sibling pattern followed
+
+`web/src/features/chat/index.tsx` (`ChatArea`) — the only other
+feature-area doing real data work at the time — for the
+`RegionErrorBoundary` wrap + `apiFetch` usage shape. `web/src/shared/ui/button.tsx`
+for the Next/First-page buttons. `web/src/features/runs/run-detail.tsx`
+confirmed the `/runs/$runId` route already exists in the router config, and
+`web/src/shared/contract/client.ts` confirmed `apiFetch`'s exact signature
+(`(path, { schema, method?, body?, signal? })`, prepends `/api`, throws
+`ApiError` on `!res.ok`, otherwise `schema.parse(await res.json())`).
+
+## Tests
+
+Brief's one test plus 4 more (5 total, all in
+`web/src/features/runs/index.test.tsx`):
+1. Brief's test — lists `run-1` fetched from `/api/runs`.
+2. Empty page (`{ items: [], total: 0 }`) → renders "No runs yet".
+3. A 500 response → renders `role="alert"`.
+4. Changing the search input triggers a re-fetch whose URL contains
+   `search=hello`.
+5. Clicking Next when `nextCursor` is present triggers a re-fetch whose URL
+   contains `cursor=abc`.
+
+All 5 use `renderAt('/runs')` (not a bare `render(<RunsArea />)`) — `<Link>`
+needs router context, which turned out to be required for every test that
+renders a populated row, not just the brief's original one.
+
+**Test command + output:**
+```
+cd web && bun run test src/features/runs/index.test.tsx
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+```
+
+## Gate results
+
+- `cd web && bun run typecheck` → clean (`tsc --noEmit`, no output). One
+  fix needed along the way: a mock `fetch` in the search test had no typed
+  parameter, so `fetchMock.mock.calls.at(-1)?.[0]` inferred against an
+  empty tuple (`TS2493`) — fixed by giving the mock an explicit
+  `(_input: RequestInfo | URL) => ...` signature.
+- `cd web && bun run test src/features/runs/index.test.tsx` → 5/5 pass.
+- `bun run lint:file -- "web/src/features/runs/index.tsx"
+  "web/src/features/runs/index.test.tsx"` → clean (root linter does cover
+  `web/`; it invokes `biome check`). Two fixes needed:
+  1. `useEffect` deps: biome's `useExhaustiveDependencies` wanted the whole
+     `query` object as a dependency, not the three destructured fields —
+     changed `[query.search, query.outcome, query.degraded, cursor]` to
+     `[query, cursor]`.
+  2. Ran `bunx biome check --write` once to auto-fix formatting (collapsed
+     a multi-line `vi.stubGlobal` call and two single-child JSX blocks per
+     biome's line-width rule); re-verified typecheck + tests still green
+     after the auto-fix.
+- `bun run docs:check` (pre-commit hook) → passed automatically on commit;
+  no new `src/` subsystem was added (only `web/src/features/runs/index.tsx`
+  changed, an already-documented area), so no `architecture.md` edit was
+  required for this task-level UI change.
+
+## Concerns / notes for follow-on work
+
+- `outcome` is `z.string()` in the contract (not an enum), so the facet
+  options list (`answer`/`error`/`resource`/`gap`/`unknown`) is a
+  best-effort mirror of what `src/run/run-dto.ts` currently emits, not a
+  contract-enforced set. If the server starts emitting a new outcome
+  string, the dropdown won't offer it (it's a `<select>`, not free text).
+  Worth revisiting if outcome is ever promoted to a proper enum, or if a
+  later UI wants per-facet counts.
+- No debounce on the search input — every keystroke re-fetches. The brief
+  explicitly allowed "a plain controlled input re-fetching on change is
+  fine," so this is a deliberate, brief-sanctioned simplification, not an
+  oversight; a follow-on could debounce if it proves noisy against a real
+  `runsRoot` with many files.
+- Per the T13 review carry-forward noted in the dispatch brief: this list
+  uses plain `apiFetch` (not the SSE stream `useRunTrace`/`waterfall.tsx`
+  consume for the detail view), so the schema-decoupling concern from that
+  earlier review doesn't apply here — `RunListResponseSchema` is passed
+  straight into `apiFetch` as intended.

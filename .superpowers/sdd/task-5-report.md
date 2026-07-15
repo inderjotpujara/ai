@@ -1,147 +1,150 @@
-# Task 5 report: contract client + transport port interface (Slice-30b Phase 1b)
+# Task 5 report — `mapRunToDto` (src/run/run-dto.ts) — Slice 30b Phase 3
 
-## Note on this file
-This overwrites a stale `task-5-report.md` from an earlier Slice-30b Phase 1
-task ("Config — `ConfigEntry.strict?` flag + server `AGENT_WEB_*` entries"),
-which shares this filename due to per-phase task numbering. That content is
-preserved in git history. This report covers the actual current Task 5
-(Slice-30b **Phase 1b**, frontend-scaffold plan: contract client + transport
-port interface).
+**Status:** DONE
+**Commit:** `971179a` — `feat(run): mapRunToDto — flatten spans/degrades/artifacts into a validated RunDTO`
+**Branch:** `slice-30b-phase3-runs`
+**Tests:** `bun test tests/run/run-dto.test.ts` → 9 pass / 0 fail / 41 expect() calls.
+**Gate:** `bun run typecheck` clean; `bun run lint:file` clean (after biome auto-format).
 
-## Status: DONE
+## What shipped
 
-## Files
-- `web/src/shared/contract/client.ts` — `sessionToken()`, `apiFetch<T>()`, `getHealth()`, `class ApiError extends Error`.
-- `web/src/shared/contract/client.test.ts` — 3 tests (token read, bearer+zod-parse happy path, non-2xx → ApiError).
-- `web/src/shared/transport/types.ts` — `TransportEvent`, `ChatTransport`, `RunStream` (all `type`, no `ai`/`@ai-sdk/*` import).
-- `web/src/shared/transport/types.test.ts` — 2 tests (stub adapter shape, `RunStream` cursor).
+- `src/run/run-dto.ts` — `mapRunToDto(runsRoot, id): Promise<RunDTO | undefined>` plus the shared
+  `readDegrades(runDir): Promise<DegradeDTO[]>` helper. `summarizeRunListItem` + the mtime summary
+  cache are **not** here — those are Task 6, as instructed.
+- `tests/run/run-dto.test.ts` — 9 tests off fabricated tmp-dir run fixtures.
 
-## Commit
-`08d46a1bf26b002a8a3a9d91143fbf58ef31f870` — feat(web): token'd contract client + bidirectional transport port interface
+## Interfaces consumed (all verified against real source, not assumed)
 
-## TDD RED → GREEN
-- RED: ran `cd web && bun run test src/shared/contract/ src/shared/transport/` before writing sources.
-  `client.test.ts` failed as expected: `Failed to resolve import "./client.ts" from "src/shared/contract/client.test.ts"`.
-  `types.test.ts` unexpectedly showed 2 passed at RED time — because its only
-  imports of `./types.ts` (`ChatTransport`, `RunStream`) are `import type`-only,
-  so esbuild elides the import statement entirely under `verbatimModuleSyntax`;
-  the module is never resolved at runtime by Vitest. Noting this as an
-  observation (not a defect): the file still had to exist for `bun run
-  typecheck`, since `tsc` (unlike the Vitest/esbuild transform) does resolve
-  type-only imports to check them, and it's committed regardless as scoped by
-  the brief.
-- GREEN: wrote `client.ts` and `types.ts` per the brief, then re-ran the same
-  command — 5/5 passed.
+- `readSpans` / `buildTree` / `type TraceNode` from `./run-trace.ts` — reused, not reimplemented.
+  `buildTree` sorts roots ascending by `startUnixNano`, so `tree[0]` is the earliest root.
+- `type SpanRecord` from `../telemetry/jsonl-exporter.ts` — confirmed `startUnixNano`/`endUnixNano`
+  are µs×1000 (ordering only); `durationMs` is exact ms. Events carry `timeUnixNano`.
+- `ATTR` from `../telemetry/spans.ts` — verified every key used: `OUTCOME`(`agent.outcome`),
+  `CONTENT_POLICY`(`content.policy`), `DELEGATION_TARGET`/`DELEGATION_DEPTH`/`DELEGATION_ANCESTORS`,
+  `MODEL_ID`(`gen_ai.request.model`)/`MODEL_PROVIDER`/`MODEL_NUM_CTX`/`MODEL_FOOTPRINT_BYTES`/
+  `MODEL_RUNTIME_DEGRADED`, `USAGE_INPUT_TOKENS`/`USAGE_OUTPUT_TOKENS`. The per-span degrade event
+  name is `reliability.degrade` (confirmed in `recordDegrade`).
+- `type DegradeEvent` from `../reliability/ledger.ts` — `{kind, subject, reason, detail?, from?, to?,
+  attempts?, lane?}`. No `spanId` on disk → `DegradeDTO.spanId` left unset.
+- `readRunArtifacts` from `./artifacts.ts` (Task 4) — wired directly into `RunDTO.artifacts`.
+- Contracts from `../contracts/index.ts`: `RunDtoSchema`, `SpanStatus`, `RunLifecycle`, `RunOrigin`,
+  `DegradeKind`, `DegradeDTO`, `RunDTO`, `SpanDTO`. Output validated through `RunDtoSchema.parse`
+  before return (a test asserts the parse does not throw).
 
-## Brief sample-code defect found and fixed
-The brief's `types.test.ts` sample yields:
-```ts
-yield { type: StatusEventType.RunStart, eventId: '1', data: { runId: 'r1' } };
-```
-The actual `RunStartEventSchema` in `src/contracts/events.ts` is:
-```ts
-z.object({ type: z.literal(StatusEventType.RunStart), runId: z.string(), task: z.string().optional() })
-```
-— a **flat** `runId` field, not a nested `data` object. The brief's literal
-would fail to satisfy `TransportEvent = StatusEvent & { eventId: string }`
-under `tsc` (the object doesn't match any member of the `RunStart`
-discriminated-union arm — missing `runId`, extraneous `data`). Fixed the test
-to `{ type: StatusEventType.RunStart, eventId: '1', runId: 'r1' }`, matching
-the real contract shape. Per the standing "plan sample code ships defects"
-lesson, this was corrected against the actual contract rather than softened
-or worked around.
+## Correctness rules implemented + hand-verified against fixtures
 
-## @contracts alias resolution — confirmed both ways
-- **Vitest**: `types.test.ts` imports `StatusEventType` (a value — a real
-  string enum, not type-only) from `@contracts` and invokes it at runtime
-  inside the async generator; the 5/5 green run proves the alias resolves
-  under Vitest's own resolver (`web/vitest.config.ts`'s
-  `resolve.alias['@contracts'] → ../src/contracts/index.ts`), independent of
-  tsc's `paths` mapping.
-- **tsc**: `client.ts` imports `ZodType` (type) from `zod`; `types.ts` imports
-  `RespondRequest`/`StatusEvent` (types) from `@contracts`. `bun run
-  typecheck` (from `web/`) is clean, proving `web/tsconfig.json`'s `paths: {
-  "@contracts": ["../src/contracts/index.ts"] }` maps correctly.
-- `zod` (root dependency, pinned `^4.4.3`) resolves from `web/` via workspace
-  hoisting — confirmed via `node -e "require.resolve('zod')"` run from
-  `web/`, resolving to `node_modules/.bun/zod@4.4.3/node_modules/zod`. No
-  divergent zod version was added; the root pin is reused as-is.
+- **offsetMs** = `(span.startUnixNano - rootStartUnixNano) / 1e6`, `rootStartUnixNano =
+  tree[0].span.startUnixNano` (earliest root). Fixture run-1: child start `1_010_000_000`, root
+  `1_000_000_000` → offset `10`. Root offset `0`. ✓
+- **startMs** = `round(rootStartUnixNano / 1e6)`. run-1 → `1000`. ✓ (based on earliest root, per spec —
+  distinct from `durationMs`, which comes from the `agent.run` span.)
+- **depth** — root 0, child parent+1, assigned during a depth-first flatten in tree/offset order. ✓
+- **status** — `code === 2 → SpanStatus.Error` else `Ok` (OTel ERROR===2); `statusMessage` from
+  `span.status.message`. ✓
+- **tokens (per span)** — from `USAGE_*` when either present, else omitted (most spans carry none).
+  **run tokens** = sum of per-span input/output; `undefined` when no span carried any. run-7 → `{13,12}`. ✓
+- **lifecycle** — `Running` when no `agent.run` span exists yet (BatchSpanProcessor exports on end,
+  so an in-flight root is simply absent); else `Failed` when root `status.code===2` OR
+  `outcome==='resource'`; else `Done`. Only Running/Done/Failed emitted. All three branches tested,
+  plus the `outcome=resource on a non-error root` case (run-2b) which must still be Failed. ✓
+- **models** = distinct `MODEL_ID` across spans; **roots** = tree roots' span ids;
+  **degraded** = `degrades.length > 0` (run-level) and per-span `reliability.degrade` event presence.
+- **origin** = `RunOrigin.Manual`, **owner** = `'local'` (reserved constants). **malformedSpans** from
+  `readSpans`; **spanCount** = `spans.length`. **undefined** when the run dir has no spans. `node` omitted.
 
-## Gate 1 — tests
-Command: `cd web && bun run test src/shared/contract/ src/shared/transport/`
-```
- Test Files  2 passed (2)
-      Tests  5 passed (5)
-```
+## Test cases
 
-## Gate 2 — typecheck
-Command: `cd web && bun run typecheck`
-```
-$ tsc --noEmit
-```
-(clean — no output, exit 0)
+1. Clean run — offsets/depth/tokens-sum/startMs/durationMs/roots/Done lifecycle + `RunDtoSchema.parse`.
+2. Error root (`code:2`) → Failed + span status Error + statusMessage.
+3. `outcome=resource` on a non-error root → still Failed (span status stays Ok).
+4. In-flight run (no `agent.run`) → Running; delegation projection (agent + `depth`/`ancestors` split on ` → `).
+5. Degrades from `degradation.jsonl` → `degraded=true`, label populated, `spanId` unset.
+6. Per-span `reliability.degrade` event → `span.degraded=true`, event offset projected.
+7. No spans → `undefined`; malformed line counted (`malformedSpans=1`, `spanCount=1`).
+8. Artifacts wired in from the run dir (`answer.txt` + `spans.jsonl`).
+9. Multi-gen token roll-up (`{13,12}`), distinct models `[m1,m2]`, token-less span omits tokens.
 
-## Gate 3 — lint
-Command: `bun run lint:file -- "web/src/shared/contract/client.ts" "web/src/shared/contract/client.test.ts" "web/src/shared/transport/types.ts" "web/src/shared/transport/types.test.ts"`
-```
-$ biome check web/src/shared/contract/client.ts web/src/shared/contract/client.test.ts web/src/shared/transport/types.ts web/src/shared/transport/types.test.ts
-Checked 4 files in 4ms. No fixes applied.
-```
-0 errors, 0 warnings on the new files after fixes. Two rounds of `biome check
---write` were applied first (import sorting + formatting: multi-line function
-signatures, import order in `types.test.ts` and `client.test.ts`). One
-`lint/style/noNonNullAssertion` warning surfaced on
-`fetchMock.mock.calls[0]!` in the non-2xx test; resolved with a scoped
-`// biome-ignore lint/style/noNonNullAssertion` + reason (array access is
-guaranteed non-empty — the test just awaited the one call that populates it)
-— matching the brief's own anticipation that a scoped ignore might be needed
-in this file's test cleanup.
+## Correctness subtleties resolved
 
-Also ran repo-wide `bun run lint` (563 files) — 14 pre-existing warnings
-elsewhere in the repo (`noExplicitAny` in earlier-slice test files), 0
-errors; none touch the new files.
-
-Also ran `bun run docs:check` (mirrors the pre-commit hook) both before and
-as part of the commit — passed both times: `✔ docs-check: living docs
-present + linked; every src subsystem documented.` This task adds only
-`web/src/**` (frontend, not a new `src/<subsystem>`), so no
-`docs/architecture.md` update was required for this task specifically; the
-slice-level docs update (architecture.md / README / ROADMAP / SDD ledger) is
-the responsibility of the slice landing, not each individual task commit.
-
-## Self-review
-- `sessionToken()` reads via `(globalThis as { window?: {...} }).window?.__AGENT_TOKEN__ ?? ''`
-  — correct for real browsers (`globalThis.window` self-refers), for Vitest's
-  `vi.stubGlobal('window', ...)` stubbing, and degrades to `''` when `window`
-  is absent (test cleanup does `delete (globalThis as any).window`).
-- `apiFetch` sets `content-type` only when a body is present (no spurious
-  header on GETs), defaults `method` to GET/POST based on body presence, and
-  always parses the response through the caller-supplied zod `schema` — no
-  `any` escapes the boundary.
-- `ApiError` carries `status: number` and a fixed `name = 'ApiError'` (via
-  `override name`), matching the test's
-  `toMatchObject({ name: 'ApiError', status: 401 } satisfies Partial<ApiError>)`.
-- `transport/types.ts` is 100% `type`-only, imports nothing from
-  `ai`/`@ai-sdk/*`, keeping the AI-SDK boundary out of the contract/transport
-  layer per the plan's D14 requirement (bidirectional + resumable shape:
-  `stream(runId?, fromCursor?)` + `respond(runId, payload)`,
-  `RunStream.cursor` for Last-Event-ID resume).
-- `getHealth()` correctly uses a **local** `z.object({ ok: z.boolean() })`
-  schema rather than importing from `@contracts` — confirmed health is not
-  present in `src/contracts/index.ts`'s barrel (only `dto.ts`, `enums.ts`,
-  `events.ts`, `requests.ts` are re-exported).
-- No vacuous assertions: the bearer-token test checks the actual
-  `Authorization` header value sent to the stubbed `fetch`; the non-2xx test
-  checks both `name` and `status` on the thrown error.
+- **`startMs` vs `durationMs` base differ by design.** `startMs`/`offsetMs` are anchored on the
+  *earliest root* (`tree[0]`), while `durationMs` and `outcome`/`contentPolicy` come from the
+  `agent.run` span specifically. This matches the brief and is intentional.
+- **DegradeKind string identity.** On-disk `kind` is the string value (e.g. `'tool_skipped'`), which
+  is exactly the `DegradeKind` enum value, so `DEGRADE_LABEL[e.kind]` indexes correctly; a `?? e.kind`
+  fallback tolerates any unknown kind without throwing. The contract's `DegradeKind` is a wire mirror
+  with identical values (guarded by `degrade-kind-parity.test.ts`).
+- **`spanId` on degrades left unset** — not persisted to `degradation.jsonl`; `DegradeDTO.spanId` is
+  optional and omitted. Asserted in test 5.
+- **Extracted a `bool()` helper** (vs the brief's inline `typeof === 'boolean'` ternary) for
+  `runtimeDegraded` — same behavior, matches the `str`/`num` helper style.
+- **`noUncheckedIndexedAccess`** — the only raw index is `tree[0]?.span.startUnixNano ?? 0`; all other
+  span iteration is via `for...of`/`.map`, so no unguarded array access.
 
 ## Concerns
-- The one real finding — the brief's `types.test.ts` sample using a nested
-  `data.runId` shape that doesn't match the actual `RunStartEventSchema` — was
-  caught and corrected before it could compile-fail. Flagging it here so the
-  Phase-1b plan document / task-6+ briefs (which likely reuse similar
-  `StatusEvent` literals) can be checked against the real flat shape too.
-- The working tree has several unstaged modifications from prior
-  tasks/session bookkeeping (`.remember/now.md`, `.superpowers/sdd/progress.md`,
-  task 1–4 briefs/reports, the phase-1b plan doc) — left untouched/uncommitted
-  since they are out of this task's scope; only Task 5's four new files were
-  staged and committed.
+
+None. All requirements met; no correctness ambiguity remained unresolved.
+
+---
+
+## Adversarial-verification fixes (appended)
+
+Two verified findings in `src/run/run-dto.ts` fixed at high reasoning effort.
+
+### FIX 1 (Important) — crew/workflow runs mapped to lifecycle=Running forever
+The mapper derived the run root as `spans.find(s => s.name === 'agent.run')`. Crew
+runs (`crew.run`) and workflow runs (`workflow.run`) have no `agent.run` span, so
+`runRoot` was `undefined` → lifecycle perpetually `Running`, `outcome='unknown'`,
+`durationMs=0` for any finished crew/workflow run.
+
+Fix — made the run root generic:
+- Added `RUN_ROOT_NAMES = {agent.run, crew.run, workflow.run}`.
+- The run root is now the earliest top-level root `tree[0]` (already anchors
+  `startMs`/offsets). `runRootPresent = tree[0] exists && its name ∈ RUN_ROOT_NAMES`.
+  Because a run's root span is exported only when it ends, an earliest root whose
+  name is NOT a run-root name means the root hasn't flushed yet → still in-flight
+  (this is the name-agnostic "no recorded end" check).
+- `outcome`/`contentPolicy` read from whichever top-level root carries `ATTR.OUTCOME`
+  (fall back to earliest root) — name-agnostic across all three root kinds.
+- Lifecycle rule preserved: `Running` if no run root present; else `Failed` if
+  run-root status is error OR `outcome === 'resource'`; else `Done`. `durationMs`
+  is the run root's duration when present, else 0.
+- `resource`→Failed / `gap`→Done decisions untouched (out of scope).
+- Regression: for `agent.run`-rooted runs `tree[0]` IS the `agent.run` span, so
+  behavior is identical — all 9 original tests stay green.
+
+Note: the crew/workflow engines don't currently call `setRunOutcome`, so real
+`crew.run`/`workflow.run` spans may not carry `agent.outcome` yet. The core fix
+still lands: a finished crew/workflow run is now `Done` (not stuck `Running`) with
+its real `durationMs`; `outcome` falls back to `'unknown'` if the attr is absent.
+Wiring crew/workflow outcome emission is a separate engine concern, out of scope
+for this mapper fix.
+
+### FIX 2 (robustness) — schema-invalid degrade line crashed the whole run map
+`readDegrades` only caught JSON syntax errors. A line that is valid JSON but fails
+`DegradeDtoSchema` (unknown `kind`, missing `reason`/`subject`, wrong-typed
+`attempts`) was pushed into `RunDTO.degrades`, and the terminal
+`RunDtoSchema.parse(dto)` then threw → one bad line made the entire run unviewable.
+
+Fix — each mapped `DegradeDTO` is now run through `DegradeDtoSchema.safeParse`;
+only `success` entries are pushed, non-conforming lines are silently skipped.
+The existing torn-JSON `try/catch` is kept. Guarantee: `mapRunToDto` never throws
+on degrade-line content, and `RunDTO.degrades` contains only schema-valid entries.
+
+### Tests added (`tests/run/run-dto.test.ts`)
+- `completed crew.run root (no agent.run) → Done, non-zero duration, outcome`
+- `completed workflow.run root → Done, non-zero duration, outcome`
+- `crew.run root with resource outcome → Failed lifecycle`
+- `in-flight crew/workflow run (no recorded run-root span yet) → Running`
+- `schema-invalid degrade line is skipped; run still maps + validates`
+
+### Gate
+- `bun run typecheck` — clean (noUncheckedIndexedAccess).
+- `bun run lint:file` on both files — clean (Biome format applied to the test).
+- `bun test tests/run/run-dto.test.ts` — **14 pass / 0 fail** (9 original + 5 new).
+
+### Judgment calls
+- Anchored the run root on `tree[0]` (earliest top-level root) rather than a
+  `spans.find(name)`: robust against a nested `crew.run` inside an `agent.run`
+  (the outer root wins) and keeps `agent.run` behavior byte-identical.
+- `durationMs` stays 0 for in-flight runs (matches the existing in-flight test)
+  rather than reporting the earliest child's partial duration.

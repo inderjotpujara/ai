@@ -1,128 +1,84 @@
-### Task 2: Blueprint-Mono design-token system (light + dark)
+### Task 2: `RunListItemDTO` — the list-cheap summary DTO
 
 **Files:**
-- Create: `web/src/shared/design/tokens.css`
-- Test: `web/src/shared/design/tokens.test.ts`
+- Modify: `src/contracts/dto.ts`
+- Test: `tests/contracts/dto.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: nothing.
-- Produces: CSS custom properties `--color-bg`, `--color-accent`, `--color-signal`, `--color-fg`, `--color-muted`, `--font-sans`, `--font-mono`, motion tokens; the `.dark` variant; font-family names "Geist Variable" / "Geist Mono Variable" (fonts imported in `main.tsx`, Task 6).
+- Consumes: `RunLifecycle`, `RunOrigin` enums; the module-local `TokensSchema`.
+- Produces: `RunListItemDtoSchema` + `RunListItemDTO` = `{ id: string, startMs: number, durationMs: number, outcome: string, lifecycle: RunLifecycle, origin: RunOrigin, models: string[], degraded: boolean, spanCount: number, tokens?: { input?, output? } }` — **no `spans`, no `artifacts`, no `degrades`** (the whole point of the summary cache). Auto-exported by the `export *` barrel.
 
-- [ ] **Step 1: Write the failing test** (a token-presence contract guarding the palette literals)
+- [ ] **Step 1: Write the failing test** — append to `tests/contracts/dto.test.ts`:
 
-`web/src/shared/design/tokens.test.ts`:
 ```ts
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { RunListItemDtoSchema } from '../../src/contracts/dto.ts';
 
-const css = readFileSync(resolve(import.meta.dirname, 'tokens.css'), 'utf8');
+test('RunListItemDTO parses a minimal summary (tokens optional, no spans/artifacts)', () => {
+  const parsed = RunListItemDtoSchema.parse({
+    id: 'run-1',
+    startMs: 1000,
+    durationMs: 42,
+    outcome: 'answer',
+    lifecycle: RunLifecycle.Done,
+    origin: RunOrigin.Manual,
+    models: ['qwen3.5:9b'],
+    degraded: false,
+    spanCount: 7,
+  });
+  expect(parsed.tokens).toBeUndefined();
+  expect(parsed.models).toEqual(['qwen3.5:9b']);
+  // The list DTO deliberately carries no heavy arrays.
+  expect('spans' in parsed).toBe(false);
+  expect('artifacts' in parsed).toBe(false);
+});
 
-describe('Blueprint-Mono tokens', () => {
-  it('imports Tailwind v4 and declares the class-toggled dark variant', () => {
-    expect(css).toContain('@import "tailwindcss"');
-    expect(css).toContain('@custom-variant dark');
+test('RunListItemDTO round-trips with a token roll-up present', () => {
+  const parsed = RunListItemDtoSchema.parse({
+    id: 'run-2',
+    startMs: 0,
+    durationMs: 0,
+    outcome: 'unknown',
+    lifecycle: RunLifecycle.Running,
+    origin: RunOrigin.Manual,
+    models: [],
+    degraded: true,
+    spanCount: 0,
+    tokens: { input: 12, output: 8 },
   });
-  it('defines the locked Blueprint-Mono palette literals', () => {
-    expect(css).toContain('#0B0C0E'); // near-black base
-    expect(css).toContain('#4C8DFF'); // blueprint-blue accent
-    expect(css).toContain('#35D0C0'); // signal teal
-  });
-  it('ships both a dark base and a functional light theme', () => {
-    expect(css).toMatch(/@theme/);
-    expect(css).toMatch(/\.dark\b/);
-  });
-  it('honors prefers-reduced-motion', () => {
-    expect(css).toContain('prefers-reduced-motion');
-  });
+  expect(parsed.tokens).toEqual({ input: 12, output: 8 });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to fail** — `bun test --path-ignore-patterns 'web/**' tests/contracts/dto.test.ts` → FAIL (`RunListItemDtoSchema` not exported).
 
-Run: `cd web && bun run test src/shared/design/tokens.test.ts`
-Expected: FAIL — cannot read `tokens.css` (ENOENT).
+- [ ] **Step 3: Minimal impl** — append to `src/contracts/dto.ts` (after `RunDtoSchema`; `TokensSchema` is already declared at the top of the file):
 
-- [ ] **Step 3: Write `tokens.css`**
-
-`web/src/shared/design/tokens.css`:
-```css
-@import "tailwindcss";
-
-/* Class-toggled dark mode (Task 3 toggles the .dark class on <html>).
-   Without this, dark: only follows OS prefers-color-scheme. */
-@custom-variant dark (&:where(.dark, .dark *));
-
-/* Blueprint-Mono tokens → :root vars + Tailwind utilities.
-   Palette literals live ONLY here. */
-@theme {
-  --color-bg: #0B0C0E;          /* near-black canvas */
-  --color-surface: #14161A;
-  --color-fg: #E6E8EC;
-  --color-muted: #8A8F98;
-  --color-accent: #4C8DFF;      /* blueprint-blue — live/interactive only */
-  --color-signal: #35D0C0;      /* signal teal */
-  --color-border: #23262D;
-
-  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;
-
-  --spacing-rail: 18rem;        /* sessions sidebar width */
-
-  --ease-spring: linear(0, 0.12, 0.45, 0.79, 0.96, 1);
-  --duration-fast: 140ms;
-}
-
-/* Dark is the design's home; the functional light theme overrides tokens only. */
-:root {
-  color-scheme: dark;
-  --color-bg: #0B0C0E;
-  --color-surface: #14161A;
-  --color-fg: #E6E8EC;
-  --color-muted: #8A8F98;
-  --color-border: #23262D;
-}
-:root:where(.light) {
-  color-scheme: light;
-  --color-bg: #FBFBFC;
-  --color-surface: #FFFFFF;
-  --color-fg: #14161A;
-  --color-muted: #5B616B;
-  --color-border: #E3E5E9;
-  /* accent + signal are shared across themes */
-}
-
-body {
-  background-color: var(--color-bg);
-  color: var(--color-fg);
-  font-family: var(--font-sans);
-  /* subtle blueprint dot-grid */
-  background-image: radial-gradient(var(--color-border) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    transition-duration: 0.001ms !important;
-  }
-}
+```ts
+/** Lightweight list summary — no `spans`/`artifacts`/`degrades` (that is the
+ *  whole point of the mtime summary cache; Slice 30b Phase 3, Layer ②). */
+export const RunListItemDtoSchema = z.object({
+  id: z.string(),
+  startMs: z.number(),
+  durationMs: z.number(),
+  outcome: z.string(),
+  lifecycle: z.enum(RunLifecycle),
+  origin: z.enum(RunOrigin),
+  models: z.array(z.string()),
+  degraded: z.boolean(),
+  spanCount: z.number(),
+  tokens: TokensSchema,
+});
+export type RunListItemDTO = z.infer<typeof RunListItemDtoSchema>;
 ```
 
-_Note: the `.dark`/`.light` class strategy — default (no class) = dark; `.light` class = light. Task 3's `ThemeProvider` toggles the `light` class. The `@custom-variant dark` line keeps `dark:` utilities working when neither class or the `.dark` class is present._
+- [ ] **Step 4: Run to pass** — `bun test --path-ignore-patterns 'web/**' tests/contracts/dto.test.ts` → PASS.
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd web && bun run test src/shared/design/tokens.test.ts`
-Expected: PASS (4 tests).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-git add web/src/shared/design/tokens.css web/src/shared/design/tokens.test.ts
-git commit -m "feat(web): Blueprint-Mono design tokens — light+dark, reduced-motion, Geist"
+bun run typecheck && bun run lint:file -- "src/contracts/dto.ts" "tests/contracts/dto.test.ts"
+git add src/contracts/dto.ts tests/contracts/dto.test.ts
+git commit -m "feat(contracts): RunListItemDTO — list-cheap run summary (no spans/artifacts)"
 ```
 
 ---
