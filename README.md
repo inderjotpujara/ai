@@ -83,8 +83,11 @@ Mini.
 > projects a run's `spans.jsonl`/`degradation.jsonl`/artifacts into
 > schema-validated DTOs, and the web ships a real Runs list plus a
 > run-detail view whose `@visx` waterfall live-tails a running trace over
-> the Phase-1b transport port's **first real consumer**. The
-> crews/workflows/builders/library screens, cross-invocation persistence,
+> the Phase-1b transport port's resumable `stream(runId, cursor, schema)`
+> surface — Phase 3 is its **first real consumer** (Phase 2's chat already
+> calls the port's `respond()` leg; Phase 3 is the first to parse a
+> `SpanDTO` off the wire). The crews/workflows/builders/library screens,
+> cross-invocation persistence,
 > and browser voice remain Phases 4–8. Next: **Slice 30b Phase 4**.
 > **Slices 23/24/25 remain held** on the `ai@7` provider blocker. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -161,7 +164,7 @@ Mini.
 > D1, a waterfall only, no `@xyflow` node-graph this phase. `SpanDTO.node`,
 > `RunDTO.origin` (still constant `manual`), and `server.principal` (still
 > constant `local`) remain reserved for later slices. Full suite:
-> 1273 pass/36 skip/0 fail\* (root) + 83 pass (web, Vitest/happy-dom).
+> 1274 pass/36 skip/0 fail\* (root, 1310 tests) + 83 pass (web, Vitest/happy-dom).
 > \*One rerun surfaced the documented pre-existing `verification.live`
 > grounding-judge flake (real-Ollama nondeterminism, unrelated to Runs);
 > an isolated rerun of `tests/verification` was clean.

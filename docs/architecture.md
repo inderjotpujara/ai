@@ -757,8 +757,8 @@ sequenceDiagram
     List-->>Browser: 200 RunListResponse {items, nextCursor?, total}
 
     Browser->>App: GET /api/runs/:id
-    App->>App: confineToDir(id, runsRoot) — 404 on escape/missing, indistinguishable
     App->>Detail: handleRunDetail(id, {runsRoot})
+    Detail->>Detail: confineToDir(id, runsRoot) — 404 on escape/missing, indistinguishable
     Detail->>Mapper: mapRunToDto(runsRoot, id)
     Mapper->>Disk: readSpans + readDegrades
     Mapper->>Artifacts: readRunArtifacts(runDir)
@@ -766,6 +766,7 @@ sequenceDiagram
 
     Browser->>App: GET /api/runs/:id/stream (Last-Event-ID?)
     App->>Stream: handleRunStream(id, {runsRoot}, {lastEventId, signal})
+    Stream->>Stream: confineToDir(id, runsRoot) — 404 on escape/missing, indistinguishable
     Stream->>Mapper: mapRunToDto(runsRoot, id) — polled every pollMs, wrapped in runs.stream span
     Stream-->>Browser: SSE frames id:&lt;spanId&gt;\ndata:&lt;SpanDTO&gt; until lifecycle !== Running
     Note over Browser,Stream: reconnect resumes via Last-Event-ID — a cursor-seeded<br/>emitted-set replays only newer spans, no duplicate bars
@@ -3196,8 +3197,9 @@ inbound bodies the server validates before any engine call (`ChatRequest` over a
 minimal structural `UiMessageLike`, and `RespondRequest` for the consent
 back-channel), plus, since Phase 3, the **outbound-shaping** query/response
 pair for the Runs list: `RunListQuerySchema` (coerces raw query strings —
-`degraded` string→boolean, `limit` `z.coerce.number()` clamped ≤200 and
-defaulted to 25) and `RunListResponseSchema` (a page of `RunListItemDTO` plus
+`degraded` string→boolean, `limit` `z.coerce.number()` capped at 200 —
+an over-limit or otherwise-malformed query param is **rejected with a 400**,
+not silently clamped — and defaulted to 25) and `RunListResponseSchema` (a page of `RunListItemDTO` plus
 an opaque `nextCursor` and the post-filter `total`). `index.ts` is the barrel.
 
 **Data flow.** browser/server ⇄ `contracts` schemas: the server parses inbound
@@ -3538,9 +3540,11 @@ the detail route:
 
 - **`GET /api/runs`** — `list.ts`'s `handleRunList`: `RunListQuerySchema.parse`
   coerces the raw query string (`degraded` `'true'|'false'` → boolean,
-  `limit` `z.coerce.number()` clamped ≤200, defaulted 25), `readdir`s
-  `runsRoot` for run-id directories (a missing/unreadable root degrades to
-  `{items:[], total:0}` rather than throwing), maps each id through the
+  `limit` `z.coerce.number()` capped at 200 — an over-limit or malformed
+  query param is **rejected with a 400**, not silently clamped — defaulted
+  25), `readdir`s `runsRoot` for run-id directories (a missing/unreadable
+  root degrades to `{items:[], total:0}` rather than throwing), maps each id
+  through the
   cache-fronted `summarizeRunListItem` (below), filters by a case-insensitive
   substring search over `id`/`models`/`outcome` plus exact `outcome`/
   `degraded` facets, sorts newest-first by `startMs`, and paginates via an
@@ -3558,8 +3562,13 @@ the detail route:
   `confineToDir` guard, then a `text/event-stream` response whose body
   polls `mapRunToDto` every `pollMs` (default 250 ms), emitting each new
   `SpanDTO` as an SSE frame (`id: <spanId>\ndata: <json>\n\n`) until
-  `lifecycle !== Running` (the run-root closed — the same stop signal the
-  CLI's `bun run runs --follow` uses), then records the outcome and closes.
+  `lifecycle !== Running` — the run-root closed, per the name-agnostic
+  `runRootSummary` lifecycle (below). This is the same *idea* as the CLI's
+  `bun run runs --follow` stopper but not the same signal: the CLI stopper
+  still keys on a span named exactly `agent.run` (`cli/runs.ts`), so it never
+  stops on a finished `crew.run`/`workflow.run` — the very divergence this
+  doc's `runRootSummary` note calls out. The stream then records the outcome
+  and closes.
   `Last-Event-ID` resume seeds the emitted-set with every span up to and
   including that cursor so only newer spans replay; an unknown/stale cursor
   degrades to a full snapshot replay rather than silently emitting nothing.
@@ -3578,7 +3587,9 @@ other server state.
 
 - **`run-dto.ts`'s `mapRunToDto(runsRoot, id)`** — reads `spans.jsonl` via
   `run-trace.ts`'s existing `readSpans`/`buildTree`, depth-first-flattens the
-  span tree assigning `offsetMs` (relative to the run-root's start) and
+  span tree assigning `offsetMs` (relative to the earliest top-level root's
+  start, `tree[0]` — normally the recognized run-root, but see
+  `runRootSummary`'s orphan-sibling case below, where they can diverge) and
   `depth`, and projects each span into a `SpanDTO` (status, delegation
   target/depth/ancestors, model id/provider/numCtx/footprint, per-span
   tokens, a `degraded` flag derived from a `reliability.degrade` span event,
@@ -3634,15 +3645,25 @@ other server state.
   token roll-up/a degraded badge; an empty page renders "No runs yet"; a
   failed fetch renders a local `role="alert"` (the `RegionErrorBoundary`
   only catches render-phase errors, not an async fetch rejection).
-- **`run-detail.tsx`'s `RunDetail`** — the phase's integration linchpin:
+- **`run-detail.tsx`'s `RunDetail`** — the phase's integration linchpin. A
+  route-entry component reads the `:runId` param and mounts a fresh
+  `RunDetailView` keyed on `key={runId}` — the key forces a full remount on
+  `/runs/a` → `/runs/b` navigation (a final-review fix), since TanStack
+  Router doesn't otherwise remount on a param-only change and `useRunTrace`'s
+  state would merge run B's spans into run A's leftover state. `RunDetailView`
   fetches the `RunDTO` snapshot (`GET /api/runs/:id`), seeds `useRunTrace`
   with its spans, then opens the live-tail stream
   (`createSseTransport().stream(runId, cursor, SpanDtoSchema, signal)`) to
   ingest any spans appended after the snapshot — the transport port's first
   real consumer, and the first browser code to actually parse a `SpanDTO`
-  off the wire. Two effects: the snapshot fetch (cancelled-flag guarded) and
-  the stream loop, which starts only once the snapshot resolves and tears
-  down on unmount/navigation via **both** a cancelled flag **and** an
+  off the wire. Three effects: the snapshot fetch (cancelled-flag guarded);
+  an idempotent snapshot-seed ingest (`useRunTrace`'s lazy `useState`
+  initializer only runs on first mount, but the snapshot always resolves
+  asynchronously, so a separate effect `ingest`s the snapshot's spans once it
+  arrives — `ingest` dedupes by spanId, so this is a no-op if the trace
+  already has them); and the stream loop, which starts only once the snapshot
+  resolves and tears down on unmount/navigation via **both** a cancelled flag
+  **and** an
   `AbortController.abort()` — a flag alone only re-checks after the next
   stream frame yields, so it cannot close a connection that's idle *between*
   spans; the abort is what actually ends the underlying fetch. (An
@@ -3697,10 +3718,31 @@ dedicated span of their own — they ride the existing per-request
   "Jump to Runs" nav command) → Phase 8.
 - **Voice** → Phase 7.
 
-Two honest minor caveats, not blocking: the stream's `Last-Event-ID` resume
-re-seeds using the flattened depth-first span order (the brief-prescribed
-algorithm), not true on-disk append order, so an overlapping sibling span
-written after — but sorted before — the cursor on a resume is a known,
-documented edge case; and `RUN_STREAM_BYTES` counts the UTF-16 code units of
-each SSE frame's `JSON.stringify`'d text, not UTF-8 bytes, undercounting
-multibyte content — a telemetry approximation, not a user-facing defect.
+Three honest minor caveats, not blocking:
+
+- The stream's `Last-Event-ID` resume re-seeds using the flattened
+  depth-first span order (the brief-prescribed algorithm), not true on-disk
+  append order, so an overlapping sibling span written after — but sorted
+  before — the cursor on a resume is a known, documented edge case.
+- `RUN_STREAM_BYTES` counts UTF-8 bytes of each SSE frame's encoded text
+  (`rec.chunk(bytes.byteLength)` over the already-encoded buffer) as of the
+  final-review fix wave; an earlier revision counted UTF-16 code units of the
+  pre-encoding string and undercounted multibyte content — fixed, not a
+  live caveat, kept here as a changelog note.
+- **In-flight nested crew/workflow runs can close the live-tail early.**
+  Spans export **on end** (write-on-end `SimpleSpanProcessor` + JSONL
+  append), and a sequential crew nests `workflow.run` under `crew.run`. In
+  the ms-scale window after the inner `workflow.run` span ends but before
+  its `crew.run` parent does, `spans.jsonl` contains `workflow.run` as an
+  **orphan top-level root** — and `runRootSummary` recognizes it, so a poll
+  landing in that window reads `lifecycle: Done` one beat early. The live
+  stream's stop condition then fires and the SSE connection closes **before**
+  the true `crew.run` root span is ever emitted — that connection
+  permanently misses the run's final frame (no auto-reconnect), and the busy
+  indicator clears early for what is, on the server, still a running crew. A
+  page reload or a fresh connection self-heals (list/detail always re-read
+  the full, by-then-closed tree). Inherent to write-on-end span export —
+  distinguishing "a workflow-only run just finished" from "a crew's inner
+  workflow just finished" is not possible from spans alone until the crew's
+  own outcome-emission lands (a later-phase item) — so this is tracked as a
+  follow-on rather than fixed here.
