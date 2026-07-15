@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
+import type { RunCrewTurn } from '../../src/server/crews/run.ts';
+import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -17,6 +19,12 @@ writeFileSync(
 const noRun: RunChatTurn = async () => {
   throw new Error('unused');
 };
+const noCrewRun: RunCrewTurn = async () => {
+  throw new Error('unused');
+};
+const noWorkflowRun: RunWorkflowTurn = async () => {
+  throw new Error('unused');
+};
 const deps: ServerDeps = {
   token: TOKEN,
   policy,
@@ -26,6 +34,8 @@ const deps: ServerDeps = {
   consent: createConsentRegistry(),
   uploadsDir: runsRoot,
   runsRoot,
+  runCrewTurn: noCrewRun,
+  runWorkflowTurn: noWorkflowRun,
 };
 
 let server: ReturnType<typeof Bun.serve>;

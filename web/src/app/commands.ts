@@ -10,7 +10,8 @@ export type Command = {
 
 // Phase 1b: only navigation commands are wireable. Launch-agent/crew/workflow
 // and switch-model land with their features (⌘K completeness = Phase 8).
-// jump-to-run is wired below; Phase 8 extends it to jump to a specific recent run.
+// jump-to-run, jump-to-crew, and jump-to-workflow are wired below; Phase 8
+// extends jump-to-run to jump to a specific recent run.
 export const navCommands: Command[] = [
   { id: 'go-chat', label: 'Go to Chat', run: (n) => n({ to: '/' }) },
   { id: 'go-crews', label: 'Go to Crews', run: (n) => n({ to: '/crews' }) },
@@ -36,4 +37,14 @@ export const navCommands: Command[] = [
     run: (n) => n({ to: '/settings' }),
   },
   { id: 'jump-to-run', label: 'Jump to Runs', run: (n) => n({ to: '/runs' }) },
+  {
+    id: 'jump-to-crew',
+    label: 'Jump to Crews',
+    run: (n) => n({ to: '/crews' }),
+  },
+  {
+    id: 'jump-to-workflow',
+    label: 'Jump to Workflows',
+    run: (n) => n({ to: '/workflows' }),
+  },
 ];

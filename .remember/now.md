@@ -1,0 +1,2 @@
+
+Nothing durable to save. The C1 bug and other issues found are in-flight fixes (being addressed in the next wave); they'll be documented in commits and code. The testing insight (Amendment-A mocking hiding snapshot-timing races) is a valuable lesson for this session but not a standing rule that needs memorialization. ✓

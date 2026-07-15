@@ -1,6 +1,10 @@
 import { z } from 'zod';
-import { RunListItemDtoSchema } from './dto.ts';
-import { ChatRole, FeedbackRating } from './enums.ts';
+import {
+  CrewListItemDtoSchema,
+  RunListItemDtoSchema,
+  WorkflowListItemDtoSchema,
+} from './dto.ts';
+import { ChatRole, FeedbackRating, RunKind } from './enums.ts';
 
 /**
  * A minimal, structural UIMessage-like shape. We deliberately do NOT import
@@ -57,6 +61,7 @@ export const RunListQuerySchema = z.object({
     .enum(['true', 'false'])
     .optional()
     .transform((v) => (v === undefined ? undefined : v === 'true')),
+  kind: z.enum(RunKind).optional(),
   limit: z.coerce.number().int().positive().max(200).default(25),
   cursor: z.string().optional(),
 });
@@ -69,3 +74,29 @@ export const RunListResponseSchema = z.object({
   total: z.number(),
 });
 export type RunListResponse = z.infer<typeof RunListResponseSchema>;
+
+/** `POST /api/crews/:name/run` and `POST /api/workflows/:id/run` body. The
+ *  `.max(100_000)` bounds the perimeter — these routes go live in Phase 4
+ *  Task 12 and there is otherwise no body-size cap at this layer. */
+export const CrewRunRequestSchema = z.object({
+  input: z.string().max(100_000),
+});
+export type CrewRunRequest = z.infer<typeof CrewRunRequestSchema>;
+export const WorkflowRunRequestSchema = z.object({
+  input: z.string().max(100_000),
+});
+export type WorkflowRunRequest = z.infer<typeof WorkflowRunRequestSchema>;
+
+/** Launch response — the minted runId the browser opens the watch stream for. */
+export const RunLaunchResponseSchema = z.object({ runId: z.string() });
+export type RunLaunchResponse = z.infer<typeof RunLaunchResponseSchema>;
+
+/** Browse list responses — plain arrays (small in-memory registries, no cursor). */
+export const CrewListResponseSchema = z.object({
+  items: z.array(CrewListItemDtoSchema),
+});
+export type CrewListResponse = z.infer<typeof CrewListResponseSchema>;
+export const WorkflowListResponseSchema = z.object({
+  items: z.array(WorkflowListItemDtoSchema),
+});
+export type WorkflowListResponse = z.infer<typeof WorkflowListResponseSchema>;

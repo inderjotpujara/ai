@@ -1,10 +1,22 @@
-import type { RunDTO } from '@contracts';
-import { RunDtoSchema, RunLifecycle, SpanDtoSchema } from '@contracts';
-import { useParams } from '@tanstack/react-router';
+import type { CrewDetailDTO, RunDTO, WorkflowDetailDTO } from '@contracts';
+import {
+  CrewDetailDtoSchema,
+  RunDtoSchema,
+  RunLifecycle,
+  SpanDtoSchema,
+  WorkflowDetailDtoSchema,
+} from '@contracts';
+import { useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
-import { apiFetch } from '../../shared/contract/client.ts';
+import { ApiError, apiFetch } from '../../shared/contract/client.ts';
+import { DagView } from '../../shared/dag/dag-view.tsx';
+import type { DagModel } from '../../shared/dag/types.ts';
+import { workflowGraph } from '../../shared/dag/workflow-graph.ts';
 import { createSseTransport } from '../../shared/transport/sse-adapter.ts';
+import { Button } from '../../shared/ui/button.tsx';
 import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
+import { crewGraph } from '../crews/crew-graph.ts';
+import { findRunGraphSource, stepStatusOverlay } from './run-dag.ts';
 import { useRunTrace } from './use-run-trace.ts';
 import { Waterfall } from './waterfall.tsx';
 
@@ -18,6 +30,21 @@ import { Waterfall } from './waterfall.tsx';
  * torn down on unmount/navigation by both a cancelled flag AND an
  * `AbortController.abort()` — the abort is what stops an idle stream between
  * frames, since a flag alone is only re-checked after the next frame yields).
+ *
+ * Task 18 adds the live DAG overlay for workflow/crew runs (D8): a
+ * Graph/Waterfall toggle appears once a `DagModel` is resolved, and
+ * `stepStatusOverlay(spans)` lights up nodes as `workflow.step` spans close.
+ * Two independent sources feed `dagModel`, per Amendment A:
+ *   1. `graphKind`/`graphId` search params (set by the crew/workflow Run
+ *      buttons, Tasks 15/17) — the def id is known at launch time, so the
+ *      graph structure loads immediately, from t=0, with no run data needed.
+ *   2. `findRunGraphSource(spans)` (`run-dag.ts`) — a cold-open fallback for
+ *      a run opened from the Runs list (no search params), which can only
+ *      resolve once the run's `workflow.run`/`crew.run` root span closes
+ *      (that root closes LAST, since its wrapped function awaits every
+ *      nested step — see `run-dag.ts`'s doc comment).
+ * The search-param path is skipped entirely when params are absent, and the
+ * telemetry-scan path is skipped entirely when params are present — never both.
  */
 /**
  * Route entry: reads the `:runId` param and mounts a FRESH `RunDetailView` per
@@ -30,12 +57,25 @@ export function RunDetail() {
   return <RunDetailView key={runId} runId={runId} />;
 }
 
+function loadGraph(kind: 'workflow' | 'crew', id: string): Promise<DagModel> {
+  return kind === 'workflow'
+    ? apiFetch<WorkflowDetailDTO>(`/workflows/${id}`, {
+        schema: WorkflowDetailDtoSchema,
+      }).then(workflowGraph)
+    : apiFetch<CrewDetailDTO>(`/crews/${id}`, {
+        schema: CrewDetailDtoSchema,
+      }).then(crewGraph);
+}
+
 function RunDetailView({ runId }: { runId: string }) {
+  const search = useSearch({ from: '/runs/$runId' });
   const [snapshot, setSnapshot] = useState<RunDTO | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   // Set once the live-tail stream closes on its own (run finished → the server
   // ends the stream), so a snapshot captured mid-run stops showing "busy".
   const [streamEnded, setStreamEnded] = useState(false);
+  const [dagModel, setDagModel] = useState<DagModel | undefined>(undefined);
+  const [view, setView] = useState<'waterfall' | 'graph'>('waterfall');
   const { spans, cursor, ingest } = useRunTrace(snapshot?.spans ?? []);
 
   useEffect(() => {
@@ -43,15 +83,39 @@ function RunDetailView({ runId }: { runId: string }) {
     setSnapshot(undefined);
     setError(undefined);
     setStreamEnded(false);
-    apiFetch(`/runs/${runId}`, { schema: RunDtoSchema })
-      .then((result) => {
-        if (!cancelled) setSnapshot(result);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'failed to load run');
+    setDagModel(undefined);
+    setView('waterfall');
+
+    // A freshly-launched run's dir is PRE-CREATED by the launch handler before
+    // any span flushes, so `GET /api/runs/:id` → mapRunToDto → undefined → 404
+    // for a brief window (~50-200ms, until the first `mcp.mount` span lands).
+    // On the launch→watch flow that 404 would otherwise stick as "failed to
+    // load" forever (this effect fires once, no retry). So treat a snapshot 404
+    // as "run is still starting" and retry with bounded backoff (~10 × 300ms ≈
+    // 3s); any non-404 (401/500/…) is a real error and surfaces immediately.
+    const MAX_ATTEMPTS = 10;
+    const RETRY_MS = 300;
+    async function load() {
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        try {
+          const result = await apiFetch(`/runs/${runId}`, {
+            schema: RunDtoSchema,
+          });
+          if (!cancelled) setSnapshot(result);
+          return;
+        } catch (err: unknown) {
+          if (cancelled) return;
+          const stillStarting = err instanceof ApiError && err.status === 404;
+          if (!stillStarting || attempt === MAX_ATTEMPTS - 1) {
+            setError(err instanceof Error ? err.message : 'failed to load run');
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+          if (cancelled) return;
         }
-      });
+      }
+    }
+    void load();
     return () => {
       cancelled = true;
     };
@@ -114,6 +178,54 @@ function RunDetailView({ runId }: { runId: string }) {
     };
   }, [runId, snapshot]);
 
+  // Amendment A — the primary launch→watch path: when the run was opened via
+  // the crew/workflow Run button, `graphKind`/`graphId` are already on the
+  // URL, so the def loads immediately (independent of `spans`/`snapshot`) and
+  // the view auto-switches to Graph the instant it resolves — the graph is
+  // visible from t=0, well before the run's root span could ever close.
+  useEffect(() => {
+    if (!search.graphKind || !search.graphId) return;
+    let cancelled = false;
+    loadGraph(search.graphKind, search.graphId)
+      .then((model) => {
+        if (cancelled) return;
+        setDagModel(model);
+        setView('graph');
+      })
+      .catch(() => {
+        if (!cancelled) setDagModel(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [search.graphKind, search.graphId]);
+
+  // Cold-open fallback: no graphKind/graphId (a run opened from the Runs
+  // list) — derive the definition source from the live span trace instead.
+  // Re-runs on every grown `spans` array so it resolves the instant the run's
+  // root span closes; see run-dag.ts's `findRunGraphSource` doc comment for
+  // why that's the earliest this path can resolve. Skipped entirely when the
+  // search-param path above is already supplying the model.
+  useEffect(() => {
+    if (search.graphKind && search.graphId) return;
+    const source = findRunGraphSource(spans);
+    if (!source) {
+      setDagModel(undefined);
+      return;
+    }
+    let cancelled = false;
+    loadGraph(source.kind, source.id)
+      .then((model) => {
+        if (!cancelled) setDagModel(model);
+      })
+      .catch(() => {
+        if (!cancelled) setDagModel(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [spans, search.graphKind, search.graphId]);
+
   return (
     <RegionErrorBoundary region="Run">
       <section data-testid="run-detail" className="p-8">
@@ -139,7 +251,29 @@ function RunDetailView({ runId }: { runId: string }) {
         )}
         {!error && snapshot && (
           <div className="mt-4">
-            <Waterfall spans={spans} />
+            {dagModel && (
+              <div className="mb-2 flex gap-2">
+                <Button
+                  data-testid="view-toggle-waterfall"
+                  variant={view === 'waterfall' ? 'accent' : 'default'}
+                  onClick={() => setView('waterfall')}
+                >
+                  Waterfall
+                </Button>
+                <Button
+                  data-testid="view-toggle-graph"
+                  variant={view === 'graph' ? 'accent' : 'default'}
+                  onClick={() => setView('graph')}
+                >
+                  Graph
+                </Button>
+              </div>
+            )}
+            {dagModel && view === 'graph' ? (
+              <DagView model={dagModel} statusById={stepStatusOverlay(spans)} />
+            ) : (
+              <Waterfall spans={spans} />
+            )}
           </div>
         )}
       </section>

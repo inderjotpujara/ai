@@ -13,6 +13,7 @@ const page = {
   items: [
     {
       id: 'run-1',
+      kind: 'agent',
       startMs: 1000,
       durationMs: 42,
       outcome: 'answer',
@@ -100,6 +101,23 @@ describe('RunsArea', () => {
     await waitFor(() => {
       const lastCall = fetchMock.mock.calls.at(-1);
       expect(String(lastCall?.[0])).toContain('cursor=abc');
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it('re-fetches with a kind query string when the kind facet changes', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
+      jsonResponse(page),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    renderAt('/runs');
+    await waitFor(() => expect(screen.getByText('run-1')).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId('runs-kind-filter'), {
+      target: { value: 'crew' },
+    });
+    await waitFor(() => {
+      const lastCall = fetchMock.mock.calls.at(-1);
+      expect(String(lastCall?.[0])).toContain('kind=crew');
     });
     vi.unstubAllGlobals();
   });

@@ -2,10 +2,13 @@ import { z } from 'zod';
 import {
   ArtifactKind,
   ChatRole,
+  CrewProcess,
   DegradeKind,
+  RunKind,
   RunLifecycle,
   RunOrigin,
   SpanStatus,
+  StepKind,
 } from './enums.ts';
 
 /** Optional token roll-up; mapper tolerates absence (telemetry gap #1). */
@@ -72,6 +75,7 @@ export const RunDtoSchema = z.object({
   /** Reserved now, constant "local"; backfilling ownership later (Slices 24/33). */
   owner: z.string(),
   origin: z.enum(RunOrigin),
+  kind: z.enum(RunKind),
   lifecycle: z.enum(RunLifecycle),
   startMs: z.number(),
   durationMs: z.number(),
@@ -104,6 +108,7 @@ export const RunListItemDtoSchema = z.object({
   outcome: z.string(),
   lifecycle: z.enum(RunLifecycle),
   origin: z.enum(RunOrigin),
+  kind: z.enum(RunKind),
   models: z.array(z.string()),
   degraded: z.boolean(),
   spanCount: z.number(),
@@ -119,3 +124,89 @@ export const ChatMessageDtoSchema = z.object({
   degraded: z.boolean().optional(),
 });
 export type ChatMessageDTO = z.infer<typeof ChatMessageDtoSchema>;
+
+/** Projected crew member — prompt scaffolding + selection policy only. The
+ *  engine's `tools: ToolSet` is dropped (not JSON-serializable). `requires`/
+ *  `prefer` are the raw capability/policy strings (Capability/PreferPolicy
+ *  values); kept as strings on the wire — the browser only displays them. */
+export const CrewMemberDtoSchema = z.object({
+  name: z.string(),
+  role: z.string(),
+  goal: z.string(),
+  backstory: z.string(),
+  requires: z.array(z.string()),
+  prefer: z.string(),
+  agentRef: z.string().optional(),
+});
+export type CrewMemberDTO = z.infer<typeof CrewMemberDtoSchema>;
+
+/** Projected crew task — the `output: z.ZodType` schema is dropped (not
+ *  serializable); `verify` surfaces the grounded-verification opt-in. */
+export const CrewTaskDtoSchema = z.object({
+  id: z.string(),
+  description: z.string(),
+  expectedOutput: z.string(),
+  member: z.string(),
+  dependsOn: z.array(z.string()),
+  verify: z.boolean().optional(),
+});
+export type CrewTaskDTO = z.infer<typeof CrewTaskDtoSchema>;
+
+export const CrewListItemDtoSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  process: z.enum(CrewProcess),
+  memberCount: z.number(),
+  taskCount: z.number(),
+});
+export type CrewListItemDTO = z.infer<typeof CrewListItemDtoSchema>;
+
+export const CrewDetailDtoSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  process: z.enum(CrewProcess),
+  members: z.array(CrewMemberDtoSchema),
+  tasks: z.array(CrewTaskDtoSchema),
+});
+export type CrewDetailDTO = z.infer<typeof CrewDetailDtoSchema>;
+
+/** A projected workflow step — closures (`input`/`predicate`/`over`/`run`) and
+ *  the `output: z.ZodType` are dropped; only display + structure remain. Branch
+ *  targets and the map sub-step kind are surfaced so the DAG can render control
+ *  flow. */
+export const StepDtoSchema = z.object({
+  id: z.string(),
+  kind: z.enum(StepKind),
+  agent: z.string().optional(),
+  tool: z.string().optional(),
+  onError: z.string().optional(),
+  retry: z.boolean().optional(),
+  verify: z.boolean().optional(),
+  branch: z.object({ whenTrue: z.string(), whenFalse: z.string() }).optional(),
+  map: z.object({ subKind: z.enum(StepKind) }).optional(),
+});
+export type StepDTO = z.infer<typeof StepDtoSchema>;
+
+/** A DAG edge. `depends` edges come from `effectiveDeps`; `branch-*` edges from
+ *  a BranchStep's whenTrue/whenFalse (rendered distinctly / dashed). */
+export const EdgeDtoSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  kind: z.enum(['depends', 'branch-true', 'branch-false']),
+});
+export type EdgeDTO = z.infer<typeof EdgeDtoSchema>;
+
+export const WorkflowListItemDtoSchema = z.object({
+  id: z.string(),
+  description: z.string().optional(),
+  stepCount: z.number(),
+});
+export type WorkflowListItemDTO = z.infer<typeof WorkflowListItemDtoSchema>;
+
+export const WorkflowDetailDtoSchema = z.object({
+  id: z.string(),
+  description: z.string().optional(),
+  steps: z.array(StepDtoSchema),
+  edges: z.array(EdgeDtoSchema),
+});
+export type WorkflowDetailDTO = z.infer<typeof WorkflowDetailDtoSchema>;
