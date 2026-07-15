@@ -33,6 +33,7 @@
   --color-muted: #8A8F98;
   --color-border: #23262D;
   --color-backdrop: rgb(0 0 0 / 0.5);
+  --color-danger: #F0616D;
 }
 :root:where(.light) {
   color-scheme: light;
@@ -42,6 +43,7 @@
   --color-muted: #5B616B;
   --color-border: #E3E5E9;
   --color-backdrop: rgb(15 23 42 / 0.35);
+  --color-danger: #D22B3A;
   /* accent + signal are shared across themes */
 }
 
