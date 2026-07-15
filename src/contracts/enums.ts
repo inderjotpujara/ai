@@ -87,3 +87,29 @@ export enum StatusEventType {
   Confirm = 'data-confirm',
   RunEnd = 'data-run-end',
 }
+
+/** Wire mirror of `src/workflow/types.ts` StepKind (isomorphic rule — no engine
+ *  import). `tests/contracts/step-kind-parity.test.ts` guards value parity. */
+export enum StepKind {
+  Agent = 'agent',
+  Tool = 'tool',
+  Branch = 'branch',
+  Map = 'map',
+  Verify = 'verify',
+}
+
+/** Wire mirror of `src/crew/types.ts` CrewProcess (isomorphic rule).
+ *  `tests/contracts/crew-process-parity.test.ts` guards value parity. */
+export enum CrewProcess {
+  Sequential = 'sequential',
+  Hierarchical = 'hierarchical',
+}
+
+/** What a run IS (chat/agent/crew/workflow), derived by the mapper from the run's
+ *  root span name. Distinct from RunOrigin (HOW a run was triggered). Slice 30b Phase 4. */
+export enum RunKind {
+  Chat = 'chat',
+  Agent = 'agent',
+  Crew = 'crew',
+  Workflow = 'workflow',
+}
