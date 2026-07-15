@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import {
   ChatMessageDtoSchema,
   RunDtoSchema,
+  RunListItemDtoSchema,
   SpanDtoSchema,
 } from '../../src/contracts/dto.ts';
 import {
@@ -124,4 +125,39 @@ test('ChatMessageDTO rejects an unknown role', () => {
   expect(() =>
     ChatMessageDtoSchema.parse({ id: 'm4', role: 'narrator', text: 'x' }),
   ).toThrow();
+});
+
+test('RunListItemDTO parses a minimal summary (tokens optional, no spans/artifacts)', () => {
+  const parsed = RunListItemDtoSchema.parse({
+    id: 'run-1',
+    startMs: 1000,
+    durationMs: 42,
+    outcome: 'answer',
+    lifecycle: RunLifecycle.Done,
+    origin: RunOrigin.Manual,
+    models: ['qwen3.5:9b'],
+    degraded: false,
+    spanCount: 7,
+  });
+  expect(parsed.tokens).toBeUndefined();
+  expect(parsed.models).toEqual(['qwen3.5:9b']);
+  // The list DTO deliberately carries no heavy arrays.
+  expect('spans' in parsed).toBe(false);
+  expect('artifacts' in parsed).toBe(false);
+});
+
+test('RunListItemDTO round-trips with a token roll-up present', () => {
+  const parsed = RunListItemDtoSchema.parse({
+    id: 'run-2',
+    startMs: 0,
+    durationMs: 0,
+    outcome: 'unknown',
+    lifecycle: RunLifecycle.Running,
+    origin: RunOrigin.Manual,
+    models: [],
+    degraded: true,
+    spanCount: 0,
+    tokens: { input: 12, output: 8 },
+  });
+  expect(parsed.tokens).toEqual({ input: 12, output: 8 });
 });
