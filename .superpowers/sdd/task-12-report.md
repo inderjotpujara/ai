@@ -1,121 +1,96 @@
-# Task 12 report (Slice 30b Phase 1): `## Contracts` + `## Server (web BFF)` subsystem sections
+# Task 12 report (Slice 30b Phase 3 — Runs): @visx deps + `--color-danger` token
 
-*(Note: this path previously held a Slice-29 report for a differently-scoped
-Task 12 — "docs: §Voice architecture + README/ROADMAP/ledger", which itself
-had overwritten a Slice-26 report before that. Overwritten here per that
-report's own file-reuse convention: per-slice Task-N reports share the same
-filename, so each slice's Task 12 report replaces the last.)*
+*(Note: this filename previously held a Phase-2 Task 12 report for a
+differently-scoped task — "feat(web): fetch-based SSE ChatTransport adapter."
+Per that report's own stated convention, per-slice Task-N reports share the
+same filename and each new slice/phase's Task 12 report replaces the last.
+This report covers the current Phase-3 Task 12: @visx charting deps +
+`--color-danger` design token, the first web-layer task of Phase 3.)*
 
-**Commit:** `6cea19b` — `docs(architecture): add Contracts + Server (web BFF)
-subsystem sections (Slice 30b Phase 1)` (1 file changed, 59 insertions, 2
-deletions, `docs/architecture.md` only)
+**Status:** DONE
+
+**Commit:** `ce5f5ba42e3174132cdd8e7afca940e3d1f219a3` — "chore(web): add @visx
+(scale/shape/axis/group/tooltip) + --color-danger token"
 
 ## What was done
 
-1. **Confirmed baseline.** `bun run docs:check` already PASSED before any
-   edit — the minimal placeholder rows added during Tasks 1 and 6 (in the
-   "Layer" table under `## 2. System map`, lines ~531–532) already contain
-   the substrings `src/contracts` and `src/server`, which is all
-   `scripts/docs-check.ts` rule 3 requires (a simple per-`src/<subsystem>`
-   substring check). This matches the task framing exactly — the brief's
-   Step 1 ("confirm docs-check FAILS") described the state *before* Tasks 1/6
-   landed; by Task 12 those rows already exist so the check passes going in.
+1. **Installed deps** — `cd web && bun add @visx/scale @visx/shape @visx/axis
+   @visx/group @visx/tooltip`. Bun resolved all five to **`4.0.0`** (current
+   major at install time):
+   - `@visx/scale@4.0.0`
+   - `@visx/shape@4.0.0`
+   - `@visx/axis@4.0.0`
+   - `@visx/group@4.0.0`
+   - `@visx/tooltip@4.0.0`
 
-2. **Appended the two full sections verbatim from the brief** at the end of
-   `docs/architecture.md` (after `## 23. Voice input (STT) (Slice 29)`, the
-   last content in the file, previously ending at line 3065): `## Contracts
-   (web wire protocol — src/contracts/, Slice 30b Phase 1)` and `## Server
-   (web BFF — src/server/, Slice 30b Phase 1)`, each with **Feature** /
-   **Mechanism** / **Data flow** subsections. Verified every named file
-   against the actual shipped tree before writing:
-   - `src/contracts/`: `enums.ts`, `dto.ts`, `events.ts`, `requests.ts`,
-     `index.ts` — matches `tests/contracts/{enums,dto,events,requests,
-     isomorphic,degrade-kind-parity}.test.ts` on disk.
-   - `src/server/`: `main.ts`, `app.ts`, `security/{token,origin,
-     media-path}.ts` — matches `tests/server/{main,app,token,origin,
-     media-path}.test.ts` on disk.
-   - No mention of the chat/SSE handler, DTO mappers, or the `web/` frontend
-     (correctly scoped to what Tasks 1–11 shipped, not later phases — the
-     brief is explicit these attach later).
-   - Followed the doc's existing precedent of appending unnumbered top-level
-     `##` sections after the last numbered section (Slice 30a content was
-     also folded into the doc without new section numbers elsewhere), per
-     the brief's exact instruction to add "a new top-level `##` section
-     each" with no numbering.
+   No `@xyflow` package was added, per design decision D1 (waterfall view is
+   @visx-only).
 
-3. **Reconciled the minimal Task-1/Task-6 table rows** — kept them (they are
-   part of the same registry table `docs-check` substring-matches against,
-   and the doc's own convention elsewhere — e.g. the Voice/Media/Process
-   rows — is "short table summary + full section below," not one-or-the-
-   other) but rewrote their prose from a stale narrower snapshot into an
-   accurate summary that points at the new full sections:
-   - Contracts row previously described only `enums.ts` + the isomorphic
-     rule, as if Tasks 2–4 hadn't yet shipped `dto.ts`/`events.ts`/
-     `requests.ts`/`index.ts`. Now lists all five files and says "full
-     section below."
-   - Server row previously said "Tasks 6+ … per-session bearer token" only
-     (stale as of Task 6, before Tasks 7–11 shipped the Host/Origin
-     allowlist, media-path confinement, `/api/health`, COOP/COEP static
-     serving, the `server.request` span, and the `bun run web` entry). Now
-     summarizes the full shipped Phase-1 surface and says "full section
-     below."
-   - No duplicated/contradictory claims remain: each subsystem's facts
-     appear once in full (the new sections) and once as a short pointer
-     summary (the table), consistent with the rest of the document.
+2. **Wrote the failing test first** (TDD RED) — the `web` package already had
+   a `tokens.test.ts` from an earlier task with existing `describe` blocks, so
+   the brief's exact test snippet was **appended** as a new `describe('design
+   tokens', ...)` block rather than overwriting the file. Ran
+   `bun run test src/shared/design/tokens.test.ts` → confirmed RED: 1 failed
+   (`--color-danger` not found), 4 pre-existing tests still passed.
 
-## docs:check output
+3. **Minimal impl** (TDD GREEN) — added to
+   `web/src/shared/design/tokens.css`:
+   - dark `:root { ... }` block: `--color-danger: #F0616D;`
+   - light `:root:where(.light) { ... }` block: `--color-danger: #D22B3A;`
 
-```
-$ bun run docs:check
-$ bun run scripts/docs-check.ts
-✔ docs-check: living docs present + linked; every src subsystem documented.
-```
-PASS, both before and after the edit (exit 0), and again as the pre-commit
-hook on `git commit`.
+   Re-ran the test → GREEN: 5/5 passed.
 
-## typecheck output
+## Gate results
 
-```
-$ bun run typecheck
-$ tsc --noEmit
-```
-PASS, exit 0 (docs-only change, no code touched — confirms no regression).
+- `cd web && bun run test src/shared/design/tokens.test.ts` → **PASS**, 5/5
+  tests (1 new + 4 pre-existing), ~360ms.
+- `cd web && bun run typecheck` → **clean** (`tsc --noEmit`, no output).
+- `cd web && bun run build` → **succeeds** (`vite build`, 704 modules
+  transformed, built in 318ms) — proves the five new @visx deps resolve and
+  install correctly under the workspace's Vite/Rolldown build. Only output
+  was the pre-existing "chunk larger than 500kB" advisory (unrelated to this
+  change, not a new regression).
+- Root `bun run lint:file -- "web/src/shared/design/tokens.css"
+  "web/src/shared/design/tokens.test.ts"` → **does cover web files**
+  (`biome check`, root-scoped). First run flagged one formatter-only issue:
+  the appended test's `const dark = css.slice(...)` line exceeded Biome's
+  line-width limit. Reformatted to a multi-line call; re-ran → clean, 0
+  errors.
 
-## Self-review
+## Lockfile
 
-- Compared every claim in the new sections against the actual files on disk
-  (`ls src/contracts src/server src/server/security tests/contracts
-  tests/server`) before writing — all named files exist exactly as
-  described, nothing invented.
-- Confirmed the brief's prose doesn't claim anything from later phases
-  (chat/SSE handler, DTO mappers, `web/` frontend, persistence/
-  `SessionStore`) — it explicitly calls those out as attaching "in later
-  phases." Verified the reconciled table rows also don't smuggle in
-  later-phase claims.
-- Re-read the table rows and new full sections side by side after editing —
-  no duplicate/contradictory content remains.
-- `git diff` on the final commit confirms only `docs/architecture.md` was
-  touched, only in the two intended spots (two table-row edits near line
-  531–532; one append at end of file).
-- Did **not** touch the many other modified files already present in the
-  working tree at task start (`.remember/*`, `.superpowers/sdd/task-*-brief.md`,
-  `.superpowers/sdd/task-*-report.md`, `.superpowers/sdd/progress.md`) —
-  those are other tasks'/agents' in-flight state, out of scope for a
-  docs-only Task 12, and were left exactly as found (not staged, not
-  committed).
+Only a **root `bun.lock`** exists for this repo (no separate `web/bun.lock` —
+confirmed by `ls web/bun.lock` returning "No such file or directory" before
+the install). `bun add` inside `web/` updated the root `bun.lock` in place, so
+the commit includes `bun.lock` (repo root), not `web/bun.lock` as the brief's
+Step 6 example commit assumed. This matches how the workspace is actually set
+up (single lockfile for the whole `bun` workspace).
+
+## Files changed (commit `ce5f5ba`)
+
+- `web/package.json` — added the five `@visx/*` deps.
+- `bun.lock` (root) — lockfile update for the new deps (60 packages
+  installed/resolved as transitive deps of the five @visx packages).
+- `web/src/shared/design/tokens.css` — `--color-danger` added to both the
+  dark `:root` and light `:root:where(.light)` blocks.
+- `web/src/shared/design/tokens.test.ts` — new `describe('design tokens', ...)`
+  block appended (existing tests/blocks left untouched).
+
+Staged explicitly by path (`git add web/package.json bun.lock
+web/src/shared/design/tokens.css web/src/shared/design/tokens.test.ts`), not
+`-A` — verified via `git status --short` before commit that no other
+repo-wide in-flight changes (`.superpowers/sdd/*`, `.remember/*`, the
+Phase-3 plan doc) were swept in.
 
 ## Concerns
 
-- **`bun run check` (the brief's "Final gate (run after Task 12)" step) does
-  NOT currently pass** — but the failure is pre-existing Biome lint/format
-  noise (24 errors / 15 warnings: arg-wrapping style, import ordering) in
-  `tests/contracts/*.test.ts` and `tests/server/*.test.ts` shipped by
-  Tasks 1–11, **not introduced by this task**. Verified by `git stash`-ing
-  my change and re-running `bun run lint` against the pre-Task-12 tree:
-  identical 24 errors / 15 warnings appear with or without my docs edit.
-  Task 12's own mandatory gates — `docs:check` and `typecheck` — both pass
-  cleanly. Fixing those pre-existing test-file lint issues is outside a
-  docs-only task's scope (and outside the file set I was asked to touch);
-  flagging so the orchestrator can route it to whichever task/agent owns
-  those test files before the Phase-1 `bun run check` gate is declared
-  green.
+- **Lockfile location differs from the brief's Step 6 literal command**
+  (`git add ... web/bun.lock ...`) — there is no `web/bun.lock`; the correct
+  file is the root `bun.lock`. Flagging in case downstream tooling/scripts
+  assume a per-workspace lockfile.
+- The pre-existing `tokens.test.ts` file (from an earlier task) was extended
+  rather than replaced — worth a quick sanity check that no later task
+  expects this file to contain *only* the brief's snippet.
+- Chunk-size build warning (`>500kB` minified JS) is pre-existing and
+  unrelated to @visx (the five packages are small); not something this task
+  introduced, not addressed here.

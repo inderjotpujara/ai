@@ -1,142 +1,63 @@
-# Task 4 report: Region error boundary + Base-UI primitives (Slice 30b Phase-1b)
+# Task 4 report: `readRunArtifacts` — readdir + classify into `ArtifactKind` (Slice 30b Phase 3)
 
 ## Status: DONE
 
-## Commit
-`ed68cc5 feat(web): RegionErrorBoundary + Base-UI Button/Dialog primitives`
+Commit: `e53f709 feat(run): readRunArtifacts — readdir+classify run dir into ArtifactKind`
 
-## Files created
-- `web/src/shared/ui/error-boundary.tsx` — `RegionErrorBoundary` class component
-- `web/src/shared/ui/button.tsx` — `Button` (native button + `variant?: 'default' | 'accent'`)
-- `web/src/shared/ui/dialog.tsx` — `Dialog` wrapping Base UI's `Dialog` primitive
-- `web/src/shared/ui/error-boundary.test.tsx` — 2 tests
-- `web/src/shared/ui/dialog.test.tsx` — 2 tests
+## Files changed
+- `src/run/artifacts.ts` (new) — `readRunArtifacts(runDir): Promise<RunArtifact[]>` where `RunArtifact = { name: string; bytes: number; kind: ArtifactKind }`.
+- `tests/run/artifacts.test.ts` (new) — 4 tests.
 
-## Base UI API verification (installed `@base-ui-components/react@1.0.0-rc.0`)
+## Context check before implementing
+Confirmed `ArtifactKind` (in `src/contracts/enums.ts`) already has all 11 members needed (`Answer, Gap, Spans, Degradation, Other, Result, Resource, Unverified, Failed, Error, Media`) — the contracts-group task landed it already, per the brief. Confirmed the `@contracts`/relative barrel `src/contracts/index.ts` re-exports `enums.ts` via `export * from './enums.ts'`, so `../contracts/index.ts` resolves `ArtifactKind` as the brief's snippet expects. Read `src/run/run-trace.ts`'s `readSpans` for the established "swallow fs errors, return empty" convention (`try { readFile(...) } catch { return {spans:[], malformed:0} }`) and matched it exactly in `readRunArtifacts`'s missing-dir handling.
 
-Inspected `web/node_modules/@base-ui-components/react/package.json` `exports` map and
-the `.d.ts` files under `web/node_modules/@base-ui-components/react/dialog/`.
+## Implementation
+Followed the brief's Step 3 snippet almost verbatim, with two small deliberate deviations:
+1. Extracted the return shape into an exported `type RunArtifact = { name: string; bytes: number; kind: ArtifactKind }` (brief inlined the object-literal type on the function signature) — named type is reused for `dirBytes`'s caller and cleaner for the mapper (Task 5+) to import instead of duplicating the inline shape.
+2. Doc comment on `readRunArtifacts` explicitly cross-references `readSpans` in `run-trace.ts` as the precedent for the fs-error-tolerance convention, per the brief's ask to "match `src/run/` conventions."
 
-- **Import path confirmed:** `@base-ui-components/react/dialog` is a valid subpath
-  export (`exports['./dialog']` → `./dialog/index.d.ts` / `./dialog/index.js`,
-  with an ESM variant under `./esm/dialog/`). `dialog/index.d.ts` does
-  `export * as Dialog from './index.parts.js'`, so
-  `import { Dialog as BaseDialog } from '@base-ui-components/react/dialog'` is
-  exactly right — no root-import fallback needed.
-- **Part names confirmed** via `dialog/index.parts.d.ts`: `Root`, `Portal`,
-  `Backdrop`, `Popup`, `Title` (plus `Close`, `Description`, `Viewport`, `Trigger`,
-  `Handle`) all exist under those exact names — no `Content`/`Overlay` rename in
-  this RC, no restructuring versus the brief's sample.
-- **Root props** (`dialog/root/DialogRoot.d.ts`): `open?: boolean`,
-  `onOpenChange?: (open: boolean, eventDetails: DialogRoot.ChangeEventDetails) => void`.
-  Our wrapper's narrower `onOpenChange: (open: boolean) => void` is directly
-  assignable (a callback with fewer parameters satisfies a wider one) — confirmed
-  by `tsc --noEmit` passing clean with no cast. `modal` defaults to `true` (focus
-  trap + scroll lock + outside-pointer disabled), satisfying the focus-trap
-  requirement with no extra props.
-- **Unmount-on-close confirmed** (`dialog/root/DialogRoot.d.ts`, `actionsRef` doc):
-  the popup only stays mounted after close if an `actionsRef` with an `unmount`
-  action is supplied; by default Base UI unmounts the closed dialog's content.
-  This is what makes "renders nothing when closed" pass with zero extra props.
-- **No adaptation needed.** The brief's `dialog.tsx` sample matched the installed
-  API verbatim — used byte-for-byte as written.
+Logic, unchanged from the brief:
+- `readdir(runDir, { withFileTypes: true })` wrapped in try/catch → `[]` on any failure (missing dir, permissions, etc. — never throws).
+- Directory entries: only `media/` is recognized: it's rolled up via `dirBytes()` (readdir one level under `media/`, sum `stat().size` for each **file** entry — subdirectories under `media/` are ignored per the brief's "media dirs are flat" comment) and emitted as `{ name: 'media', bytes, kind: Media }`. Any other directory entry is silently skipped (not modeled in the brief's classification table).
+- File entries: looked up in the `FILE_KINDS` record by exact filename; `?? ArtifactKind.Other` fallthrough for anything unrecognized; `bytes` = `stat().size`.
 
 ## TDD
-
-**RED** — wrote both test files first (`error-boundary.test.tsx`,
-`dialog.test.tsx`), then ran:
-```
-$ cd web && bun run test src/shared/ui/
-FAIL src/shared/ui/dialog.test.tsx — Failed to resolve import "./dialog.tsx"
-FAIL src/shared/ui/error-boundary.test.tsx — Failed to resolve import "./error-boundary.tsx"
-Test Files  2 failed (2)
-     Tests  no tests
-```
-Confirmed genuine RED (missing modules), not a false pass.
-
-**GREEN** — wrote `error-boundary.tsx`, `button.tsx`, `dialog.tsx` verbatim from
-the brief (`Button` isn't in this task's test list but is required by the
-`Dialog`/palette interface description, so it was created alongside per the
-brief's file list). Re-ran the same command: 4/4 tests passed on the first try.
-No happy-dom portal workaround was needed — React portals into `document.body`
-render synchronously and RTL's `screen` queries the whole document by default,
-so plain `getByText`/`queryByText` worked without `findBy*`/`waitFor`.
-
-## Gate 1 — tests
+Wrote the test file first (brief's Step 1 sample, plus one additional test I added — see below), ran it to confirm RED (module didn't exist), then wrote the implementation, then GREEN.
 
 ```
-$ cd web && bun run test src/shared/ui/
- RUN  v4.1.10 /Users/inderjotsingh/ai/web
- Test Files  2 passed (2)
-      Tests  4 passed (4)
-   Duration  564ms
+$ bun test tests/run/artifacts.test.ts
+ 4 pass
+ 0 fail
+ 14 expect() calls
+Ran 4 tests across 1 file. [29.00ms]
 ```
 
-Console output stayed pristine: the error-boundary "catches a throwing child" test
-spies on `console.error` (`vi.spyOn(console, 'error').mockImplementation(() => {})`)
-before triggering `Boom`, suppressing both React's dev-mode error logging and the
-boundary's own `componentDidCatch` log during the assertion.
+Test coverage (4 tests, beyond the brief's 3-test sample):
+1. `answer.txt/result.txt/spans.jsonl/degradation.jsonl/error.json/random.log` → correct kinds, `random.log` → `Other`, byte-size spot-check on `answer.txt`.
+2. **Added test** (not in the brief's sample, added for classification-table completeness): `gap.txt/resource.txt/unverified.txt/failed.txt` → `Gap/Resource/Unverified/Failed` — the brief's sample test only exercised 6 of the 10 file-kind rows in its own classification table, leaving 4 (`gap`, `resource`, `unverified`, `failed`) unverified by any test. Added this test so every row of the table has direct coverage.
+3. `media/` dir with two files (`4` + `2` bytes) → `Media` kind, `bytes: 6` (rolled-up sum).
+4. Missing run dir → `[]`, never throws.
 
-## Gate 2 — typecheck
-
+## Gate — all clean
 ```
-$ cd web && bun run typecheck
-$ tsc --noEmit
-(clean, no output, exit 0)
-```
+$ bun test tests/run/artifacts.test.ts
+4 pass, 0 fail, 14 expect() calls
 
-## Gate 3 — lint
+$ bun run typecheck
+$ tsc --noEmit   (clean, no output)
 
-Initial `bun run lint` (from repo root) flagged 4 errors, all in the new files
-(a `Button` formatting diff, an `error-boundary.tsx` JSX-wrapping diff, and
-import-order in both new test files), plus pre-existing unrelated
-`noExplicitAny` warnings in `tests/provisioning/provisioner.test.ts` and
-`tests/resource/ollama-control.test.ts` (untouched by this task). Ran the scoped
-autofix:
+$ bun run lint:file -- "src/run/artifacts.ts" "tests/run/artifacts.test.ts"
+$ biome check src/run/artifacts.ts tests/run/artifacts.test.ts
+Checked 2 files in 28ms. No fixes applied.
 ```
-$ bun run lint:file -- "web/src/shared/ui/button.tsx" "web/src/shared/ui/dialog.tsx" \
-    "web/src/shared/ui/dialog.test.tsx" "web/src/shared/ui/error-boundary.tsx" \
-    "web/src/shared/ui/error-boundary.test.tsx" --write
-Checked 5 files in 6ms. Fixed 4 files.
-```
-Re-ran `bun run lint` from root: **0 errors**, 14 pre-existing warnings (all in
-files outside this task's scope). No repo-wide config changes; only the biome
-auto-formatter touched the new files (import sort + JSX/argument wrapping) — no
-scoped `biome-ignore` was needed, no genuine rule conflict encountered.
-
-Re-ran tests + typecheck after the autofix to confirm nothing regressed: 4/4
-tests still passed, `tsc --noEmit` still clean.
+Commit hook also ran `bun run scripts/docs-check.ts` → passed. No `docs/architecture.md` update in this task: `src/run/` is an already-documented subsystem (per `docs:check`'s per-subsystem gate) and this is a pure new-function addition within it, not a new subsystem — the mapper landing (later task in this same phase) is the natural point to describe `RunDTO.artifacts` in `architecture.md`, per the phase plan.
 
 ## Self-review
-
-- **`RegionErrorBoundary`**: class component; `getDerivedStateFromError` sets
-  state; `componentDidCatch` logs `[region:<name>]` + error + component stack to
-  `console.error` (telemetry sink explicitly deferred to a later phase per the
-  brief's own comment). Fallback renders `role="alert"` with the region name
-  bolded, matching the test's `toHaveTextContent(/Chat/)`.
-- **`Button`**: extends native `ButtonHTMLAttributes`, `variant` defaults to
-  `'default'`, explicit `type="button"` avoids accidental form-submit semantics,
-  `className` passthrough appends after the variant classes so callers can
-  override. Not directly unit-tested in this task (brief's test list covers only
-  error-boundary + dialog) — it's a trivial presentational wrapper; Task 7's
-  palette will exercise it through its own tests.
-- **`Dialog`**: thin wrapper; `open`/`onOpenChange`/`title`/`children` map 1:1 onto
-  Base UI's `Root`/`Title`/children slot. Focus-trap and Esc-close are Base UI's
-  default `Root` behavior (`modal` defaults `true`; `disablePointerDismissal`
-  defaults `false`, so outside-click and Escape both dismiss) — verified via the
-  type declarations rather than reimplemented.
-- Styling in `button.tsx`/`dialog.tsx` consumes the same `--color-*` CSS custom
-  properties Task 2's `tokens.css` established (`--color-border`,
-  `--color-surface`, `--color-fg`, `--color-accent`, `--color-bg`,
-  `--color-muted`), consistent with Task 3's `theme.tsx` usage.
+- Diff is exactly the two new files, nothing else touched — confirmed via `git show --stat` (2 files changed, 119 insertions, 0 deletions).
+- `readRunArtifacts` never throws for any input tested: missing dir → `[]`; unreadable/unknown file → `Other`; directory other than `media/` → silently skipped (not a table row, so no artifact emitted — matches the brief's table which lists no "other directory" row).
+- `bytes` semantics verified both ways: plain file uses `stat().size` directly (byte-exact, verified `answer.txt` written with 5 bytes → `bytes: 5`); `media/` directory uses the rolled-up sum (verified `4 + 2 = 6`).
+- Import style matches sibling `run/` files: `node:fs/promises`, `node:path`, contracts import via the barrel (`../contracts/index.ts`) — consistent with how `run-trace.ts` imports from `../telemetry/`.
+- `FILE_KINDS` is a flat `Record<string, ArtifactKind>` — no risk of an enum value drifting out of sync with `src/contracts/enums.ts` since it's a one-way lookup keyed by filename, not a re-declaration of the enum itself.
 
 ## Concerns
-
-- `Button` has no dedicated unit test in this task (out of the brief's scope);
-  flagging in case a reviewer wants one added preemptively, though Task 7's ⌘K
-  palette will cover it via its own render.
-- Living docs (`docs/architecture.md`, README, ROADMAP, SDD ledger) were **not**
-  touched by this task — per the repo's hard line those are gated at
-  slice-landing (pre-push), not per-task, and `.superpowers/sdd/progress.md`
-  already shows other in-flight edits from the broader Phase-1b effort that are
-  outside this task's scope.
+- None blocking. One forward-note for the mapper task: `readRunArtifacts` skips any directory entry other than `media/` (e.g., if a future run dir grows a second subdirectory) rather than classifying it — this matches the brief's classification table (which has no "other directory" row) but is worth flagging so the mapper doesn't assume every dir entry is represented in the artifact list.

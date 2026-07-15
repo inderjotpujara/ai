@@ -1,143 +1,123 @@
-### Task 11: Server — `bun run web` entry point (config → mint token → boot → inject into HTML)
+### Task 11: Wire the three GET routes into `handleApi`
 
 **Files:**
-- Create: `src/server/main.ts`
-- Modify: `package.json`
-- Test: `tests/server/main.test.ts`
+- Modify: `src/server/app.ts` (`handleApi`)
+- Test: `tests/server/runs-routes.test.ts` (through `buildFetch`, perimeter + token still enforced)
 
 **Interfaces:**
-- Consumes: `loadConfig` from `../config/schema.ts`; `buildFetch`, `type ServerDeps` from `./app.ts`; `mintSessionToken` from `./security/token.ts`.
-- Produces: `renderIndexHtml(token: string): string`; `type StartOptions`; `startWebServer(opts?: StartOptions): { server: ReturnType<typeof Bun.serve>; token: string; port: number }`; a `web` script in `package.json`.
+- Consumes: `handleRunDetail` (Task 8), `handleRunList` (Task 9), `handleRunStream` (Task 10).
+- Produces: three GET matches in `handleApi`, ordered **stream before bare-id** (so `:id/stream` is not swallowed by `:id`), and list before both. The existing POST `/api/runs/:id/respond` match stays. `handleRunStream` passes `{ lastEventId: req.headers.get('Last-Event-ID') ?? undefined, signal: req.signal }`.
 
-- [ ] **Step 1: Write the failing entry-point smoke test**
-
-```ts
-// tests/server/main.test.ts
-import { expect, test } from 'bun:test';
-import { renderIndexHtml, startWebServer } from '../../src/server/main.ts';
-
-test('renderIndexHtml injects the session token into the served page', () => {
-  const html = renderIndexHtml('tok-123');
-  expect(html).toContain('tok-123');
-  expect(html.toLowerCase()).toContain('<!doctype html>');
-});
-
-test('startWebServer boots on an ephemeral port, mints a token, and serves it', async () => {
-  const { server, token, port } = startWebServer({ port: 0 });
-  try {
-    expect(token).toMatch(/^[0-9a-f]{64}$/);
-    expect(port).toBeGreaterThan(0);
-
-    const index = await fetch(`http://localhost:${port}/`);
-    expect(await index.text()).toContain(token);
-
-    const health = await fetch(`http://localhost:${port}/api/health`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
-    expect(health.status).toBe(200);
-
-    const unauth = await fetch(`http://localhost:${port}/api/health`);
-    expect(unauth.status).toBe(401);
-  } finally {
-    server.stop(true);
-  }
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/server/main.test.ts`
-Expected: FAIL — cannot resolve `../../src/server/main.ts`.
-
-- [ ] **Step 3: Write the entry point**
+- [ ] **Step 1: Write the failing test** — `tests/server/runs-routes.test.ts` (mirror `app.test.ts`'s `buildFetch` boot with a `runsRoot` pointed at a tmp dir holding one run):
 
 ```ts
-// src/server/main.ts
-import { loadConfig } from '../config/schema.ts';
-import { type ServerDeps, buildFetch } from './app.ts';
-import { mintSessionToken } from './security/token.ts';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
+import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
+import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 
-/**
- * Minimal served page for Phase 1 (no web/ build yet). The token is injected as
- * `window.__AGENT_TOKEN__` so the future frontend reads it from the served HTML
- * rather than a network round-trip. Phase 1b replaces this with the Vite build.
- */
-export function renderIndexHtml(token: string): string {
-  return (
-    '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
-    '<title>AI Local Agent</title>' +
-    `<script>window.__AGENT_TOKEN__=${JSON.stringify(token)};</script>` +
-    '</head><body><div id="root"></div></body></html>'
-  );
-}
-
-export type StartOptions = {
-  port?: number;
-  allowedOrigins?: string[];
-  recordIo?: boolean;
-  staticDir?: string;
-  token?: string;
+const TOKEN = 'a'.repeat(64);
+const policy = { port: 0, allowedOrigins: [] as string[] };
+const runsRoot = mkdtempSync(join(tmpdir(), 'routes-runs-'));
+mkdirSync(join(runsRoot, 'run-1'), { recursive: true });
+writeFileSync(
+  join(runsRoot, 'run-1', 'spans.jsonl'),
+  `${JSON.stringify({ name: 'agent.run', kind: 0, traceId: 't', spanId: 'a', parentSpanId: null, startUnixNano: 0, endUnixNano: 1_000_000, durationMs: 1, status: { code: 0 }, attributes: { 'agent.outcome': 'answer' }, events: [] })}\n`,
+);
+const noRun: RunChatTurn = async () => { throw new Error('unused'); };
+const deps: ServerDeps = {
+  token: TOKEN, policy, recordIo: false, indexHtml: '<!doctype html><title>t</title>',
+  runChatTurn: noRun, consent: createConsentRegistry(), uploadsDir: runsRoot, runsRoot,
 };
 
-/** Boot the local web BFF. Returns the server handle for tests/shutdown. */
-export function startWebServer(opts: StartOptions = {}): {
-  server: ReturnType<typeof Bun.serve>;
-  token: string;
-  port: number;
-} {
-  const cfg = loadConfig().values;
-  const port = opts.port ?? (cfg.AGENT_WEB_PORT as number);
-  const allowedOrigins =
-    opts.allowedOrigins ??
-    String(cfg.AGENT_WEB_ORIGIN_ALLOWLIST)
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  const recordIo = opts.recordIo ?? (cfg.AGENT_WEB_RECORD_IO as boolean);
-  const token = opts.token ?? mintSessionToken();
+let server: ReturnType<typeof Bun.serve>;
+let base: string;
+beforeAll(() => {
+  server = Bun.serve({ port: 0, fetch: buildFetch(deps), idleTimeout: 0 });
+  const { port } = server;
+  if (port === undefined) throw new Error('no port');
+  policy.port = port;
+  base = `http://localhost:${port}`;
+});
+afterAll(() => server.stop(true));
 
-  const policy = { port, allowedOrigins };
-  const deps: ServerDeps = {
-    token,
-    policy,
-    recordIo,
-    staticDir: opts.staticDir,
-    indexHtml: renderIndexHtml(token),
-  };
-  // idleTimeout: 0 is required so future SSE streams are not idle-closed.
-  const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });
-  policy.port = server.port; // reconcile when port === 0 (ephemeral)
-  return { server, token, port: server.port };
+const auth = { authorization: `Bearer ${TOKEN}` };
+
+test('GET /api/runs requires the token', async () => {
+  expect((await fetch(`${base}/api/runs`)).status).toBe(401);
+});
+
+test('GET /api/runs lists the run', async () => {
+  const res = await fetch(`${base}/api/runs`, { headers: auth });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { items: { id: string }[]; total: number };
+  expect(body.items.map((i) => i.id)).toContain('run-1');
+});
+
+test('GET /api/runs/:id returns the RunDTO', async () => {
+  const res = await fetch(`${base}/api/runs/run-1`, { headers: auth });
+  expect(res.status).toBe(200);
+  expect(((await res.json()) as { id: string }).id).toBe('run-1');
+});
+
+test('GET /api/runs/:id/stream opens an event-stream (not the detail JSON)', async () => {
+  const res = await fetch(`${base}/api/runs/run-1/stream`, { headers: auth });
+  expect(res.status).toBe(200);
+  expect(res.headers.get('content-type')).toContain('text/event-stream');
+  await res.body?.cancel();
+});
+
+test('GET /api/runs/missing → 404', async () => {
+  expect((await fetch(`${base}/api/runs/missing`, { headers: auth })).status).toBe(404);
+});
+```
+
+- [ ] **Step 2: Run to fail** — `bun test --path-ignore-patterns 'web/**' tests/server/runs-routes.test.ts` → FAIL (routes not wired).
+
+- [ ] **Step 3: Minimal impl** — in `src/server/app.ts` `handleApi`, add imports and the matches (place BEFORE the existing `respondMatch` block or after `/api/feedback` — but the stream/detail/list GET matches must be ordered stream→detail, and none collide with the POST respond match):
+
+```ts
+import { handleRunDetail } from './runs/detail.ts';
+import { handleRunList } from './runs/list.ts';
+import { handleRunStream } from './runs/stream.ts';
+
+// ... inside handleApi, after the /api/health block and before the 404:
+if (req.method === 'GET' && url.pathname === '/api/runs') {
+  rec.status(200);
+  return handleRunList(url.searchParams, deps);
 }
-
-if (import.meta.main) {
-  const { server } = startWebServer();
-  process.stderr.write(
-    `web BFF on http://localhost:${server.port} ` +
-      '(session token minted + injected into served HTML)\n',
-  );
+const streamMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/stream$/);
+if (req.method === 'GET' && streamMatch?.[1]) {
+  rec.status(200);
+  return handleRunStream(streamMatch[1], deps, {
+    lastEventId: req.headers.get('Last-Event-ID') ?? undefined,
+    signal: req.signal,
+  });
+}
+const detailMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+if (req.method === 'GET' && detailMatch?.[1]) {
+  const res = await handleRunDetail(detailMatch[1], deps);
+  rec.status(res.status);
+  return res;
 }
 ```
 
-- [ ] **Step 4: Add the `web` script to `package.json`**
+(Note: `handleRunDetail` may 404, so set `rec.status` from the actual response, not a hardcoded 200.)
 
-In `package.json` `scripts`, add (do NOT touch the existing `serve`):
+- [ ] **Step 4: Run to pass** — `bun test --path-ignore-patterns 'web/**' tests/server/runs-routes.test.ts tests/server/app.test.ts` → PASS (existing perimeter/token/404 tests still green).
 
-```json
-    "web": "bun run src/server/main.ts",
-```
-
-- [ ] **Step 5: Run smoke test + typecheck to verify pass**
-
-Run: `bun test tests/server/main.test.ts && bun run typecheck`
-Expected: PASS (2 tests) and no type errors.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-git add src/server/main.ts package.json tests/server/main.test.ts
-git commit -m "feat(server): add bun run web entry point with token minting + HTML injection"
+bun run typecheck && bun run lint:file -- "src/server/app.ts" "tests/server/runs-routes.test.ts"
+git add src/server/app.ts tests/server/runs-routes.test.ts
+git commit -m "feat(server): wire GET /api/runs, /api/runs/:id, /api/runs/:id/stream into handleApi"
 ```
 
 ---
+
+## Layer ④ — Web feature
 

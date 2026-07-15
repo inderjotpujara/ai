@@ -1,158 +1,109 @@
-### Task 3: ThemeProvider + light/dark toggle
+### Task 3: `RunListQuery` + `RunListResponse` request/response schemas
 
 **Files:**
-- Create: `web/src/shared/design/theme.tsx`
-- Test: `web/src/shared/design/theme.test.tsx`
+- Modify: `src/contracts/requests.ts`
+- Test: `tests/contracts/requests.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: `matchMedia`, `localStorage`.
-- Produces: `ThemeProvider` (React component), `useTheme(): { theme: 'light' | 'dark'; toggle: () => void; set: (t: 'light' | 'dark') => void }`, and a `Theme` string enum `{ Light='light', Dark='dark' }`. Applies/removes the `light` class + `data-theme` attribute on `document.documentElement`; persists to `localStorage['agent-theme']`; initial = stored value ?? (`prefers-color-scheme: light` → light, else dark).
+- Consumes: `RunListItemDtoSchema` (Task 2) — imported from `./dto.ts` (a `./` sibling, allowed by the isomorphism guard).
+- Produces:
+  - `RunListQuerySchema` → `RunListQuery` = `{ search?: string, outcome?: string, degraded?: boolean, limit: number, cursor?: string }`. Query values arrive as strings, so `limit` uses `z.coerce.number()` with `.default(25)` and `degraded` coerces `'true'/'false'` → boolean. (Coercion lives in the contract but stays zod-only — no forbidden import.)
+  - `RunListResponseSchema` → `RunListResponse` = `{ items: RunListItemDTO[], nextCursor?: string, total: number }`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test** — append to `tests/contracts/requests.test.ts`:
 
-`web/src/shared/design/theme.test.tsx`:
-```tsx
-import { describe, expect, it, beforeEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { ThemeProvider, useTheme, Theme } from './theme.tsx';
-
-function Probe() {
-  const { theme, toggle } = useTheme();
-  return (
-    <button type="button" onClick={toggle}>
-      theme:{theme}
-    </button>
-  );
-}
-
-beforeEach(() => {
-  localStorage.clear();
-  document.documentElement.className = '';
-});
-
-describe('ThemeProvider', () => {
-  it('defaults to dark when no stored value and OS is not light', () => {
-    render(<ThemeProvider><Probe /></ThemeProvider>);
-    expect(screen.getByRole('button')).toHaveTextContent('theme:dark');
-    expect(document.documentElement).toHaveClass('dark');
-    expect(document.documentElement).not.toHaveClass('light');
-  });
-
-  it('toggles to light, applies the class, and persists', async () => {
-    render(<ThemeProvider><Probe /></ThemeProvider>);
-    await userEvent.click(screen.getByRole('button'));
-    expect(screen.getByRole('button')).toHaveTextContent('theme:light');
-    expect(document.documentElement).toHaveClass('light');
-    expect(document.documentElement).not.toHaveClass('dark');
-    expect(localStorage.getItem('agent-theme')).toBe(Theme.Light);
-  });
-
-  it('restores the persisted theme on mount', () => {
-    localStorage.setItem('agent-theme', Theme.Light);
-    render(<ThemeProvider><Probe /></ThemeProvider>);
-    expect(screen.getByRole('button')).toHaveTextContent('theme:light');
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd web && bun run test src/shared/design/theme.test.tsx`
-Expected: FAIL — cannot resolve `./theme.tsx`.
-
-- [ ] **Step 3: Write `theme.tsx`**
-
-`web/src/shared/design/theme.tsx`:
-```tsx
+```ts
 import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-  type ReactNode,
-} from 'react';
+  RunListQuerySchema,
+  RunListResponseSchema,
+} from '../../src/contracts/requests.ts';
+import { RunLifecycle, RunOrigin } from '../../src/contracts/enums.ts';
 
-export enum Theme {
-  Light = 'light',
-  Dark = 'dark',
-}
+test('RunListQuery coerces string query params and defaults limit', () => {
+  const parsed = RunListQuerySchema.parse({
+    search: 'qwen',
+    outcome: 'answer',
+    degraded: 'true',
+    limit: '10',
+  });
+  expect(parsed).toEqual({
+    search: 'qwen',
+    outcome: 'answer',
+    degraded: true,
+    limit: 10,
+  });
+});
 
-const STORAGE_KEY = 'agent-theme';
+test('RunListQuery applies the default limit when omitted', () => {
+  const parsed = RunListQuerySchema.parse({});
+  expect(parsed.limit).toBe(25);
+  expect(parsed.degraded).toBeUndefined();
+});
 
-type ThemeContextValue = {
-  theme: Theme;
-  toggle: () => void;
-  set: (t: Theme) => void;
-};
-
-const ThemeContext = createContext<ThemeContextValue | null>(null);
-
-function initialTheme(): Theme {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === Theme.Light || stored === Theme.Dark) return stored;
-  } catch {
-    // localStorage unavailable → fall through to OS preference
-  }
-  const prefersLight =
-    typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: light)').matches;
-  return prefersLight ? Theme.Light : Theme.Dark;
-}
-
-function apply(theme: Theme): void {
-  const root = document.documentElement;
-  // Set BOTH classes explicitly. `.dark` must be present in dark mode so
-  // Tailwind's `dark:` variant (@custom-variant dark → `.dark` ancestor) fires;
-  // tokens.css also keeps the dark palette on bare :root as a fallback.
-  root.classList.toggle('dark', theme === Theme.Dark);
-  root.classList.toggle('light', theme === Theme.Light);
-  root.setAttribute('data-theme', theme);
-}
-
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(initialTheme);
-
-  useEffect(() => {
-    apply(theme);
-    try {
-      localStorage.setItem(STORAGE_KEY, theme);
-    } catch {
-      // ignore persistence failure — theme still applies for the session
-    }
-  }, [theme]);
-
-  const set = useCallback((t: Theme) => setTheme(t), []);
-  const toggle = useCallback(
-    () => setTheme((t) => (t === Theme.Dark ? Theme.Light : Theme.Dark)),
-    [],
-  );
-
-  return (
-    <ThemeContext.Provider value={{ theme, toggle, set }}>{children}</ThemeContext.Provider>
-  );
-}
-
-export function useTheme(): ThemeContextValue {
-  const ctx = useContext(ThemeContext);
-  if (!ctx) throw new Error('useTheme must be used within <ThemeProvider>');
-  return ctx;
-}
+test('RunListResponse validates items + pagination', () => {
+  const parsed = RunListResponseSchema.parse({
+    items: [
+      {
+        id: 'run-1',
+        startMs: 1,
+        durationMs: 2,
+        outcome: 'answer',
+        lifecycle: RunLifecycle.Done,
+        origin: RunOrigin.Manual,
+        models: [],
+        degraded: false,
+        spanCount: 1,
+      },
+    ],
+    nextCursor: 'abc',
+    total: 1,
+  });
+  expect(parsed.items).toHaveLength(1);
+  expect(parsed.nextCursor).toBe('abc');
+});
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Run to fail** — `bun test --path-ignore-patterns 'web/**' tests/contracts/requests.test.ts` → FAIL (schemas not exported).
 
-Run: `cd web && bun run test src/shared/design/theme.test.tsx`
-Expected: PASS (3 tests).
+- [ ] **Step 3: Minimal impl** — append to `src/contracts/requests.ts` (add `RunListItemDtoSchema` to the existing `./dto.ts`? there is no such import yet — add one):
 
-- [ ] **Step 5: Typecheck + commit**
+```ts
+import { RunListItemDtoSchema } from './dto.ts';
+
+/** `GET /api/runs?search=&outcome=&degraded=&limit=&cursor=` query. Values are
+ *  raw query strings, so `limit`/`degraded` coerce; `limit` carries a default. */
+export const RunListQuerySchema = z.object({
+  search: z.string().optional(),
+  outcome: z.string().optional(),
+  degraded: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  limit: z.coerce.number().int().positive().max(200).default(25),
+  cursor: z.string().optional(),
+});
+export type RunListQuery = z.infer<typeof RunListQuerySchema>;
+
+/** `GET /api/runs` response — a page of run summaries + a cursor when more remain. */
+export const RunListResponseSchema = z.object({
+  items: z.array(RunListItemDtoSchema),
+  nextCursor: z.string().optional(),
+  total: z.number(),
+});
+export type RunListResponse = z.infer<typeof RunListResponseSchema>;
+```
+
+- [ ] **Step 4: Run to pass** — `bun test --path-ignore-patterns 'web/**' tests/contracts` → PASS (incl. `isomorphic.test.ts`: the new `./dto.ts` import is a `./` sibling, allowed).
+
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-cd web && bun run typecheck && cd ..
-git add web/src/shared/design/theme.tsx web/src/shared/design/theme.test.tsx
-git commit -m "feat(web): ThemeProvider with persisted light/dark toggle"
+bun run typecheck && bun run lint:file -- "src/contracts/requests.ts" "tests/contracts/requests.test.ts"
+git add src/contracts/requests.ts tests/contracts/requests.test.ts
+git commit -m "feat(contracts): RunListQuery + RunListResponse schemas for the Runs list endpoint"
 ```
 
 ---
+
+## Layer ② — The span→DTO mapper
 

@@ -1,157 +1,157 @@
-# Task 9 Report: `withServerRequestSpan` telemetry helper (Slice 30b)
+# Task 9 Report: `handleRunList` — `GET /api/runs` filtered/sorted/paginated list (Slice 30b Phase 3)
 
-Note: this filename was previously reused for earlier, unrelated Task 9s from
-prior slices (Slice 26 runtime-download live-verify; Slice 29 voice-input mic
-capture). That content is superseded here — this is the Slice 30b web-BFF
-telemetry Task 9.
+Note: this filename was previously reused for an earlier, unrelated Task 9
+(Slice 30b Phase 2 consent registry / `POST /api/runs/:id/respond`). That
+content is superseded here — this is the Slice 30b **Phase 3** runs-list
+Task 9.
 
-## Summary
-
-Implemented per brief, TDD (RED → GREEN), followed by typecheck + full-suite regression
-check, then committed. No deviations from the brief's exact values.
-
-## Files touched
-
-- `src/telemetry/spans.ts` — modified (shared file).
-- `tests/telemetry/server-request-span.test.ts` — new test file.
-
-## Exact edits
-
-### 1. `ATTR` object (added before the closing `} as const;`, after the `VOICE_*` block)
-
-```ts
-  // Server / web BFF (Slice 30b)
-  SERVER_ROUTE: 'server.route',
-  SERVER_METHOD: 'http.request.method',
-  SERVER_STATUS: 'http.response.status_code',
-  SERVER_DURATION_MS: 'server.duration_ms',
-  /** Request principal/owner; reserved "local" now, upgrades to audit-grade in Slice 35. */
-  SERVER_PRINCIPAL: 'server.principal',
-```
-
-### 2. `withServerRequestSpan` helper (added right before `setRunOutcome`, i.e. near the
-other `with*Span` helpers and immediately after `withRunSpan`)
-
-```ts
-/**
- * Span for one HTTP request handled by the web BFF (Slice 30b). Follows the
- * recorder-callback pattern (`withRuntimeSpan`): opens a `server.request` span,
- * sets route/method + the reserved principal, runs `fn` (which reports the final
- * status via `rec.status`), records the duration in a `finally`, and — via
- * `inSpan` — records an error status if `fn` throws.
- */
-export function withServerRequestSpan<T>(
-  info: { route: string; method: string; principal?: string },
-  fn: (rec: { status: (code: number) => void }) => Promise<T>,
-): Promise<T> {
-  return inSpan('server.request', async (span) => {
-    const startedAt = performance.now();
-    span.setAttribute(ATTR.SERVER_ROUTE, info.route);
-    span.setAttribute(ATTR.SERVER_METHOD, info.method);
-    span.setAttribute(ATTR.SERVER_PRINCIPAL, info.principal ?? 'local');
-    try {
-      return await fn({
-        status: (code) => span.setAttribute(ATTR.SERVER_STATUS, code),
-      });
-    } finally {
-      span.setAttribute(
-        ATTR.SERVER_DURATION_MS,
-        Math.round(performance.now() - startedAt),
-      );
-    }
-  });
-}
-```
-
-Uses the existing module-private `inSpan('server.request', ...)` (same pattern as
-`withRunSpan`, `withRuntimeSpan`, etc.) — `inSpan` sets `SpanStatusCode.ERROR` and
-rethrows on throw, and always ends the span in its own `finally`. No changes to
-`inSpan` itself were needed.
-
-### 3. Test file (verbatim from the brief, step 1)
-
-`tests/telemetry/server-request-span.test.ts` — two tests:
-1. Happy path: emits `server.request` span with `server.route`, `http.request.method`,
-   `http.response.status_code`, `server.principal` (defaulted to `'local'`), and a
-   numeric `server.duration_ms`.
-2. Throwing handler: span still ends, `status.code === SpanStatusCode.ERROR`.
-
-Uses `registerTestProvider()` from `tests/helpers/otel-test-provider.ts`, storing the
-returned `{ exporter, provider }` in a module-level `h` var; `afterAll` calls
-`h.provider.shutdown()` (not on the whole return object).
-
-## Test commands + results
-
-### RED (before implementation)
-
-```
-$ bun test tests/telemetry/server-request-span.test.ts
-SyntaxError: Export named 'withServerRequestSpan' not found in module
-'/Users/inderjotsingh/ai/src/telemetry/spans.ts'.
-0 pass / 1 fail / 1 error
-```
-
-### GREEN (after implementation)
-
-```
-$ bun test tests/telemetry/server-request-span.test.ts
-2 pass
-0 fail
-8 expect() calls
-Ran 2 tests across 1 file. [82.00ms]
-```
-
-### Typecheck (clean)
-
-```
-$ bun run typecheck
-$ tsc --noEmit
-(no output — exit 0)
-```
-
-### No-regression confirmation (full telemetry suite, including the new file)
-
-```
-$ bun test tests/telemetry
-39 pass
-0 fail
-117 expect() calls
-Ran 39 tests across 13 files. [93.00ms]
-```
-
-All pre-existing telemetry tests (12 other files) plus the new one pass; no
-regressions introduced.
+## Status: DONE
 
 ## Commit
+`46350f9` — feat(server): handleRunList — filtered/sorted/paginated GET /api/runs
 
+## Files
+- Created: `src/server/runs/list.ts`
+- Created: `tests/server/runs-list.test.ts`
+
+## TDD flow
+1. **RED**: Wrote `tests/server/runs-list.test.ts` exactly per the brief's
+   Step 1 sample (4 tests: sort-desc-by-startMs+total, case-insensitive
+   search over id/models/outcome, outcome+degraded facet filters,
+   limit+opaque-cursor pagination). Ran to fail:
+   ```
+   $ bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts
+   error: Cannot find module '../../src/server/runs/list.ts' from
+     '/Users/inderjotsingh/ai/tests/server/runs-list.test.ts'
+   0 pass, 1 fail, 1 error
+   ```
+2. **GREEN**: Implemented `src/server/runs/list.ts` per the brief's Step 3
+   sample verbatim — `encodeCursor`/`decodeCursorId`/`matchesSearch`/
+   `handleRunList`, importing `RunsDeps` from `./detail.ts` (Task 8,
+   committed) and `summarizeRunListItem` from `../../run/run-dto.ts`
+   (Task 6, committed, mtime-cache-fronted).
+3. Ran to pass (final run after formatting fix, see Gate below):
+   ```
+   $ bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts
+   bun test v1.3.11 (af24e281)
+    4 pass
+    0 fail
+    17 expect() calls
+   Ran 4 tests across 1 file. [117.00ms]
+   ```
+
+## Interfaces confirmed against already-landed code
+- `RunsDeps = { runsRoot: string }` — confirmed exported from
+  `src/server/runs/detail.ts` (Task 8).
+- `summarizeRunListItem(runsRoot, id): Promise<RunListItemDTO | undefined>` —
+  confirmed exported + mtime-cache-fronted in `src/run/run-dto.ts` (Task 6).
+- `RunListQuerySchema` (`src/contracts/requests.ts`) — confirmed: `search`/
+  `outcome` are plain optional strings; `degraded` is
+  `z.enum(['true','false']).optional().transform(...)` → boolean or
+  `undefined`; `limit` is `z.coerce.number().int().positive().max(200).default(25)`.
+- `RunListResponseSchema` — confirmed: `{ items: RunListItemDtoSchema[],
+  nextCursor?: string, total: number }`.
+- `RunListItemDtoSchema` (`src/contracts/dto.ts`) — confirmed field set
+  (`id`, `startMs`, `durationMs`, `outcome: string`, `lifecycle`, `origin`,
+  `models: string[]`, `degraded: boolean`, `spanCount`, `tokens`) matches
+  what `list.ts`'s filter/sort/search logic assumes.
+
+## Implementation notes
+- `handleRunList(params, deps)` builds the raw query object from
+  `URLSearchParams`, `RunListQuerySchema.parse`s it, `readdir`s
+  `deps.runsRoot` for directory entries (a `readdir` failure — root doesn't
+  exist yet — degrades to an empty `{items:[], total:0}` 200 rather than
+  throwing/500ing), projects each id through `summarizeRunListItem`
+  (`undefined` entries, e.g. dirs with no `spans.jsonl`, are dropped),
+  filters by `search`/`outcome`/`degraded`, sorts descending by `startMs`,
+  then paginates: an opaque cursor is `base64url(startMs:id)`, decoded back
+  to just the `id` half, used to find that item's index in the filtered+
+  sorted array and slice from the next index; `nextCursor` is only set when
+  `start + limit < filtered.length`.
+- `search` matching is over
+  `` `${id} ${models.join(' ')} ${outcome}`.toLowerCase() `` — a substring
+  match against the lowercased search term, exactly per the brief.
+
+## Gate results (all three, before commit)
+1. **typecheck** — `bun run typecheck` → `$ tsc --noEmit` clean, no errors.
+2. **lint** — `bun run lint:file -- "src/server/runs/list.ts"
+   "tests/server/runs-list.test.ts"` — first pass reported 2 formatting
+   errors (Biome's line-width/wrapping rules differ from the brief's inline
+   sample formatting, e.g. multi-arg `writeRun({...})` object literals and
+   the `matchesSearch` template-literal length in `list.ts`). Ran `bunx
+   biome check --write` on both files to auto-fix formatting only (no logic
+   changes — confirmed by re-reading the diff, purely re-wrapped
+   lines/object literals). Re-ran lint → `Checked 2 files in 5ms. No fixes
+   applied.` (clean). Re-ran the focused test suite and typecheck after the
+   autofix to confirm nothing broke — both still green/clean (results shown
+   above are the post-autofix final runs).
+3. **focused tests** — 4 pass / 0 fail, 17 `expect()` calls (see above).
+4. `bun run scripts/docs-check.ts` (pre-commit hook) → passed: "living docs
+   present + linked; every src subsystem documented" — `src/server/runs/`
+   already exists as a documented subsystem surface from Task 8; adding
+   `list.ts` alongside `detail.ts` didn't introduce a new subsystem.
+
+## Commit
+`git add src/server/runs/list.ts tests/server/runs-list.test.ts` (no `git
+add -A` — the working tree has unrelated dirty ledger/scratch files from
+other in-flight tasks, left untouched). `git status --short` before commit
+confirmed only these two files were staged (`A  src/server/runs/list.ts`,
+`A  tests/server/runs-list.test.ts`); everything else stayed as pre-existing
+modified/untracked.
+
+Commit: `46350f9` — "feat(server): handleRunList — filtered/sorted/paginated
+GET /api/runs"
 ```
-commit 3ee90f0
-feat(telemetry): add server.request span helper for the web BFF
- 2 files changed, 70 insertions(+)
- create mode 100644 tests/telemetry/server-request-span.test.ts
+2 files changed, 218 insertions(+)
+ create mode 100644 src/server/runs/list.ts
+ create mode 100644 tests/server/runs-list.test.ts
 ```
 
-The pre-commit hook ran `docs:check` (docs-only gate for this repo) and passed:
-"docs-check: living docs present + linked; every src subsystem documented."
-
-## Self-review
-
-- Followed the brief verbatim for ATTR key names/values and the helper signature —
-  no deviation.
-- `withServerRequestSpan` mirrors sibling helpers (`withRunSpan`, `withRuntimeSpan`)
-  in structure: opens via `inSpan`, sets up-front attributes, exposes a recorder
-  callback (`rec.status`) for attributes only knowable at settle-time, and uses a
-  `finally` for the duration measurement so it's recorded even if `fn` throws
-  (verified by the throwing-handler test).
-- `principal` defaults to `'local'` exactly as specified — matches the reserved
-  "local, upgrades in Slice 35" comment on the ATTR key.
-- Only the two required files were touched; no changes to `inSpan`, other `ATTR`
-  keys, or unrelated helpers.
-- Did not touch the sdd ledger/progress.md, README, ROADMAP, or architecture.md —
-  out of scope for a single per-task brief (assumed handled at slice-review/closeout
-  level, consistent with prior task reports in this same ledger sequence).
+## Deviations from brief
+None in logic — the implementation matches the brief's Step 3 sample
+verbatim. The only change from the brief's literal text was Biome's
+auto-formatting (line wrapping / multi-line object literals) applied to
+both the test file and `list.ts` to satisfy the project's lint gate; no
+behavioral change.
 
 ## Concerns
+None blocking. Same interim-cache caveat already noted in Task 6's report
+applies transitively here (the in-process `summaryCache` in `run-dto.ts` is
+a stateless-friendly interim, not a persisted index — Phase 6 territory,
+not this task's scope).
 
-None. Implementation is a small, additive, self-contained helper with no
-observed regressions; typecheck is clean under strict tsconfig.
+---
+
+## Follow-up: review-requested test-coverage gaps (post-review)
+
+Review came back Spec ✅ / Quality Approved with two Important
+test-coverage gaps (code already correct by inspection — these lock in the
+behavior). Added exactly two tests to `tests/server/runs-list.test.ts`:
+
+1. **missing/unreadable runsRoot → 200 with empty list** — asserts the
+   "degrade, never crash" contract: `handleRunList(new URLSearchParams(''),
+   { runsRoot: join(root, 'does-not-exist') })` returns 200 with body
+   `{ items: [], total: 0 }` and `nextCursor` undefined.
+2. **stale cursor id → resets to page 1 (never throws)** — two runs, request
+   with a cursor for an absent id (`Buffer.from('999:ghost').toString(
+   'base64url')`, same encoding the impl uses); asserts 200 and all items
+   returned (`items.length === 2`, start resets to 0).
+
+Gate (changed test file only):
+- `bun run typecheck` → `$ tsc --noEmit` clean.
+- `bun run lint:file -- "tests/server/runs-list.test.ts"` → clean after one
+  `biome check --write` autofix (pure line-wrap formatting, no logic change).
+- Test run:
+  ```
+  $ bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts
+  bun test v1.3.11 (af24e281)
+   6 pass
+   0 fail
+   23 expect() calls
+  Ran 6 tests across 1 file. [111.00ms]
+  ```
+
+Follow-up commit (NOT amended into T9): `d2dc6f6` — "test(server): cover
+runList empty-root degrade + stale-cursor fallback". `git add
+tests/server/runs-list.test.ts` only (no `git add -A`); 1 file changed,
+19 insertions. Pre-commit docs-check passed.
