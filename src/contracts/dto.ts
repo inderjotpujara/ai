@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   ArtifactKind,
   ChatRole,
+  CrewProcess,
   DegradeKind,
   RunLifecycle,
   RunOrigin,
@@ -119,3 +120,48 @@ export const ChatMessageDtoSchema = z.object({
   degraded: z.boolean().optional(),
 });
 export type ChatMessageDTO = z.infer<typeof ChatMessageDtoSchema>;
+
+/** Projected crew member — prompt scaffolding + selection policy only. The
+ *  engine's `tools: ToolSet` is dropped (not JSON-serializable). `requires`/
+ *  `prefer` are the raw capability/policy strings (Capability/PreferPolicy
+ *  values); kept as strings on the wire — the browser only displays them. */
+export const CrewMemberDtoSchema = z.object({
+  name: z.string(),
+  role: z.string(),
+  goal: z.string(),
+  backstory: z.string(),
+  requires: z.array(z.string()),
+  prefer: z.string(),
+  agentRef: z.string().optional(),
+});
+export type CrewMemberDTO = z.infer<typeof CrewMemberDtoSchema>;
+
+/** Projected crew task — the `output: z.ZodType` schema is dropped (not
+ *  serializable); `verify` surfaces the grounded-verification opt-in. */
+export const CrewTaskDtoSchema = z.object({
+  id: z.string(),
+  description: z.string(),
+  expectedOutput: z.string(),
+  member: z.string(),
+  dependsOn: z.array(z.string()),
+  verify: z.boolean().optional(),
+});
+export type CrewTaskDTO = z.infer<typeof CrewTaskDtoSchema>;
+
+export const CrewListItemDtoSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  process: z.enum(CrewProcess),
+  memberCount: z.number(),
+  taskCount: z.number(),
+});
+export type CrewListItemDTO = z.infer<typeof CrewListItemDtoSchema>;
+
+export const CrewDetailDtoSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  process: z.enum(CrewProcess),
+  members: z.array(CrewMemberDtoSchema),
+  tasks: z.array(CrewTaskDtoSchema),
+});
+export type CrewDetailDTO = z.infer<typeof CrewDetailDtoSchema>;
