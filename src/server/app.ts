@@ -4,6 +4,8 @@ import { handleChat } from './chat/handler.ts';
 import type { RunChatTurn } from './chat/run-turn.ts';
 import type { ConsentRegistry } from './consent/registry.ts';
 import { handleRespond } from './consent/respond.ts';
+import { handleCrewDetail } from './crews/detail.ts';
+import { handleCrewList } from './crews/list.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleRunDetail } from './runs/detail.ts';
@@ -13,6 +15,8 @@ import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
 import { handleUpload } from './upload.ts';
+import { handleWorkflowDetail } from './workflows/detail.ts';
+import { handleWorkflowList } from './workflows/list.ts';
 
 /**
  * The thin BFF's dependencies. It owns NO business logic: it enforces the
@@ -125,6 +129,26 @@ async function handleApi(
         if (req.method === 'GET' && detailMatch?.[1]) {
           const res = await handleRunDetail(detailMatch[1], deps);
           rec.status(res.status); // may be 404 — reflect the actual status
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/crews') {
+          rec.status(200);
+          return handleCrewList();
+        }
+        if (req.method === 'GET' && url.pathname === '/api/workflows') {
+          rec.status(200);
+          return handleWorkflowList();
+        }
+        const crewDetail = url.pathname.match(/^\/api\/crews\/([^/]+)$/);
+        if (req.method === 'GET' && crewDetail?.[1]) {
+          const res = handleCrewDetail(crewDetail[1]);
+          rec.status(res.status);
+          return res;
+        }
+        const wfDetail = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
+        if (req.method === 'GET' && wfDetail?.[1]) {
+          const res = handleWorkflowDetail(wfDetail[1]);
+          rec.status(res.status);
           return res;
         }
         rec.status(404);
