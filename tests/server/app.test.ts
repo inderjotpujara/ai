@@ -11,6 +11,9 @@ const policy = { port: 0, allowedOrigins: [] as string[] };
 // None of these tests exercise POST /api/upload or an /api/chat body with
 // uploadIds, so a plain (never-read) confined dir suffices.
 const uploadsDir = mkdtempSync(join(tmpdir(), 'app-uploads-'));
+// None of these tests exercise a Runs endpoint (Phase 3), so a plain
+// (never-read) confined dir suffices here too.
+const runsRoot = mkdtempSync(join(tmpdir(), 'app-runs-'));
 // None of these tests exercise POST /api/chat — a fake that throws if ever
 // invoked keeps the fixtures honest about what's actually under test here.
 const unusedRunChatTurn: RunChatTurn = async () => {
@@ -24,6 +27,7 @@ const deps: ServerDeps = {
   runChatTurn: unusedRunChatTurn,
   consent: createConsentRegistry(),
   uploadsDir,
+  runsRoot,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -90,6 +94,7 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     runChatTurn: unusedRunChatTurn,
     consent: createConsentRegistry(),
     uploadsDir,
+    runsRoot,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -127,6 +132,7 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     runChatTurn: unusedRunChatTurn,
     consent: createConsentRegistry(),
     uploadsDir,
+    runsRoot,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -182,6 +188,7 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     runChatTurn: unusedRunChatTurn,
     consent: createConsentRegistry(),
     uploadsDir,
+    runsRoot,
   };
   const symlinkServer = Bun.serve({
     port: 0,

@@ -26,6 +26,8 @@ export type ServerDeps = {
   consent: ConsentRegistry;
   /** Durable dir confined-uploads are written to/read from (Task 16). */
   uploadsDir: string;
+  /** Root dir the Runs endpoints read on-disk spans/artifacts from (Phase 3). */
+  runsRoot: string;
 };
 
 export function json(body: unknown, status = 200): Response {
