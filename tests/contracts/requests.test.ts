@@ -1,9 +1,16 @@
 import { expect, test } from 'bun:test';
-import { ChatRole, FeedbackRating } from '../../src/contracts/enums.ts';
+import {
+  ChatRole,
+  FeedbackRating,
+  RunLifecycle,
+  RunOrigin,
+} from '../../src/contracts/enums.ts';
 import {
   ChatRequestSchema,
   FeedbackRequestSchema,
   RespondRequestSchema,
+  RunListQuerySchema,
+  RunListResponseSchema,
   UiMessageLikeSchema,
   UploadResponseSchema,
 } from '../../src/contracts/requests.ts';
@@ -89,4 +96,47 @@ test('FeedbackRequest rejects an invalid rating enum value', () => {
 test('FeedbackRequest rejects a missing messageId', () => {
   const result = FeedbackRequestSchema.safeParse({ rating: 'up' });
   expect(result.success).toBe(false);
+});
+
+test('RunListQuery coerces string query params and defaults limit', () => {
+  const parsed = RunListQuerySchema.parse({
+    search: 'qwen',
+    outcome: 'answer',
+    degraded: 'true',
+    limit: '10',
+  });
+  expect(parsed).toEqual({
+    search: 'qwen',
+    outcome: 'answer',
+    degraded: true,
+    limit: 10,
+  });
+});
+
+test('RunListQuery applies the default limit when omitted', () => {
+  const parsed = RunListQuerySchema.parse({});
+  expect(parsed.limit).toBe(25);
+  expect(parsed.degraded).toBeUndefined();
+});
+
+test('RunListResponse validates items + pagination', () => {
+  const parsed = RunListResponseSchema.parse({
+    items: [
+      {
+        id: 'run-1',
+        startMs: 1,
+        durationMs: 2,
+        outcome: 'answer',
+        lifecycle: RunLifecycle.Done,
+        origin: RunOrigin.Manual,
+        models: [],
+        degraded: false,
+        spanCount: 1,
+      },
+    ],
+    nextCursor: 'abc',
+    total: 1,
+  });
+  expect(parsed.items).toHaveLength(1);
+  expect(parsed.nextCursor).toBe('abc');
 });
