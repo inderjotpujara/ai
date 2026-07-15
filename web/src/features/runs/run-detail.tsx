@@ -19,8 +19,18 @@ import { Waterfall } from './waterfall.tsx';
  * `AbortController.abort()` — the abort is what stops an idle stream between
  * frames, since a flag alone is only re-checked after the next frame yields).
  */
+/**
+ * Route entry: reads the `:runId` param and mounts a FRESH `RunDetailView` per
+ * run via `key={runId}`. The `key` forces a full remount on navigation
+ * (`/runs/a` → `/runs/b`), which resets `useRunTrace` — without it, run A's
+ * spans would merge into run B's waterfall since the trace hook never clears.
+ */
 export function RunDetail() {
   const { runId } = useParams({ from: '/runs/$runId' });
+  return <RunDetailView key={runId} runId={runId} />;
+}
+
+function RunDetailView({ runId }: { runId: string }) {
   const [snapshot, setSnapshot] = useState<RunDTO | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   // Set once the live-tail stream closes on its own (run finished → the server
@@ -89,6 +99,9 @@ export function RunDetail() {
         ) {
           return;
         }
+        // A real (non-abort) stream error must still clear the busy indicator —
+        // otherwise "Run in progress…" sticks forever on a broken stream.
+        setStreamEnded(true);
         console.error('[run-detail] live-tail stream failed', err);
       }
     }

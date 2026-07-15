@@ -111,11 +111,15 @@ async function handleApi(
           /^\/api\/runs\/([^/]+)\/stream$/,
         );
         if (req.method === 'GET' && streamMatch?.[1]) {
-          rec.status(200);
-          return handleRunStream(streamMatch[1], deps, {
+          // handleRunStream can return a synchronous 404 (path-escaping id)
+          // before it ever streams; reflect the REAL status in telemetry
+          // (a 200 streaming body still reports 200).
+          const res = await handleRunStream(streamMatch[1], deps, {
             lastEventId: req.headers.get('Last-Event-ID') ?? undefined,
             signal: req.signal,
           });
+          rec.status(res.status);
+          return res;
         }
         const detailMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
         if (req.method === 'GET' && detailMatch?.[1]) {

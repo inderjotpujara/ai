@@ -77,6 +77,45 @@ test('404 on a path-escaping id', async () => {
   expect(res.status).toBe(404);
 });
 
+test('missing runsRoot dir → 404, not 500 (fresh install with no runs/)', async () => {
+  const res = await handleRunStream(
+    'r1',
+    { runsRoot: join(root, 'no-such-runs-root') },
+    {},
+  );
+  expect(res.status).toBe(404);
+});
+
+test('a spanId with CR/LF cannot inject a spurious SSE frame', async () => {
+  // Done run so the stream closes promptly; the malicious id lives on a child.
+  await writeSpans('r-inject', [
+    span({
+      name: 'agent.run',
+      spanId: 'a',
+      attributes: { 'agent.outcome': 'answer' },
+    }),
+    span({
+      name: 'x',
+      spanId: 'x\ndata:evil\n\n',
+      parentSpanId: 'a',
+    }),
+  ]);
+  const res = await handleRunStream(
+    'r-inject',
+    { runsRoot: root },
+    { pollMs: 20 },
+  );
+  const frames = await collect(res);
+  // One frame per real span (2), NOT an extra injected frame. Every emitted
+  // frame carries valid JSON data (the injected `data:evil` would have been a
+  // separate, unparseable frame).
+  expect(frames).toHaveLength(2);
+  const ids = frames.map((f) => f.id);
+  // The sanitized id has its control chars stripped (no newline survives).
+  expect(ids.some((id) => id.includes('\n') || id.includes('\r'))).toBe(false);
+  expect(ids).toContain('xdata:evil');
+});
+
 test('snapshot then tail: emits existing spans, then a newly-appended span, then closes on root close', async () => {
   // in-flight: no agent.run yet → Running → keeps tailing
   await writeSpans('r1', [span({ name: 'agent.delegation', spanId: 's1' })]);

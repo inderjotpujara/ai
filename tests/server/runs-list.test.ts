@@ -127,6 +127,48 @@ test('missing/unreadable runsRoot → 200 with empty list (degrade, never crash)
   expect(body.nextCursor).toBeUndefined();
 });
 
+test('a run whose spans.jsonl has a {} line still 200s and lists the other runs', async () => {
+  await writeRun('good', 2_000_000_000, { 'agent.outcome': 'answer' });
+  // A run whose spans.jsonl contains a JSON-valid but wrong-shaped line — must
+  // not 500 the whole list (F1 fault isolation).
+  const badDir = join(root, 'bad');
+  await mkdir(badDir, { recursive: true });
+  await writeFile(
+    join(badDir, 'spans.jsonl'),
+    [
+      '{}',
+      JSON.stringify(
+        span({
+          name: 'agent.run',
+          spanId: 'bad-a',
+          startUnixNano: 1_000_000_000,
+          attributes: { 'agent.outcome': 'answer' },
+        }),
+      ),
+      '',
+    ].join('\n'),
+  );
+  const page = await list('');
+  expect(page.total).toBe(2);
+  expect(page.items.map((i) => i.id).sort()).toEqual(['bad', 'good']);
+});
+
+test('equal startMs pages deterministically via the id tie-break', async () => {
+  await writeRun('zeta', 4_000_000_000, { 'agent.outcome': 'answer' });
+  await writeRun('alpha', 4_000_000_000, { 'agent.outcome': 'answer' });
+  // Same startMs → the id tie-break decides order (alpha before zeta), stable
+  // across requests so cursor pagination cannot skip/repeat a page.
+  const page = await list('');
+  expect(page.items.map((i) => i.id)).toEqual(['alpha', 'zeta']);
+});
+
+test('malformed query (limit/degraded) → 400, not 500', async () => {
+  const bad = async (qs: string) =>
+    (await handleRunList(new URLSearchParams(qs), { runsRoot: root })).status;
+  expect(await bad('limit=abc')).toBe(400);
+  expect(await bad('degraded=maybe')).toBe(400);
+});
+
 test('stale cursor id → resets to page 1 (never throws)', async () => {
   await writeRun('a', 2_000_000_000, { 'agent.outcome': 'answer' });
   await writeRun('b', 1_000_000_000, { 'agent.outcome': 'answer' });

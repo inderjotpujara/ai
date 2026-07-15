@@ -195,6 +195,34 @@ test('undefined for a run with no spans; malformed lines are counted', async () 
   expect(dto?.spanCount).toBe(1);
 });
 
+test('JSON-valid but wrong-shaped span line ({}) is isolated as malformed, not thrown', async () => {
+  const dir = join(root, 'run-badshape');
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, 'spans.jsonl'),
+    [
+      JSON.stringify(
+        span({
+          name: 'agent.run',
+          spanId: 'a',
+          attributes: { 'agent.outcome': 'answer' },
+        }),
+      ),
+      '{}', // valid JSON, wrong shape — must NOT throw a TypeError in the mapper
+      JSON.stringify(span({ name: 'x', spanId: 'b', parentSpanId: 'a' })),
+      '',
+    ].join('\n'),
+  );
+  const dto = await mapRunToDto(root, 'run-badshape');
+  expect(dto).toBeDefined();
+  // The two well-formed spans still map; the `{}` line is counted, not fatal.
+  expect(dto?.malformedSpans).toBe(1);
+  expect(dto?.spanCount).toBe(2);
+  expect(dto?.spans.map((s) => s.spanId).sort()).toEqual(['a', 'b']);
+  // Validates cleanly through the terminal schema.
+  RunDtoSchema.parse(dto);
+});
+
 test('artifacts are wired in from the run dir', async () => {
   const dir = await writeRun('run-6', [
     span({ name: 'agent.run', spanId: 'a' }),

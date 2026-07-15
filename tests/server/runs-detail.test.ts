@@ -55,3 +55,11 @@ test('path traversal on :id → 404 (no leak, MediaPathError)', async () => {
   const res = await handleRunDetail('../../../../etc', { runsRoot: root });
   expect(res.status).toBe(404);
 });
+
+test('missing runsRoot dir → 404, not 500 (fresh install with no runs/)', async () => {
+  const res = await handleRunDetail('run-1', {
+    runsRoot: join(root, 'no-such-runs-root'),
+  });
+  expect(res.status).toBe(404);
+  expect(await res.json()).toEqual({ error: 'not found' });
+});

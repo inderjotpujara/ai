@@ -1,4 +1,5 @@
 import { readdir } from 'node:fs/promises';
+import { ZodError } from 'zod';
 import type { RunListItemDTO } from '../../contracts/index.ts';
 import {
   RunListQuerySchema,
@@ -44,18 +45,29 @@ function matchesSearch(item: RunListItemDTO, search: string): boolean {
  * by `startMs` and paginated via an opaque `base64url(startMs:id)` cursor:
  * `total` reflects the post-filter count (not the page size), and
  * `nextCursor` is present only when more items remain past the current page.
+ * A malformed query (bad `limit`/`degraded`) is rejected with a 400 rather than
+ * bubbling to a 500, and the sort carries an `id` tie-break so equal `startMs`
+ * values page deterministically (never fall back to unstable readdir order).
  */
 export async function handleRunList(
   params: URLSearchParams,
   deps: RunsDeps,
 ): Promise<Response> {
-  const query = RunListQuerySchema.parse({
-    search: params.get('search') ?? undefined,
-    outcome: params.get('outcome') ?? undefined,
-    degraded: params.get('degraded') ?? undefined,
-    limit: params.get('limit') ?? undefined,
-    cursor: params.get('cursor') ?? undefined,
-  });
+  let query: ReturnType<typeof RunListQuerySchema.parse>;
+  try {
+    query = RunListQuerySchema.parse({
+      search: params.get('search') ?? undefined,
+      outcome: params.get('outcome') ?? undefined,
+      degraded: params.get('degraded') ?? undefined,
+      limit: params.get('limit') ?? undefined,
+      cursor: params.get('cursor') ?? undefined,
+    });
+  } catch (err) {
+    // A bad query (limit=abc, degraded=maybe, …) is the caller's fault → 400,
+    // not a 500. Body stays generic (no zod detail) to avoid echoing input.
+    if (err instanceof ZodError) return json({ error: 'bad request' }, 400);
+    throw err;
+  }
 
   let ids: string[];
   try {
@@ -67,8 +79,16 @@ export async function handleRunList(
 
   const summaries: RunListItemDTO[] = [];
   for (const id of ids) {
-    const item = await summarizeRunListItem(deps.runsRoot, id);
-    if (item) summaries.push(item);
+    // Defense-in-depth: one unreadable/corrupt run must not fail the whole
+    // list. `summarizeRunListItem` already isolates malformed span lines, but
+    // any unexpected throw (bad permissions, a torn projection) is swallowed
+    // here so the other runs still list.
+    try {
+      const item = await summarizeRunListItem(deps.runsRoot, id);
+      if (item) summaries.push(item);
+    } catch {
+      // skip this run
+    }
   }
 
   const filtered = summaries
@@ -77,7 +97,10 @@ export async function handleRunList(
     .filter((s) =>
       query.degraded === undefined ? true : s.degraded === query.degraded,
     )
-    .sort((a, b) => b.startMs - a.startMs);
+    // Stable secondary key: equal startMs must not fall back to the unstable
+    // readdir order, or cursor pagination flakes (a tie could reorder between
+    // requests and skip/repeat a page).
+    .sort((a, b) => b.startMs - a.startMs || a.id.localeCompare(b.id));
 
   let start = 0;
   if (query.cursor) {

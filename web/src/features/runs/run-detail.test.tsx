@@ -1,5 +1,12 @@
-import { screen, waitFor } from '@testing-library/react';
+import {
+  createMemoryHistory,
+  createRouter,
+  RouterProvider,
+} from '@tanstack/react-router';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { routeTree } from '../../app/router.tsx';
+import { ThemeProvider } from '../../shared/design/theme.tsx';
 import { renderAt } from '../../test/render.tsx';
 
 function jsonResponse(body: unknown): Response {
@@ -26,6 +33,7 @@ function controllableStream(): {
   response: Response;
   push: (frame: string) => void;
   close: () => void;
+  error: (e: unknown) => void;
 } {
   const encoder = new TextEncoder();
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -41,6 +49,7 @@ function controllableStream(): {
     }),
     push: (frame) => controller?.enqueue(encoder.encode(frame)),
     close: () => controller?.close(),
+    error: (e) => controller?.error(e),
   };
 }
 
@@ -156,6 +165,73 @@ describe('RunDetail', () => {
     await waitFor(() =>
       expect(screen.getByTestId('bar-b')).toBeInTheDocument(),
     );
+    vi.unstubAllGlobals();
+  });
+
+  it('clears the busy indicator when the live-tail stream errors (non-abort)', async () => {
+    const runningDto = { ...dto, lifecycle: 'running' };
+    const stream = controllableStream();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) =>
+        String(input).includes('/stream')
+          ? stream.response
+          : jsonResponse(runningDto),
+      ),
+    );
+    renderAt('/runs/run-1');
+    await waitFor(() =>
+      expect(screen.getByTestId('run-busy')).toBeInTheDocument(),
+    );
+    // A non-abort stream failure must still clear busy (not stick forever).
+    stream.error(new Error('stream boom'));
+    await waitFor(() =>
+      expect(screen.queryByTestId('run-busy')).not.toBeInTheDocument(),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it('remounts and resets the waterfall when the runId changes', async () => {
+    const dtoFor = (id: string, spanId: string) => ({
+      ...dto,
+      id,
+      roots: [spanId],
+      spans: [{ ...dto.spans[0], spanId }],
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes('/stream')) return emptyStream();
+        return url.includes('/runs/run-2')
+          ? jsonResponse(dtoFor('run-2', 'b'))
+          : jsonResponse(dtoFor('run-1', 'a'));
+      }),
+    );
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({ initialEntries: ['/runs/run-1'] }),
+    });
+    render(
+      <ThemeProvider>
+        <RouterProvider router={router} />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('bar-a')).toBeInTheDocument(),
+    );
+    await act(async () => {
+      await router.navigate({
+        to: '/runs/$runId',
+        params: { runId: 'run-2' },
+      });
+    });
+    // The key={runId} remount resets useRunTrace: run-2's bar appears and
+    // run-1's bar is gone (not merged into the new run's waterfall).
+    await waitFor(() =>
+      expect(screen.getByTestId('bar-b')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('bar-a')).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 

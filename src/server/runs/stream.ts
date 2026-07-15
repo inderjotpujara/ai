@@ -7,8 +7,21 @@ import type { RunsDeps } from './detail.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// C0 control chars (includes CR \r and LF \n), written as \u escapes so no
+// literal control char appears in the source.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them from an untrusted id
+const CONTROL_CHARS = /[\u0000-\u001f]/g;
+
+/**
+ * Build one SSE frame. The `id:` line interpolates `span.spanId` raw, so any
+ * control char (notably CR/LF) in it could inject a spurious frame/field —
+ * strip them (defense-in-depth for future remote run-sync, where spanIds may
+ * not be locally generated). The `data:` line is JSON, which already escapes
+ * newlines, so only the `id:` line needs sanitizing.
+ */
 function frame(span: SpanDTO): string {
-  return `id: ${span.spanId}\ndata: ${JSON.stringify(span)}\n\n`;
+  const safeId = span.spanId.replace(CONTROL_CHARS, '');
+  return `id: ${safeId}\ndata: ${JSON.stringify(span)}\n\n`;
 }
 
 export type RunStreamOpts = {
@@ -110,9 +123,11 @@ export async function handleRunStream(
                   // onto a controller whose stream is gone.
                   if (internal.signal.aborted) break;
                   emitted.add(s.spanId);
-                  const text = frame(s);
-                  controller.enqueue(encoder.encode(text));
-                  rec.chunk(text.length);
+                  const bytes = encoder.encode(frame(s));
+                  controller.enqueue(bytes);
+                  // Count UTF-8 bytes, not UTF-16 code units, so the telemetry
+                  // reflects what actually went over the wire.
+                  rec.chunk(bytes.byteLength);
                 }
                 if (dto.lifecycle !== RunLifecycle.Running) {
                   rec.outcome(dto.outcome);

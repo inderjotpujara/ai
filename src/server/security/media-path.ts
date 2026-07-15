@@ -17,7 +17,15 @@ export class MediaPathError extends Error {
  * with the chat/media endpoints in a later phase — this util is its primitive).
  */
 export function confineToDir(candidate: string, root: string): string {
-  const realRoot = realpathSync(resolve(root));
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(resolve(root));
+  } catch {
+    // A missing ROOT dir (fresh install with no runs/ or uploads/ yet) must
+    // resolve to the same MediaPathError → 404 path as a missing candidate,
+    // not throw a raw ENOENT that bubbles to a 500.
+    throw new MediaPathError(candidate);
+  }
   let real: string;
   try {
     real = realpathSync(resolve(realRoot, candidate));
