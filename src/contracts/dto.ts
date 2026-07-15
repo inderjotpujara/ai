@@ -4,9 +4,12 @@ import {
   ChatRole,
   CrewProcess,
   DegradeKind,
+  McpAuthKind,
+  McpTransportKind,
   RunKind,
   RunLifecycle,
   RunOrigin,
+  RuntimeKind,
   SpanStatus,
   StepKind,
   VerifiedLevel,
@@ -349,3 +352,52 @@ export const BuildResultDtoSchema = z.object({
     .optional(),
 });
 export type BuildResultDTO = z.infer<typeof BuildResultDtoSchema>;
+
+/** Projected model-catalog row — installed (from `buildRegistry()`) or
+ *  pullable (from the cached discovery catalog, fit-ranked). No `provider`
+ *  field: which `DownloadProvider` fetches a pullable model's weights is a
+ *  server-internal resolution detail (`src/server/models/pull.ts`, Task 17),
+ *  never sent to the client. */
+export const ModelInventoryDtoSchema = z.object({
+  runtime: z.enum(RuntimeKind),
+  model: z.string(),
+  installed: z.boolean(),
+  fits: z.boolean(),
+  sizeBytes: z.number().optional(),
+  shortfallBytes: z.number().optional(),
+});
+export type ModelInventoryDTO = z.infer<typeof ModelInventoryDtoSchema>;
+
+/** Projected memory space, from `MemoryStore.stats(): Record<string, number>`
+ *  (`src/memory/store.ts:178-183`). */
+export const MemorySpaceDtoSchema = z.object({
+  name: z.string(),
+  chunkCount: z.number(),
+});
+export type MemorySpaceDTO = z.infer<typeof MemorySpaceDtoSchema>;
+
+/** Projected recall hit. Mirrors `RetrievalResult` (`src/memory/types.ts:29-35`)
+ *  minus `namespace` — deliberately dropped: the Memory tab's recall box is
+ *  space-scoped already (the request's `space` param), so per-hit namespace
+ *  is redundant detail the wire doesn't need. */
+export const RetrievalResultDtoSchema = z.object({
+  id: z.string(),
+  source: z.string(),
+  text: z.string(),
+  score: z.number(),
+});
+export type RetrievalResultDTO = z.infer<typeof RetrievalResultDtoSchema>;
+
+/** Projected MCP server entry, joining `McpConfig.entries`
+ *  (`src/mcp/types.ts:72-76`) with the server-side mount-status snapshot
+ *  (`src/server/mcp/`, a later increment). `status: 'dormant'` mirrors
+ *  `McpConfig.dormant` (missing required env vars — never attempted). */
+export const McpServerDtoSchema = z.object({
+  name: z.string(),
+  kind: z.enum(McpTransportKind),
+  agents: z.array(z.string()).optional(),
+  authKind: z.enum(McpAuthKind),
+  status: z.enum(['mounted', 'skipped', 'dormant']),
+  reason: z.string().optional(),
+});
+export type McpServerDTO = z.infer<typeof McpServerDtoSchema>;
