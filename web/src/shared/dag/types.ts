@@ -5,13 +5,16 @@ import type { StepKind } from '@contracts';
 export type DagNodeKind = StepKind | 'manager';
 
 /** Live overlay status for a node (run-detail's D8 join); undefined/omitted
- *  renders as the neutral/default (pending) look. */
+ *  renders as the neutral/default (pending) look. `Proposed` (Phase 5, D6) is
+ *  distinct from `Pending`: a proposed node is a staged, not-yet-committed
+ *  builder proposal, not a step waiting its turn in an active run. */
 export enum DagStatus {
   Pending = 'pending',
   Running = 'running',
   Done = 'done',
   Error = 'error',
   Skipped = 'skipped',
+  Proposed = 'proposed',
 }
 
 export type DagNode = {
