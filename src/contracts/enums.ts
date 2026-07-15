@@ -105,11 +105,34 @@ export enum CrewProcess {
   Hierarchical = 'hierarchical',
 }
 
-/** What a run IS (chat/agent/crew/workflow), derived by the mapper from the run's
- *  root span name. Distinct from RunOrigin (HOW a run was triggered). Slice 30b Phase 4. */
+/** What a run IS (chat/agent/crew/workflow/build/pull), derived by the mapper
+ *  from the run's root span name. Distinct from RunOrigin (HOW a run was
+ *  triggered). Build/Pull added Slice 30b Phase 5 — contract-owned, no engine
+ *  mirror needed (see `deriveRunKind`, Task 2). */
 export enum RunKind {
   Chat = 'chat',
   Agent = 'agent',
   Crew = 'crew',
   Workflow = 'workflow',
+  Build = 'build',
+  Pull = 'pull',
+}
+
+/** Wire mirror of `src/verified-build/types.ts` VerifiedLevel (isomorphic
+ *  rule — no engine import). `tests/contracts/verified-level-parity.test.ts`
+ *  guards value parity. Slice 30b Phase 5. */
+export enum VerifiedLevel {
+  Behaves = 'behaves',
+  Runs = 'runs',
+  Unverified = 'unverified',
+}
+
+/** Wire mirror of `src/verified-build/types.ts` ReuseKind (isomorphic rule).
+ *  Also doubles as the `data-confirm` event's `kind` value for a reuse-offer
+ *  ask (D4). `tests/contracts/reuse-kind-parity.test.ts` guards value parity.
+ *  Slice 30b Phase 5. */
+export enum ReuseKind {
+  Reuse = 'reuse',
+  Offer = 'offer',
+  Generate = 'generate',
 }
