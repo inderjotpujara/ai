@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleRunStream } from '../../src/server/runs/stream.ts';
 import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
+import { ATTR } from '../../src/telemetry/spans.ts';
+import { registerTestProvider } from '../helpers/otel-test-provider.ts';
 
 function span(
   p: Partial<SpanRecord> & { name: string; spanId: string },
@@ -145,6 +147,45 @@ test('stale/unknown Last-Event-ID replays the full snapshot (not nothing)', asyn
   );
   // a stale cursor degrades to a fresh connection: replay everything
   expect(resumed.map((f) => f.id)).toEqual(['a', 'b']);
+});
+
+test('reader cancel() stops the tail promptly without throwing', async () => {
+  // in-flight run (no run-root) → Running: with maxWaitMs 5s the loop can ONLY
+  // stop quickly via the cancel() handler, so a finished `runs.stream` span
+  // within the short wait below proves the disconnect ended the poll loop
+  // (not the deadline). No unhandled rejection proves the guarded close.
+  await writeSpans('r5', [span({ name: 'agent.delegation', spanId: 's1' })]);
+  const { exporter, provider } = registerTestProvider();
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown) => {
+    rejections.push(reason);
+  };
+  process.on('unhandledRejection', onRejection);
+  try {
+    const res = await handleRunStream(
+      'r5',
+      { runsRoot: root },
+      { pollMs: 10, maxWaitMs: 5_000 },
+    );
+    const body = res.body;
+    if (!body) throw new Error('response has no body');
+    const reader = body.getReader();
+    // receive the snapshot frame, then disconnect
+    const { value } = await reader.read();
+    expect(value).toBeDefined();
+    await reader.cancel(); // must resolve, not throw
+    // a few poll ticks to observe the abort, hit finally, end the span
+    await new Promise((r) => setTimeout(r, 80));
+    const span = exporter
+      .getFinishedSpans()
+      .find((s) => s.name === 'runs.stream');
+    // loop actually terminated (well before maxWaitMs) with the abort outcome
+    expect(span?.attributes[ATTR.RUN_STREAM_OUTCOME]).toBe('aborted');
+    expect(rejections).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onRejection);
+    await provider.shutdown();
+  }
 });
 
 test('bounded by maxWaitMs when spans.jsonl never appears', async () => {

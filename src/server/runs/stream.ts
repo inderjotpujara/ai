@@ -29,8 +29,11 @@ export type RunStreamOpts = {
  * `Last-Event-ID`, seeds the emitted set with every span up to and including
  * that id so only newer spans replay. A stale/unknown cursor degrades to a
  * fresh connection (full snapshot replay) rather than silently emitting
- * nothing. Bounded by `maxWaitMs` and `signal`. Any read error mid-tail
- * degrades to a clean close (never throws out of the stream). Wrapped in
+ * nothing. Bounded by `maxWaitMs`, the caller `signal`, and a reader
+ * disconnect (`ReadableStream.cancel()` aborts an internal controller so the
+ * poll loop stops promptly rather than reading disk to `maxWaitMs`). Any read
+ * error mid-tail degrades to a clean close, and the `finally` close is guarded
+ * so a cancelled controller never rejects the wrapping span. Wrapped in
  * `withRunStreamSpan`.
  */
 export async function handleRunStream(
@@ -57,6 +60,12 @@ export async function handleRunStream(
   const maxWaitMs = opts.maxWaitMs ?? 600_000;
   const encoder = new TextEncoder();
 
+  // A client disconnect surfaces as ReadableStream.cancel(); we abort this
+  // internal controller so the poll loop stops on its next tick instead of
+  // reading disk for an abandoned run until maxWaitMs. The loop stops on
+  // EITHER the caller's signal or this one.
+  const internal = new AbortController();
+
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       void withRunStreamSpan(
@@ -67,7 +76,11 @@ export async function handleRunStream(
           const deadline = Date.now() + maxWaitMs;
           try {
             for (;;) {
-              if (opts.signal?.aborted || Date.now() > deadline) {
+              if (
+                opts.signal?.aborted ||
+                internal.signal.aborted ||
+                Date.now() > deadline
+              ) {
                 rec.outcome('aborted');
                 break;
               }
@@ -93,6 +106,9 @@ export async function handleRunStream(
                 }
                 for (const s of dto.spans) {
                   if (emitted.has(s.spanId)) continue;
+                  // The reader may have cancelled mid-snapshot; stop enqueuing
+                  // onto a controller whose stream is gone.
+                  if (internal.signal.aborted) break;
                   emitted.add(s.spanId);
                   const text = frame(s);
                   controller.enqueue(encoder.encode(text));
@@ -110,10 +126,19 @@ export async function handleRunStream(
             // the reader. The outcome tag makes the truncation observable.
             rec.outcome('error');
           } finally {
-            controller.close();
+            // close() throws if the stream was already cancelled/errored by the
+            // reader; swallow so the void-ed span promise never rejects.
+            try {
+              controller.close();
+            } catch {
+              // already closed/cancelled — nothing to do
+            }
           }
         },
       );
+    },
+    cancel() {
+      internal.abort();
     },
   });
 
