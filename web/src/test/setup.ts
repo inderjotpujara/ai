@@ -44,3 +44,17 @@ beforeEach(() => {
     },
   });
 });
+
+// @xyflow/react observes node/viewport size via ResizeObserver on mount;
+// happy-dom has no implementation. A no-op stub is enough for DagView's smoke
+// tests (they assert on rendered nodes/edges, not measured pixel layout).
+beforeEach(() => {
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
