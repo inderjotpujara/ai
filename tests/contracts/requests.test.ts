@@ -119,6 +119,46 @@ test('RunListQuery applies the default limit when omitted', () => {
   expect(parsed.degraded).toBeUndefined();
 });
 
+test('RunListQuery coerces a numeric-string limit to a number', () => {
+  const parsed = RunListQuerySchema.parse({ limit: '10' });
+  expect(parsed.limit).toBe(10);
+});
+
+test('RunListQuery rejects a non-numeric limit', () => {
+  expect(() => RunListQuerySchema.parse({ limit: 'abc' })).toThrow();
+});
+
+test('RunListQuery rejects a zero limit (must be positive)', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '0' })).toThrow();
+});
+
+test('RunListQuery rejects a negative limit', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '-5' })).toThrow();
+});
+
+test('RunListQuery rejects a limit above the max of 200', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '201' })).toThrow();
+});
+
+test('RunListQuery rejects a non-integer limit', () => {
+  expect(() => RunListQuerySchema.parse({ limit: '10.5' })).toThrow();
+});
+
+test('RunListQuery rejects a degraded value that is neither true nor false', () => {
+  expect(() => RunListQuerySchema.parse({ degraded: 'yes' })).toThrow();
+  expect(() => RunListQuerySchema.parse({ degraded: '1' })).toThrow();
+});
+
+test('RunListResponse rejects a payload missing the required total', () => {
+  const result = RunListResponseSchema.safeParse({ items: [] });
+  expect(result.success).toBe(false);
+});
+
+test('RunListResponse rejects a payload missing the required items', () => {
+  const result = RunListResponseSchema.safeParse({ total: 0 });
+  expect(result.success).toBe(false);
+});
+
 test('RunListResponse validates items + pagination', () => {
   const parsed = RunListResponseSchema.parse({
     items: [
