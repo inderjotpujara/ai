@@ -56,6 +56,7 @@ function controllableStream(): {
 const dto = {
   id: 'run-1',
   owner: 'local',
+  kind: 'agent',
   origin: 'manual',
   lifecycle: 'done',
   startMs: 0,

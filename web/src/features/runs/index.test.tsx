@@ -13,6 +13,7 @@ const page = {
   items: [
     {
       id: 'run-1',
+      kind: 'agent',
       startMs: 1000,
       durationMs: 42,
       outcome: 'answer',
