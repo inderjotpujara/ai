@@ -106,6 +106,8 @@ graph TD
     subgraph RUN["Run store · src/run"]
         runstore["run-store.ts"]
         runtrace["run-trace.ts"]
+        rundto["run-dto.ts · mapRunToDto/summarizeRunListItem (Slice 30b Phase 3)"]
+        runartifacts["artifacts.ts · readRunArtifacts"]
     end
     subgraph WF["Workflow · src/workflow"]
         wftypes["types.ts · StepKind"]
@@ -374,6 +376,9 @@ graph TD
     octl --> images
     runscli --> runtrace
     runtrace --> spansfile
+    rundto --> runtrace
+    rundto --> runartifacts
+    runartifacts --> spansfile
     flow --> wfengine
     flow --> runstore
     flow --> mcpconfig
@@ -529,7 +534,7 @@ graph TD
 | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14); agent-builder entry (`agent-builder.ts`, `bun run agent-builder "<need>" [--yes] [--force]`, Slice 17; `--force` commits a failed verify gate at `unverified` and prints a WARNING, §20) plus a TTY-gated capability-gap offer wired into `chat.ts`'s `{kind:'gap'}` branch (§18); crew-builder entry (`crew-builder.ts`, `bun run crew-builder "<need>" [--yes] [--force]`, Slice 19; same `--force` semantics) plus the `offer-crew.ts` multi-step gap-offer heuristic (§19); archive entry (`archive.ts`, `bun run archive [--prune]`, Slice 20 — reports idle near-duplicate generated artifacts per registry, `--prune` archives each behind a per-candidate consent prompt); a per-run telemetry scope for CLIs that mount no MCP servers (`with-run.ts`, Slice 20) — `withRunTelemetry(opts, body)` owns `createRun` → `initRunTelemetry` → `body` → `finally{tel.shutdown()}` for the builder + archive CLIs, so their `agent.build`/`crew.build`/`build.verify`/`build.archive` spans land in `runs/<id>/spans.jsonl` instead of hitting the no-op provider; and `chat.ts`'s informational reuse hint (`reuseHintText`, shown on a gap before any build offer, §20) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
 | **Contracts** | `src/contracts/` | Isomorphic web wire protocol (Slice 30b — Phase 1 base; Phase 2 additions below): enums (`enums.ts`, +`FeedbackRating`), read-model DTOs (`dto.ts`), the transient-SSE `StatusEvent` union (`events.ts` — Phase 2 makes this a **live** wire type: the server now actually emits it as `data-*` UI-message parts, not just a defined shape), inbound request schemas (`requests.ts` — `ChatRequestSchema` gained optional `uploadIds`; new `UploadResponseSchema` and `FeedbackRequestSchema`), barrel (`index.ts`). **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*` | `zod` only |
-| **Server** | `src/server/` | `Bun.serve` web BFF, still no business logic of its own (Slice 30b — Phase 1 perimeter; Phase 2 below adds the live routes): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry — **plus (Phase 2, full narrative below)** `POST /api/chat` (SSE UI-message-stream handler over a lazily-built engine — nothing warms at server boot), `POST /api/runs/:id/respond` (the consent back-channel), `POST /api/upload` (confined image upload, media-by-reference), and `POST /api/feedback` (chat.feedback telemetry) | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts`, `cli/run-chat-session.ts` (Phase 2) |
+| **Server** | `src/server/` | `Bun.serve` web BFF, still no business logic of its own (Slice 30b — Phase 1 perimeter; Phase 2 below adds the live routes): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry — **plus (Phase 2, full narrative below)** `POST /api/chat` (SSE UI-message-stream handler over a lazily-built engine — nothing warms at server boot), `POST /api/runs/:id/respond` (the consent back-channel), `POST /api/upload` (confined image upload, media-by-reference), and `POST /api/feedback` (chat.feedback telemetry) — **plus (Phase 3, `src/server/runs/`, full narrative below)** `GET /api/runs` (`list.ts`, cache-fronted cursor-paginated summaries), `GET /api/runs/:id` (`detail.ts`, full `RunDTO`), and `GET /api/runs/:id/stream` (`stream.ts`, live-tailing SSE wrapped in a `runs.stream` span) — `confineToDir` guards the `:id` path segment on **both** detail and stream, and a new `runsRoot` dep on `ServerDeps` (wired from `main.ts`) is what all three read | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts`, `cli/run-chat-session.ts` (Phase 2), `run/run-dto.ts` (Phase 3) |
 | **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`). Crews/Workflows/Builders/Runs/Library/Settings remain stubs; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
@@ -541,7 +546,7 @@ graph TD
 | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
 | **Logging** | `src/log/` | Structured leveled log signal (Slice 30a, Ops Surface Task 1 — replaces ad-hoc `console.*` status output, the tail source the coming web UI reads): `logger.ts`'s `createLogger(name)` returns a `Logger` (`debug`/`info`/`warn`/`error`, each `(msg, fields?)`) that emits one record to stderr per call — pretty (`HH:MM:SS LEVEL name msg`) when stderr is a TTY, else a JSON line `{ ts, level, name, runId, msg, ...fields }`; level gated by `AGENT_LOG_LEVEL` (default `info`); `setLogSink(fn)` is the test seam. Stamps `runId` via `telemetry/run-router.ts`'s `currentRunId()` (reads the OTel context `withRunContext` binds), so log lines correlate with a run's `spans.jsonl` without threading a run id by hand. `cli/chat.ts`'s router-warm and project-store status lines are the first callers | `telemetry/run-router.ts` (`currentRunId`) |
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; declarative `mcp.json` registry + per-entry degrade (`config.ts`), consent-gated mounting with spec-hash/tools-hash pinning (`consent.ts`, `mount.ts`), curated 12-entry starter pack (`pack.ts`, Slice 15); mount/consume MCP servers (`client.ts`, `server.ts`, `sqlite-server.ts`); **live remote OAuth (Slice 26, §14)** — `oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (DCR/CIMD, PKCE + CSRF `state`, browser-loopback redirect via `loopback.ts`, AS-metadata persistence) backed by `token-store.ts`'s 0600 atomic on-disk store (`~/.config/ai/mcp-tokens.json`); `client.ts`'s `mountMcpServer` completes the first-time handshake on `UnauthorizedError` | MCP SDK + AI SDK MCP client |
-| **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`); collision-free sortable run ids (`run-id.ts` `newRunId()`, Slice 30a — replaced `run-<pid>` which collided on concurrent runs) | filesystem |
+| **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`); collision-free sortable run ids (`run-id.ts` `newRunId()`, Slice 30a — replaced `run-<pid>` which collided on concurrent runs); **web DTO mapper (Slice 30b Phase 3, full narrative below)** — `run-dto.ts`'s `mapRunToDto` (spans→`RunDTO`, schema-validated) and `summarizeRunListItem` (list-cheap `RunListItemDTO`, mtime-cached), sharing one name-agnostic `runRootSummary` helper across `agent.run`/`crew.run`/`workflow.run` roots; `artifacts.ts`'s `readRunArtifacts` (readdir+classify into the extended `ArtifactKind`) | filesystem |
 | **Usage** | `src/usage/` | Aggregate token/latency usage view from existing telemetry (Slice 30a, Ops Surface Task 6 — no new instrumentation): `aggregate.ts`'s `aggregateSpans(spans)` groups every span's `gen_ai.request.model` attribute, summing `gen_ai.usage.{input,output}_tokens` (missing → 0, never NaN) and `durationMs` per model, sorted desc by total duration; `renderUsage(rows)` renders a fixed-width text table. `cli/usage.ts` (`bun run usage`) reads every `runs/<id>/spans.jsonl` via `run/run-trace.ts`'s `readSpans`, flat-maps, aggregates, and prints — a missing/unreadable runs root degrades to an empty table instead of throwing | `run/run-trace.ts` (`readSpans`), `telemetry/jsonl-exporter.ts` (`SpanRecord`) |
 | **Process** | `src/process/` | Process-lifecycle safety net (Slice 30a, for the long-lived concurrent web host): a central child-process registry (`child-registry.ts` — `registerChild`/`killAllChildren`/`childCount`) that every long-lived spawn site (model-server supervision, media generation, voice mic + STT subprocess) registers with, so a process-wide shutdown can terminate every child even if a site never runs its own teardown path; a process-wide SIGINT/SIGTERM handler (added alongside signal-clean shutdown) drains the registry on exit | `runtime/process-supervisor.ts`, `media/generate/adapter.ts`, `voice/cli-io.ts`, `voice/transcribe.ts` (spawn sites register here) |
 | **Error boundary** | `src/errors/` | Top-level error boundary (Slice 30a, Ops Surface Task 5 — replaces `cli/chat.ts`'s bare `main().catch(console.error)`): `boundary.ts`'s `explain(err)` maps each `core/errors.ts` subclass (`ProviderError`/`ToolError`/`ResourceError`/`WorkflowError`/`CrewError`/`MemoryError`/`VerificationError`/`MaxStepsError`) to an actionable `{title, hint}`, unknown errors falling to a generic pair; `handleTopLevel(err, deps?)` logs the explanation, returns exit code `1`, and — **when given a `runDir`** — best-effort persists `error.json` (`{name, title, message, hint, at}`); `deps` (`runDir`/`write`/`log`) defaults to `writeFileSync`/`process.stderr.write`. `cli/chat.ts`'s `main().catch` routes through it for the actionable stderr explanation but does **not yet thread a `runDir`** (the run dir is created inside `withMcpRun`, out of scope at the top-level catch), so `error.json` persistence is wired in Slice 30b — today the boundary's shipped value is the explanation, not the file | `core/errors.ts` (the typed error taxonomy) |
@@ -726,6 +731,45 @@ Stateless per request: there is no `SessionStore` yet (Phase 6) — every
 `POST /api/chat` re-sends the whole message history and the server derives
 `task` from it fresh each time; nothing persists across requests beyond the
 in-memory `ConsentRegistry`.
+
+### 3d. Runs history + live trace waterfall (browser REST + SSE, Slice 30b Phase 3)
+
+Three read-only `GET` routes, all stateless per request — no engine call, no
+`SessionStore` — that turn a run's on-disk `spans.jsonl`/`degradation.jsonl`/
+artifacts into the browser's Runs list and run-detail waterfall (see the
+"Runs" section below for the full narrative).
+
+```mermaid
+sequenceDiagram
+    actor Browser as Browser (RunsArea / RunDetail)
+    participant App as server/app.ts
+    participant List as server/runs/list.ts
+    participant Detail as server/runs/detail.ts
+    participant Stream as server/runs/stream.ts
+    participant Mapper as run/run-dto.ts
+    participant Artifacts as run/artifacts.ts
+    participant Disk as runs/&lt;id&gt;/*.jsonl
+
+    Browser->>App: GET /api/runs?search=&outcome=&degraded=&cursor= (Bearer token)
+    App->>List: handleRunList(params, {runsRoot})
+    List->>Mapper: summarizeRunListItem(runsRoot, id) per run dir (mtime-cached)
+    Mapper->>Disk: stat spans.jsonl mtime → readSpans (cache miss only)
+    List-->>Browser: 200 RunListResponse {items, nextCursor?, total}
+
+    Browser->>App: GET /api/runs/:id
+    App->>App: confineToDir(id, runsRoot) — 404 on escape/missing, indistinguishable
+    App->>Detail: handleRunDetail(id, {runsRoot})
+    Detail->>Mapper: mapRunToDto(runsRoot, id)
+    Mapper->>Disk: readSpans + readDegrades
+    Mapper->>Artifacts: readRunArtifacts(runDir)
+    Detail-->>Browser: 200 RunDTO | 404 {error:'not found'}
+
+    Browser->>App: GET /api/runs/:id/stream (Last-Event-ID?)
+    App->>Stream: handleRunStream(id, {runsRoot}, {lastEventId, signal})
+    Stream->>Mapper: mapRunToDto(runsRoot, id) — polled every pollMs, wrapped in runs.stream span
+    Stream-->>Browser: SSE frames id:&lt;spanId&gt;\ndata:&lt;SpanDTO&gt; until lifecycle !== Running
+    Note over Browser,Stream: reconnect resumes via Last-Event-ID — a cursor-seeded<br/>emitted-set replays only newer spans, no duplicate bars
+```
 
 ---
 
@@ -3130,26 +3174,47 @@ browser (`web/`) — and depends on **nothing but `zod`** (a test,
 no AI-SDK types, per Slice-23 forward-compat).
 
 **Mechanism.** `enums.ts` holds the finite named sets (`RunOrigin`,
-`RunLifecycle`, `SpanStatus`, `ArtifactKind`, `DegradeKind`, `ChatRole`,
+`RunLifecycle`, `SpanStatus`, `ArtifactKind` — extended in Slice 30b Phase 3
+with `Result`/`Resource`/`Unverified`/`Failed`/`Error`/`Media` alongside the
+original `Answer`/`Gap`/`Spans`/`Degradation`/`Other`, one member per artifact
+`src/run/artifacts.ts` can now classify —, `DegradeKind`, `ChatRole`,
 `ModelLoadAction`, `StatusEventType`). `dto.ts` defines the read-model DTOs
-(`RunDTO`/`SpanDTO`/`DegradeDTO`/`ChatMessageDTO`). The forward-compat fields
+(`RunDTO`/`SpanDTO`/`DegradeDTO`/`ChatMessageDTO`, plus Phase 3's
+`RunListItemDTO` — a list-cheap projection carrying no `spans`/`artifacts`/
+`degrades`, purpose-built for the Runs history list). The forward-compat fields
 reserved for later slices are already **present and required** today (`owner`
 constant `"local"`; run `lifecycle`/`origin`; run/span `degraded`) — forward
 compat means their non-default *values* only start arriving in later slices
 (e.g. real ownership in Slices 24/33). Only `node` (span location, Slices
-31/38) and the token roll-ups are `.optional()`. `events.ts` defines the transient-SSE `StatusEvent`
+31/38) and the token roll-ups are `.optional()`. Phase 3's mapper still emits
+`origin` as the constant `RunOrigin.Manual` for every run — the reservation is
+unchanged, only `RunDTO`/`RunListItemDTO` now have a real reader. `events.ts`
+defines the transient-SSE `StatusEvent`
 discriminated union (`data-run-start` … `data-confirm` … `data-run-end`) —
 OUR types, never re-exported AI-SDK `UIMessage` parts. `requests.ts` defines the
 inbound bodies the server validates before any engine call (`ChatRequest` over a
 minimal structural `UiMessageLike`, and `RespondRequest` for the consent
-back-channel). `index.ts` is the barrel.
+back-channel), plus, since Phase 3, the **outbound-shaping** query/response
+pair for the Runs list: `RunListQuerySchema` (coerces raw query strings —
+`degraded` string→boolean, `limit` `z.coerce.number()` clamped ≤200 and
+defaulted to 25) and `RunListResponseSchema` (a page of `RunListItemDTO` plus
+an opaque `nextCursor` and the post-filter `total`). `index.ts` is the barrel.
 
 **Data flow.** browser/server ⇄ `contracts` schemas: the server parses inbound
-requests (`ChatRequestSchema.parse`) at the perimeter and (later phases) maps
-engine spans → `RunDTO`/`SpanDTO` and writes `StatusEvent`s as transient SSE
-data-parts. The `DegradeKind` wire enum mirrors `src/reliability/ledger.ts` by
-value (guarded by `tests/contracts/degrade-kind-parity.test.ts`) without
-importing it.
+requests (`ChatRequestSchema.parse`) at the perimeter and, since Phase 3, maps
+engine spans → `RunDTO`/`SpanDTO` (`src/run/run-dto.ts`, not `src/contracts/`
+itself — the contracts stay isomorphic and own no I/O) and writes
+`StatusEvent`s as transient SSE data-parts. Phase 3 closes three telemetry-gap
+projections that were previously either absent or CLI-only: **token
+roll-up** (summing `gen_ai.usage.{input,output}_tokens` across a run's spans
+into `RunDTO.tokens`/`RunListItemDTO.tokens`), **lifecycle synthesis**
+(deriving `Running`/`Done`/`Failed` from the recognized run-root span's status
++ outcome, name-agnostic across `agent.run`/`crew.run`/`workflow.run` — the
+CLI's `run-trace.ts` `summarizeRun` only ever recognized `agent.run`), and
+**artifact classification** (readdir + classify a run dir's files into the
+extended `ArtifactKind`). The `DegradeKind` wire enum mirrors
+`src/reliability/ledger.ts` by value (guarded by
+`tests/contracts/degrade-kind-parity.test.ts`) without importing it.
 
 ## Server (web BFF — `src/server/`, Slice 30b Phase 1)
 
@@ -3430,11 +3495,13 @@ here, a documented, not-yet-implemented finer-grained count),
 - **`SessionStore`** (cross-invocation persistence, conversation search,
   rename/delete/export, long-run completion notifications) → Phase 6. Chat
   is stateless per request today.
-- **Span → `RunDTO`/`SpanDTO` waterfall mappers + `@visx`/`@xyflow` run
-  history** → Phase 3 (Runs). `convertToModelMessages` is **not** used
-  anywhere in this phase — the orchestrator's public surface stays a plain
-  `task: string`, so the server's job is building that string
-  (`buildTaskFromMessages`), not converting AI-SDK message types.
+- **Span → `RunDTO`/`SpanDTO` waterfall mappers + run history** — **shipped
+  in Phase 3**, see the "Runs" section below (`@xyflow` stays out of scope
+  per D1 — a waterfall, not a node-graph). `convertToModelMessages` is
+  **not** used anywhere in this (Phase 2) chat path — the orchestrator's
+  public surface stays a plain `task: string`, so the server's job is
+  building that string (`buildTaskFromMessages`), not converting AI-SDK
+  message types.
 - **Voice** (AudioWorklet + sherpa-onnx WASM + barge-in) → Phase 7. The
   COOP/COEP headers Phase 1 already ships exist to ready this.
 - **Accessibility pass** (keyboard/ARIA/reduced-motion), full ⌘K, and motion
@@ -3446,3 +3513,194 @@ here, a documented, not-yet-implemented finer-grained count),
   still not wired — `bun run web` serves the same Phase-1 stub HTML;
   today's dev workflow runs the Vite dev server and the BFF as separate
   origins.
+
+## Runs (web UI — Slice 30b Phase 3)
+
+**Feature.** Phase 3 turns the Phase-1b Runs stub into a real run-history
+browser: search/filter/paginate every run under `runsRoot`, open one, and
+watch its span tree render as an `@visx` waterfall — including a **live**
+one, whose bars stream in as the run progresses. It is the **first real
+consumer of the resumable transport-port interface** Phase 1b only defined
+(`stream(runId, cursor, schema)`, `shared/transport/types.ts`), and the
+**first place `RunDTO`/`SpanDTO` are actually emitted by the server and
+parsed by the browser** — Phases 1–2 only defined those DTOs and the
+`StatusEvent` union; nothing read real engine spans off disk until now.
+Like Chat, Runs is **read-only and stateless per request**: every request
+re-reads `runsRoot` from disk, fronted only by an in-process cache (below) —
+there is no persisted run index yet (Phase 6).
+
+### Server (`src/server/runs/`)
+
+Three new `GET` routes, registered in `app.ts`'s `handleApi` in an order that
+matters — the `/stream` regex is matched **before** the bare-`:id` regex, so
+`/api/runs/:id/stream` opens an event-stream instead of being swallowed by
+the detail route:
+
+- **`GET /api/runs`** — `list.ts`'s `handleRunList`: `RunListQuerySchema.parse`
+  coerces the raw query string (`degraded` `'true'|'false'` → boolean,
+  `limit` `z.coerce.number()` clamped ≤200, defaulted 25), `readdir`s
+  `runsRoot` for run-id directories (a missing/unreadable root degrades to
+  `{items:[], total:0}` rather than throwing), maps each id through the
+  cache-fronted `summarizeRunListItem` (below), filters by a case-insensitive
+  substring search over `id`/`models`/`outcome` plus exact `outcome`/
+  `degraded` facets, sorts newest-first by `startMs`, and paginates via an
+  opaque `base64url(startMs:id)` cursor — `total` reflects the **post-filter**
+  count, `nextCursor` is present only when more items remain, and a
+  stale/unknown cursor degrades to page one rather than erroring.
+- **`GET /api/runs/:id`** — `detail.ts`'s `handleRunDetail`: `confineToDir(id,
+  runsRoot)` guards the id against `../`/symlink/absolute traversal
+  **before** any lookup; a `MediaPathError` maps to the exact same
+  `{error:'not found'}` 404 a genuinely-missing run returns, so a caller
+  cannot distinguish "escaped the runs root" from "no such run" (no
+  filesystem-structure leak). Otherwise `mapRunToDto` (below) returns the
+  full, schema-validated `RunDTO`.
+- **`GET /api/runs/:id/stream`** — `stream.ts`'s `handleRunStream`: same
+  `confineToDir` guard, then a `text/event-stream` response whose body
+  polls `mapRunToDto` every `pollMs` (default 250 ms), emitting each new
+  `SpanDTO` as an SSE frame (`id: <spanId>\ndata: <json>\n\n`) until
+  `lifecycle !== Running` (the run-root closed — the same stop signal the
+  CLI's `bun run runs --follow` uses), then records the outcome and closes.
+  `Last-Event-ID` resume seeds the emitted-set with every span up to and
+  including that cursor so only newer spans replay; an unknown/stale cursor
+  degrades to a full snapshot replay rather than silently emitting nothing.
+  Bounded by a `maxWaitMs` (default 600 s), the caller's `AbortSignal`, and
+  an internal `AbortController` that a `ReadableStream.cancel()` (client
+  disconnect) trips so the poll loop stops promptly instead of reading disk
+  for an abandoned run until the deadline; a guarded `finally` close
+  tolerates a controller the reader already cancelled. Wrapped in
+  `withRunStreamSpan` (§ Telemetry below).
+
+`ServerDeps` gained a `runsRoot: string` (wired from `main.ts`); all three
+handlers take it as their sole dependency (`RunsDeps = {runsRoot}`) — no
+other server state.
+
+### The `src/run` mapper
+
+- **`run-dto.ts`'s `mapRunToDto(runsRoot, id)`** — reads `spans.jsonl` via
+  `run-trace.ts`'s existing `readSpans`/`buildTree`, depth-first-flattens the
+  span tree assigning `offsetMs` (relative to the run-root's start) and
+  `depth`, and projects each span into a `SpanDTO` (status, delegation
+  target/depth/ancestors, model id/provider/numCtx/footprint, per-span
+  tokens, a `degraded` flag derived from a `reliability.degrade` span event,
+  raw attributes + events). It sums every span's `gen_ai.usage.*` tokens and
+  distinct `MODEL_ID`s into the run-level roll-up, reads `degradation.jsonl`
+  via `readDegrades` (tolerant: a line that parses as JSON but fails
+  `DegradeDtoSchema` — an evolved/corrupt shape — is dropped, not thrown, so
+  a torn degrade line can never make the whole run unviewable), reads
+  artifacts via `readRunArtifacts` (below), and returns
+  `RunDtoSchema.parse(dto)` — a malformed projection fails loudly here, on
+  the server, never on the wire.
+- **`runRootSummary(tree)`** — a shared helper deriving a run's
+  `startMs`/`durationMs`/`outcome`/`lifecycle` from its **top-level roots**,
+  name-agnostic across `agent.run`/`crew.run`/`workflow.run` (the earliest
+  recognized root anchors duration/outcome; the run reads `Failed` on an
+  error-status root or a `resource` outcome, else `Done`; no recognized root
+  yet present at all reads `Running`). This is a deliberate, adversarially-
+  caught fix: the CLI's `run-trace.ts` `summarizeRun` only ever recognized
+  `agent.run`, so a finished `crew.run`/`workflow.run` misread as
+  perpetually `Running` with `durationMs: 0`. `mapRunToDto` and
+  `summarizeRunListItem` both call this **one** helper so the list and
+  detail views can never disagree on a run's lifecycle/duration/outcome.
+- **`summarizeRunListItem(runsRoot, id)`** — the list-cheap sibling
+  projection (no `spans`/`artifacts`/`degrades` — `RunListItemDTO` omits
+  them by design), fronted by an **in-process, mtime-keyed summary cache**:
+  keyed on `spans.jsonl`'s `mtimeMs` (**not** the run directory's mtime — a
+  directory's mtime only changes on entry add/remove/rename, not on append,
+  so keying on the dir would leave an in-flight run's list summary stale as
+  spans stream in). A cache hit skips the disk read entirely; a miss reads
+  `spans.jsonl`, recomputes, and repopulates. This cache is explicitly
+  interim scaffolding for a stateless-per-request phase — **a real
+  persisted run index is Phase 6**; today every cache miss still re-reads
+  disk from scratch.
+- **`artifacts.ts`'s `readRunArtifacts(runDir)`** — `readdir`s the run
+  directory and classifies each top-level entry into the extended
+  `ArtifactKind` via a filename→kind map (`answer.txt`/`gap.txt`/
+  `resource.txt`/`result.txt`/`unverified.txt`/`failed.txt`/`spans.jsonl`/
+  `degradation.jsonl`/`error.json`); a `media/` subdirectory rolls up into
+  **one** `Media`-kind entry with a flat (one-level) byte sum; anything
+  else classifies as `Other`. A missing run directory degrades to `[]`
+  rather than throwing, mirroring `readSpans`'s tolerance.
+
+### Web (`web/src/features/runs/`)
+
+- **`index.tsx`'s `RunsArea`** — the rich list: `apiFetch('/runs?<qs>',
+  {schema: RunListResponseSchema})` in a cancelled-flag-guarded effect keyed
+  on the query + cursor; a search box plus outcome/degraded facet `<select>`s
+  (the outcome options are the free-form values `run-dto.ts` actually
+  emits — `answer`/`error`/`resource`/`gap`/`unknown` — not
+  contract-enforced, since `RunListQuery.outcome` is a bare `z.string()`);
+  forward-only cursor pagination (any query change resets the cursor stack);
+  each row `Link`s to `/runs/$runId` showing id/outcome/lifecycle/models/
+  token roll-up/a degraded badge; an empty page renders "No runs yet"; a
+  failed fetch renders a local `role="alert"` (the `RegionErrorBoundary`
+  only catches render-phase errors, not an async fetch rejection).
+- **`run-detail.tsx`'s `RunDetail`** — the phase's integration linchpin:
+  fetches the `RunDTO` snapshot (`GET /api/runs/:id`), seeds `useRunTrace`
+  with its spans, then opens the live-tail stream
+  (`createSseTransport().stream(runId, cursor, SpanDtoSchema, signal)`) to
+  ingest any spans appended after the snapshot — the transport port's first
+  real consumer, and the first browser code to actually parse a `SpanDTO`
+  off the wire. Two effects: the snapshot fetch (cancelled-flag guarded) and
+  the stream loop, which starts only once the snapshot resolves and tears
+  down on unmount/navigation via **both** a cancelled flag **and** an
+  `AbortController.abort()` — a flag alone only re-checks after the next
+  stream frame yields, so it cannot close a connection that's idle *between*
+  spans; the abort is what actually ends the underlying fetch. (An
+  adversarial review caught the original version missing this abort
+  entirely — a stream left open indefinitely after navigating away from an
+  idle run — fixed before merge, along with a busy indicator that never
+  cleared; both are now covered by a targeted regression test.) A run-busy
+  indicator shows while `lifecycle === Running` and clears via a local
+  `streamEnded` flag once the stream closes on its own, rather than
+  re-fetching the snapshot (which risks an infinite reconnect loop).
+- **`use-run-trace.ts`** — a pure `foldSpan(state, span, eventId?)` reducer
+  (de-dupe by `spanId`, replace in place; keep the array offset-sorted;
+  advance the resume `cursor` to the latest `eventId`) plus the
+  `useRunTrace(initial)` hook wrapping it in `useState`/`useCallback`,
+  mirroring Phase 2's `useStatusEvents` shape.
+- **`waterfall.tsx`'s `Waterfall`** — an `@visx` Gantt-style chart:
+  `scaleLinear` maps `[0, maxEnd]` (the latest span's `offsetMs + durationMs`,
+  floored at 1 to avoid a `-Infinity` domain on an empty trace) onto a fixed
+  720 px width; one row per span (22 px row height, 14 px bar); each bar's
+  `x`/`width` come from `offsetMs`/`durationMs` (width floored at 2 px so a
+  zero-duration span stays visible); fill color follows a fixed precedence —
+  `status === 'error'` → `--color-danger`, else `degraded` → `--color-signal`,
+  else `--color-accent`; clicking a bar opens a span-detail panel (name,
+  agent, model id, token roll-up, offset+duration). Per decision **D1**,
+  this phase ships the waterfall **only** — no `@xyflow` node-graph; a
+  trace's natural shape is a timeline, not a DAG canvas.
+
+### Telemetry
+
+`src/telemetry/spans.ts`'s `withRunStreamSpan` mirrors `withUiStreamSpan`'s
+recorder-callback shape: it opens a `runs.stream` span tagging the route and
+`run.stream.run_id`, and records `run.stream.chunks`/`run.stream.bytes`/
+`run.stream.resumes`/`run.stream.outcome` in a `finally` so the aggregates
+land even if the handler throws. The list and detail routes carry no
+dedicated span of their own — they ride the existing per-request
+`server.request` span from `app.ts`.
+
+### What's still deferred (explicit, not Phase-3 debt)
+
+- **`SessionStore` + a real persisted run index + rename/delete/export** →
+  Phase 6. Phase 3 is stateless per request — the mapper always re-reads
+  disk, fronted only by the mtime-keyed summary cache above.
+- **`@xyflow` node-graph** (D1) — the waterfall is the only trace
+  visualization this phase ships.
+- **`SpanDTO.node`** (span location, Slices 31/38), **`RunDTO.origin`**
+  (still emitted as the constant `RunOrigin.Manual`, Slice 25), and
+  **`server.principal`** (still the constant `'local'`, Slices 24/33/35/38)
+  stay reserved — Phase 3 gives them real readers, not real values.
+- **`runs/` retention GC** — registered as a Tier-2 `docs/ROADMAP.md` slice,
+  not built here.
+- **Accessibility polish + full ⌘K** (a recent-run entry beyond the existing
+  "Jump to Runs" nav command) → Phase 8.
+- **Voice** → Phase 7.
+
+Two honest minor caveats, not blocking: the stream's `Last-Event-ID` resume
+re-seeds using the flattened depth-first span order (the brief-prescribed
+algorithm), not true on-disk append order, so an overlapping sibling span
+written after — but sorted before — the cursor on a resume is a known,
+documented edge case; and `RUN_STREAM_BYTES` counts the UTF-16 code units of
+each SSE frame's `JSON.stringify`'d text, not UTF-8 bytes, undercounting
+multibyte content — a telemetry approximation, not a user-facing defect.
