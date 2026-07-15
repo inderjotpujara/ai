@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   type DegradeDTO,
@@ -7,6 +7,8 @@ import {
   type RunDTO,
   RunDtoSchema,
   RunLifecycle,
+  type RunListItemDTO,
+  RunListItemDtoSchema,
   RunOrigin,
   type SpanDTO,
   SpanStatus,
@@ -53,6 +55,47 @@ function tokensOf(attrs: Record<string, unknown>): SpanDTO['tokens'] {
   const output = num(attrs[ATTR.USAGE_OUTPUT_TOKENS]);
   if (input === undefined && output === undefined) return undefined;
   return { input, output };
+}
+
+type RunRootSummary = {
+  startMs: number;
+  durationMs: number;
+  outcome: string;
+  lifecycle: RunLifecycle;
+  contentPolicy?: string;
+};
+
+/**
+ * Derive run-level startMs/durationMs/outcome/lifecycle from the top-level
+ * trace roots — name-agnostic across `agent.run` / `crew.run` / `workflow.run`
+ * (the earliest recognized root anchors the run; `tree[0]` is already sorted
+ * by start time by `buildTree`). Shared by `mapRunToDto` and
+ * `summarizeRunListItem` so the two projections cannot drift apart: the sibling
+ * `summarizeRun` in run-trace.ts only recognizes `agent.run`, which makes a
+ * completed crew.run/workflow.run report durationMs 0 / lifecycle Running —
+ * this helper is the fix, applied to both list and detail views alike.
+ */
+function runRootSummary(tree: TraceNode[]): RunRootSummary {
+  const rootSpan = tree[0]?.span;
+  const rootStartUnixNano = rootSpan?.startUnixNano ?? 0;
+  const runRootPresent =
+    rootSpan !== undefined && RUN_ROOT_NAMES.has(rootSpan.name);
+  const outcomeSource =
+    tree.map((n) => n.span).find((s) => ATTR.OUTCOME in s.attributes) ??
+    rootSpan;
+  const outcome = str(outcomeSource?.attributes[ATTR.OUTCOME]) ?? 'unknown';
+  const lifecycle = !runRootPresent
+    ? RunLifecycle.Running
+    : rootSpan?.status.code === OTEL_STATUS_ERROR || outcome === 'resource'
+      ? RunLifecycle.Failed
+      : RunLifecycle.Done;
+  return {
+    startMs: Math.round(rootStartUnixNano / NANOS_PER_MS),
+    durationMs: runRootPresent ? (rootSpan?.durationMs ?? 0) : 0,
+    outcome,
+    lifecycle,
+    contentPolicy: str(outcomeSource?.attributes[ATTR.CONTENT_POLICY]),
+  };
 }
 
 /** Read degradation.jsonl (one DegradeEvent per line) → DegradeDTO[]. Missing → []. */
@@ -170,13 +213,6 @@ export async function mapRunToDto(
   const flat: SpanDTO[] = [];
   flatten(tree, 0, rootStartUnixNano, flat);
 
-  // The run root is the earliest top-level root (`tree[0]`, which already
-  // anchors startMs/offsets). A run is in-flight until its root span ends and
-  // flushes, so an earliest root whose name is NOT a recognized run root means
-  // the root hasn't been recorded yet → still Running.
-  const rootSpan = tree[0]?.span;
-  const runRootPresent =
-    rootSpan !== undefined && RUN_ROOT_NAMES.has(rootSpan.name);
   const models = new Set<string>();
   let tokIn: number | undefined;
   let tokOut: number | undefined;
@@ -191,18 +227,8 @@ export async function mapRunToDto(
       ? undefined
       : { input: tokIn, output: tokOut };
 
-  // Outcome/content-policy come from whichever top-level root carries the
-  // outcome attribute (fall back to the earliest root) — name-agnostic, so it
-  // works for agent.run, crew.run, and workflow.run roots alike.
-  const outcomeSource =
-    tree.map((n) => n.span).find((s) => ATTR.OUTCOME in s.attributes) ??
-    rootSpan;
-  const outcome = str(outcomeSource?.attributes[ATTR.OUTCOME]) ?? 'unknown';
-  const lifecycle = !runRootPresent
-    ? RunLifecycle.Running
-    : rootSpan?.status.code === OTEL_STATUS_ERROR || outcome === 'resource'
-      ? RunLifecycle.Failed
-      : RunLifecycle.Done;
+  const { startMs, durationMs, outcome, lifecycle, contentPolicy } =
+    runRootSummary(tree);
 
   const degrades = await readDegrades(runDir);
   const artifacts = await readRunArtifacts(runDir);
@@ -212,11 +238,11 @@ export async function mapRunToDto(
     owner: 'local',
     origin: RunOrigin.Manual,
     lifecycle,
-    startMs: Math.round(rootStartUnixNano / NANOS_PER_MS),
-    durationMs: runRootPresent ? (rootSpan?.durationMs ?? 0) : 0,
+    startMs,
+    durationMs,
     outcome,
     models: [...models],
-    contentPolicy: str(outcomeSource?.attributes[ATTR.CONTENT_POLICY]),
+    contentPolicy,
     tokens: runTokens,
     degraded: degrades.length > 0,
     degrades,
@@ -227,4 +253,86 @@ export async function mapRunToDto(
     artifacts,
   };
   return RunDtoSchema.parse(dto);
+}
+
+// why: mtime-keyed summary cache. The list view would otherwise be
+// O(runs × spans/run) disk reads on every request (a keystroke-driven search
+// re-lists constantly); a real persisted index is Phase 6 — this in-process
+// Map is the stateless-friendly interim. Keyed on `spans.jsonl`'s `mtimeMs`
+// (NOT the run directory's mtime): a directory's mtime only changes on entry
+// add/remove/rename, not on append, so keying on the dir would leave an
+// in-flight run's summary stale as spans stream in. runDir (not id) is the
+// map key purely so it reads unambiguously in a debugger; id is unique per
+// runsRoot in practice.
+const summaryCache = new Map<
+  string,
+  { mtimeMs: number; item: RunListItemDTO }
+>();
+
+/** Test-only: current cache entry count (asserts memoization vs recompute). */
+export function __summaryCacheSize(): number {
+  return summaryCache.size;
+}
+
+/**
+ * List-cheap projection of a run: spanCount/models/tokens/outcome/lifecycle
+ * without the full flatten, artifacts readdir, or degradation.jsonl read that
+ * `mapRunToDto` does. `degraded` is derived from per-span `reliability.degrade`
+ * events (already in spans.jsonl) rather than reading degradation.jsonl, since
+ * that file read is exactly the extra I/O this projection exists to avoid.
+ * Uses the same `runRootSummary` as `mapRunToDto` (agent.run/crew.run/
+ * workflow.run, earliest recognized root) so the two projections cannot
+ * disagree on lifecycle/duration/outcome for the same run.
+ */
+export async function summarizeRunListItem(
+  runsRoot: string,
+  id: string,
+): Promise<RunListItemDTO | undefined> {
+  const runDir = join(runsRoot, id);
+  let mtimeMs: number;
+  try {
+    mtimeMs = (await stat(join(runDir, 'spans.jsonl'))).mtimeMs;
+  } catch {
+    return undefined; // no spans.jsonl → not a started/completed run
+  }
+  const cached = summaryCache.get(runDir);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.item;
+
+  const { spans } = await readSpans(runDir);
+  if (spans.length === 0) return undefined;
+
+  const tree = buildTree(spans);
+  const { startMs, durationMs, outcome, lifecycle } = runRootSummary(tree);
+
+  const models = new Set<string>();
+  let tokIn: number | undefined;
+  let tokOut: number | undefined;
+  let degraded = false;
+  for (const s of spans) {
+    const m = str(s.attributes[ATTR.MODEL_ID]);
+    if (m) models.add(m);
+    const i = num(s.attributes[ATTR.USAGE_INPUT_TOKENS]);
+    const o = num(s.attributes[ATTR.USAGE_OUTPUT_TOKENS]);
+    if (i !== undefined) tokIn = (tokIn ?? 0) + i;
+    if (o !== undefined) tokOut = (tokOut ?? 0) + o;
+    if (s.events.some((e) => e.name === 'reliability.degrade')) degraded = true;
+  }
+
+  const item = RunListItemDtoSchema.parse({
+    id,
+    startMs,
+    durationMs,
+    outcome,
+    lifecycle,
+    origin: RunOrigin.Manual,
+    models: [...models],
+    degraded,
+    spanCount: spans.length,
+    tokens:
+      tokIn === undefined && tokOut === undefined
+        ? undefined
+        : { input: tokIn, output: tokOut },
+  });
+  summaryCache.set(runDir, { mtimeMs, item });
+  return item;
 }
