@@ -1,7 +1,11 @@
-import { RespondRequestSchema, StatusEventSchema } from '@contracts';
-import { z } from 'zod';
+import {
+  RespondRequestSchema,
+  type StatusEvent,
+  StatusEventSchema,
+} from '@contracts';
+import { type ZodType, z } from 'zod';
 import { ApiError, apiFetch, sessionToken } from '../contract/client.ts';
-import type { ChatTransport, TransportEvent } from './types.ts';
+import type { ChatTransport } from './types.ts';
 
 const OkSchema = z.object({ ok: z.boolean() });
 
@@ -67,7 +71,12 @@ async function* readSseStream(
  */
 export function createSseTransport(): ChatTransport {
   return {
-    async *stream(runId, fromCursor) {
+    async *stream<T = StatusEvent>(
+      runId?: string,
+      fromCursor?: string | null,
+      schema?: ZodType<T>,
+    ): AsyncIterable<T & { eventId: string }> {
+      const payloadSchema = (schema ?? StatusEventSchema) as ZodType<T>;
       const path = runId ? `/api/runs/${runId}/stream` : '/api/chat';
       const res = await fetch(path, {
         headers: {
@@ -81,9 +90,9 @@ export function createSseTransport(): ChatTransport {
       }
 
       for await (const frame of readSseStream(res.body)) {
-        const parsed = StatusEventSchema.parse(JSON.parse(frame.data));
+        const parsed = payloadSchema.parse(JSON.parse(frame.data));
         const eventId = frame.id ?? '';
-        yield { ...parsed, eventId } satisfies TransportEvent;
+        yield { ...(parsed as object), eventId } as T & { eventId: string };
       }
     },
 

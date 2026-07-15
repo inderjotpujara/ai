@@ -1,4 +1,5 @@
 import type { RespondRequest, StatusEvent } from '@contracts';
+import type { ZodType } from 'zod';
 
 /** A transport event = a wire StatusEvent tagged with an SSE event id for resume. */
 export type TransportEvent = StatusEvent & { eventId: string };
@@ -9,11 +10,16 @@ export type TransportEvent = StatusEvent & { eventId: string };
  * room for WS/resumable later.
  */
 export type ChatTransport = {
-  /** server→client stream; `fromCursor` replays after a Last-Event-ID reconnect. */
-  stream(
+  /**
+   * server→client stream; `fromCursor` replays after a Last-Event-ID reconnect.
+   * `schema` parameterizes the frame payload (default `StatusEvent` for the
+   * chat path; e.g. `SpanDtoSchema` for the runs live-tail).
+   */
+  stream<T = StatusEvent>(
     runId?: string,
     fromCursor?: string | null,
-  ): AsyncIterable<TransportEvent>;
+    schema?: ZodType<T>,
+  ): AsyncIterable<T & { eventId: string }>;
   /** client→server back-channel: POST /api/runs/:id/respond (consent / human-in-loop). */
   respond(runId: string, payload: RespondRequest): Promise<void>;
 };
