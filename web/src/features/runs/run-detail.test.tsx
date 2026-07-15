@@ -3,7 +3,13 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { routeTree } from '../../app/router.tsx';
 import { ThemeProvider } from '../../shared/design/theme.tsx';
@@ -268,6 +274,107 @@ describe('RunDetail', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(screen.queryByTestId('bar-late')).not.toBeInTheDocument();
 
+    vi.unstubAllGlobals();
+  });
+
+  const workflowDto = {
+    ...dto,
+    kind: 'workflow',
+    roots: ['root'],
+    spans: [
+      {
+        spanId: 'root',
+        parentSpanId: null,
+        name: 'workflow.run',
+        offsetMs: 0,
+        durationMs: 20,
+        depth: 0,
+        status: 'ok',
+        degraded: false,
+        attributes: { 'workflow.id': 'fetch-then-summarize' },
+        events: [],
+      },
+      {
+        spanId: 'step-fetch',
+        parentSpanId: 'root',
+        name: 'workflow.step',
+        offsetMs: 1,
+        durationMs: 5,
+        depth: 1,
+        status: 'ok',
+        degraded: false,
+        attributes: { 'workflow.step.id': 'fetch' },
+        events: [],
+      },
+    ],
+  };
+
+  const workflowDef = {
+    id: 'fetch-then-summarize',
+    steps: [
+      { id: 'fetch', kind: 'tool', tool: 'fetch' },
+      { id: 'summarize', kind: 'agent', agent: 'web_fetch' },
+    ],
+    edges: [{ from: 'fetch', to: 'summarize', kind: 'depends' }],
+  };
+
+  it('offers a Graph/Waterfall toggle for a workflow run and overlays live step status', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes('/stream')) return emptyStream();
+        if (url.includes('/workflows/')) return jsonResponse(workflowDef);
+        return jsonResponse(workflowDto);
+      }),
+    );
+    renderAt('/runs/run-1');
+    await waitFor(() =>
+      expect(screen.getByTestId('view-toggle-graph')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('view-toggle-graph'));
+    await waitFor(() =>
+      expect(screen.getByTestId('dag-view')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('dag-node-fetch')).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows no Graph toggle for a plain agent run (no recognized crew/workflow root)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) =>
+        String(input).includes('/stream') ? emptyStream() : jsonResponse(dto),
+      ),
+    );
+    renderAt('/runs/run-1');
+    await waitFor(() =>
+      expect(screen.getByTestId('bar-a')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('view-toggle-graph')).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it('Amendment A: loads the graph immediately from graphKind/graphId search params, before any root span exists', async () => {
+    // `dto` here has no workflow.run/crew.run root at all — the search-param
+    // path must resolve the graph without ever consulting the span trace.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes('/stream')) return emptyStream();
+        if (url.includes('/workflows/')) return jsonResponse(workflowDef);
+        return jsonResponse(dto);
+      }),
+    );
+    renderAt('/runs/run-1?graphKind=workflow&graphId=fetch-then-summarize');
+    await waitFor(() =>
+      expect(screen.getByTestId('dag-view')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('dag-node-fetch')).toBeInTheDocument();
+    // The view auto-switches to Graph for the launch→watch flow — no click
+    // needed, unlike the cold-open telemetry-scan fallback above.
+    expect(screen.getByTestId('view-toggle-graph')).toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 });

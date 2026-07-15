@@ -1,5 +1,5 @@
 import type { RunListResponse } from '@contracts';
-import { RunListResponseSchema } from '@contracts';
+import { RunKind, RunListResponseSchema } from '@contracts';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '../../shared/contract/client.ts';
@@ -17,15 +17,32 @@ const DEGRADED_OPTIONS = [
   { value: 'false', label: 'Clean only' },
 ];
 
-type Query = { search: string; outcome: string; degraded: string };
+/** Task 18 kind facet — every `RunKind` value plus an "All" escape hatch,
+ *  feeding `?kind=` straight into `RunListQuerySchema.kind` (server-side
+ *  `src/server/runs/list.ts`). */
+const KIND_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'All' },
+  { value: RunKind.Chat, label: 'chat' },
+  { value: RunKind.Crew, label: 'crew' },
+  { value: RunKind.Workflow, label: 'workflow' },
+  { value: RunKind.Agent, label: 'agent' },
+];
 
-const emptyQuery: Query = { search: '', outcome: '', degraded: '' };
+type Query = {
+  search: string;
+  outcome: string;
+  degraded: string;
+  kind: string;
+};
+
+const emptyQuery: Query = { search: '', outcome: '', degraded: '', kind: '' };
 
 function toQueryString(query: Query, cursor: string | undefined): string {
   const params = new URLSearchParams();
   if (query.search) params.set('search', query.search);
   if (query.outcome) params.set('outcome', query.outcome);
   if (query.degraded) params.set('degraded', query.degraded);
+  if (query.kind) params.set('kind', query.kind);
   if (cursor) params.set('cursor', cursor);
   const qs = params.toString();
   return qs ? `/runs?${qs}` : '/runs';
@@ -112,6 +129,19 @@ export function RunsArea() {
             {DEGRADED_OPTIONS.map((d) => (
               <option key={d.value} value={d.value}>
                 {d.label}
+              </option>
+            ))}
+          </select>
+
+          <select
+            data-testid="runs-kind-filter"
+            value={query.kind}
+            onChange={(e) => updateQuery({ kind: e.target.value })}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-sm text-[var(--color-fg)]"
+          >
+            {KIND_OPTIONS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {k.label}
               </option>
             ))}
           </select>
