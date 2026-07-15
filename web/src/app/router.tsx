@@ -13,6 +13,7 @@ import { RunsArea } from '../features/runs/index.tsx';
 import { RunDetail } from '../features/runs/run-detail.tsx';
 import { SettingsArea } from '../features/settings/index.tsx';
 import { WorkflowsArea } from '../features/workflows/index.tsx';
+import { WorkflowDetail } from '../features/workflows/workflow-detail.tsx';
 import { AppShell } from './app-shell.tsx';
 
 const rootRoute = createRootRoute({ component: AppShell });
@@ -49,6 +50,7 @@ export const routeTree = rootRoute.addChildren([
   route('/crews', CrewsArea),
   route('/crews/$crewName', CrewDetail),
   route('/workflows', WorkflowsArea),
+  route('/workflows/$workflowId', WorkflowDetail),
   route('/builders', BuildersArea),
   route('/runs', RunsArea),
   runDetailRoute,
