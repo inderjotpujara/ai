@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  ArtifactKind,
   type DegradeDTO,
   DegradeDtoSchema,
   DegradeKind,
@@ -226,7 +227,14 @@ export async function mapRunToDto(
 ): Promise<RunDTO | undefined> {
   const runDir = join(runsRoot, id);
   const { spans, malformed } = await readSpans(runDir);
-  if (spans.length === 0) return undefined;
+  const artifacts = await readRunArtifacts(runDir);
+  const hasError = artifacts.some((a) => a.kind === ArtifactKind.Error);
+  // A run whose process died before ANY span ever flushed (spans.length===0,
+  // spans.jsonl absent or empty) has nothing else to report — unless the
+  // detached-catch handler in server/{crews,workflows}/run.ts already wrote
+  // error.json, in which case it IS a viewable (Failed) run; fall through
+  // instead of the usual "no spans → not a run" undefined.
+  if (spans.length === 0 && !hasError) return undefined;
 
   const tree = buildTree(spans);
   const rootStartUnixNano = tree[0]?.span.startUnixNano ?? 0;
@@ -247,11 +255,27 @@ export async function mapRunToDto(
       ? undefined
       : { input: tokIn, output: tokOut };
 
-  const { startMs, durationMs, outcome, lifecycle, contentPolicy } =
-    runRootSummary(tree);
+  const {
+    startMs,
+    durationMs,
+    outcome: rootOutcome,
+    lifecycle: rootLifecycle,
+    contentPolicy,
+  } = runRootSummary(tree);
+  // Mirrors the spans.length===0 rescue above for the sibling case: spans DID
+  // flush (e.g. an `mcp.mount` span from crew/workflow setup) but the process
+  // died before the crew.run/workflow.run/agent.run root ever appeared, so
+  // runRootSummary reads Running forever — the SSE watch stream's
+  // `lifecycle !== Running` stop condition then never fires and it polls to
+  // its maxWaitMs cap. error.json is this run's real terminal state in that
+  // case. A run whose root DID resolve (already Done/Failed) is untouched —
+  // a completed/failed root wins even if an error.json also happens to be
+  // present.
+  const earlyFailed = rootLifecycle === RunLifecycle.Running && hasError;
+  const lifecycle = earlyFailed ? RunLifecycle.Failed : rootLifecycle;
+  const outcome = earlyFailed ? 'error' : rootOutcome;
 
   const degrades = await readDegrades(runDir);
-  const artifacts = await readRunArtifacts(runDir);
 
   const dto: RunDTO = {
     id,
@@ -274,6 +298,18 @@ export async function mapRunToDto(
     artifacts,
   };
   return RunDtoSchema.parse(dto);
+}
+
+/** Cheap existence check for `error.json` — a single `stat`, not the full
+ *  artifacts readdir `mapRunToDto` pays for. Used by `summarizeRunListItem`
+ *  only on the already-narrow "root reads Running" branch. */
+async function hasErrorArtifact(runDir: string): Promise<boolean> {
+  try {
+    await stat(join(runDir, 'error.json'));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // why: mtime-keyed summary cache. The list view would otherwise be
@@ -320,10 +356,24 @@ export async function summarizeRunListItem(
   if (cached && cached.mtimeMs === mtimeMs) return cached.item;
 
   const { spans } = await readSpans(runDir);
-  if (spans.length === 0) return undefined;
-
   const tree = buildTree(spans);
-  const { startMs, durationMs, outcome, lifecycle } = runRootSummary(tree);
+  const {
+    startMs,
+    durationMs,
+    outcome: rootOutcome,
+    lifecycle: rootLifecycle,
+  } = runRootSummary(tree);
+  // Mirrors mapRunToDto's early-failed rescue (see its comment there): a run
+  // whose root span never flushed reads Running here too; if the
+  // detached-catch handler already wrote error.json, that IS this run's
+  // terminal state. A single extra stat — cheap, and only paid on the
+  // already-narrow Running branch — keeps this list projection from
+  // disagreeing with the detail view.
+  const earlyFailed =
+    rootLifecycle === RunLifecycle.Running && (await hasErrorArtifact(runDir));
+  if (spans.length === 0 && !earlyFailed) return undefined;
+  const lifecycle = earlyFailed ? RunLifecycle.Failed : rootLifecycle;
+  const outcome = earlyFailed ? 'error' : rootOutcome;
 
   const models = new Set<string>();
   let tokIn: number | undefined;

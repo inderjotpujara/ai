@@ -10,7 +10,10 @@ import { createRun, writeArtifact } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 
 /** Starts a crew run to completion under its own `withMcpRun` scope. Detached by
- *  the handler; may reject (its rejection is caught + persisted to error.json). */
+ *  the handler; may reject (its rejection is caught + persisted to error.json).
+ *  Implementations MUST be `async` (always return a Promise): the handler's
+ *  `.catch` below only attaches to a Promise — a synchronously-throwing impl
+ *  escapes it and crashes the request instead of degrading to error.json. */
 export type RunCrewTurn = (input: {
   def: CrewDef;
   input: string;
