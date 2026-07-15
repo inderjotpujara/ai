@@ -136,3 +136,29 @@ export enum ReuseKind {
   Offer = 'offer',
   Generate = 'generate',
 }
+
+/** Wire mirror of `src/core/types.ts` RuntimeKind (isomorphic rule — no core
+ *  import). `tests/contracts/runtime-kind-parity.test.ts` guards value
+ *  parity. Slice 30b Phase 5 (Models tab / ModelInventoryDTO). */
+export enum RuntimeKind {
+  Ollama = 'Ollama',
+  MlxServer = 'MlxServer',
+  LmStudio = 'LmStudio',
+  LlamaCpp = 'LlamaCpp',
+}
+
+/** Wire mirror of `src/mcp/types.ts` McpTransportKind (isomorphic rule).
+ *  `tests/contracts/mcp-transport-kind-parity.test.ts` guards value parity.
+ *  Slice 30b Phase 5 (McpServerDTO). */
+export enum McpTransportKind {
+  Stdio = 'stdio',
+  Http = 'http',
+}
+
+/** Wire mirror of `src/mcp/types.ts` McpAuthKind (isomorphic rule).
+ *  `tests/contracts/mcp-auth-kind-parity.test.ts` guards value parity.
+ *  Slice 30b Phase 5 (McpServerDTO). */
+export enum McpAuthKind {
+  Static = 'static',
+  OAuth = 'oauth',
+}
