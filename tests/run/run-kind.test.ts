@@ -9,3 +9,9 @@ test('deriveRunKind maps root span names to a RunKind', () => {
   expect(deriveRunKind([])).toBe(RunKind.Chat); // ui.stream / no recognized root
   expect(deriveRunKind(['ui.stream'])).toBe(RunKind.Chat);
 });
+
+test('deriveRunKind maps build/pull roots to RunKind.Build/RunKind.Pull (Phase 5)', () => {
+  expect(deriveRunKind(['agent.build'])).toBe(RunKind.Build);
+  expect(deriveRunKind(['crew.build'])).toBe(RunKind.Build);
+  expect(deriveRunKind(['model.pull'])).toBe(RunKind.Pull);
+});

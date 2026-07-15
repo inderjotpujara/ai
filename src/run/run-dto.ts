@@ -24,22 +24,31 @@ import { buildTree, readSpans, type TraceNode } from './run-trace.ts';
 const NANOS_PER_MS = 1e6;
 const OTEL_STATUS_ERROR = 2;
 
-/** Root span names that anchor a run: an agent run, a crew run, or a workflow
- *  run. Recognizing all three (not just `agent.run`) is what keeps a finished
- *  crew/workflow run from being read as perpetually in-flight. */
+/** Root span names that anchor a run: an agent/crew/workflow run, an
+ *  agent/crew build (Phase 5), or a model pull (Phase 5). Recognizing all
+ *  six is what keeps a finished build/pull from reading as perpetually
+ *  in-flight (spec §7.2). */
 const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
   'agent.run',
   'crew.run',
   'workflow.run',
+  'agent.build',
+  'crew.build',
+  'model.pull',
 ]);
 
-/** Derive what a run IS from the names of its root spans. A crew/workflow root
- *  wins over an agent root (a crew nests agent runs); everything else (chat's
- *  ui.stream, or no recognized root) is Chat. */
+/** Derive what a run IS from the names of its root spans. A crew/workflow
+ *  root wins over an agent root (a crew nests agent runs); a build/pull root
+ *  is checked next (these never co-occur with a run root in the same
+ *  process); everything else (chat's ui.stream, or no recognized root) is
+ *  Chat. */
 export function deriveRunKind(rootSpanNames: string[]): RunKind {
   if (rootSpanNames.includes('crew.run')) return RunKind.Crew;
   if (rootSpanNames.includes('workflow.run')) return RunKind.Workflow;
   if (rootSpanNames.includes('agent.run')) return RunKind.Agent;
+  if (rootSpanNames.includes('crew.build')) return RunKind.Build;
+  if (rootSpanNames.includes('agent.build')) return RunKind.Build;
+  if (rootSpanNames.includes('model.pull')) return RunKind.Pull;
   return RunKind.Chat;
 }
 
