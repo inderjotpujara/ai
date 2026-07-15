@@ -6,6 +6,9 @@ import type { ConsentRegistry } from './consent/registry.ts';
 import { handleRespond } from './consent/respond.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleRunDetail } from './runs/detail.ts';
+import { handleRunList } from './runs/list.ts';
+import { handleRunStream } from './runs/stream.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
@@ -96,6 +99,29 @@ async function handleApi(
         if (req.method === 'POST' && url.pathname === '/api/feedback') {
           rec.status(200);
           return handleFeedback(req);
+        }
+        if (req.method === 'GET' && url.pathname === '/api/runs') {
+          rec.status(200);
+          return handleRunList(new URLSearchParams(url.search), deps);
+        }
+        // Stream match MUST precede the bare-:id detail match so that
+        // `/api/runs/:id/stream` opens an event-stream rather than being
+        // captured as a detail lookup (which would return JSON instead).
+        const streamMatch = url.pathname.match(
+          /^\/api\/runs\/([^/]+)\/stream$/,
+        );
+        if (req.method === 'GET' && streamMatch?.[1]) {
+          rec.status(200);
+          return handleRunStream(streamMatch[1], deps, {
+            lastEventId: req.headers.get('Last-Event-ID') ?? undefined,
+            signal: req.signal,
+          });
+        }
+        const detailMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+        if (req.method === 'GET' && detailMatch?.[1]) {
+          const res = await handleRunDetail(detailMatch[1], deps);
+          rec.status(res.status); // may be 404 — reflect the actual status
+          return res;
         }
         rec.status(404);
         return json({ error: 'not found' }, 404);
