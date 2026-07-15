@@ -162,3 +162,13 @@ export enum McpAuthKind {
   Static = 'static',
   OAuth = 'oauth',
 }
+
+/** Which builder flow a build request targets. Contract-owned — no engine
+ *  mirror needed (`src/crew-builder`'s `Shape` type covers only
+ *  'crew'|'workflow'; 'agent' is the agent-builder's separate flow). Slice
+ *  30b Phase 5. */
+export enum BuilderKind {
+  Agent = 'agent',
+  Crew = 'crew',
+  Workflow = 'workflow',
+}

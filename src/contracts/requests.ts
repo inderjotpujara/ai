@@ -1,10 +1,20 @@
 import { z } from 'zod';
 import {
   CrewListItemDtoSchema,
+  McpServerDtoSchema,
+  MemorySpaceDtoSchema,
+  ModelInventoryDtoSchema,
+  RetrievalResultDtoSchema,
   RunListItemDtoSchema,
   WorkflowListItemDtoSchema,
 } from './dto.ts';
-import { ChatRole, FeedbackRating, RunKind } from './enums.ts';
+import {
+  BuilderKind,
+  ChatRole,
+  FeedbackRating,
+  RunKind,
+  RuntimeKind,
+} from './enums.ts';
 
 /**
  * A minimal, structural UIMessage-like shape. We deliberately do NOT import
@@ -100,3 +110,76 @@ export const WorkflowListResponseSchema = z.object({
   items: z.array(WorkflowListItemDtoSchema),
 });
 export type WorkflowListResponse = z.infer<typeof WorkflowListResponseSchema>;
+
+/** `POST /api/builders/build` body (spec §4.2.1). `need.max(20_000)` bounds
+ *  the perimeter the same way `CrewRunRequestSchema` bounds `input` (Phase 4). */
+export const BuilderBuildRequestSchema = z.object({
+  kind: z.enum(BuilderKind),
+  need: z.string().max(20_000),
+  autoYes: z.boolean().optional(),
+  force: z.boolean().optional(),
+});
+export type BuilderBuildRequest = z.infer<typeof BuilderBuildRequestSchema>;
+
+/** `POST /api/models/pull` body (spec §4.2.4). No `provider` field — the
+ *  server resolves which `DownloadProvider` to use from its own catalog
+ *  lookup (never trusts the client to pick the download mechanism). */
+export const ModelPullRequestSchema = z.object({
+  runtime: z.enum(RuntimeKind),
+  modelRef: z.string().min(1),
+});
+export type ModelPullRequest = z.infer<typeof ModelPullRequestSchema>;
+
+/** `POST /api/memory/:space/recall` body (spec §4.2.5). `space` is a path
+ *  param on the real route, not this body — kept here too (optional) so the
+ *  schema is reusable if a future caller posts a bare query without a path
+ *  param (e.g. an internal test harness). */
+export const MemoryRecallRequestSchema = z.object({
+  query: z.string().min(1),
+  space: z.string().optional(),
+  topK: z.number().int().positive().optional(),
+});
+export type MemoryRecallRequest = z.infer<typeof MemoryRecallRequestSchema>;
+
+/** `POST /api/mcp/add` body (spec §4.2.6) — the raw `mcpServers.<name>` value,
+ *  mirroring `PackEntry.server` (`src/mcp/types.ts:84`). */
+export const McpAddRequestSchema = z.object({
+  name: z.string().min(1),
+  server: z.record(z.string(), z.unknown()),
+});
+export type McpAddRequest = z.infer<typeof McpAddRequestSchema>;
+
+/** Browse/list responses — plain arrays (small in-memory/on-disk sets, no
+ *  cursor), mirroring `CrewListResponseSchema`/`WorkflowListResponseSchema`
+ *  (Phase 4). */
+export const ModelListResponseSchema = z.object({
+  items: z.array(ModelInventoryDtoSchema),
+});
+export type ModelListResponse = z.infer<typeof ModelListResponseSchema>;
+
+export const MemorySpaceListResponseSchema = z.object({
+  items: z.array(MemorySpaceDtoSchema),
+});
+export type MemorySpaceListResponse = z.infer<
+  typeof MemorySpaceListResponseSchema
+>;
+
+export const RetrievalResponseSchema = z.object({
+  items: z.array(RetrievalResultDtoSchema),
+});
+export type RetrievalResponse = z.infer<typeof RetrievalResponseSchema>;
+
+export const McpListResponseSchema = z.object({
+  items: z.array(McpServerDtoSchema),
+});
+export type McpListResponse = z.infer<typeof McpListResponseSchema>;
+
+/** Shared by `GET /api/builders/agents` and `GET /api/builders/crews` — both
+ *  are a bare list of registry names (existing-agent awareness for the
+ *  wizard), not a projected DTO array. */
+export const BuilderRegistryListResponseSchema = z.object({
+  items: z.array(z.string()),
+});
+export type BuilderRegistryListResponse = z.infer<
+  typeof BuilderRegistryListResponseSchema
+>;
