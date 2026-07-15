@@ -533,9 +533,9 @@ graph TD
 |---|---|---|---|
 | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14); agent-builder entry (`agent-builder.ts`, `bun run agent-builder "<need>" [--yes] [--force]`, Slice 17; `--force` commits a failed verify gate at `unverified` and prints a WARNING, §20) plus a TTY-gated capability-gap offer wired into `chat.ts`'s `{kind:'gap'}` branch (§18); crew-builder entry (`crew-builder.ts`, `bun run crew-builder "<need>" [--yes] [--force]`, Slice 19; same `--force` semantics) plus the `offer-crew.ts` multi-step gap-offer heuristic (§19); archive entry (`archive.ts`, `bun run archive [--prune]`, Slice 20 — reports idle near-duplicate generated artifacts per registry, `--prune` archives each behind a per-candidate consent prompt); a per-run telemetry scope for CLIs that mount no MCP servers (`with-run.ts`, Slice 20) — `withRunTelemetry(opts, body)` owns `createRun` → `initRunTelemetry` → `body` → `finally{tel.shutdown()}` for the builder + archive CLIs, so their `agent.build`/`crew.build`/`build.verify`/`build.archive` spans land in `runs/<id>/spans.jsonl` instead of hitting the no-op provider; and `chat.ts`'s informational reuse hint (`reuseHintText`, shown on a gap before any build offer, §20) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
-| **Contracts** | `src/contracts/` | Isomorphic web wire protocol (Slice 30b — Phase 1 base; Phase 2 additions below): enums (`enums.ts`, +`FeedbackRating`), read-model DTOs (`dto.ts`), the transient-SSE `StatusEvent` union (`events.ts` — Phase 2 makes this a **live** wire type: the server now actually emits it as `data-*` UI-message parts, not just a defined shape), inbound request schemas (`requests.ts` — `ChatRequestSchema` gained optional `uploadIds`; new `UploadResponseSchema` and `FeedbackRequestSchema`), barrel (`index.ts`). **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*` | `zod` only |
-| **Server** | `src/server/` | `Bun.serve` web BFF, still no business logic of its own (Slice 30b — Phase 1 perimeter; Phase 2 below adds the live routes): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry — **plus (Phase 2, full narrative below)** `POST /api/chat` (SSE UI-message-stream handler over a lazily-built engine — nothing warms at server boot), `POST /api/runs/:id/respond` (the consent back-channel), `POST /api/upload` (confined image upload, media-by-reference), and `POST /api/feedback` (chat.feedback telemetry) — **plus (Phase 3, `src/server/runs/`, full narrative below)** `GET /api/runs` (`list.ts`, cache-fronted cursor-paginated summaries), `GET /api/runs/:id` (`detail.ts`, full `RunDTO`), and `GET /api/runs/:id/stream` (`stream.ts`, live-tailing SSE wrapped in a `runs.stream` span) — `confineToDir` guards the `:id` path segment on **both** detail and stream, and a new `runsRoot` dep on `ServerDeps` (wired from `main.ts`) is what all three read | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts`, `cli/run-chat-session.ts` (Phase 2), `run/run-dto.ts` (Phase 3) |
-| **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`). Crews/Workflows/Builders/Runs/Library/Settings remain stubs; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
+| **Contracts** | `src/contracts/` | Isomorphic web wire protocol (Slice 30b — Phase 1 base; Phase 2 additions below): enums (`enums.ts`, +`FeedbackRating`), read-model DTOs (`dto.ts`), the transient-SSE `StatusEvent` union (`events.ts` — Phase 2 makes this a **live** wire type: the server now actually emits it as `data-*` UI-message parts, not just a defined shape), inbound request schemas (`requests.ts` — `ChatRequestSchema` gained optional `uploadIds`; new `UploadResponseSchema` and `FeedbackRequestSchema`), barrel (`index.ts`) — **plus (Phase 4, full narrative below)** `StepKind`/`CrewProcess` parity-mirrors + the new `RunKind` enum, `CrewMemberDTO`/`CrewTaskDTO`/`CrewListItemDTO`/`CrewDetailDTO`, `StepDTO`/`EdgeDTO`/`WorkflowListItemDTO`/`WorkflowDetailDTO`, `RunDTO`/`RunListItemDTO.kind`, and `CrewRunRequestSchema`/`WorkflowRunRequestSchema`/`RunLaunchResponseSchema`/`CrewListResponseSchema`/`WorkflowListResponseSchema` + `RunListQuery.kind`. **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*` | `zod` only |
+| **Server** | `src/server/` | `Bun.serve` web BFF, still no business logic of its own (Slice 30b — Phase 1 perimeter; Phase 2 below adds the live routes): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry — **plus (Phase 2, full narrative below)** `POST /api/chat` (SSE UI-message-stream handler over a lazily-built engine — nothing warms at server boot), `POST /api/runs/:id/respond` (the consent back-channel), `POST /api/upload` (confined image upload, media-by-reference), and `POST /api/feedback` (chat.feedback telemetry) — **plus (Phase 3, `src/server/runs/`, full narrative below)** `GET /api/runs` (`list.ts`, cache-fronted cursor-paginated summaries), `GET /api/runs/:id` (`detail.ts`, full `RunDTO`), and `GET /api/runs/:id/stream` (`stream.ts`, live-tailing SSE wrapped in a `runs.stream` span) — `confineToDir` guards the `:id` path segment on **both** detail and stream, and a new `runsRoot` dep on `ServerDeps` (wired from `main.ts`) is what all three read — **plus (Phase 4, `src/server/crews/` + `src/server/workflows/` + `launch-turns.ts`, full narrative below)** `GET /api/crews[/:name]`/`GET /api/workflows[/:id]` (browse — no `confineToDir`, registry-map lookups only) and `POST /api/crews/:name/run`/`POST /api/workflows/:id/run` (the fire-and-watch launch contract: pre-created run dir, detached turn, `error.json` on throw) backed by `launch-turns.ts`'s `createRealRunCrewTurn`/`createRealRunWorkflowTurn` (same `createLazyEngine`/`withMcpRun` path as `bun run crew`/`bun run flow`); `ServerDeps` gains `runCrewTurn`/`runWorkflowTurn` | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts`, `cli/run-chat-session.ts` (Phase 2), `run/run-dto.ts` (Phase 3), `crew/crew-dto.ts` + `workflow/workflow-dto.ts` + `crews/`/`workflows/` registries + `cli/crew.ts`/`cli/flow.ts`'s underlying `runCrewCli`/`runFlow` (Phase 4) |
+| **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`) — **plus (Phase 4, full narrative below)** real `features/crews/` and `features/workflows/` list+detail screens with a **▶ Run** launch button, a generic `shared/dag/` `@xyflow/react` `DagView` (+ deterministic `layeredPositions` layout, no `dagre`) fed by `workflow-graph.ts`/`crew-graph.ts` (D7a's process-aware crew split), a run-detail live DAG overlay (D8, `features/runs/run-dag.ts`) with a Graph/Waterfall toggle, a Runs kind facet, and `jump-to-crew`/`jump-to-workflow` ⌘K commands. Builders/Library/Settings remain stubs; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
@@ -546,15 +546,15 @@ graph TD
 | **Telemetry** | `src/telemetry/` | OTel provider, span helpers (`ATTR` + `withXSpan`/`recordX`), JSONL exporter — the **extensible** observability layer | OpenTelemetry SDK |
 | **Logging** | `src/log/` | Structured leveled log signal (Slice 30a, Ops Surface Task 1 — replaces ad-hoc `console.*` status output, the tail source the coming web UI reads): `logger.ts`'s `createLogger(name)` returns a `Logger` (`debug`/`info`/`warn`/`error`, each `(msg, fields?)`) that emits one record to stderr per call — pretty (`HH:MM:SS LEVEL name msg`) when stderr is a TTY, else a JSON line `{ ts, level, name, runId, msg, ...fields }`; level gated by `AGENT_LOG_LEVEL` (default `info`); `setLogSink(fn)` is the test seam. Stamps `runId` via `telemetry/run-router.ts`'s `currentRunId()` (reads the OTel context `withRunContext` binds), so log lines correlate with a run's `spans.jsonl` without threading a run id by hand. `cli/chat.ts`'s router-warm and project-store status lines are the first callers | `telemetry/run-router.ts` (`currentRunId`) |
 | **Tools / MCP** | `src/tools/`, `src/mcp/` | Define tools; declarative `mcp.json` registry + per-entry degrade (`config.ts`), consent-gated mounting with spec-hash/tools-hash pinning (`consent.ts`, `mount.ts`), curated 12-entry starter pack (`pack.ts`, Slice 15); mount/consume MCP servers (`client.ts`, `server.ts`, `sqlite-server.ts`); **live remote OAuth (Slice 26, §14)** — `oauth-provider.ts`'s `createOAuthProvider` is a real `@ai-sdk/mcp` `OAuthClientProvider` (DCR/CIMD, PKCE + CSRF `state`, browser-loopback redirect via `loopback.ts`, AS-metadata persistence) backed by `token-store.ts`'s 0600 atomic on-disk store (`~/.config/ai/mcp-tokens.json`); `client.ts`'s `mountMcpServer` completes the first-time handshake on `UnauthorizedError` | MCP SDK + AI SDK MCP client |
-| **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`); collision-free sortable run ids (`run-id.ts` `newRunId()`, Slice 30a — replaced `run-<pid>` which collided on concurrent runs); **web DTO mapper (Slice 30b Phase 3, full narrative below)** — `run-dto.ts`'s `mapRunToDto` (spans→`RunDTO`, schema-validated) and `summarizeRunListItem` (list-cheap `RunListItemDTO`, mtime-cached), sharing one name-agnostic `runRootSummary` helper across `agent.run`/`crew.run`/`workflow.run` roots; `artifacts.ts`'s `readRunArtifacts` (readdir+classify into the extended `ArtifactKind`) | filesystem |
+| **Run store** | `src/run/` | Per-run dir + artifacts (`run-store.ts`); span reader/tree (`run-trace.ts`); collision-free sortable run ids (`run-id.ts` `newRunId()`, Slice 30a — replaced `run-<pid>` which collided on concurrent runs); **web DTO mapper (Slice 30b Phase 3, full narrative below)** — `run-dto.ts`'s `mapRunToDto` (spans→`RunDTO`, schema-validated) and `summarizeRunListItem` (list-cheap `RunListItemDTO`, mtime-cached), sharing one name-agnostic `runRootSummary` helper across `agent.run`/`crew.run`/`workflow.run` roots; `artifacts.ts`'s `readRunArtifacts` (readdir+classify into the extended `ArtifactKind`) — **plus (Slice 30b Phase 4)** `run-dto.ts`'s `deriveRunKind` (root-span-name → `RunKind`, called from both mapper functions) and an early-failed-launch fix: a run whose root span never closed but whose `error.json` already landed (the fire-and-watch launch's detached catch) now reads as terminal `Failed`, not perpetually `Running` | filesystem |
 | **Usage** | `src/usage/` | Aggregate token/latency usage view from existing telemetry (Slice 30a, Ops Surface Task 6 — no new instrumentation): `aggregate.ts`'s `aggregateSpans(spans)` groups every span's `gen_ai.request.model` attribute, summing `gen_ai.usage.{input,output}_tokens` (missing → 0, never NaN) and `durationMs` per model, sorted desc by total duration; `renderUsage(rows)` renders a fixed-width text table. `cli/usage.ts` (`bun run usage`) reads every `runs/<id>/spans.jsonl` via `run/run-trace.ts`'s `readSpans`, flat-maps, aggregates, and prints — a missing/unreadable runs root degrades to an empty table instead of throwing | `run/run-trace.ts` (`readSpans`), `telemetry/jsonl-exporter.ts` (`SpanRecord`) |
 | **Process** | `src/process/` | Process-lifecycle safety net (Slice 30a, for the long-lived concurrent web host): a central child-process registry (`child-registry.ts` — `registerChild`/`killAllChildren`/`childCount`) that every long-lived spawn site (model-server supervision, media generation, voice mic + STT subprocess) registers with, so a process-wide shutdown can terminate every child even if a site never runs its own teardown path; a process-wide SIGINT/SIGTERM handler (added alongside signal-clean shutdown) drains the registry on exit | `runtime/process-supervisor.ts`, `media/generate/adapter.ts`, `voice/cli-io.ts`, `voice/transcribe.ts` (spawn sites register here) |
 | **Error boundary** | `src/errors/` | Top-level error boundary (Slice 30a, Ops Surface Task 5 — replaces `cli/chat.ts`'s bare `main().catch(console.error)`): `boundary.ts`'s `explain(err)` maps each `core/errors.ts` subclass (`ProviderError`/`ToolError`/`ResourceError`/`WorkflowError`/`CrewError`/`MemoryError`/`VerificationError`/`MaxStepsError`) to an actionable `{title, hint}`, unknown errors falling to a generic pair; `handleTopLevel(err, deps?)` logs the explanation, returns exit code `1`, and — **when given a `runDir`** — best-effort persists `error.json` (`{name, title, message, hint, at}`); `deps` (`runDir`/`write`/`log`) defaults to `writeFileSync`/`process.stderr.write`. `cli/chat.ts`'s `main().catch` routes through it for the actionable stderr explanation but does **not yet thread a `runDir`** (the run dir is created inside `withMcpRun`, out of scope at the top-level catch), so `error.json` persistence is wired in Slice 30b — today the boundary's shipped value is the explanation, not the file | `core/errors.ts` (the typed error taxonomy) |
 | **Declarations** | `models/`, `agents/`, `workflows/`, `crews/` | Data: which model / which agent / which workflow DAG / which crew (`crews/index.ts` `CREWS` + `getCrew`, mirrors `workflows/index.ts`; `research-crew.ts` is the reference sequential example). Since Slice 17, `agents/index.ts` is a small **registry** rather than pure data — `AGENTS: Record<name, AgentFactory>` + `agentNames()`, with `// AGENT-BUILDER:IMPORTS`/`:ENTRIES` marker comments the agent-builder's `write.ts` inserts new generated entries at; `super.ts`/`chat.ts`/`flow.ts` all build their agent set by iterating `agentNames()` instead of importing each factory by hand | nothing beyond the `Agent`/`AgentFactory` types (pure data + one lookup) |
 | **Media** | `src/media/` | Full multimodal I/O subsystem (Slice 27 — see §22 for the full narrative): run-scoped `MediaStore` (`store.ts`) as the hub for both input and generated media; handle-marker ingest/resolve (`ingest.ts`, `resolve.ts`) turning CLI flags/drag-in paths/clipboard paste into `[img:h]`/`[audio:h]`/`[video:h]` markers and back into AI-SDK v6 `FilePart`s; STT (`audio/transcribe.ts`, mlx-whisper) and video frame-sampling (`video/frames.ts`, ffmpeg); a shared subprocess adapter (`spawn.ts`); generation (`generate/`) — the `MediaGenerator` `ExecMode.OneShot\|Server` job adapter (`adapter.ts`), the mflux image / Kokoro TTS / LTX video strategies, a shape-only ComfyUI/Wan server lane (`comfy-lane.ts`), and the `generate_image`/`generate_speech`/`generate_video` tools (`tools.ts`); the uncensored content-policy axis (`policy.ts`, `generate/safety.ts`) and voice-clone consent (`consent.ts`) | `reliability/` (timeouts, degrade ledger), `telemetry/spans.ts`, `runtime/process-supervisor.ts` (`SpawnFn` type), `core/types.ts` (`Capability`/`ContentPolicy`) |
 | **Voice** | `src/voice/` | CLI voice **input** — speech-to-text feeding the `chat` prompt (Slice 29 — see §23 for the full narrative): typed core (`types.ts` — `VoiceFrames`, `CaptureSource`, `VoiceOutcome`, `VoiceError` with an actionable `hint`, `VoiceConfig`, `Transcriber`); env-fallback model/ffmpeg resolution (`model.ts` — `voiceCacheDir`/`resolveVoiceModel`/`ffmpegCmd`); capture (`capture.ts` — `captureFromFile` via ffmpeg decode, `captureFromMic` tap-to-toggle with ffmpeg-`silencedetect` auto-stop); transcription behind an execution seam (`transcribe.ts` — `createTranscriber` picks in-process `sherpa-onnx-node` [default] or a `stt-worker.mjs` node subprocess via `AGENT_VOICE_EXEC=subprocess`); prompt splicing (`ingest.ts` — `ingestVoice`, degrade-never-crash); real CLI adapters (`cli-io.ts` — ffmpeg `avfoundation` `MicIo` + raw-TTY key handling); `scripts/setup-voice.ts` (`bun run setup:voice`, downloads the moonshine-tiny model + checks ffmpeg) | `reliability/timeout.ts` (`withWallClock`), `reliability/ledger.ts` (`DegradeKind.ToolSkipped`), `telemetry/spans.ts` (`withVoiceTranscribeSpan`), `media/ingest.ts` (`IngestFlags` — shares the `--voice`/`--voice-in` flag object) |
-| **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
-| **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — both `main()`s now run their whole scope inside `withMcpRun` (`with-mcp-run.ts`, Slice 16, §14), which owns `createRun` → `initRunTelemetry` → mount before handing the run body a `run: RunHandle`: `runCrewCli` → `writeArtifact('result.txt'\|'failed.txt')`, with `shutdown()` happening in `withMcpRun`'s `finally`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
+| **Workflow / DAG** | `src/workflow/` | Deterministic multi-step engine (Slice 10): step types + `StepKind` (`types.ts`), construction-time DAG validation (`define.ts`), topological execution with bounded concurrency (`engine.ts`), per-kind step dispatch (`run-step.ts`) — **plus (Slice 30b Phase 4)** `workflow-dto.ts`'s `mapWorkflowToListItem`/`mapWorkflowToDetail` (steps→`StepDTO[]`, edges derived via `effectiveDeps` verbatim + branch/map handling) | `core/delegate.ts` (`runGuardedAgent`) + `telemetry/spans.ts` + Zod (I/O schemas) |
+| **Crew / Roles** | `src/crew/`, `src/cli/crew.ts`, `crews/` | Team-of-agents orchestration layer (Slice 11): typed crew model + task graph (`types.ts`), crew-definition validation (`define.ts`), member → `Agent` construction (`member-agent.ts`), compile to a `WorkflowDef` (sequential) or an orchestrator `Agent` (hierarchical) (`compile.ts`), `runCrew` dispatcher under a `crew.run` span (`engine.ts`); CLI entry `runCrewCli`/`main()` (`src/cli/crew.ts`, `bun run crew <name> [input...]`) mirrors `runFlow`/`flow.ts` — both `main()`s now run their whole scope inside `withMcpRun` (`with-mcp-run.ts`, Slice 16, §14), which owns `createRun` → `initRunTelemetry` → mount before handing the run body a `run: RunHandle`: `runCrewCli` → `writeArtifact('result.txt'\|'failed.txt')`, with `shutdown()` happening in `withMcpRun`'s `finally`; both `crew.ts` and `flow.ts` build live model selection via `createSelectionRuntime()` (`select-runtime.ts`) and pass `onBeforeDelegate` into their agent steps — **plus (Slice 30b Phase 4)** `crew-dto.ts`'s `mapCrewToListItem`/`mapCrewToDetail` (process-agnostic projection — the sequential-vs-hierarchical rendering split lives web-side, D7a) | `workflow/engine.ts` (sequential) + `core/orchestrator.ts` + `core/delegate.ts` (hierarchical + live model selection via `onBeforeDelegate`) + `resource/selector.ts` (indirectly, via the same hook) + `cli/select-runtime.ts` |
 | **Memory / RAG** | `src/memory/`, `src/cli/memory.ts` | Persistent semantic memory (Slice 12): two-tier store — LanceDB table-per-space (`lancedb-store.ts`) + `bun:sqlite` space registry/document manifest (`sqlite-store.ts`, schema owned by `db/migrate.ts`'s `MEMORY_MIGRATIONS`, Slice 30a Task 8) — space-scoped embedder-authority (`types.ts`), weights-only embedding via the Model Manager (`embed.ts`), semantic/fixed chunking (`chunk.ts`), dense→optional-rerank→budget-fit retrieval (`retrieve.ts`, `reranker.ts`), the `createMemoryStore` facade (`store.ts`) and `recall` tool (`recall-tool.ts`); `store.ts`'s `ensureSpace` refuses (throws `MemoryError`) a configured embedder that differs from the one a space was built with, instead of silently returning the stale space — the fix is the explicit, destructive `reindex(space, newEmbedModel)` the error message points at (Slice 30a Task 8, was silent corruption); CLI `bun run memory ingest\|recall\|stats\|reindex` (`src/cli/memory.ts`); optional `memory` dep on `runCrew`/`runWorkflow` binds a `recall` tool + auto-persists task/step output | `resource/model-manager.ts` (`ensureReady`) + `runtime` (`RuntimeControl.embed`) + `telemetry/spans.ts` + `core/guardrails.ts` (injection budget off the live `numCtx`) + `db/migrate.ts` |
 | **Verification** | `src/verification/` | Anti-hallucination layer (Slice 13): grounded verification of agent outputs against the memory chunks they cite — claim decomposition (`claims.ts`), a MiniCheck-style per-claim faithfulness judge with consent-pull + general-model fallback (`judge.ts`, `deps.ts`), bounded Corrective RAG (`crag.ts`), the `verify()` primitive (`verify.ts`), and the opt-in verify→branch→corrective→abstain sub-graph expander (`expand.ts`, `StepKind.Verify`) spliced into workflows/crews via `--verify` (§12) | `memory/store.ts` (`getByIds`) + `resource/model-manager.ts` (`ensureReady`) + `runtime` (consent-pull) + `telemetry/spans.ts` |
 | **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`, now re-exporting `src/reliability`'s `withRetry`/`IdleWatchdog`, Slice 21) → **bounded-parallel** downloads (`DOWNLOAD_CONCURRENCY=2` on a TTY, sequential otherwise) through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`, keyed by the download `ProviderKind`) with a unified progress protocol; adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF single-file + MLX whole-snapshot) now persists bytes to disk atomically and was real-snapshot live-verified in Slice 18**, **LM Studio download wired into `providerFor` and live-verified in Slice 26** (`ALTRUNTIME_LIVE=1`; poll-URL fixed); dest-dir resolution (`dest-dir.ts`); dependency-free UI (`ui/`, incl. `MultiProgressBar`); a manual `scripts/refresh-snapshot.ts`; CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (download `ProviderKind` + inference `RuntimeKind`) + `core/kind-map.ts`, `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
@@ -772,6 +772,57 @@ sequenceDiagram
     Note over Browser,Stream: reconnect resumes via Last-Event-ID — a cursor-seeded<br/>emitted-set replays only newer spans, no duplicate bars
 ```
 
+### 3e. Crews & Workflows — browse/run/watch (browser REST + fire-and-watch launch + reused SSE, Slice 30b Phase 4)
+
+Browse is read-only REST over the in-memory registries (no disk, no engine
+call); launch is **fire-and-watch** — the POST returns `{runId}` immediately
+and the browser opens the **same** `GET /api/runs/:id/stream` §3d already
+ships to watch it live, with the step/task graph overlaid on top of the spans
+(see the "Crews & Workflows" section below for the full narrative).
+
+```mermaid
+sequenceDiagram
+    actor Browser as Browser (Crews/Workflows/RunDetail)
+    participant App as server/app.ts
+    participant List as server/crews+workflows/list.ts
+    participant Detail as server/crews+workflows/detail.ts
+    participant Run as server/crews+workflows/run.ts
+    participant Turns as server/launch-turns.ts
+    participant Store as run/run-store.ts
+    participant Engine as crew/engine.ts + workflow/engine.ts
+    participant Stream as server/runs/stream.ts (Phase 3, unchanged)
+    participant DagLib as shared/dag/ (workflowGraph/crewGraph)
+    participant Overlay as features/runs/run-dag.ts
+
+    Browser->>App: GET /api/crews or /api/workflows (Bearer token)
+    App->>List: handleCrewList() or handleWorkflowList()
+    List->>List: Object.values(CREWS or WORKFLOWS).map(mapCrewToListItem or mapWorkflowToListItem)
+    List-->>Browser: 200 {items} (CrewListItemDTO[] or WorkflowListItemDTO[])
+
+    Browser->>App: GET /api/crews/:name or /api/workflows/:id
+    App->>Detail: handleCrewDetail(name) or handleWorkflowDetail(id)
+    Detail->>Detail: registry-map lookup only — no confineToDir (not a filesystem path)
+    Detail-->>Browser: 200 CrewDetailDTO or WorkflowDetailDTO, 404 {error:'not found'}
+    Browser->>DagLib: crewGraph(detail) or workflowGraph(detail) → DagModel (nodes/edges)
+
+    Browser->>App: POST /api/crews/:name/run or /api/workflows/:id/run {input}
+    App->>Run: handleCrewRun(req, deps, name) or handleWorkflowRun(req, deps, id)
+    Run->>Run: CrewRunRequestSchema or WorkflowRunRequestSchema.parse(body) — 400 on bad body
+    Run->>Run: registry lookup — 404 if unknown
+    Run->>Store: newRunId() → createRun(runsRoot, runId) — dir PRE-CREATED before any response
+    Run->>Turns: void runCrewTurn({def, input, runId}) or runWorkflowTurn(...) — DETACHED, not awaited
+    Turns->>Engine: withMcpRun → createSelectionRuntime → runCrewCli or runFlow (same path as bun run crew / bun run flow)
+    Run-->>Browser: 200 {runId} — returned at once, run keeps executing in the background
+    Note over Run,Turns: any throw in the detached turn is caught by Run's own<br/>.catch and persisted to error.json — never an unhandled rejection
+
+    Browser->>Browser: navigate to /runs/:runId?graphKind&graphId (Amendment A —<br/>graph model loads from t=0, no need to wait on the run's root span)
+    Browser->>App: GET /api/runs/:runId/stream (Phase 3, reused verbatim — no new stream code)
+    App->>Stream: handleRunStream(runId, {runsRoot}, {...})
+    Stream-->>Browser: SSE frames id:&lt;spanId&gt;\ndata:&lt;SpanDTO&gt; until lifecycle !== Running
+    Browser->>Overlay: stepStatusOverlay(spans) — joins workflow.step-tagged spans onto the DagModel by id
+    Note over Browser,Overlay: a cold-open (no graphKind/graphId) falls back to<br/>findRunGraphSource(spans), which can only resolve once the run's<br/>crew.run/workflow.run root span closes (it closes LAST)
+```
+
 ---
 
 ## 4. Resource model (Apple Silicon; admission mutex, Slice 30a)
@@ -860,6 +911,8 @@ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewa
 
 **Extending telemetry (standing rule):** a new subsystem adds a `withXSpan`/`recordX` helper + `ATTR` keys here — the transport (provider/exporter) and the OTLP seam are untouched, and both the local viewer and any backend get the new signal for free.
 
+**`RunKind` — what a run IS, not how it started (Slice 30b Phase 4).** `src/run/run-dto.ts`'s `deriveRunKind(rootSpanNames)` reads a run's *existing* root-span names (`crew.run`/`workflow.run`/`agent.run`, else `Chat`) — no new span or attribute — and stamps the contract-owned `RunKind` enum onto `RunDTO.kind`/`RunListItemDTO.kind`. It is distinct from `RunOrigin` (how a run was *triggered* — manual/schedule/webhook/…, still reserved). The web Runs browser (§ "Runs" below) surfaces a **kind facet** (`RunListQuery.kind`) so a crew/workflow run launched from the new Crews/Workflows areas (§ "Crews & Workflows" below) is findable in the same list chat/agent runs live in.
+
 ---
 
 ## 8. Composition guardrails (Slice 9)
@@ -908,6 +961,8 @@ The safe-composition foundation for the future workflow/crew engine. Each delega
 - **CLI entry** (`src/cli/flow.ts`): `bun run flow <name> [input...]` — the workflow analog of `chat.ts`/`run-chat.ts`. `main()` resolves the workflow via `getWorkflow`, then calls `withMcpRun` (`src/cli/with-mcp-run.ts`, Slice 16; see §14), which owns `createRun` → `initRunTelemetry` → `loadMcpConfig()`+`mountAll()` (consent-gated per §14) in that order and hands the body a `run: RunHandle`. The body builds the `agents` map from `createFileQaAgent`/`createWebFetchAgent` keyed by `.name`, builds the shared live-selection runtime (below), and calls `runFlow(deps)` with that `run`. `runFlow(deps)` itself wraps `withWorkflowSpan(def.id, …)` around `runWorkflow` → on `done`, `annotateStep({[ATTR.WORKFLOW_OUTCOME]: outcome.kind})` then `writeArtifact('result.txt', <last step's output>)`; on `failed`, `writeArtifact('failed.txt', "step <id>: <message>")` — all still inside the `workflow.run` span so the outcome attribute lands on it. `main()` prints the last step's output (or the failure) to stdout/stderr, closing the selection runtime in `finally`; `withMcpRun`'s own `finally` closes the mounted registry and shuts down telemetry.
 
 - **Shared live-selection runtime** (`src/cli/select-runtime.ts`, Slice 11 Task 7): `createSelectionRuntime(opts?)` extracts `chat.ts`'s inline manager + offline `buildRegistry()` + `createSelectHook` + one-line selection `notify` into a single reusable async factory, returning `{ onBeforeDelegate, capture, close }`. `close()` calls `manager.unloadAll()`. Both `flow.ts`'s and `crew.ts`'s `main()` build one runtime per CLI invocation (nested inside the mounted MCP registry, closed in `finally`) and thread `onBeforeDelegate` into `defaultRunAgentStep`/`runCrew` respectively — so a workflow agent step or a crew member is resolved to the largest model that fits the *live* RAM budget at delegation time, the same guarantee `chat.ts` gives its orchestrator. `chat.ts` itself is left with its original inline wiring in this slice; deduping it against `select-runtime.ts` is a follow-up.
+
+- **Web browse/run (Slice 30b Phase 4).** `src/workflow/workflow-dto.ts`'s `mapWorkflowToListItem`/`mapWorkflowToDetail` project `WORKFLOWS` into JSON-safe DTOs (`WorkflowListItemDTO`/`WorkflowDetailDTO`) — dropping the closures/Zod schemas a `WorkflowDef` carries — for the new `GET /api/workflows[/:id]` handlers in `src/server/workflows/`. `mapWorkflowToDetail`'s edges are derived via `effectiveDeps` **verbatim** (the same function the engine and `defineWorkflow` use), so the browser's DAG can never disagree with what the engine will actually run; branch `whenTrue`/`whenFalse` become distinct `branch-true`/`branch-false` edges. The DTO reflects the *definition* graph (unexpanded) — the D7a process-aware node/edge derivation for rendering (`workflowGraph`) lives web-side, not in this mapper, so the DTO stays a faithful, presentation-agnostic projection. See "Crews & Workflows (web UI — Slice 30b Phase 4)" below for the full browse/launch/watch narrative.
 
 ---
 
@@ -1001,6 +1056,18 @@ tool + auto-persisted task output — and **Slice 13** (verification, §12): a
 crew/task `verify` flag splices the grounded-verification sub-graph into the
 compiled workflow, no new engine required. Out of scope (v1): CrewAI "Flows"
 (our DAG already is that), planning / batch kickoff / human-in-the-loop tasks.
+
+**Web browse/run (Slice 30b Phase 4).** `src/crew/crew-dto.ts`'s
+`mapCrewToListItem`/`mapCrewToDetail` project `CREWS` into JSON-safe DTOs
+(`CrewListItemDTO`/`CrewDetailDTO`) for the new `GET /api/crews[/:name]`
+handlers in `src/server/crews/`; the detail DTO carries `members`/`tasks`
+verbatim (minus `tools`/the Zod `output` schema) and stays **process-agnostic**
+— it does not decide sequential-vs-hierarchical rendering. That decision (the
+D7a task-DAG vs. manager→member delegation-star split) lives web-side
+(`crew-graph.ts`), reading `CrewDetailDTO.process`, precisely so the DTO stays
+a faithful projection rather than baking in a presentation choice. See "Crews
+& Workflows (web UI — Slice 30b Phase 4)" below for the full browse/launch/
+watch narrative.
 
 ---
 
@@ -3751,3 +3818,320 @@ Three honest minor caveats, not blocking:
   workflow just finished" is not possible from spans alone until the crew's
   own outcome-emission lands (a later-phase item) — so this is tracked as a
   follow-on rather than fixed here.
+
+## Crews & Workflows (web UI — Slice 30b Phase 4)
+
+**Feature.** Phase 4 makes the Crews and Workflows nav areas real: browse
+both registries, launch a run from the browser, and **watch the step/task
+graph light up live** on the run-detail page. The pivotal insight from the
+seam audit: **watching is inherited free from Phase 3.** A crew run emits a
+`crew.run` root span and a workflow run emits a `workflow.run` root span into
+the *same* `runs/<id>/spans.jsonl` the Runs browser already reads, and
+`run-dto.ts` already treats both as first-class run roots (§ "Runs" above) —
+so the "watch" half needed **no new server stream code at all**. The
+genuinely new build is three things: **browse** (project the in-memory
+`CREWS`/`WORKFLOWS` registries to JSON-safe DTOs behind `GET` list/detail
+endpoints), a **fire-and-watch launch seam** (`POST …/:id/run` mints a
+`runId`, starts the run *detached*, and returns `{runId}` immediately so the
+browser can open the live stream while the run proceeds), and **one reusable
+`@xyflow` DAG component** that renders both a workflow's step-graph and a
+crew's task-graph, and — the payoff — overlays live per-step status on
+run-detail as the run executes. Five layers, mirroring the Phase-3 "Runs"
+shape:
+
+1. **Contracts** (`src/contracts/`, isomorphic) — the wire types.
+2. **Pure mappers** (`src/crew/crew-dto.ts`, `src/workflow/workflow-dto.ts`,
+   `src/run/run-dto.ts`) — projection, no I/O.
+3. **Server BFF** (`src/server/crews/`, `src/server/workflows/`,
+   `src/server/launch-turns.ts`) — browse + fire-and-watch launch.
+4. **Web** (`web/src/features/crews/`, `web/src/features/workflows/`,
+   `web/src/shared/dag/`) — the list/detail screens + the generic `DagView`.
+5. **Runs-browser closure** (`web/src/features/runs/`) — a kind facet so a
+   launched crew/workflow run is findable in the same Runs list chat/agent
+   runs live in.
+
+### Contracts (`src/contracts/`)
+
+- **`enums.ts`** mirrors two engine enums **by value**, guarded by parity
+  tests (the established `DegradeKind` precedent, § "Contracts" above):
+  `StepKind` (`agent`/`tool`/`branch`/`map`/`verify`,
+  `tests/contracts/step-kind-parity.test.ts`) and `CrewProcess`
+  (`sequential`/`hierarchical`,
+  `tests/contracts/crew-process-parity.test.ts`). `RunKind`
+  (`chat`/`agent`/`crew`/`workflow`) is new and contract-owned, not a mirror —
+  see § "Observability" above for `deriveRunKind`.
+- **`dto.ts`** adds: `CrewMemberDTO` (`name`/`role`/`goal`/`backstory`/
+  `requires`/`prefer`/`agentRef?`), `CrewTaskDTO` (`id`/`description`/
+  `expectedOutput`/`member`/`dependsOn`/`verify?` — the Zod `output` schema
+  is dropped, not serializable), `CrewListItemDTO`
+  (`name`/`description?`/`process`/`memberCount`/`taskCount`),
+  `CrewDetailDTO` (`name`/`description?`/`process`/`members`/`tasks`),
+  `StepDTO` (`id`/`kind`/`agent?`/`tool?`/`onError?`/`retry?`/`verify?`/
+  `branch?:{whenTrue,whenFalse}`/`map?:{subKind}` — closures and the Zod
+  `output` schema dropped), `EdgeDTO` (`from`/`to`/`kind:
+  'depends'|'branch-true'|'branch-false'`), `WorkflowListItemDTO`
+  (`id`/`description?`/`stepCount`), `WorkflowDetailDTO`
+  (`id`/`description?`/`steps`/`edges`). `RunDtoSchema` and
+  `RunListItemDtoSchema` both gain a required `kind: RunKind`.
+- **`requests.ts`** adds `CrewRunRequestSchema`/`WorkflowRunRequestSchema`
+  (`{input: z.string().max(100_000)}` — the 100k cap is a Task-12 hardening
+  fix over the plan's unbounded `z.string()`), `RunLaunchResponseSchema`
+  (`{runId}`), `CrewListResponseSchema`/`WorkflowListResponseSchema`
+  (`{items}`), and an optional `kind: RunKind` facet on `RunListQuerySchema`.
+
+### Pure mappers (`src/crew/crew-dto.ts`, `src/workflow/workflow-dto.ts`, `src/run/run-dto.ts`)
+
+- **`crew-dto.ts`**'s `mapCrewToListItem(def)`/`mapCrewToDetail(def)` project
+  a `CrewDef` verbatim (member/task fields, minus `tools` and the Zod
+  `output` schema) — **process-agnostic**: the DTO does not decide how a
+  sequential vs. hierarchical crew should render, that split lives web-side
+  (D7a, below), so the DTO stays a faithful projection rather than baking in
+  a presentation choice.
+- **`workflow-dto.ts`**'s `mapWorkflowToListItem(def)`/`mapWorkflowToDetail(def)`
+  project a `WorkflowDef`'s steps into `StepDTO[]` and derive `EdgeDTO[]` via
+  `deriveEdges`, which calls `effectiveDeps(step, i, steps)` **verbatim** —
+  the exact function the engine and `defineWorkflow` use — so the DTO's edges
+  can never disagree with what the engine will actually run; a `BranchStep`
+  additionally emits two `branch-true`/`branch-false` edges to its
+  `whenTrue`/`whenFalse` targets. Adversarially verified by two parallel
+  Opus reviewers (lens A: scheduler-fidelity: does `deriveEdges` reuse
+  `effectiveDeps` provably, not just plausibly; lens B: projection/schema
+  correctness) — both "SOUND, could not refute." The DTO reflects the
+  *definition* graph (unexpanded); a `--verify`-expanded run's *live* graph
+  is driven by the real spans instead (see D8 below) — this mapper's output
+  is only faithful as long as the web launch path never enables `--verify`
+  without also feeding the expanded def to the overlay (a tracked
+  forward-item, not yet a live gap since web launch does not set `--verify`).
+- **`run-dto.ts`**'s `deriveRunKind(rootSpanNames)` (§ "Observability" above)
+  is called from both `mapRunToDto` and `summarizeRunListItem`, so list and
+  detail can never disagree on a run's `kind`. A second, independent Phase-4
+  fix to the same file: a run whose process died **before** its
+  `crew.run`/`workflow.run`/`agent.run` root span ever closed — the fire-and-watch
+  launch's own detached-catch already persisted `error.json` in that
+  case — now reads as a terminal `Failed` lifecycle (`earlyFailed` in both
+  functions) instead of hanging at `Running` forever; this is what makes an
+  early-thrown launch **watchable** (the SSE stream's `lifecycle !==
+  Running` stop condition actually fires) rather than polling to its
+  `maxWaitMs` cap. A completed/failed root always wins over a stray
+  `error.json` — this only fires on the narrow "no recognized root at all"
+  branch.
+
+### Server (`src/server/crews/`, `src/server/workflows/`, `src/server/launch-turns.ts`)
+
+Both areas mirror `src/server/runs/`'s shape (`list.ts`/`detail.ts`, plus a
+new `run.ts`):
+
+- **`GET /api/crews`** / **`GET /api/workflows`** — `handleCrewList`/
+  `handleWorkflowList`: `Object.values(CREWS|WORKFLOWS).map(mapCrewToListItem|
+  mapWorkflowToListItem)` → `{items}` (200). No pagination (D9 — the
+  registries are small and in-memory).
+- **`GET /api/crews/:name`** / **`GET /api/workflows/:id`** —
+  `handleCrewDetail`/`handleWorkflowDetail`: a plain registry-map lookup
+  (`getCrew(name)`/`getWorkflow(id)`) → the projected detail (200) or
+  `{error:'not found'}` (404). **No `confineToDir`** — the name/id is a
+  registry-map key, not a filesystem path, so nothing here ever touches
+  disk; a plain map-miss is the whole guard.
+- **`POST /api/crews/:name/run`** / **`POST /api/workflows/:id/run`** —
+  `handleCrewRun`/`handleWorkflowRun`, the **fire-and-watch launch**
+  contract (D4): zod-parse the body (`{input}`, 400 on a `ZodError`, generic
+  message, no echo) → registry lookup (404 if unknown) → `newRunId()` →
+  **`createRun(runsRoot, runId)` pre-creates the run directory before any
+  response is sent**, so the browser's immediate follow-up
+  `GET /api/runs/:runId/stream` never 404s on a race → `void
+  deps.runCrewTurn({def, input, runId}).catch(...)` (or `runWorkflowTurn`)
+  starts the run **detached** — the handler does not `await` it — and any
+  throw is caught in that `.catch` and persisted to `runs/<id>/error.json`
+  (mirroring the CLI's/Phase-2's top-level catch pattern), **never** an
+  unhandled promise rejection → the handler returns `{runId}` (200) at once,
+  while the run keeps executing in the background. `RunCrewTurn`/
+  `RunWorkflowTurn` implementations **must** be `async` (always return a
+  Promise) — a synchronously-throwing implementation would escape the
+  `.catch` and crash the request instead of degrading to `error.json`; this
+  contract is documented on the exported types themselves. Adversarially
+  verified by two parallel Opus reviewers over this exact concurrency
+  surface (lens A: lost-run/unhandled-rejection risk; lens B:
+  handler-wiring/security) — both "SOUND, could not refute": the run dir
+  exists by the time the browser's first stream poll lands, a throw always
+  degrades to a watchable `Failed` run (via the `run-dto.ts` fix above,
+  never a silently-lost run), and no boot-time network is introduced.
+- **`launch-turns.ts`**'s `createRealRunCrewTurn(runsRoot)`/
+  `createRealRunWorkflowTurn(runsRoot)` are the real (non-test)
+  `RunCrewTurn`/`RunWorkflowTurn` implementations: each opens one
+  `withMcpRun({runsRoot, runId}, ...)` scope, builds
+  `createSelectionRuntime({ledger})` for live model selection, and calls
+  `runCrewCli`/`runFlow` — **the exact same path** `bun run crew`/
+  `bun run flow`'s CLI `main()` uses (workflow additionally builds the
+  `agents` map from the `AGENTS` registry, mirroring `flow.ts`). Both are
+  built from the **same `createLazyEngine(runsRoot)`** Phase-2 chat uses
+  (D6) — nothing (registry build, model manager, MCP mount) runs at server
+  boot, only on the first launch request, so startup/health/perimeter tests
+  stay Ollama-free. Like `createRealRunChatTurn`, this seam is thin
+  composition covered by live-verify, not unit tests (which would only mock
+  the composition away).
+- **Routing** (`app.ts`) — `GET /api/crews`, `GET /api/crews/:name`,
+  `POST /api/crews/:name/run` (+ the workflow trio). The `/run` sub-route
+  regexes are matched **before** the bare-`:name`/`:id` detail regexes —
+  the same ordering discipline Phase 3 established for `/stream` vs. the
+  bare-`:id` detail route (§ "Runs" above) — so `POST /api/crews/foo/run`
+  opens the launch handler instead of being swallowed by the detail route.
+  All six routes ride the existing perimeter (`enforcePerimeter` → token
+  guard) and the existing `server.request` telemetry span unchanged — no
+  route bypasses the perimeter to reach these handlers. `ServerDeps` gains
+  `runCrewTurn: RunCrewTurn` and `runWorkflowTurn: RunWorkflowTurn`;
+  `main.ts` wires `createRealRunCrewTurn`/`createRealRunWorkflowTurn` in.
+
+### Web (`web/src/shared/dag/`, `web/src/features/crews/`, `web/src/features/workflows/`, `web/src/features/runs/`)
+
+- **`shared/dag/types.ts`** defines the generic model every producer builds
+  (D7): `DagModel = {nodes: DagNode[], edges: DagEdge[]}`. `DagNode`
+  (`id`/`label`/`sublabel?`/`kind: DagNodeKind`/`status?: DagStatus`) —
+  `DagNodeKind` is every `StepKind` value **plus** `'manager'` (D7a's
+  hierarchical-crew hub node, which has no `StepKind` analog). `DagEdge`
+  (`from`/`to`/`kind: DagEdgeKind`) — `DagEdgeKind` mirrors `EdgeDTO['kind']`
+  verbatim **plus** `'delegates'` (D7a's manager→member edge). `DagStatus`
+  (`pending`/`running`/`done`/`error`/`skipped`) is the live-overlay status
+  enum; an unset status renders the neutral/pending look.
+- **`shared/dag/layout.ts`**'s `layeredPositions(model)` is a deterministic
+  **layered layout** — no `dagre` dependency: each node's rank is the length
+  of the longest path from any root, found by relaxing
+  `rank[to] = max(rank[to], rank[from] + 1)` over every edge once per node
+  (a safe upper bound for an acyclic graph); nodes within a rank lay out in
+  model order; `x = rank × 220px`, `y = indexWithinRank × 90px`.
+  Unreachable/disconnected nodes rank 0.
+- **`shared/dag/dag-view.tsx`**'s `DagView` is the one reusable `@xyflow/react`
+  canvas (pan/zoom, custom node rendering per `DagNodeKind`, an optional
+  `statusById` overlay prop) that workflow-detail, crew-detail, and
+  run-detail (D8) each feed with their own `DagModel` — unit-tested in
+  isolation with a fixture graph, per D7.
+- **`shared/dag/workflow-graph.ts`**'s `workflowGraph(detail)` is a pure,
+  honest projection: nodes = steps (`label` = step id, `sublabel` = the
+  step's `agent`/`tool`, `kind` = the step's own `StepKind` — no
+  relabeling); edges = `detail.edges` verbatim (already derived
+  server-side by `workflow-dto.ts`, never re-derived here).
+- **`features/crews/crew-graph.ts`**'s `crewGraph(detail)` is **D7a — the
+  process-aware crew→`DagModel` projection**, deliberately kept web-side
+  (not in the DTO) so the server DTO stays presentation-agnostic:
+  **Sequential** crews compile to agent steps, so `crewGraph` renders a
+  task-dependency DAG — nodes = tasks (`kind: StepKind.Agent`, honest since
+  sequential tasks *are* agent steps), edges from `dependsOn` else the
+  previous task in order (the crew analog of `effectiveDeps`).
+  **Hierarchical** crews have **no static task DAG** (the manager delegates
+  at runtime, not along a fixed graph) — `crewGraph` instead renders a
+  **manager → members delegation star**: one `kind:'manager'` hub node plus
+  one node per member, `'delegates'` edges from the hub to each member; the
+  crew's task list is shown in a side panel on crew-detail, not on the
+  graph.
+- **`features/crews/index.tsx`** (`CrewsArea`) and
+  **`features/crews/crew-detail.tsx`** mirror the Runs list/detail shape: a
+  client-side-searchable list linking to `/crews/$name`; the detail page
+  shows the members panel + `DagView(crewGraph(detail))` + a **▶ Run**
+  button that `POST`s the launch request and navigates to
+  `/runs/$runId?graphKind=crew&graphId=$name` (Amendment A, below).
+- **`features/workflows/index.tsx`** (`WorkflowsArea`) and
+  **`features/workflows/workflow-detail.tsx`** mirror the same shape for
+  workflows: `DagView(workflowGraph(detail))` + a step-detail side panel +
+  a **▶ Run** button navigating to
+  `/runs/$runId?graphKind=workflow&graphId=$id`.
+- **`app/router.tsx`** gives the `/runs/$runId` route a typed
+  `validateSearch` accepting optional `graphKind: 'crew'|'workflow'` and
+  `graphId: string` — the send side of Amendment A. `app/commands.ts` adds
+  `jump-to-crew`/`jump-to-workflow` ⌘K entries alongside the existing
+  `jump-to-run`.
+- **`features/runs/run-dag.ts`** — the run-detail overlay's two pure
+  helpers. `findRunGraphSource(spans)` scans the live span tail for a
+  recognized `workflow.run`/`crew.run` root and reads its
+  `workflow.id`/`crew.id` attribute — this is the **cold-open fallback**
+  (a run opened from the Runs list, with no `graphKind`/`graphId` on the
+  URL); it scans `spans` directly rather than gating on `RunDTO.kind`
+  because the root span (and `kind`) is only written once `span.end()`
+  fires, and a `workflow.run`/`crew.run` root awaits every nested step, so
+  it closes **last** — see the D8 caveats below.
+  `stepStatusOverlay(spans)` lights up a `DagNode` as `Done`/`Error` the
+  instant its matching `workflow.step`-tagged span (`SpanDTO.attributes
+  ['workflow.step.id'] === node.id`) closes; a currently-executing step has
+  no span yet (spans are recorded on completion only), so there is no
+  reliable synthetic "running" signal — nodes light up progressively, not
+  optimistically. A hierarchical crew emits **no** `workflow.step` spans at
+  all (its manager delegates rather than running the DAG engine), so this
+  returns `{}` for it — a silent, correct degrade to `DagView`'s default
+  look, not an error.
+- **`features/runs/run-detail.tsx`** (D8 — the integration point) — for a
+  workflow/crew run, `RunDetailView` resolves a `DagModel` from **two
+  independent sources** (Amendment A, a controller post-review fix, "no
+  deferrals" rule): (1) `graphKind`/`graphId` search params, set by the
+  crew/workflow Run buttons at navigate-time — the def id is already known
+  at launch, so the graph structure loads **immediately, from `t=0`**, no
+  run data needed at all; (2) `findRunGraphSource(spans)` — the cold-open
+  fallback for a run opened from the Runs list, which can only resolve once
+  the run's root span closes (see above). The search-param path is skipped
+  entirely when params are absent and vice versa — never both at once. Once
+  a `DagModel` resolves, a **Graph/Waterfall toggle** appears (waterfall
+  stays the default for chat/agent runs, which never resolve a `DagModel`);
+  `DagView(model, statusById: stepStatusOverlay(spans))` renders the live
+  overlay, `Waterfall` remains available as before (§ "Runs" above,
+  unchanged).
+- **Runs-browser closure** — `features/runs/index.tsx` gains a `kind`
+  `<select>` facet (every `RunKind` value plus an "All" escape hatch) wired
+  straight to `?kind=`; `server/runs/list.ts`'s `handleRunList` applies an
+  exact `RunListQuery.kind` equality filter server-side over the
+  cache-fronted summaries — so a crew/workflow run launched from the new
+  areas is findable in the same list chat/agent runs already live in.
+
+### D8 — two documented limitations, not bugs
+
+- **Hierarchical crews never light up.** Because a hierarchical crew emits
+  no `workflow.step` spans (its delegation runs on `agent.delegation` spans,
+  not the DAG engine — § "Crews & roles" above), `stepStatusOverlay` always
+  returns `{}` for one: the manager→members delegation star **renders**
+  (D7a) but its nodes **never transition off the neutral/pending look**,
+  even as the run actually progresses. This is the correct, silent
+  DagView-default degrade for a crew shape that has no per-node liveness
+  signal to show — not something a future fix corrects without a new
+  telemetry signal (delegation-to-DagNode mapping is a forward-item, not
+  scoped here).
+- **The graph is only reliably drawable via the cold-open path once the
+  run's root span closes** — `findRunGraphSource` needs the root's
+  `workflow.id`/`crew.id` attribute, which (per write-on-end span export)
+  lands only when the root itself ends, and a `workflow.run`/`crew.run`
+  root's wrapped function awaits every nested step, so it closes **last**.
+  This is the **same underlying mechanism** as the Phase-3 F3 forward-item
+  above ("in-flight nested crew/workflow runs can close the live-tail
+  early") — both are consequences of write-on-end `SimpleSpanProcessor`
+  export, not independent bugs. Amendment A's URL-param handoff sidesteps
+  this entirely for the **primary** launch→watch flow (the def id is known
+  at launch time, so the graph is visible from `t=0`) — the cold-open
+  fallback above is the one path that still waits, and only for a run
+  opened cold from the Runs list rather than launched from Crews/Workflows.
+  The real forward-fix (persisting the def id as run metadata at launch,
+  so even a cold open resolves instantly) remains a documented,
+  lower-priority forward-item now that the primary flow is covered.
+
+### Telemetry
+
+No new span kinds. The new browse/launch routes are automatically wrapped
+by the existing `withServerRequestSpan` (`server.request`, route + method +
+status) — same as every other `/api` handler. The launched run itself emits
+the pre-existing `crew.run`/`workflow.run` root span plus `withStepSpan` per
+workflow step, unchanged (§ "Workflows / DAG engine" and § "Crews & roles"
+above); `RunKind` is a **derived DTO field**, computed from existing span
+names, not a new telemetry attribute. (Forward-item, not built: a dedicated
+`crew.launch`/`workflow.launch` marker span, if launch latency ever needs
+isolating from run latency — not needed this phase.)
+
+### What's still deferred (explicit, not Phase-4 debt)
+
+- **In-UI run cancellation** — watch is read-only; cancel is a Slice-24/
+  remote concern.
+- **A concurrent-launch cap** — single-process today; Slice 24.
+- **`setRunOutcome` for crew/workflow runs** — the engines don't emit it yet
+  (outcome falls back to `'unknown'`; lifecycle/duration are still
+  correct), carried forward from Phase 3.
+- **`runs/` retention GC** — registered Tier-2 `docs/ROADMAP.md` item, not
+  built here.
+- **Verify-expanded definition preview on workflow-detail** — the DTO
+  reflects the unexpanded definition graph; see the mapper note above.
+- **Accessibility polish + remaining ⌘K breadth** (beyond the two new jump
+  commands) → Phase 8.
+- **Delegation-to-DagNode liveness for hierarchical crews** and **launch-time
+  def-id persistence for the cold-open case** (D8 limitations above) —
+  forward-items, not scoped to this phase.
