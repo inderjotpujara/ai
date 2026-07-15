@@ -206,6 +206,118 @@ test('artifacts are wired in from the run dir', async () => {
   expect(names).toContain('spans.jsonl');
 });
 
+test('completed crew.run root (no agent.run) → Done, non-zero duration, outcome', async () => {
+  await writeRun('run-crew', [
+    span({
+      name: 'crew.run',
+      spanId: 'c',
+      startUnixNano: 2_000_000_000,
+      durationMs: 42,
+      attributes: { 'crew.id': 'writers', 'agent.outcome': 'answer' },
+    }),
+    span({
+      name: 'workflow.step',
+      spanId: 's1',
+      parentSpanId: 'c',
+      startUnixNano: 2_005_000_000,
+      durationMs: 20,
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-crew');
+  expect(dto?.lifecycle).toBe(RunLifecycle.Done);
+  expect(dto?.durationMs).toBe(42);
+  expect(dto?.outcome).toBe('answer');
+  expect(dto?.roots).toEqual(['c']);
+});
+
+test('completed workflow.run root → Done, non-zero duration, outcome', async () => {
+  await writeRun('run-wf', [
+    span({
+      name: 'workflow.run',
+      spanId: 'w',
+      startUnixNano: 3_000_000_000,
+      durationMs: 33,
+      attributes: { 'workflow.id': 'pipeline', 'agent.outcome': 'answer' },
+    }),
+    span({
+      name: 'workflow.step',
+      spanId: 's1',
+      parentSpanId: 'w',
+      startUnixNano: 3_002_000_000,
+      durationMs: 10,
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-wf');
+  expect(dto?.lifecycle).toBe(RunLifecycle.Done);
+  expect(dto?.durationMs).toBe(33);
+  expect(dto?.outcome).toBe('answer');
+});
+
+test('crew.run root with resource outcome → Failed lifecycle', async () => {
+  await writeRun('run-crew-fail', [
+    span({
+      name: 'crew.run',
+      spanId: 'c',
+      durationMs: 12,
+      attributes: { 'crew.id': 'writers', 'agent.outcome': 'resource' },
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-crew-fail');
+  expect(dto?.lifecycle).toBe(RunLifecycle.Failed);
+  expect(dto?.outcome).toBe('resource');
+});
+
+test('in-flight crew/workflow run (no recorded run-root span yet) → Running', async () => {
+  await writeRun('run-crew-inflight', [
+    span({
+      name: 'workflow.step',
+      spanId: 's1',
+      startUnixNano: 4_000_000_000,
+      durationMs: 5,
+      attributes: { 'workflow.step.id': 'draft' },
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-crew-inflight');
+  expect(dto?.lifecycle).toBe(RunLifecycle.Running);
+  expect(dto?.durationMs).toBe(0);
+  expect(dto?.outcome).toBe('unknown');
+});
+
+test('schema-invalid degrade line is skipped; run still maps + validates', async () => {
+  await writeRun(
+    'run-bad-degrade',
+    [span({ name: 'agent.run', spanId: 'a' })],
+    {
+      degradation: [
+        // Valid JSON but fails DegradeDtoSchema (missing required `reason`).
+        JSON.stringify({ kind: 'tool_skipped', subject: 'voice' }),
+        // Valid JSON, unknown kind — also fails the schema.
+        JSON.stringify({ kind: 'bogus_kind', subject: 'x', reason: 'y' }),
+        // Fully valid entry.
+        JSON.stringify({
+          kind: 'retried',
+          subject: 'model',
+          reason: 'timeout',
+          attempts: 2,
+        }),
+        '',
+      ].join('\n'),
+    },
+  );
+  const dto = await mapRunToDto(root, 'run-bad-degrade');
+  expect(dto).toBeDefined();
+  // Does not throw through the terminal RunDtoSchema.parse.
+  const parsed = RunDtoSchema.parse(dto);
+  expect(parsed.degrades).toHaveLength(1);
+  expect(parsed.degrades[0]).toMatchObject({
+    kind: 'retried',
+    subject: 'model',
+    reason: 'timeout',
+    attempts: 2,
+  });
+  expect(parsed.degraded).toBe(true);
+});
+
 test('run tokens sum across multiple gen spans; token-less spans omit tokens', async () => {
   await writeRun('run-7', [
     span({ name: 'agent.run', spanId: 'a', startUnixNano: 0 }),

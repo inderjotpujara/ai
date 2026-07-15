@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   type DegradeDTO,
+  DegradeDtoSchema,
   DegradeKind,
   type RunDTO,
   RunDtoSchema,
@@ -18,6 +19,15 @@ import { buildTree, readSpans, type TraceNode } from './run-trace.ts';
 
 const NANOS_PER_MS = 1e6;
 const OTEL_STATUS_ERROR = 2;
+
+/** Root span names that anchor a run: an agent run, a crew run, or a workflow
+ *  run. Recognizing all three (not just `agent.run`) is what keeps a finished
+ *  crew/workflow run from being read as perpetually in-flight. */
+const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
+  'agent.run',
+  'crew.run',
+  'workflow.run',
+]);
 
 /** Human label per DegradeKind (mapper-side; the ledger's LABEL map is not exported). */
 const DEGRADE_LABEL: Record<DegradeKind, string> = {
@@ -58,7 +68,7 @@ export async function readDegrades(runDir: string): Promise<DegradeDTO[]> {
     if (line.length === 0) continue;
     try {
       const e = JSON.parse(line) as DegradeEvent;
-      out.push({
+      const dto: DegradeDTO = {
         kind: e.kind,
         label: DEGRADE_LABEL[e.kind] ?? e.kind,
         subject: e.subject,
@@ -67,7 +77,14 @@ export async function readDegrades(runDir: string): Promise<DegradeDTO[]> {
         to: e.to,
         attempts: e.attempts,
         lane: e.lane,
-      });
+      };
+      // Best-effort: a line that is valid JSON but doesn't conform to the
+      // degrade shape (unknown kind, missing reason/subject, wrong-typed
+      // attempts, an evolved/corrupt schema) is dropped rather than pushed —
+      // otherwise the terminal RunDtoSchema.parse would throw and make the
+      // whole run unviewable. mapRunToDto never throws on degrade content.
+      const parsed = DegradeDtoSchema.safeParse(dto);
+      if (parsed.success) out.push(parsed.data);
     } catch {
       // Tolerate a torn line; degradation is best-effort telemetry.
     }
@@ -153,7 +170,13 @@ export async function mapRunToDto(
   const flat: SpanDTO[] = [];
   flatten(tree, 0, rootStartUnixNano, flat);
 
-  const runRoot = spans.find((s) => s.name === 'agent.run');
+  // The run root is the earliest top-level root (`tree[0]`, which already
+  // anchors startMs/offsets). A run is in-flight until its root span ends and
+  // flushes, so an earliest root whose name is NOT a recognized run root means
+  // the root hasn't been recorded yet → still Running.
+  const rootSpan = tree[0]?.span;
+  const runRootPresent =
+    rootSpan !== undefined && RUN_ROOT_NAMES.has(rootSpan.name);
   const models = new Set<string>();
   let tokIn: number | undefined;
   let tokOut: number | undefined;
@@ -168,10 +191,16 @@ export async function mapRunToDto(
       ? undefined
       : { input: tokIn, output: tokOut };
 
-  const outcome = str(runRoot?.attributes[ATTR.OUTCOME]) ?? 'unknown';
-  const lifecycle = !runRoot
+  // Outcome/content-policy come from whichever top-level root carries the
+  // outcome attribute (fall back to the earliest root) — name-agnostic, so it
+  // works for agent.run, crew.run, and workflow.run roots alike.
+  const outcomeSource =
+    tree.map((n) => n.span).find((s) => ATTR.OUTCOME in s.attributes) ??
+    rootSpan;
+  const outcome = str(outcomeSource?.attributes[ATTR.OUTCOME]) ?? 'unknown';
+  const lifecycle = !runRootPresent
     ? RunLifecycle.Running
-    : runRoot.status.code === OTEL_STATUS_ERROR || outcome === 'resource'
+    : rootSpan?.status.code === OTEL_STATUS_ERROR || outcome === 'resource'
       ? RunLifecycle.Failed
       : RunLifecycle.Done;
 
@@ -184,10 +213,10 @@ export async function mapRunToDto(
     origin: RunOrigin.Manual,
     lifecycle,
     startMs: Math.round(rootStartUnixNano / NANOS_PER_MS),
-    durationMs: runRoot?.durationMs ?? 0,
+    durationMs: runRootPresent ? (rootSpan?.durationMs ?? 0) : 0,
     outcome,
     models: [...models],
-    contentPolicy: str(runRoot?.attributes[ATTR.CONTENT_POLICY]),
+    contentPolicy: str(outcomeSource?.attributes[ATTR.CONTENT_POLICY]),
     tokens: runTokens,
     degraded: degrades.length > 0,
     degrades,
