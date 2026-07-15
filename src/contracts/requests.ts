@@ -75,10 +75,16 @@ export const RunListResponseSchema = z.object({
 });
 export type RunListResponse = z.infer<typeof RunListResponseSchema>;
 
-/** `POST /api/crews/:name/run` and `POST /api/workflows/:id/run` body. */
-export const CrewRunRequestSchema = z.object({ input: z.string() });
+/** `POST /api/crews/:name/run` and `POST /api/workflows/:id/run` body. The
+ *  `.max(100_000)` bounds the perimeter — these routes go live in Phase 4
+ *  Task 12 and there is otherwise no body-size cap at this layer. */
+export const CrewRunRequestSchema = z.object({
+  input: z.string().max(100_000),
+});
 export type CrewRunRequest = z.infer<typeof CrewRunRequestSchema>;
-export const WorkflowRunRequestSchema = z.object({ input: z.string() });
+export const WorkflowRunRequestSchema = z.object({
+  input: z.string().max(100_000),
+});
 export type WorkflowRunRequest = z.infer<typeof WorkflowRunRequestSchema>;
 
 /** Launch response — the minted runId the browser opens the watch stream for. */

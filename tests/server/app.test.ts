@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
+import type { RunCrewTurn } from '../../src/server/crews/run.ts';
+import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -19,6 +21,14 @@ const runsRoot = mkdtempSync(join(tmpdir(), 'app-runs-'));
 const unusedRunChatTurn: RunChatTurn = async () => {
   throw new Error('runChatTurn should not be invoked by these tests');
 };
+// None of these tests exercise a launch route either — throwing stubs keep
+// the fixtures honest about what's actually under test here too.
+const unusedRunCrewTurn: RunCrewTurn = async () => {
+  throw new Error('runCrewTurn should not be invoked by these tests');
+};
+const unusedRunWorkflowTurn: RunWorkflowTurn = async () => {
+  throw new Error('runWorkflowTurn should not be invoked by these tests');
+};
 const deps: ServerDeps = {
   token: TOKEN,
   policy,
@@ -28,6 +38,8 @@ const deps: ServerDeps = {
   consent: createConsentRegistry(),
   uploadsDir,
   runsRoot,
+  runCrewTurn: unusedRunCrewTurn,
+  runWorkflowTurn: unusedRunWorkflowTurn,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -95,6 +107,8 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     consent: createConsentRegistry(),
     uploadsDir,
     runsRoot,
+    runCrewTurn: unusedRunCrewTurn,
+    runWorkflowTurn: unusedRunWorkflowTurn,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -133,6 +147,8 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     consent: createConsentRegistry(),
     uploadsDir,
     runsRoot,
+    runCrewTurn: unusedRunCrewTurn,
+    runWorkflowTurn: unusedRunWorkflowTurn,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -226,6 +242,8 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     consent: createConsentRegistry(),
     uploadsDir,
     runsRoot,
+    runCrewTurn: unusedRunCrewTurn,
+    runWorkflowTurn: unusedRunWorkflowTurn,
   };
   const symlinkServer = Bun.serve({
     port: 0,

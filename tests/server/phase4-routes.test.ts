@@ -29,12 +29,26 @@ function deps(): ServerDeps {
     consent: createConsentRegistry(),
     uploadsDir,
     runsRoot,
+    runCrewTurn: async () => {},
+    runWorkflowTurn: async () => {},
   };
 }
 
 function authGet(path: string): Request {
   return new Request(`http://localhost:0${path}`, {
     headers: { Authorization: `Bearer ${TOKEN}`, Host: 'localhost:0' },
+  });
+}
+
+function authPost(path: string, body: unknown): Request {
+  return new Request(`http://localhost:0${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      Host: 'localhost:0',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
   });
 }
 
@@ -47,4 +61,24 @@ test('GET /api/crews and /api/workflows route to their handlers', async () => {
     (await fetch(authGet('/api/workflows/fetch-then-summarize'))).status,
   ).toBe(200);
   expect((await fetch(authGet('/api/crews/nope'))).status).toBe(404);
+});
+
+test('POST /api/crews/research-crew/run routes to the launch handler', async () => {
+  const fetch = buildFetch(deps());
+  const res = await fetch(
+    authPost('/api/crews/research-crew/run', { input: 'AI' }),
+  );
+  expect(res.status).toBe(200);
+  const { runId } = (await res.json()) as { runId: string };
+  expect(runId.startsWith('run-')).toBe(true);
+});
+
+test('POST /api/workflows/fetch-then-summarize/run routes to the launch handler', async () => {
+  const fetch = buildFetch(deps());
+  const res = await fetch(
+    authPost('/api/workflows/fetch-then-summarize/run', { input: 'AI' }),
+  );
+  expect(res.status).toBe(200);
+  const { runId } = (await res.json()) as { runId: string };
+  expect(runId.startsWith('run-')).toBe(true);
 });

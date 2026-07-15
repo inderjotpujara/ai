@@ -6,6 +6,8 @@ import type { ConsentRegistry } from './consent/registry.ts';
 import { handleRespond } from './consent/respond.ts';
 import { handleCrewDetail } from './crews/detail.ts';
 import { handleCrewList } from './crews/list.ts';
+import type { RunCrewTurn } from './crews/run.ts';
+import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleRunDetail } from './runs/detail.ts';
@@ -17,6 +19,8 @@ import { createTokenGuard } from './security/token.ts';
 import { handleUpload } from './upload.ts';
 import { handleWorkflowDetail } from './workflows/detail.ts';
 import { handleWorkflowList } from './workflows/list.ts';
+import type { RunWorkflowTurn } from './workflows/run.ts';
+import { handleWorkflowRun } from './workflows/run.ts';
 
 /**
  * The thin BFF's dependencies. It owns NO business logic: it enforces the
@@ -35,6 +39,12 @@ export type ServerDeps = {
   uploadsDir: string;
   /** Root dir the Runs endpoints read on-disk spans/artifacts from (Phase 3). */
   runsRoot: string;
+  /** Launches a crew run to completion under its own `withMcpRun` scope
+   *  (Phase 4, Task 11/12). */
+  runCrewTurn: RunCrewTurn;
+  /** Launches a workflow run to completion under its own `withMcpRun` scope
+   *  (Phase 4, Task 11/12). */
+  runWorkflowTurn: RunWorkflowTurn;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -138,6 +148,21 @@ async function handleApi(
         if (req.method === 'GET' && url.pathname === '/api/workflows') {
           rec.status(200);
           return handleWorkflowList();
+        }
+        // /run sub-path matches MUST precede the bare-:name/:id detail
+        // matches below — same ordering discipline as the stream-before-
+        // detail rule above (Task 10), applied to the launch routes.
+        const crewRun = url.pathname.match(/^\/api\/crews\/([^/]+)\/run$/);
+        if (req.method === 'POST' && crewRun?.[1]) {
+          const res = await handleCrewRun(req, deps, crewRun[1]);
+          rec.status(res.status);
+          return res;
+        }
+        const wfRun = url.pathname.match(/^\/api\/workflows\/([^/]+)\/run$/);
+        if (req.method === 'POST' && wfRun?.[1]) {
+          const res = await handleWorkflowRun(req, deps, wfRun[1]);
+          rec.status(res.status);
+          return res;
         }
         const crewDetail = url.pathname.match(/^\/api\/crews\/([^/]+)$/);
         if (req.method === 'GET' && crewDetail?.[1]) {
