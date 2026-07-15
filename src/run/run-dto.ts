@@ -76,22 +76,31 @@ type RunRootSummary = {
  * this helper is the fix, applied to both list and detail views alike.
  */
 function runRootSummary(tree: TraceNode[]): RunRootSummary {
-  const rootSpan = tree[0]?.span;
-  const rootStartUnixNano = rootSpan?.startUnixNano ?? 0;
-  const runRootPresent =
-    rootSpan !== undefined && RUN_ROOT_NAMES.has(rootSpan.name);
+  const roots = tree.map((n) => n.span);
+  // The earliest top-level root anchors the run's start time (tree[0] is
+  // already start-sorted).
+  const startSpan = roots[0];
+  // ...but the run-root that decides lifecycle/duration/outcome is the
+  // recognized agent.run/crew.run/workflow.run among ALL top-level roots — it
+  // need not be tree[0]. An orphan child (its parent span never written — an
+  // in-flight run whose root span is still open, or a torn trace) is a sibling
+  // root and can sort ahead of the closed run-root. Keying lifecycle off
+  // tree[0] alone made such a run read as perpetually Running even after its
+  // run-root closed (surfaced by the live run-stream tail, which stops on
+  // lifecycle !== Running).
+  const runRoot = roots.find((s) => RUN_ROOT_NAMES.has(s.name));
+  const runRootPresent = runRoot !== undefined;
   const outcomeSource =
-    tree.map((n) => n.span).find((s) => ATTR.OUTCOME in s.attributes) ??
-    rootSpan;
+    roots.find((s) => ATTR.OUTCOME in s.attributes) ?? runRoot ?? startSpan;
   const outcome = str(outcomeSource?.attributes[ATTR.OUTCOME]) ?? 'unknown';
   const lifecycle = !runRootPresent
     ? RunLifecycle.Running
-    : rootSpan?.status.code === OTEL_STATUS_ERROR || outcome === 'resource'
+    : runRoot.status.code === OTEL_STATUS_ERROR || outcome === 'resource'
       ? RunLifecycle.Failed
       : RunLifecycle.Done;
   return {
-    startMs: Math.round(rootStartUnixNano / NANOS_PER_MS),
-    durationMs: runRootPresent ? (rootSpan?.durationMs ?? 0) : 0,
+    startMs: Math.round((startSpan?.startUnixNano ?? 0) / NANOS_PER_MS),
+    durationMs: runRootPresent ? runRoot.durationMs : 0,
     outcome,
     lifecycle,
     contentPolicy: str(outcomeSource?.attributes[ATTR.CONTENT_POLICY]),

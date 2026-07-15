@@ -156,6 +156,12 @@ export const ATTR = {
   UI_STREAM_BYTES: 'ui.stream.bytes',
   UI_STREAM_RESUMES: 'ui.stream.resumes',
   UI_STREAM_OUTCOME: 'ui.stream.outcome',
+  // Live run-stream SSE (Slice 30b Phase 3): GET /api/runs/:id/stream
+  RUN_STREAM_CHUNKS: 'run.stream.chunks',
+  RUN_STREAM_BYTES: 'run.stream.bytes',
+  RUN_STREAM_RESUMES: 'run.stream.resumes',
+  RUN_STREAM_OUTCOME: 'run.stream.outcome',
+  RUN_STREAM_RUN_ID: 'run.stream.run_id',
   // Chat feedback (Slice 30b Phase 2; Slice 31 consumes it for the eval loop)
   FEEDBACK_MESSAGE_ID: 'chat.feedback.message_id',
   FEEDBACK_RATING: 'chat.feedback.rating',
@@ -288,6 +294,51 @@ export function withUiStreamSpan<T>(
       span.setAttribute(ATTR.UI_STREAM_BYTES, bytes);
       span.setAttribute(ATTR.UI_STREAM_RESUMES, resumes);
       span.setAttribute(ATTR.UI_STREAM_OUTCOME, outcome);
+    }
+  });
+}
+
+/**
+ * Span for one live run-stream SSE session (Slice 30b Phase 3):
+ * `GET /api/runs/:id/stream`. Mirrors `withUiStreamSpan`'s recorder-callback
+ * shape — opens a `runs.stream` span, tags route + run id, runs `fn` (which
+ * reports each SSE frame's bytes, a resume on reconnect, and the final
+ * outcome), and records the aggregates in a `finally` so they land even if
+ * `fn` throws.
+ */
+export function withRunStreamSpan<T>(
+  info: { route: string; runId: string },
+  fn: (rec: {
+    chunk: (bytes: number) => void;
+    resume: () => void;
+    outcome: (o: string) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  return inSpan('runs.stream', async (span) => {
+    span.setAttribute(ATTR.SERVER_ROUTE, info.route);
+    span.setAttribute(ATTR.RUN_STREAM_RUN_ID, info.runId);
+    let chunks = 0;
+    let bytes = 0;
+    let resumes = 0;
+    let outcome = 'unknown';
+    try {
+      return await fn({
+        chunk: (b) => {
+          chunks += 1;
+          bytes += b;
+        },
+        resume: () => {
+          resumes += 1;
+        },
+        outcome: (o) => {
+          outcome = o;
+        },
+      });
+    } finally {
+      span.setAttribute(ATTR.RUN_STREAM_CHUNKS, chunks);
+      span.setAttribute(ATTR.RUN_STREAM_BYTES, bytes);
+      span.setAttribute(ATTR.RUN_STREAM_RESUMES, resumes);
+      span.setAttribute(ATTR.RUN_STREAM_OUTCOME, outcome);
     }
   });
 }
