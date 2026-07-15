@@ -35,6 +35,12 @@ export enum ArtifactKind {
   Spans = 'spans',
   Degradation = 'degradation',
   Other = 'other',
+  Result = 'result',
+  Resource = 'resource',
+  Unverified = 'unverified',
+  Failed = 'failed',
+  Error = 'error',
+  Media = 'media',
 }
 
 /**
