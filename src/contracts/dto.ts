@@ -7,6 +7,7 @@ import {
   RunLifecycle,
   RunOrigin,
   SpanStatus,
+  StepKind,
 } from './enums.ts';
 
 /** Optional token roll-up; mapper tolerates absence (telemetry gap #1). */
@@ -165,3 +166,44 @@ export const CrewDetailDtoSchema = z.object({
   tasks: z.array(CrewTaskDtoSchema),
 });
 export type CrewDetailDTO = z.infer<typeof CrewDetailDtoSchema>;
+
+/** A projected workflow step — closures (`input`/`predicate`/`over`/`run`) and
+ *  the `output: z.ZodType` are dropped; only display + structure remain. Branch
+ *  targets and the map sub-step kind are surfaced so the DAG can render control
+ *  flow. */
+export const StepDtoSchema = z.object({
+  id: z.string(),
+  kind: z.enum(StepKind),
+  agent: z.string().optional(),
+  tool: z.string().optional(),
+  onError: z.string().optional(),
+  retry: z.boolean().optional(),
+  verify: z.boolean().optional(),
+  branch: z.object({ whenTrue: z.string(), whenFalse: z.string() }).optional(),
+  map: z.object({ subKind: z.enum(StepKind) }).optional(),
+});
+export type StepDTO = z.infer<typeof StepDtoSchema>;
+
+/** A DAG edge. `depends` edges come from `effectiveDeps`; `branch-*` edges from
+ *  a BranchStep's whenTrue/whenFalse (rendered distinctly / dashed). */
+export const EdgeDtoSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  kind: z.enum(['depends', 'branch-true', 'branch-false']),
+});
+export type EdgeDTO = z.infer<typeof EdgeDtoSchema>;
+
+export const WorkflowListItemDtoSchema = z.object({
+  id: z.string(),
+  description: z.string().optional(),
+  stepCount: z.number(),
+});
+export type WorkflowListItemDTO = z.infer<typeof WorkflowListItemDtoSchema>;
+
+export const WorkflowDetailDtoSchema = z.object({
+  id: z.string(),
+  description: z.string().optional(),
+  steps: z.array(StepDtoSchema),
+  edges: z.array(EdgeDtoSchema),
+});
+export type WorkflowDetailDTO = z.infer<typeof WorkflowDetailDtoSchema>;
