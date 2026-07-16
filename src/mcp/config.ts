@@ -101,7 +101,11 @@ export function loadMcpConfig(
     const missing: string[] = [];
     const entry = toEntry(name, parseResult.data, raw, env, missing);
     if (missing.length > 0) {
-      cfg.dormant.push({ name, missingVars: [...new Set(missing)] });
+      cfg.dormant.push({
+        name,
+        kind: entry.kind,
+        missingVars: [...new Set(missing)],
+      });
       continue;
     }
     cfg.entries.push(entry);

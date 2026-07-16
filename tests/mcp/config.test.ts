@@ -50,7 +50,7 @@ describe('loadMcpConfig', () => {
     if (gh?.kind === McpTransportKind.Http)
       expect(gh.headers.Authorization).toBe('Bearer tok');
   });
-  it('marks entries with unset env vars dormant, not failed', () => {
+  it('marks entries with unset env vars dormant, not failed — and keeps the transport kind', () => {
     const path = writeConfig({
       mcpServers: {
         gh: {
@@ -62,7 +62,9 @@ describe('loadMcpConfig', () => {
     });
     const cfg = loadMcpConfig(path, {});
     expect(cfg.entries).toHaveLength(0);
-    expect(cfg.dormant).toEqual([{ name: 'gh', missingVars: ['MISSING_KEY'] }]);
+    expect(cfg.dormant).toEqual([
+      { name: 'gh', kind: McpTransportKind.Http, missingVars: ['MISSING_KEY'] },
+    ]);
   });
   it('skips a malformed entry with a warning but keeps valid ones', () => {
     const path = writeConfig({

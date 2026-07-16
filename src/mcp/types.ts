@@ -71,7 +71,12 @@ export type McpServerEntry = StdioServerEntry | HttpServerEntry;
 
 export type McpConfig = {
   entries: McpServerEntry[];
-  dormant: { name: string; missingVars: string[] }[];
+  /** `kind` is captured from the ALREADY-VALIDATED entry (schema parse runs
+   *  before the missing-env-var check in `loadMcpConfig`), so a dormant
+   *  server's transport is known without waiting for it to activate —
+   *  needed by `McpServerDTO` (Slice 30b Phase 5), which requires `kind`
+   *  even for a dormant row. */
+  dormant: { name: string; kind: McpTransportKind; missingVars: string[] }[];
   warnings: string[];
 };
 
