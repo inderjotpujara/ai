@@ -43,6 +43,37 @@ test('recalls against the path space and returns RetrievalResultDTO[]', async ()
   expect(results[0]?.id).toBe('doc#0');
 });
 
+test('recall response is projected to RetrievalResultDTO — namespace is dropped', async () => {
+  const runsRoot = mkdtempSync(join(tmpdir(), 'memory-recall-runs-'));
+  const fakeStore = {
+    recall: async () => [
+      {
+        id: 'doc#0',
+        source: 'doc.md',
+        text: 'hello',
+        score: 0.9,
+        namespace: 'default',
+      },
+    ],
+  } as unknown as MemoryStore;
+
+  const res = await handleMemoryRecall(
+    recallReq({ query: 'hello' }),
+    { memoryStore: fakeStore, runsRoot },
+    'default',
+  );
+
+  expect(res.status).toBe(200);
+  const results = (await res.json()) as Record<string, unknown>[];
+  expect(Object.keys(results[0] ?? {}).sort()).toEqual([
+    'id',
+    'score',
+    'source',
+    'text',
+  ]);
+  expect(results[0]?.namespace).toBeUndefined();
+});
+
 test('malformed body → 400', async () => {
   const runsRoot = mkdtempSync(join(tmpdir(), 'memory-recall-runs-'));
   const res = await handleMemoryRecall(

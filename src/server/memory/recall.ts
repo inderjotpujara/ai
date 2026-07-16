@@ -70,5 +70,11 @@ export async function handleMemoryRecall(
         ...(body.topK !== undefined ? { topK: body.topK } : {}),
       }),
   );
-  return json(results, 200);
+  const dto = results.map(({ id, source, text, score }) => ({
+    id,
+    source,
+    text,
+    score,
+  }));
+  return json(dto, 200);
 }
