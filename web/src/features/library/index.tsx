@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ModelsTab } from './models-tab.tsx';
 
 type LibraryTab = 'models' | 'memory' | 'mcp';
 
@@ -8,11 +9,11 @@ const TABS: { id: LibraryTab; label: string }[] = [
   { id: 'mcp', label: 'MCP' },
 ];
 
-/** The Library area: one shell, three tabs (Models · Memory · MCP). Each
- *  panel is a stub in this increment — Increment 3 (Models), Increment 5
- *  (Memory), and Increment 4 (MCP) replace their stub `<p>` with the real
- *  list/table + actions, without touching this shell (D11: one engine seam
- *  per increment). Duplicated a third time rather than prematurely
+/** The Library area: one shell, three tabs (Models · Memory · MCP). Models
+ *  is now the real inventory table + per-row Pull (Task 18); Memory
+ *  (Increment 5) and MCP (Increment 4) still show their stub `<p>` and
+ *  replace it the same way — without touching this shell (D11: one engine
+ *  seam per increment). Duplicated a third time rather than prematurely
  *  abstracted into a shared facet component (matches the crews/workflows
  *  list precedent, Phase 4). */
 export function LibraryArea() {
@@ -45,12 +46,9 @@ export function LibraryArea() {
       </div>
       <div className="mt-4 flex-1 overflow-auto">
         {tab === 'models' && (
-          <p
-            data-testid="library-panel-models"
-            className="text-sm text-[var(--color-muted)]"
-          >
-            Models land in Increment 3.
-          </p>
+          <div data-testid="library-panel-models">
+            <ModelsTab />
+          </div>
         )}
         {tab === 'memory' && (
           <p
