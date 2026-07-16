@@ -28,8 +28,13 @@ export type McpRunContext = {
 /** Auto-builds a live OAuth provider for every http entry declaring
  *  `auth.kind === oauth`, keyed by entry name — so a caller that never
  *  touches `mountDeps.authProviders` still gets real OAuth instead of the
- *  silent "no provider registered" degrade in mount.ts. */
-function buildAuthProviders(
+ *  silent "no provider registered" degrade in mount.ts.
+ *
+ *  Exported (Slice 30b Phase 5) so `src/server/mcp/mount-one.ts` can build a
+ *  live OAuth provider for a single test-mount entry, reusing the exact
+ *  Slice-26 loopback-pop mechanism `withMcpRun` already uses for real runs —
+ *  no new OAuth code, no change to this file's own CLI behavior. */
+export function buildAuthProviders(
   config: McpConfig,
 ): Record<string, OAuthClientProvider> {
   const providers: Record<string, OAuthClientProvider> = {};

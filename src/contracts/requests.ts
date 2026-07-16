@@ -190,6 +190,10 @@ export const McpListResponseSchema = z.object({
 });
 export type McpListResponse = z.infer<typeof McpListResponseSchema>;
 
+/** `POST /api/mcp/test-mount` body — the config-entry name to verify. */
+export const McpTestMountRequestSchema = z.object({ name: z.string() });
+export type McpTestMountRequest = z.infer<typeof McpTestMountRequestSchema>;
+
 /** Shared by `GET /api/builders/agents` and `GET /api/builders/crews` — both
  *  are a bare list of registry names (existing-agent awareness for the
  *  wizard), not a projected DTO array. */

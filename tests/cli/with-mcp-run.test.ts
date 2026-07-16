@@ -1,9 +1,9 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { OAuthClientProvider } from '@ai-sdk/mcp';
-import { withMcpRun } from '../../src/cli/with-mcp-run.ts';
+import { buildAuthProviders, withMcpRun } from '../../src/cli/with-mcp-run.ts';
 import type { McpHttpSpec } from '../../src/mcp/client.ts';
 import { setServerAuth, tokenStorePath } from '../../src/mcp/token-store.ts';
 import {
@@ -327,4 +327,23 @@ describe('withMcpRun', () => {
       await rm(configHome, { recursive: true, force: true });
     }
   });
+});
+
+test('buildAuthProviders is exported for reuse by the server test-mount seam (Phase 5)', () => {
+  const config: McpConfig = {
+    entries: [
+      {
+        kind: McpTransportKind.Http,
+        name: 'oauth-server',
+        url: 'https://example.test/mcp',
+        headers: {},
+        auth: { kind: McpAuthKind.OAuth },
+        raw: { type: 'http', url: 'https://example.test/mcp' },
+      },
+    ],
+    dormant: [],
+    warnings: [],
+  };
+  const providers = buildAuthProviders(config);
+  expect(providers['oauth-server']).toBeDefined();
 });
