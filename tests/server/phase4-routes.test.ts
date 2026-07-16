@@ -1,10 +1,11 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
+import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 
 const TOKEN = 'a'.repeat(64);
 // None of these tests exercise POST /api/upload or an /api/chat body with
@@ -18,6 +19,13 @@ const runsRoot = mkdtempSync(join(tmpdir(), 'phase4-runs-'));
 const unusedRunChatTurn: RunChatTurn = async () => {
   throw new Error('runChatTurn should not be invoked by these tests');
 };
+// None of these tests exercise /api/mcp routes either, so a bare
+// never-populated mcp.json suffices.
+const mcpConfigPath = join(
+  mkdtempSync(join(tmpdir(), 'phase4-mcp-')),
+  'mcp.json',
+);
+writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 
 function deps(): ServerDeps {
   return {
@@ -34,6 +42,9 @@ function deps(): ServerDeps {
     runBuilderTurn: async () => ({ kind: 'declined' }),
     runModelPull: async () => {},
     freeDiskBytes: async () => Number.MAX_SAFE_INTEGER,
+    mcpConfigPath,
+    mcpMountStatus: createMcpMountStatus(),
+    mountOne: async () => ({ outcome: 'mounted' }),
   };
 }
 

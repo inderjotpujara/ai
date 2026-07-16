@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
+import { defaultConfigPath } from '../mcp/config.ts';
 import { freeDiskBytes } from '../provisioning/cli-deps.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
@@ -11,6 +12,8 @@ import {
   createRealRunModelPull,
   createRealRunWorkflowTurn,
 } from './launch-turns.ts';
+import { createRealMcpMountOne } from './mcp/mount-one.ts';
+import { createMcpMountStatus } from './mcp/mount-status.ts';
 import { mintSessionToken } from './security/token.ts';
 
 /**
@@ -65,6 +68,9 @@ export function startWebServer(opts: StartOptions = {}): {
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
   const runModelPull = createRealRunModelPull(runsRoot);
+  const mcpConfigPath = defaultConfigPath();
+  const mcpMountStatus = createMcpMountStatus();
+  const mountOne = createRealMcpMountOne();
   const consent = createConsentRegistry();
   // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
   // across the per-request `/api/chat` run lifecycle since the upload and
@@ -94,6 +100,9 @@ export function startWebServer(opts: StartOptions = {}): {
     runBuilderTurn,
     runModelPull,
     freeDiskBytes,
+    mcpConfigPath,
+    mcpMountStatus,
+    mountOne,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

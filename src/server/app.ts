@@ -16,6 +16,11 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleMcpAdd } from './mcp/add.ts';
+import { handleMcpList } from './mcp/list.ts';
+import type { McpMountOne } from './mcp/mount-one.ts';
+import type { McpMountStatus } from './mcp/mount-status.ts';
+import { handleMcpTestMount } from './mcp/test-mount.ts';
 import { handleModelList } from './models/list.ts';
 import type { RunModelPullTurn } from './models/pull.ts';
 import { handleModelPull } from './models/pull.ts';
@@ -60,6 +65,16 @@ export type ServerDeps = {
   runModelPull: RunModelPullTurn;
   /** Free-disk-space probe for the Models inventory route (Task 16). */
   freeDiskBytes: () => Promise<number>;
+  /** `mcp.json` path this process reads/writes (Phase 5). */
+  mcpConfigPath: string;
+  /** Addressable, in-memory mount-attempt snapshot, keyed by server name (Phase 5). */
+  mcpMountStatus: McpMountStatus;
+  /** Mounts ONE MCP server to verify it works (Phase 5's D10 gap-closure seam).
+   *  Named `mountOne` (not `mcpMountOne`) to match `McpTestMountDeps` exactly —
+   *  `handleMcpTestMount` is called with the full `deps` object below, so its
+   *  field name must line up structurally like `runsRoot`/`runCrewTurn` do for
+   *  the crew/workflow routes. */
+  mountOne: McpMountOne;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -211,6 +226,20 @@ async function handleApi(
         const wfDetail = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
         if (req.method === 'GET' && wfDetail?.[1]) {
           const res = handleWorkflowDetail(wfDetail[1]);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/mcp') {
+          rec.status(200);
+          return handleMcpList(deps);
+        }
+        if (req.method === 'POST' && url.pathname === '/api/mcp/add') {
+          const res = await handleMcpAdd(req, deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/mcp/test-mount') {
+          const res = await handleMcpTestMount(req, deps);
           rec.status(res.status);
           return res;
         }
