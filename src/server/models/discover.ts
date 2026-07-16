@@ -1,7 +1,10 @@
 import type { ModelDeclaration } from '../../core/types.ts';
 import { buildRegistry as realBuildRegistry } from '../../discovery/build-registry.ts';
 import { readCatalog as realReadCatalog } from '../../discovery/catalog-cache.ts';
-import type { Candidate } from '../../discovery/catalog-source.ts';
+import {
+  type Candidate,
+  normalizeCandidates,
+} from '../../discovery/catalog-source.ts';
 import { detectHost as realDetectHost } from '../../discovery/host.ts';
 import { type FitCandidate, fitAndRank } from '../../provisioning/fit.ts';
 
@@ -24,7 +27,12 @@ export async function discoverModels(
 ): Promise<ModelDiscovery> {
   const installed = await (deps.buildRegistry ?? realBuildRegistry)();
   const host = await (deps.detectHost ?? realDetectHost)();
-  const catalog = (deps.readCatalog ?? realReadCatalog)() ?? [];
+  // A persisted catalog cache may predate the `runtime` field (or hold a stale
+  // value); re-derive it from `provider` so every pullable row carries a valid
+  // RuntimeKind. See normalizeCandidates for the data-model rationale.
+  const catalog = normalizeCandidates(
+    (deps.readCatalog ?? realReadCatalog)() ?? [],
+  );
   const pullable = fitAndRank(catalog, host.liveBudgetBytes);
   return { installed, pullable };
 }
