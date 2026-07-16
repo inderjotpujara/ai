@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { McpTab } from './mcp-tab.tsx';
 import { ModelsTab } from './models-tab.tsx';
 
 type LibraryTab = 'models' | 'memory' | 'mcp';
@@ -10,12 +11,12 @@ const TABS: { id: LibraryTab; label: string }[] = [
 ];
 
 /** The Library area: one shell, three tabs (Models · Memory · MCP). Models
- *  is now the real inventory table + per-row Pull (Task 18); Memory
- *  (Increment 5) and MCP (Increment 4) still show their stub `<p>` and
- *  replace it the same way — without touching this shell (D11: one engine
- *  seam per increment). Duplicated a third time rather than prematurely
- *  abstracted into a shared facet component (matches the crews/workflows
- *  list precedent, Phase 4). */
+ *  is the real inventory table + per-row Pull (Task 18); MCP is the real
+ *  server list + Add-server form + Test-mount (Task 25, Increment 4). Memory
+ *  (Increment 5) still shows its stub `<p>` and replaces it the same way —
+ *  without touching this shell (D11: one engine seam per increment).
+ *  Duplicated a third time rather than prematurely abstracted into a shared
+ *  facet component (matches the crews/workflows list precedent, Phase 4). */
 export function LibraryArea() {
   const [tab, setTab] = useState<LibraryTab>('models');
 
@@ -59,12 +60,9 @@ export function LibraryArea() {
           </p>
         )}
         {tab === 'mcp' && (
-          <p
-            data-testid="library-panel-mcp"
-            className="text-sm text-[var(--color-muted)]"
-          >
-            MCP lands in Increment 4.
-          </p>
+          <div data-testid="library-panel-mcp">
+            <McpTab />
+          </div>
         )}
       </div>
     </section>
