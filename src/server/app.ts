@@ -1,5 +1,12 @@
 import { explain } from '../errors/boundary.ts';
+import type { MemoryStore } from '../memory/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
+import type { RunBuilderTurn } from './builders/build.ts';
+import { handleBuilderBuild } from './builders/build.ts';
+import {
+  handleBuilderAgentList,
+  handleBuilderCrewList,
+} from './builders/list.ts';
 import { handleChat } from './chat/handler.ts';
 import type { RunChatTurn } from './chat/run-turn.ts';
 import type { ConsentRegistry } from './consent/registry.ts';
@@ -10,6 +17,17 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleMcpAdd } from './mcp/add.ts';
+import { handleMcpList } from './mcp/list.ts';
+import type { McpMountOne } from './mcp/mount-one.ts';
+import type { McpMountStatus } from './mcp/mount-status.ts';
+import { handleMcpTestMount } from './mcp/test-mount.ts';
+import { handleMemoryIngest } from './memory/ingest.ts';
+import { handleMemoryRecall } from './memory/recall.ts';
+import { handleMemorySpaces } from './memory/spaces.ts';
+import { handleModelList } from './models/list.ts';
+import type { RunModelPullTurn } from './models/pull.ts';
+import { handleModelPull } from './models/pull.ts';
 import { handleRunDetail } from './runs/detail.ts';
 import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
@@ -45,6 +63,24 @@ export type ServerDeps = {
   /** Launches a workflow run to completion under its own `withMcpRun` scope
    *  (Phase 4, Task 11/12). */
   runWorkflowTurn: RunWorkflowTurn;
+  /** Launches the agent/crew/workflow guided-build flow (Phase 5, Task 11/12). */
+  runBuilderTurn: RunBuilderTurn;
+  /** Launches a model download to completion (Phase 5, Task 17). */
+  runModelPull: RunModelPullTurn;
+  /** Free-disk-space probe for the Models inventory route (Task 16). */
+  freeDiskBytes: () => Promise<number>;
+  /** `mcp.json` path this process reads/writes (Phase 5). */
+  mcpConfigPath: string;
+  /** Addressable, in-memory mount-attempt snapshot, keyed by server name (Phase 5). */
+  mcpMountStatus: McpMountStatus;
+  /** Mounts ONE MCP server to verify it works (Phase 5's D10 gap-closure seam).
+   *  Named `mountOne` (not `mcpMountOne`) to match `McpTestMountDeps` exactly —
+   *  `handleMcpTestMount` is called with the full `deps` object below, so its
+   *  field name must line up structurally like `runsRoot`/`runCrewTurn` do for
+   *  the crew/workflow routes. */
+  mountOne: McpMountOne;
+  /** The memory/RAG store engine-touching routes call into (Phase 5). */
+  memoryStore: MemoryStore;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -149,6 +185,29 @@ async function handleApi(
           rec.status(200);
           return handleWorkflowList();
         }
+        if (req.method === 'GET' && url.pathname === '/api/builders/agents') {
+          rec.status(200);
+          return handleBuilderAgentList();
+        }
+        if (req.method === 'GET' && url.pathname === '/api/builders/crews') {
+          rec.status(200);
+          return handleBuilderCrewList();
+        }
+        if (req.method === 'POST' && url.pathname === '/api/builders/build') {
+          rec.status(200);
+          return handleBuilderBuild(req, deps);
+        }
+        if (req.method === 'GET' && url.pathname === '/api/models') {
+          rec.status(200);
+          return handleModelList({ freeDiskBytes: deps.freeDiskBytes });
+        }
+        if (req.method === 'POST' && url.pathname === '/api/models/pull') {
+          rec.status(200);
+          return handleModelPull(req, {
+            runsRoot: deps.runsRoot,
+            runModelPull: deps.runModelPull,
+          });
+        }
         // /run sub-path matches MUST precede the bare-:name/:id detail
         // matches below — same ordering discipline as the stream-before-
         // detail rule above (Task 10), applied to the launch routes.
@@ -173,6 +232,44 @@ async function handleApi(
         const wfDetail = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
         if (req.method === 'GET' && wfDetail?.[1]) {
           const res = handleWorkflowDetail(wfDetail[1]);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/mcp') {
+          rec.status(200);
+          return handleMcpList(deps);
+        }
+        if (req.method === 'POST' && url.pathname === '/api/mcp/add') {
+          const res = await handleMcpAdd(req, deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/mcp/test-mount') {
+          const res = await handleMcpTestMount(req, deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/memory/spaces') {
+          rec.status(200);
+          return handleMemorySpaces(deps);
+        }
+        // Checked as an exact match BEFORE the :space regexes below, so a
+        // literal space named "spaces" is unreachable via /recall/ingest
+        // sub-paths only — never a collision here since "spaces" has no
+        // further sub-path of its own.
+        const memRecall = url.pathname.match(
+          /^\/api\/memory\/([^/]+)\/recall$/,
+        );
+        if (req.method === 'POST' && memRecall?.[1]) {
+          const res = await handleMemoryRecall(req, deps, memRecall[1]);
+          rec.status(res.status);
+          return res;
+        }
+        const memIngest = url.pathname.match(
+          /^\/api\/memory\/([^/]+)\/ingest$/,
+        );
+        if (req.method === 'POST' && memIngest?.[1]) {
+          const res = await handleMemoryIngest(req, deps, memIngest[1]);
           rec.status(res.status);
           return res;
         }

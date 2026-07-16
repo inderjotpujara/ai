@@ -2,10 +2,13 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { MemoryStore } from '../../src/memory/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
+import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import type { RunCrewTurn } from '../../src/server/crews/run.ts';
+import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 
 const TOKEN = 'a'.repeat(64);
@@ -25,6 +28,29 @@ const noCrewRun: RunCrewTurn = async () => {
 const noWorkflowRun: RunWorkflowTurn = async () => {
   throw new Error('unused');
 };
+const noBuilderRun: RunBuilderTurn = async () => {
+  throw new Error('unused');
+};
+// None of these tests exercise a memory route, so a throwing fake keeps the
+// fixture honest about what's actually under test here.
+const noMemoryStore = {
+  stats: async () => {
+    throw new Error('unused');
+  },
+  recall: async () => {
+    throw new Error('unused');
+  },
+  ingest: async () => {
+    throw new Error('unused');
+  },
+} as unknown as MemoryStore;
+// None of these tests exercise /api/mcp routes, so a bare never-populated
+// mcp.json suffices.
+const mcpConfigPath = join(
+  mkdtempSync(join(tmpdir(), 'runs-mcp-')),
+  'mcp.json',
+);
+writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 const deps: ServerDeps = {
   token: TOKEN,
   policy,
@@ -36,6 +62,13 @@ const deps: ServerDeps = {
   runsRoot,
   runCrewTurn: noCrewRun,
   runWorkflowTurn: noWorkflowRun,
+  runBuilderTurn: noBuilderRun,
+  runModelPull: async () => {},
+  freeDiskBytes: async () => Number.MAX_SAFE_INTEGER,
+  mcpConfigPath,
+  mcpMountStatus: createMcpMountStatus(),
+  mountOne: async () => ({ outcome: 'mounted' }),
+  memoryStore: noMemoryStore,
 };
 
 let server: ReturnType<typeof Bun.serve>;

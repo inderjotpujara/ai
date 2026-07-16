@@ -533,9 +533,9 @@ graph TD
 |---|---|---|---|
 | **CLI** | `src/cli/` | Entry + orchestration of one run; `runs` viewer; deterministic-workflow entry (`flow.ts`); crew entry (`crew.ts`); memory entry (`memory.ts`, `bun run memory ingest\|recall\|stats\|reindex`); shared live-selection runtime builder (`select-runtime.ts`, extracted from `chat.ts`'s inline wiring, reused by `flow.ts` + `crew.ts`); per-run CLI scope helper (`with-mcp-run.ts`, Slice 16) — `withMcpRun(opts, body)` owns `createRun` → `initRunTelemetry` → `withMcpMountSpan(mountAll(...))` → `body` → `finally{reg.close(); tel.shutdown()}` for all three run CLIs, so `mcp.mount` lands in the run's `spans.jsonl` (§14); agent-builder entry (`agent-builder.ts`, `bun run agent-builder "<need>" [--yes] [--force]`, Slice 17; `--force` commits a failed verify gate at `unverified` and prints a WARNING, §20) plus a TTY-gated capability-gap offer wired into `chat.ts`'s `{kind:'gap'}` branch (§18); crew-builder entry (`crew-builder.ts`, `bun run crew-builder "<need>" [--yes] [--force]`, Slice 19; same `--force` semantics) plus the `offer-crew.ts` multi-step gap-offer heuristic (§19); archive entry (`archive.ts`, `bun run archive [--prune]`, Slice 20 — reports idle near-duplicate generated artifacts per registry, `--prune` archives each behind a per-candidate consent prompt); a per-run telemetry scope for CLIs that mount no MCP servers (`with-run.ts`, Slice 20) — `withRunTelemetry(opts, body)` owns `createRun` → `initRunTelemetry` → `body` → `finally{tel.shutdown()}` for the builder + archive CLIs, so their `agent.build`/`crew.build`/`build.verify`/`build.archive` spans land in `runs/<id>/spans.jsonl` instead of hitting the no-op provider; and `chat.ts`'s informational reuse hint (`reuseHintText`, shown on a gap before any build offer, §20) | everything below |
 | **Core** | `src/core/` | Agent loop (`agent.ts`), orchestrator (agents-as-tools), `delegate.ts`, **`guardrails.ts`** (depth + return cap), taxonomy (`types.ts` — the download `ProviderKind` and the inference `RuntimeKind` are **separate** enums since Slice 18), the download↔runtime mapping helpers (`kind-map.ts` — `downloadKindFor`/`runtimeKindFor`), errors | AI SDK + telemetry |
-| **Contracts** | `src/contracts/` | Isomorphic web wire protocol (Slice 30b — Phase 1 base; Phase 2 additions below): enums (`enums.ts`, +`FeedbackRating`), read-model DTOs (`dto.ts`), the transient-SSE `StatusEvent` union (`events.ts` — Phase 2 makes this a **live** wire type: the server now actually emits it as `data-*` UI-message parts, not just a defined shape), inbound request schemas (`requests.ts` — `ChatRequestSchema` gained optional `uploadIds`; new `UploadResponseSchema` and `FeedbackRequestSchema`), barrel (`index.ts`) — **plus (Phase 4, full narrative below)** `StepKind`/`CrewProcess` parity-mirrors + the new `RunKind` enum, `CrewMemberDTO`/`CrewTaskDTO`/`CrewListItemDTO`/`CrewDetailDTO`, `StepDTO`/`EdgeDTO`/`WorkflowListItemDTO`/`WorkflowDetailDTO`, `RunDTO`/`RunListItemDTO.kind`, and `CrewRunRequestSchema`/`WorkflowRunRequestSchema`/`RunLaunchResponseSchema`/`CrewListResponseSchema`/`WorkflowListResponseSchema` + `RunListQuery.kind`. **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*` | `zod` only |
-| **Server** | `src/server/` | `Bun.serve` web BFF, still no business logic of its own (Slice 30b — Phase 1 perimeter; Phase 2 below adds the live routes): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry — **plus (Phase 2, full narrative below)** `POST /api/chat` (SSE UI-message-stream handler over a lazily-built engine — nothing warms at server boot), `POST /api/runs/:id/respond` (the consent back-channel), `POST /api/upload` (confined image upload, media-by-reference), and `POST /api/feedback` (chat.feedback telemetry) — **plus (Phase 3, `src/server/runs/`, full narrative below)** `GET /api/runs` (`list.ts`, cache-fronted cursor-paginated summaries), `GET /api/runs/:id` (`detail.ts`, full `RunDTO`), and `GET /api/runs/:id/stream` (`stream.ts`, live-tailing SSE wrapped in a `runs.stream` span) — `confineToDir` guards the `:id` path segment on **both** detail and stream, and a new `runsRoot` dep on `ServerDeps` (wired from `main.ts`) is what all three read — **plus (Phase 4, `src/server/crews/` + `src/server/workflows/` + `launch-turns.ts`, full narrative below)** `GET /api/crews[/:name]`/`GET /api/workflows[/:id]` (browse — no `confineToDir`, registry-map lookups only) and `POST /api/crews/:name/run`/`POST /api/workflows/:id/run` (the fire-and-watch launch contract: pre-created run dir, detached turn, `error.json` on throw) backed by `launch-turns.ts`'s `createRealRunCrewTurn`/`createRealRunWorkflowTurn` (same `createLazyEngine`/`withMcpRun` path as `bun run crew`/`bun run flow`); `ServerDeps` gains `runCrewTurn`/`runWorkflowTurn` | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts`, `cli/run-chat-session.ts` (Phase 2), `run/run-dto.ts` (Phase 3), `crew/crew-dto.ts` + `workflow/workflow-dto.ts` + `crews/`/`workflows/` registries + `cli/crew.ts`/`cli/flow.ts`'s underlying `runCrewCli`/`runFlow` (Phase 4) |
-| **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`) — **plus (Phase 4, full narrative below)** real `features/crews/` and `features/workflows/` list+detail screens with a **▶ Run** launch button, a generic `shared/dag/` `@xyflow/react` `DagView` (+ deterministic `layeredPositions` layout, no `dagre`) fed by `workflow-graph.ts`/`crew-graph.ts` (D7a's process-aware crew split), a run-detail live DAG overlay (D8, `features/runs/run-dag.ts`) with a Graph/Waterfall toggle, a Runs kind facet, and `jump-to-crew`/`jump-to-workflow` ⌘K commands. Builders/Library/Settings remain stubs; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
+| **Contracts** | `src/contracts/` | Isomorphic web wire protocol (Slice 30b — Phase 1 base; Phase 2 additions below): enums (`enums.ts`, +`FeedbackRating`), read-model DTOs (`dto.ts`), the transient-SSE `StatusEvent` union (`events.ts` — Phase 2 makes this a **live** wire type: the server now actually emits it as `data-*` UI-message parts, not just a defined shape), inbound request schemas (`requests.ts` — `ChatRequestSchema` gained optional `uploadIds`; new `UploadResponseSchema` and `FeedbackRequestSchema`), barrel (`index.ts`) — **plus (Phase 4, full narrative below)** `StepKind`/`CrewProcess` parity-mirrors + the new `RunKind` enum, `CrewMemberDTO`/`CrewTaskDTO`/`CrewListItemDTO`/`CrewDetailDTO`, `StepDTO`/`EdgeDTO`/`WorkflowListItemDTO`/`WorkflowDetailDTO`, `RunDTO`/`RunListItemDTO.kind`, and `CrewRunRequestSchema`/`WorkflowRunRequestSchema`/`RunLaunchResponseSchema`/`CrewListResponseSchema`/`WorkflowListResponseSchema` + `RunListQuery.kind` — **plus (Phase 5, full narrative below)** `RunKind.Build`/`Pull`, `VerifiedLevel`/`ReuseKind`/`RuntimeKind`/`McpTransportKind`/`McpAuthKind`/`McpServerStatus`/`BuilderKind` enums (all engine-value mirrors except the three contract-owned kinds `RunKind`/`McpServerStatus`/`BuilderKind`), `dto.ts`'s `AgentProposalDTO`/`CrewProposalDTO`/`WorkflowProposalDTO`/`BuildResultDTO`/`ModelInventoryDTO`/`MemorySpaceDTO`/`RetrievalResultDTO`/`McpServerDTO`, and `requests.ts`'s `BuilderBuildRequestSchema`/`ModelPullRequestSchema`/`McpAddRequestSchema`/`McpTestMountRequestSchema`/`MemoryIngestRequestSchema` + five builder/library list-response schemas. **Isomorphic rule** (enforced by `tests/contracts/isomorphic.test.ts`): files under `src/contracts/` may import **only** `zod` or sibling `./` files — never `node:*` (tests may), never `../` engine/reliability, never `ai`/*`@ai-sdk/*` | `zod` only |
+| **Server** | `src/server/` | `Bun.serve` web BFF, still no business logic of its own (Slice 30b — Phase 1 perimeter; Phase 2 below adds the live routes): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry — **plus (Phase 2, full narrative below)** `POST /api/chat` (SSE UI-message-stream handler over a lazily-built engine — nothing warms at server boot), `POST /api/runs/:id/respond` (the consent back-channel), `POST /api/upload` (confined image upload, media-by-reference), and `POST /api/feedback` (chat.feedback telemetry) — **plus (Phase 3, `src/server/runs/`, full narrative below)** `GET /api/runs` (`list.ts`, cache-fronted cursor-paginated summaries), `GET /api/runs/:id` (`detail.ts`, full `RunDTO`), and `GET /api/runs/:id/stream` (`stream.ts`, live-tailing SSE wrapped in a `runs.stream` span) — `confineToDir` guards the `:id` path segment on **both** detail and stream, and a new `runsRoot` dep on `ServerDeps` (wired from `main.ts`) is what all three read — **plus (Phase 4, `src/server/crews/` + `src/server/workflows/` + `launch-turns.ts`, full narrative below)** `GET /api/crews[/:name]`/`GET /api/workflows[/:id]` (browse — no `confineToDir`, registry-map lookups only) and `POST /api/crews/:name/run`/`POST /api/workflows/:id/run` (the fire-and-watch launch contract: pre-created run dir, detached turn, `error.json` on throw) backed by `launch-turns.ts`'s `createRealRunCrewTurn`/`createRealRunWorkflowTurn` (same `createLazyEngine`/`withMcpRun` path as `bun run crew`/`bun run flow`); `ServerDeps` gains `runCrewTurn`/`runWorkflowTurn` | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts`, `cli/run-chat-session.ts` (Phase 2), `run/run-dto.ts` (Phase 3), `crew/crew-dto.ts` + `workflow/workflow-dto.ts` + `crews/`/`workflows/` registries + `cli/crew.ts`/`cli/flow.ts`'s underlying `runCrewCli`/`runFlow` (Phase 4) — **plus (Phase 5, `src/server/{builders,models,mcp,memory}/`, full narrative below)** `POST /api/builders/build` (SSE guided-build stream, `builders/build.ts` + `adapter.ts` + `config.ts` + `map-result.ts` + `list.ts`'s registry browse), `GET /api/models` + `POST /api/models/pull` (`models/list.ts`/`discover.ts`/`pull.ts`, fire-and-watch — rides the **existing** `/api/runs/:id/stream`, no new stream), `GET /api/mcp` + `POST /api/mcp/add` + `POST /api/mcp/test-mount` (`mcp/list.ts`/`add.ts`/`test-mount.ts`/`mount-one.ts`/`mount-status.ts` — the `ConsentRegistry`'s first real callers, closing the D10 silent-skip gap), `GET /api/memory/spaces` + `POST /api/memory/:space/{recall,ingest}` (`memory/spaces.ts`/`recall.ts`/`ingest.ts`) |
+| **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`) — **plus (Phase 4, full narrative below)** real `features/crews/` and `features/workflows/` list+detail screens with a **▶ Run** launch button, a generic `shared/dag/` `@xyflow/react` `DagView` (+ deterministic `layeredPositions` layout, no `dagre`) fed by `workflow-graph.ts`/`crew-graph.ts` (D7a's process-aware crew split), a run-detail live DAG overlay (D8, `features/runs/run-dag.ts`) with a Graph/Waterfall toggle, a Runs kind facet, and `jump-to-crew`/`jump-to-workflow` ⌘K commands — **plus (Phase 5, full narrative below)** real `features/builders/` (Agent/Crew/Workflow mode toggle, streamed narration + proposal `DagView` + mid-flow consent) and a real 3-tab `features/library/` (Models — inventory + live-progress pull; Memory — spaces/stats + upload→ingest + recall; MCP — browse/status + add-server + test-mount). Settings remains a stub; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
@@ -823,6 +823,64 @@ sequenceDiagram
     Note over Browser,Overlay: a cold-open (no graphKind/graphId) falls back to<br/>findRunGraphSource(spans), which can only resolve once the run's<br/>crew.run/workflow.run root span closes (it closes LAST)
 ```
 
+### 3f. Builders + Library — web flows (browser SSE/REST, Slice 30b Phase 5)
+
+Four independent flows, all over REST/SSE against the existing perimeter —
+none of them add a new streaming transport; the builder and MCP test-mount
+routes reuse the exact `postSseStream`/flat-frame wire contract Phase 2's
+chat and Phase 4's launch already established, and the model-pull route
+rides Phase 3's `/api/runs/:id/stream` verbatim.
+
+```mermaid
+sequenceDiagram
+    actor Browser as Browser (Builders/Library)
+    participant Build as server/builders/build.ts
+    participant BuilderCore as agent-builder / crew-builder
+    participant Consent as consent/registry.ts (ConsentRegistry)
+    participant Models as server/models/{list,pull}.ts
+    participant Bridge as model.pull span/child-span bridge
+    participant Stream as server/runs/stream.ts (Phase 3, unchanged)
+    participant Mcp as server/mcp/{list,add,test-mount,mount-one}.ts
+    participant Mem as server/memory/{spaces,recall,ingest}.ts
+
+    Browser->>Build: POST /api/builders/build {kind, need} (SSE)
+    Build-->>Browser: data-run-start {runId} (first frame)
+    Build->>BuilderCore: runBuilderTurn → buildAgent or buildCrewOrWorkflow
+    BuilderCore-->>Build: narration text-deltas + confirm/confirmReuse asks
+    Build->>Consent: register promptId, await answer
+    Browser->>Build: POST /api/runs/:id/respond {promptId, value}
+    Consent-->>Build: resolves pending promise (or wall-clock timeout → DECLINE)
+    Build-->>Browser: data-build-result (BuildResultDTO, one-shot) + data-run-end
+
+    Browser->>Models: GET /api/models
+    Models-->>Browser: 200 {items} (ModelInventoryDTO[], installed + pullable)
+    Browser->>Models: POST /api/models/pull {ref}
+    Models->>Models: newRunId() → createRun (dir pre-created) → detached provider.download(...)
+    Models-->>Browser: 200 {runId} — returned at once
+    Models->>Bridge: each progress tick → open+close model.pull.progress child span
+    Browser->>Stream: GET /api/runs/:runId/stream (Phase 3, reused verbatim)
+    Stream-->>Browser: SSE frames incl. orphan model.pull.progress children while root stays open
+
+    Browser->>Mcp: GET /api/mcp
+    Mcp-->>Browser: 200 {items} (McpServerDTO[]: mounted/skipped/dormant)
+    Browser->>Mcp: POST /api/mcp/add {name, server}
+    Mcp->>Mcp: Zod-validate → 400 | write.ts atomic write → re-read → 200 McpServerDTO
+    Browser->>Mcp: POST /api/mcp/test-mount {name} (SSE)
+    Mcp-->>Browser: data-run-start {runId} (first frame)
+    Mcp->>Consent: mountOne's ConsentDeps.ask bridged to ConfirmPort (isTTY forced true)
+    Browser->>Mcp: POST /api/runs/:id/respond {promptId, value}
+    Mcp-->>Browser: data-mcp-mount (progress) + data-confirm + data-mcp-server (terminal) + data-run-end
+
+    Browser->>Mem: GET /api/memory/spaces
+    Mem-->>Browser: 200 [MemorySpaceDTO] (bare array, stats() direct read, no run)
+    Browser->>Mem: POST /api/memory/:space/recall {query, topK}
+    Mem->>Mem: mint ephemeral run → store.recall (memory.recall span, already-wired)
+    Mem-->>Browser: 200 [RetrievalResultDTO]
+    Browser->>Mem: POST /api/memory/:space/ingest {fileId}
+    Mem->>Mem: confineToDir(fileId, uploadsDir) → mint ephemeral run → store.ingest
+    Mem-->>Browser: 200 {chunks, skipped}
+```
+
 ---
 
 ## 4. Resource model (Apple Silicon; admission mutex, Slice 30a)
@@ -912,6 +970,8 @@ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewa
 **Extending telemetry (standing rule):** a new subsystem adds a `withXSpan`/`recordX` helper + `ATTR` keys here — the transport (provider/exporter) and the OTLP seam are untouched, and both the local viewer and any backend get the new signal for free.
 
 **`RunKind` — what a run IS, not how it started (Slice 30b Phase 4).** `src/run/run-dto.ts`'s `deriveRunKind(rootSpanNames)` reads a run's *existing* root-span names (`crew.run`/`workflow.run`/`agent.run`, else `Chat`) — no new span or attribute — and stamps the contract-owned `RunKind` enum onto `RunDTO.kind`/`RunListItemDTO.kind`. It is distinct from `RunOrigin` (how a run was *triggered* — manual/schedule/webhook/…, still reserved). The web Runs browser (§ "Runs" below) surfaces a **kind facet** (`RunListQuery.kind`) so a crew/workflow run launched from the new Crews/Workflows areas (§ "Crews & Workflows" below) is findable in the same list chat/agent runs live in.
+
+**`RunKind.Build`/`RunKind.Pull` (Slice 30b Phase 5).** `deriveRunKind` gains two more recognized root-span names: `agent.build`/`crew.build` → `Build` (the guided-build wizard, § "Builders + Library" below) and `model.pull` → `Pull` (the Models-tab pull, same section) — purely additive, every pre-existing root name/kind mapping is untouched. The per-run routing section above (`spans.ts`) also gains a second incremental-progress case beyond Phase 4's workflow step spans: `model.pull`'s progress ticks are each their own short-lived `model.pull.progress` **child span** (opens and closes synchronously per tick), so `SimpleSpanProcessor` flushes each tick to `spans.jsonl` immediately and the live-tailing stream surfaces it as an orphan child while the root stays open — no mid-span attribute mutation the stream format can't express, and no new stream code (§ "Builders + Library" below, the pull→spans bridge).
 
 ---
 
@@ -1222,6 +1282,25 @@ dispatches: `ingest <path>` embeds+stores a file, `recall <query>` prints
 retrieved chunks as JSON, `stats` prints per-space chunk counts, `reindex
 <space> <newEmbedModel>` rebuilds a space under a different embedder. Flags:
 `--space`, `--ns`, `--top`, `--embed`.
+
+### Web (Slice 30b Phase 5)
+
+The Library area's Memory tab (`src/server/memory/`, full narrative in
+"Builders + Library" below) is memory's **first web consumer** — before
+this phase, the only callers were the CLI and the optional crew/workflow
+wiring above. `GET /api/memory/spaces` reads `store.stats()` directly (no
+run, no span — a stats read isn't a run). `POST /api/memory/:space/recall`
+and `POST /api/memory/:space/ingest` each mint an **ephemeral run** (D8: a
+run exists so the call has somewhere to land in the Runs browser) and call
+the pre-existing `store.recall`/`store.ingest`. Importantly, `memory.recall`'s
+span (`retrieve.ts`, above) was **already wired** before this phase — Phase 5
+only gives it a run to land in, it did not add new telemetry. `:space` is
+validated against a `^[A-Za-z0-9_-]+$` allowlist (a SQLite lookup key, not a
+filesystem path — traversal doesn't apply, but the allowlist still rejects
+garbage before it reaches the store); file upload for ingest goes through
+the shared `confineToDir(fileId, uploadsDir)` guard (fork-3 — only a
+server-minted `fileId`, never a client-supplied path, ever reaches
+`memoryStore.ingest`). Corrects any stale "no web consumer" framing above.
 
 ### Telemetry
 
@@ -1637,6 +1716,25 @@ something declared is missing, and only in an interactive terminal; it never
 silently downloads. **Consent before pull is a hard product rule** here
 (never speculative).
 
+### Web pull (Slice 30b Phase 5)
+
+The Library area's Models tab (`src/server/models/`, full narrative in
+"Builders + Library" below) does **not** call `runProvision` — it is a
+narrower, browser-driven path: `GET /api/models` projects the fit-ranked
+catalog + installed inventory (`ModelInventoryDTO[]`, provider-agnostic over
+all four runtimes, no hardcoded model names) and `POST /api/models/pull`
+calls the resolved `DownloadProvider.download(...)` **directly** for one
+model, fire-and-watch (mints a runId, starts detached, returns `{runId}`
+immediately — same contract as Phase 4's crew/workflow launch). Selection
+and disk-shortfall consent are **pre-resolved** by the time the browser
+issues the pull (the user already picked one row and clicked Pull) — there
+is no `deps.ui.selectModels` prompt or preflight `checkDiskSpace` gate on
+this path, unlike the CLI's `runProvision` orchestration above. Progress
+reaches the browser via the pull→spans bridge (§7, `RunKind.Pull`): each
+progress tick becomes its own short-lived `model.pull.progress` child span,
+so the **existing** `/api/runs/:id/stream` surfaces it live with no new
+stream code at all.
+
 ### Telemetry
 
 `src/telemetry/spans.ts` extends per the standing rule (§7):
@@ -1706,6 +1804,23 @@ agent-builder suggests from (§18).
 - **`client.ts`** — `mountMcpServer(spec)` connects to any stdio or Streamable-HTTP server and returns `{tools, close}`. **Completes the first-time OAuth handshake (Slice 26):** the SDK's HTTP transport calls `auth()` internally with no code on a never-before-authorized server, which fires the provider's `redirectToAuthorization` (pops the browser) and throws `UnauthorizedError` — there is no `transport.finishAuth` re-entry point, so `connectMcpClient` catches that (only when `spec.authProvider` is a `LiveOAuthClientProvider`, i.e. has `waitForRedirect`), awaits the loopback callback the provider already captured, exchanges the code via the SDK's exported `auth()` (validates `state`, calls `saveTokens`), and retries `createClient` exactly once with a fresh transport (now reads back the just-saved tokens). A second `UnauthorizedError` on retry rethrows — it means the exchange itself failed, not that another browser hop would help. The original `createFileTools`/`createFetchTools` presets still live here as thin wrappers but are no longer called by any CLI — the registry replaced them.
 - **`server.ts`** / **`sqlite-server.ts`** — the two in-repo servers: `read_file` (stdio), and `query` (read-only) / `execute` (writes) / `schema` on `bun:sqlite` (the `sqlite` pack entry defaults to `data/agent.db`; `bun:sqlite` itself does not create parent directories, so `sqlite-server.ts` calls `mkdirSync(dirname(dbPath), { recursive: true })` before opening the database — fixed pre-merge in Slice 15 final review so a bare clone's first `sqlite` mount succeeds without a manual `mkdir -p data`). **`query`'s read-only guarantee is now engine-enforced (Slice 18):** it runs under `PRAGMA query_only = ON` (set → run synchronously → reset OFF in a `finally`; `execute` forces it OFF first), so SQLite itself rejects any write — replacing a home-rolled SQL string-classifier that a task+security review found bypassable via string-literal parentheses (`WITH x AS (SELECT ')select(' AS s) DELETE …` executed a real DELETE). This also *allows* legitimate read-only `WITH…SELECT` CTEs the old classifier false-rejected. (Relies on `bun:sqlite` being a synchronous binding — no `await` in the critical section.)
 - **`src/cli/mcp.ts`** — `bun run mcp list` (pack + in-config state), `bun run mcp status` (configured servers, dormant reasons), `bun run mcp add <name>` (copies a pack entry's `server` value into `mcp.json`, refuses to overwrite an existing key). Slice 18 made `addPackEntry` **crash-atomic and race-safe**: a per-`configPath` promise-chain mutex (`withFileLock`) serializes concurrent adds with a fresh read-modify-write inside the lock (no stale snapshot / lost update) and a per-call temp-name + `rename`.
+- **`write.ts`** (Slice 30b Phase 5, NEW) — the atomic `mcp.json` writer the
+  web `POST /api/mcp/add` handler (`src/server/mcp/add.ts`) uses: re-reads
+  the config, writes the merged result via temp-file + `randomUUID`-named
+  rename under the **same** `withFileLock`-serialized mutex `addPackEntry`
+  above already uses, and responds from the **re-read** config, never a
+  client echo. Task 19 (same phase) also fixed a pre-existing bug this
+  phase's DTO mapper needed: a dormant config entry's `McpTransportKind`
+  (`kind`) is now retained on the parsed dormant record (previously
+  dropped) — no mount-behavior change, `src/mcp/mount.ts` itself has zero
+  diff.
+- **`mcp-dto.ts`** (Slice 30b Phase 5, NEW) — the pure `McpServerDTO` mapper
+  plus `src/server/mcp/mount-status.ts`'s **addressable mount-status
+  snapshot**, projecting a config entry + its current mount outcome into
+  `McpServerStatus.Mounted`/`Skipped`/`Dormant` — an addressable,
+  query-anytime view distinct from the engine's own per-run
+  `mounted`/`skipped` result above (`src/mcp/mount.ts`'s `MountedRegistry`),
+  which is narrower and un-addressable.
 
 ### Load → consent → mount → pin → attach
 
@@ -1788,6 +1903,28 @@ demonstrate a scoped-vs-merged accuracy *gap* on this occasion; the assertion
 still guards against a regression, and the merged number remains logged for
 future runs (a smaller/weaker router model would be expected to show the gap
 more often).
+
+### Web (Slice 30b Phase 5) — closes the D10 consent gap
+
+The Library area's MCP tab (`src/server/mcp/`, full narrative in "Builders +
+Library" below) is MCP's first web surface: `GET /api/mcp` (browse+status,
+the addressable snapshot above), `POST /api/mcp/add` (write a new config
+entry, `write.ts` above), and `POST /api/mcp/test-mount` (SSE — mint a run,
+call `mountOne` for the one server under test). **`test-mount` is the
+`ConsentRegistry`'s first real caller** (previously built, Phase 2, but
+unconsumed until now) — closing decision D10, the gap where a
+never-before-approved server had no way to get interactive consent from the
+browser: `mountOne`'s `ConsentDeps.ask` is bridged onto the same
+`ConfirmPort`/`data-confirm` wire Phase-2 chat and this phase's builder flow
+use, with `isTTY` **forced true** so the approval prompt always fires over
+the web channel rather than silently auto-skipping the way a non-interactive
+CLI run would. A wall-clock cap (`withConfirmTimeout`, same shape as the
+builder route's) fails an abandoned consent closed — DECLINE, never an
+auto-approve — so the span, telemetry, and SSE connection all still close.
+OAuth reuses the engine's existing loopback handshake unchanged (exported
+`buildAuthProviders`). `src/mcp/mount.ts` itself has **zero diff** — the CLI
+mount path is completely unaffected; only a new caller (`mount-one.ts`) was
+added alongside it.
 
 ### Telemetry
 
@@ -2023,6 +2160,22 @@ attribute (`ATTR.GAP_MISSING`, set by `setRunOutcome`) are **not** modified
 by this slice — the TTY offer in `chat.ts` is a purely additive branch that
 runs *after* that outcome is already recorded, opening its own separate
 `agent.build` span rather than folding into `agent.run`.
+
+### Web builder (Slice 30b Phase 5)
+
+`buildAgent` gains a **third trigger** alongside the CLI and the chat
+gap-offer: the browser's guided-build wizard, over `POST /api/builders/build`
+(SSE, full narrative in "Builders + Library" below). `createRealRunBuilderTurn`
+(`src/server/launch-turns.ts`-adjacent) wraps `buildAgent` under
+`withAgentBuildSpan` exactly as the CLI path does — no new span kind, no
+bypass of validation or the mandatory consent gate. The one behavioral
+difference: consent (`deps.confirm`) and the reuse-offer ask
+(`deps.confirmReuse`) are bridged onto the SSE connection's `data-confirm`
+wire instead of a TTY prompt (Task 9's pure adapters), so the same
+generate→suggest→validate→consent→(stage→verify→commit) pipeline now has a
+browser-native "yes/no" instead of a terminal one. "No same-run activation"
+still holds — a written agent is live on the **next** process start,
+whether triggered from the CLI, chat, or the browser.
 
 ### Deferred (logged, not silently dropped)
 
@@ -2293,6 +2446,20 @@ above); every generated crew member runs with the crew-level tools only.
 Wiring member-scoped MCP mounting into the transpiler is future work, not a
 Slice 19 scope item (the design's non-goals explicitly park behavioral
 verification — dry-run/golden-eval/reuse — for Slice 20).
+
+### Web builder (Slice 30b Phase 5)
+
+Same shape as the agent-builder's web-builder note above: the guided-build
+wizard's Crew/Workflow mode targets `buildCrewOrWorkflow` via the same
+`POST /api/builders/build` SSE route and `RunBuilderTurn` seam, with
+`BuilderKind.Crew`/`BuilderKind.Workflow` selecting the flow and the same
+adapter-bridged `confirm`/`confirmReuse` replacing the TTY prompt. The
+`AgentProposalDTO`/`CrewProposalDTO`/`WorkflowProposalDTO` contracts (§18/§19
+mirror the builder's internal `AgentProposal`/`CrewIR`/`WorkflowIR` shapes)
+let the web `DagView` preview a proposal's structure before commit — see
+"Builders + Library" below for the full wire narrative; this section's
+IR-then-transpile pipeline itself is otherwise **unchanged** by the web
+trigger.
 
 ### Deferred / non-goals (by design, not punted)
 
@@ -4138,3 +4305,250 @@ isolating from run latency — not needed this phase.)
 - **Delegation-to-DagNode liveness for hierarchical crews** and **launch-time
   def-id persistence for the cold-open case** (D8 limitations above) —
   forward-items, not scoped to this phase.
+
+---
+
+## Builders + Library (web UI — Slice 30b Phase 5)
+
+**Feature.** Phase 5 makes the last two stub nav areas real: **Builders**
+(browse the agent/crew/workflow builder registries, then run a guided,
+streamed build with mid-flow consent) and **Library** — a 3-tab shell for
+**Models** (installed + pullable inventory, pull with live progress),
+**MCP** (browse/status, add a server, test-mount a never-before-approved one
+with real consent + OAuth), and **Memory** (spaces + stats, upload→ingest,
+recall search). Two structural insights carry the whole phase, echoing
+Phase 4's "watching is inherited free": the **model-pull progress bridge**
+needs no new stream (each progress tick is its own short-lived span, so the
+**existing** `/api/runs/:id/stream` surfaces it live), and the **MCP
+test-mount consent gate** needs no new consent mechanism (the Phase-2
+`ConsentRegistry`/`data-confirm` wire was already built — Phase 5 is simply
+its first real caller, closing decision D10, the "a never-approved server
+has no way to get interactive consent from the browser" gap). Five layers,
+the same shape as Phases 3/4:
+
+1. **Contracts** (`src/contracts/`, isomorphic) — the wire types.
+2. **Server BFF** (`src/server/{builders,models,mcp,memory}/`) — build/pull/
+   mount/recall/ingest handlers, three of them SSE.
+3. **Registry/store integration** — `src/agent-builder/`, `src/crew-builder/`,
+   `src/provisioning/`, `src/mcp/`, `src/memory/` — no new business logic,
+   only new callers.
+4. **Web** (`web/src/features/{builders,library}/`) — the wizard + 3-tab
+   shell.
+5. **Shared wire discipline** — every SSE route here rides the **same**
+   `postSseStream`/flat-frame contract Phase 2's chat established and
+   Phase 4's launch reused; no route invents its own framing.
+
+### Contracts (`src/contracts/`)
+
+- **`enums.ts`** adds (all Phase 5, all guarded by parity tests except the
+  three explicitly contract-owned kinds): `RunKind.Build`/`Pull` (§7,
+  contract-owned); `VerifiedLevel` (mirrors `verified-build/types.ts`);
+  `ReuseKind` (mirrors the same file — doubles as a `data-confirm` event's
+  `kind` for a reuse-offer ask, D4); `RuntimeKind` (mirrors `core/types.ts`,
+  Models tab); `McpTransportKind`/`McpAuthKind` (mirror `mcp/types.ts`,
+  `McpServerDTO`); `McpServerStatus` (`Mounted`/`Skipped`/`Dormant`,
+  contract-owned — the engine's own per-run mount result is a narrower,
+  un-addressable concept, so no parity test applies); `BuilderKind`
+  (`Agent`/`Crew`/`Workflow`, contract-owned — no single engine type covers
+  all three flows).
+- **`dto.ts`** adds `SuggestedServerDTO`, `AgentProposalDTO`,
+  `CrewProposalDTO`/`WorkflowProposalDTO` (the crew/workflow builder's IR
+  surfaced read-only for the wizard's proposal preview), `BuildResultDTO`
+  (discriminated over the 6 `BuildResult`/`CrewBuildResult` variants: written/
+  declined/invalid/abandoned/reused/verify-failed), `ModelInventoryDTO`
+  (installed/pullable + fit/rank fields), `MemorySpaceDTO`/
+  `RetrievalResultDTO` (space stats / a recall hit, citation-tagged fields
+  intact), `McpServerDTO` (name/transport/auth/status).
+- **`requests.ts`** adds `BuilderBuildRequestSchema` (`{kind: BuilderKind,
+  need: z.string().max(20_000), autoYes?, force?}`), `ModelPullRequestSchema`
+  (`{ref}`), `McpAddRequestSchema` (`{name: z.string().max(128),
+  server}` with a `superRefine` capping the serialized server object at
+  20,000 chars — an Important-severity hardening fix over the plan's
+  unbounded write to the shared `mcp.json`), `McpTestMountRequestSchema`
+  (`{name}`), `MemoryIngestRequestSchema` (`{fileId: z.string().max(256)}`),
+  and `MemoryRecallRequestSchema` (`{query: z.string().min(1).max(4_000),
+  topK: z.number().max(50)}`) plus five builder/library list-response
+  schemas (`BuilderRegistryListResponse`, etc.). `GET /api/memory/spaces`
+  and `POST /api/memory/:space/recall` deliberately return **bare arrays**
+  (`MemorySpaceDTO[]`/`RetrievalResultDTO[]`), not `{items}` — a spec-correct
+  deviation from the sibling crews/workflows/models list shape, verified
+  against the design doc before shipping; the `{items}`-shaped response
+  schemas for those two therefore go unused (harmless, kept for shape
+  symmetry).
+
+### Server (`src/server/builders/`, `src/server/models/`, `src/server/mcp/`, `src/server/memory/`)
+
+- **`POST /api/builders/build`** (`build.ts`) — the guided-build SSE route.
+  Mints a runId, emits `data-run-start`, and dispatches to
+  `deps.runBuilderTurn({kind, need, ...})`, which wraps `buildAgent`/
+  `buildCrewOrWorkflow` under the existing `withAgentBuildSpan`/
+  `withCrewBuildSpan` (§18/§19 — no new span kind). **Not detached** (unlike
+  the model-pull route below): the whole build runs to completion inside the
+  handler, so a client abort never tears a build down mid-stage. Narration/
+  log lines ride as `text-delta` parts (`adapter.ts`'s pure `logToTextDelta`);
+  a mid-flow consent or reuse-confirm ask suspends on a **real promise**
+  registered in the `ConsentRegistry` (fresh 32-byte `promptId` per ask,
+  `POST /api/runs/:id/respond` resolves it, delete-then-resolve makes a
+  double-resolve a no-op) and is answered via the **same connection's**
+  `data-confirm` event (`confirmViaPort`/`confirmReuseViaPort`, Task 9's pure
+  adapters) — a per-connection closure, so two concurrent builds never cross
+  wires. An abandoned consent times out via `withConfirmTimeout`
+  (`confirmWaitMs()`, `withWallClock` + `.catch(() => false)`) — **fail-closed
+  DECLINE**, never an auto-approve — closing the span/telemetry/connection
+  rather than leaking a perpetually-`Running` run. The terminal
+  `BuildResultDTO` is written **exactly once**, as a one-shot
+  `data-build-result` **data part** (not a `text-delta` of
+  `JSON.stringify(...)`, which would double-escape and is what the brief's
+  own sample tests caught failing) — the web fold reads it straight off
+  `part.data`. Adversarially verified by two parallel Opus reviewers (lens A:
+  concurrency/streaming — suspend/resume correctness, abort semantics; lens
+  B: wire-contract/handler/security) — both "SOUND, could not refute."
+- **`GET /api/builders/agents`** (`list.ts`, `handleBuilderAgentList`) and
+  **`GET /api/builders/crews`** (`list.ts`, `handleBuilderCrewList`) — browse
+  the agent/crew/workflow builder "registries" (really: the existing
+  `agents/index.ts` + `CREWS`/`WORKFLOWS` maps, projected the same read-only
+  way Phase 4's crew/workflow browse does, as bare name lists via
+  `BuilderRegistryListResponseSchema`) so the wizard can show what already
+  exists before proposing something new. (There is no `GET /api/builders`
+  root route — the two sub-routes are the only wired builder-browse
+  endpoints, both in `list.ts`, wired in `app.ts`.)
+- **`GET /api/models`** (`list.ts`/`discover.ts`) — installed + pullable
+  inventory: `buildRegistry()` (provider-agnostic, all four runtimes, no
+  hardcoded model names) fit-ranked via the existing `fitAndRank` (§13);
+  `fitAndRank` pre-filters to `fits===true`, so a non-fitting model is
+  silently absent from this list (pre-existing engine behavior, reused
+  as-is — the wire `fits` field is consequently always `true` for pullable
+  rows this phase).
+- **`POST /api/models/pull`** (`pull.ts`) — the **fire-and-watch** pull
+  contract (D4-shaped, same as Phase 4's crew/workflow launch): resolves
+  the provider server-side (no client-trusted provider kind), `createRun`
+  pre-creates the run dir before any response, `void
+  runModelPullBridge(...).catch(...)` starts the download **detached**
+  (any throw → `error.json`, never an unhandled rejection), returns
+  `{runId}` at once. `runModelPullBridge` (§13 "Web pull" above) calls
+  `provider.download(...)` directly — **not** the full `runProvision`
+  orchestration, since selection and disk-shortfall consent are
+  pre-resolved by the browser click. Each progress tick opens+closes its
+  own `model.pull.progress` **child span** synchronously (§7 — the
+  ultracode-verified pull→spans bridge, 2 Opus lenses: span/telemetry
+  correctness, and fork-1/wire-surfacing — both "SOUND"): this is *why* no
+  new stream code was needed — `SimpleSpanProcessor` flushes each tick
+  immediately, and the **existing** `/api/runs/:id/stream` (Phase 3,
+  unchanged) surfaces it as an orphan child while the root stays open. The
+  root span's outcome attribute reads `'unknown'` at the run-summary level
+  (same as crew/workflow runs, §7/Phase-4 caveat) — the real per-pull
+  outcome lives on the span attribute the Models tab reads directly.
+- **`GET /api/mcp`** (`list.ts`) — the addressable mount-status snapshot
+  (§14 "Web" above) — every configured server's current
+  `Mounted`/`Skipped`/`Dormant` status, via `mcp-dto.ts`'s pure mapper.
+- **`POST /api/mcp/add`** (`add.ts`) — Zod-validates (400 before any write,
+  incl. the 20,000-char server-object cap above), checks for a duplicate
+  name (409), writes atomically via `write.ts` under a `withFileLock`
+  mutex, and responds from the **re-read** config (never a client echo) —
+  the path is server-supplied (`configPath`), the client only names a JSON
+  key, so there is no traversal surface even though this is a real
+  filesystem write.
+- **`POST /api/mcp/test-mount`** (`test-mount.ts`/`mount-one.ts`) — the SSE
+  route that closes D10 (§14 "Web" above): mints a run, calls `mountOne` for
+  the one server under test with `ConsentDeps.ask` bridged onto the same
+  `ConfirmPort`/`data-confirm` wire the builder route uses, `isTTY` forced
+  `true` so the ask always surfaces over the web channel. A wall-clock cap
+  (`withConfirmTimeout`, identical shape to the builder route's) fail-closes
+  an abandoned consent to DECLINE; the whole `mountOne` call is wrapped in a
+  try/catch so a throw still emits the terminal `data-mcp-server` +
+  `data-run-end` exactly once (an Important-severity fix over the plan,
+  adversarially verified — 2 Opus lenses, consent/concurrency and
+  wire/oauth/security, both "SOUND" post-fix). OAuth reuses the engine's
+  existing loopback handshake (`buildAuthProviders`, §14) — no new browser
+  redirect mechanism. `src/mcp/mount.ts` itself has **zero diff**.
+- **`GET /api/memory/spaces`** (`spaces.ts`) — a direct `store.stats()` read,
+  no run (a stats read isn't a run, per D8 above).
+- **`POST /api/memory/:space/recall`** (`recall.ts`) — mints an ephemeral
+  run, calls `store.recall` (the `memory.recall` span, §11, was **already
+  wired** before this phase — Phase 5 only gives it somewhere to land), and
+  projects the result to exactly the `RetrievalResultDTO` shape
+  (`{id, source, text, score}` — a fix over the plan's raw pass-through,
+  which leaked the internal `namespace` field). `:space` is validated
+  against a `^[A-Za-z0-9_-]+$` allowlist before it ever reaches the store
+  (a SQLite lookup key, not a filesystem path).
+- **`POST /api/memory/:space/ingest`** (`ingest.ts`) — **fork-3 confinement**:
+  the request carries only a server-minted `fileId` (from the shared
+  `POST /api/upload`, Phase 2's `uploadImage` helper reused verbatim), which
+  `confineToDir(fileId, uploadsDir)` resolves against the uploads dir
+  (realpath-prefix check — defeats `../`, absolute paths, and symlink
+  escapes) before `memoryStore.ingest` ever sees a path; an escape or
+  unknown id 400s before the store is touched. No client-supplied
+  filesystem path reaches this route at all.
+- **Routing** (`app.ts`) — all new routes ride the existing perimeter
+  (bearer token + Host/Origin allowlist) and `server.request` telemetry
+  span unchanged; exact-string routes are ordered before the anchored
+  `:space`/`:name` regexes (the same no-shadow discipline Phase 3/4
+  established), tested explicitly including a `:space` literally named
+  `"spaces"`. `ServerDeps` gains `runBuilderTurn`, `runModelPull`, MCP's
+  `mountOne`/config-path/mount-status deps, and `memoryStore`; `main.ts`
+  wires the real implementations — the memory store construction is a
+  line-for-line match of `cli/memory.ts`'s `makeRealStore` (Model-Manager
+  backed embedder + cross-encoder reranker), so the web path and the CLI
+  share one memory-store recipe.
+
+### Web (`web/src/features/builders/`, `web/src/features/library/`)
+
+- **`features/builders/`** — `index.tsx` is an Agent/Crew/Workflow mode
+  toggle over `agent-wizard.tsx`/`crew-wizard.tsx`/`builder-wizard.tsx`;
+  `use-build-events.ts` folds the SSE stream (`postSseStream`, reused from
+  Phase 4/2 — **not** a new transport) into narration text + a live
+  `data-confirm` prompt + the terminal `BuildResultDTO`, read off
+  `part.data` (not as text) and `[DONE]`-tolerant (skipping the sentinel
+  before `JSON.parse`, since the underlying route emits a real AI-SDK
+  envelope with a trailing `[DONE]`). `proposal-graph.ts` feeds an
+  `AgentProposalDTO`'s shape into the shared `DagView` (§ "Crews &
+  Workflows" above) for a structural preview before commit — gated on a
+  real `AgentProposalDtoSchema.safeParse`, not mere `.proposal` presence, so
+  a crew/workflow terminal result falls back to a generic JSON card instead
+  of a wrong graph.
+- **`features/library/`** — a 3-tab shell (`index.tsx`), each tab its own
+  feature slice:
+  - **`models-tab.tsx`** — the inventory table + per-row Pull button + a
+    live progress bar, reusing `createSseTransport().stream` (Phase 3's
+    transport, no new one) against `/api/runs/:runId/stream` and reading
+    the `model.pull.progress.percent` attribute the bridge span writes
+    (§7/§13 above).
+  - **`mcp-tab.tsx`** + **`use-mcp-test-mount.ts`** — server list + status,
+    an add-server form (`POST /api/mcp/add`), and a Test-mount button that
+    opens the SSE stream and reads the terminal `data-mcp-server` DTO off
+    `part.data`, `[DONE]`-tolerant, consent answered via the shared
+    `respond()` leg — all traced against the real route's exact emission
+    order, not assumed.
+  - **`memory-tab.tsx`** — spaces list + stats, an upload-then-ingest flow
+    (reuses the chat composer's `uploadImage` helper — **fork-3**: the
+    browser never sends a filesystem path, only the server-minted
+    `fileId`), and a recall search box. Plain REST (`apiFetch`), no SSE —
+    `spaces`/`recall` return bare arrays per the contracts note above.
+  - All three tabs share the `RegionErrorBoundary` sibling pattern
+    established in Phase 3/4.
+
+### Telemetry
+
+No new span **kinds** beyond the two `RunKind` additions (§7): `agent.build`/
+`crew.build` (already existed, §18/§19 — the web trigger is a third caller,
+not a new span) and the `model.pull`/`model.pull.progress` pair (new this
+phase, §13). Every new route rides the existing `withServerRequestSpan`
+(`server.request`) automatically, same as every other `/api` handler.
+
+### What's still deferred (explicit, not Phase-5 debt)
+
+- **`POST /api/mcp/oauth/callback`** — a stable BFF OAuth-callback route is
+  a fork-2 follow-on (§9 spec); this phase reuses the engine's existing
+  loopback listener unchanged rather than fronting it with a BFF route.
+- **Media-gen model management** — parallel gen-fit catalog (Slice 28) stays
+  outside this phase's Models tab; read-only-at-most, not wired here.
+- **MCP entries can be added and tested but not edited or removed** from the
+  browser yet.
+- **No ANN index / recall isn't wired into chat yet** — the Memory tab's
+  recall is a standalone search surface, not (yet) an automatic chat
+  retrieval augmentation.
+- **A finer `RunKind`/span shape for test-mount/ingest/recall** — these
+  currently ride the generic ephemeral-run pattern rather than a
+  purpose-built kind; a forward-item, not a correctness gap.
+- **Accessibility polish** (tab-panel `role`/`aria-labelledby` wiring on the
+  Library shell) → Phase 8, same bucket as Phase 4's ⌘K breadth.

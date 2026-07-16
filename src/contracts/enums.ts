@@ -105,10 +105,92 @@ export enum CrewProcess {
   Hierarchical = 'hierarchical',
 }
 
-/** What a run IS (chat/agent/crew/workflow), derived by the mapper from the run's
- *  root span name. Distinct from RunOrigin (HOW a run was triggered). Slice 30b Phase 4. */
+/** What a run IS (chat/agent/crew/workflow/build/pull/mcp/memory), derived by
+ *  the mapper from the run's root span name. Distinct from RunOrigin (HOW a run
+ *  was triggered). Build/Pull added Slice 30b Phase 5; Mcp/Memory added in the
+ *  Phase 5 final review to recognize the ephemeral runs minted by
+ *  `POST /api/mcp/test-mount` (`mcp.mount` root) and
+ *  `POST /api/memory/:space/{recall,ingest}` (`memory.recall`/`memory.ingest`
+ *  roots) — without them those runs read as perpetually Running. All are
+ *  contract-owned, no engine mirror needed (see `deriveRunKind`, Task 2). */
 export enum RunKind {
   Chat = 'chat',
+  Agent = 'agent',
+  Crew = 'crew',
+  Workflow = 'workflow',
+  Build = 'build',
+  Pull = 'pull',
+  Mcp = 'mcp',
+  Memory = 'memory',
+}
+
+/** Wire mirror of `src/verified-build/types.ts` VerifiedLevel (isomorphic
+ *  rule — no engine import). `tests/contracts/verified-level-parity.test.ts`
+ *  guards value parity. Slice 30b Phase 5. */
+export enum VerifiedLevel {
+  Behaves = 'behaves',
+  Runs = 'runs',
+  Unverified = 'unverified',
+}
+
+/** Wire mirror of `src/verified-build/types.ts` ReuseKind (isomorphic rule).
+ *  Also doubles as the `data-confirm` event's `kind` value for a reuse-offer
+ *  ask (D4). `tests/contracts/reuse-kind-parity.test.ts` guards value parity.
+ *  Slice 30b Phase 5. */
+export enum ReuseKind {
+  Reuse = 'reuse',
+  Offer = 'offer',
+  Generate = 'generate',
+}
+
+/** Wire mirror of `src/core/types.ts` RuntimeKind (isomorphic rule — no core
+ *  import). `tests/contracts/runtime-kind-parity.test.ts` guards value
+ *  parity. Slice 30b Phase 5 (Models tab / ModelInventoryDTO). */
+export enum RuntimeKind {
+  Ollama = 'Ollama',
+  MlxServer = 'MlxServer',
+  LmStudio = 'LmStudio',
+  LlamaCpp = 'LlamaCpp',
+}
+
+/** Wire mirror of `src/mcp/types.ts` McpTransportKind (isomorphic rule).
+ *  `tests/contracts/mcp-transport-kind-parity.test.ts` guards value parity.
+ *  Slice 30b Phase 5 (McpServerDTO). */
+export enum McpTransportKind {
+  Stdio = 'stdio',
+  Http = 'http',
+}
+
+/** Wire mirror of `src/mcp/types.ts` McpAuthKind (isomorphic rule).
+ *  `tests/contracts/mcp-auth-kind-parity.test.ts` guards value parity.
+ *  Slice 30b Phase 5 (McpServerDTO). */
+export enum McpAuthKind {
+  Static = 'static',
+  OAuth = 'oauth',
+}
+
+/** Addressable mount-status snapshot value for one row of `McpServerDTO`.
+ *  Contract-owned — no engine mirror (the engine's own per-run
+ *  mounted/skipped result, `src/mcp/mount.ts`, is a narrower, un-addressable
+ *  concept; `McpMountStatusEntry` in `src/mcp/mcp-dto.ts` stays a plain
+ *  `'mounted' | 'skipped'` literal union rather than this enum, deliberately,
+ *  so its `.record(name, status)` call sites keep taking bare string
+ *  literals) — so no parity test is needed, matching `RunKind`/`BuilderKind`.
+ *  Named `McpServerStatus`, not `McpMountStatus`, to avoid colliding with the
+ *  unrelated `McpMountStatus` factory-return type in
+ *  `src/server/mcp/mount-status.ts` (the addressable snapshot store itself).
+ *  Slice 30b Phase 5 Task 20. */
+export enum McpServerStatus {
+  Mounted = 'mounted',
+  Skipped = 'skipped',
+  Dormant = 'dormant',
+}
+
+/** Which builder flow a build request targets. Contract-owned — no engine
+ *  mirror needed (`src/crew-builder`'s `Shape` type covers only
+ *  'crew'|'workflow'; 'agent' is the agent-builder's separate flow). Slice
+ *  30b Phase 5. */
+export enum BuilderKind {
   Agent = 'agent',
   Crew = 'crew',
   Workflow = 'workflow',

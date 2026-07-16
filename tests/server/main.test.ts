@@ -9,6 +9,47 @@ test('renderIndexHtml injects the session token into the served page', () => {
   expect(html.toLowerCase()).toContain('<!doctype html>');
 });
 
+test('renderIndexHtml with no dist index returns the Phase-1 stub (root div, token, no /assets)', () => {
+  const html = renderIndexHtml('tok-stub');
+  expect(html).toContain('id="root"');
+  expect(html).toContain('tok-stub');
+  expect(html).not.toContain('/assets');
+});
+
+test('renderIndexHtml with a built dist index injects the token script before the module bundle script, keeps the stylesheet, and escapes a hostile token', () => {
+  const distHtml =
+    '<!doctype html><html lang="en"><head><meta charset="UTF-8" />' +
+    '<title>Local Agents</title>' +
+    '<script type="module" crossorigin src="/assets/index-x.js"></script>' +
+    '<link rel="stylesheet" crossorigin href="/assets/index.css">' +
+    '</head><body><div id="root"></div></body></html>';
+
+  const html = renderIndexHtml('tok-456', distHtml);
+
+  expect(html).toContain('tok-456');
+  expect(html).toContain(
+    '<script type="module" crossorigin src="/assets/index-x.js"></script>',
+  );
+  expect(html).toContain(
+    '<link rel="stylesheet" crossorigin href="/assets/index.css">',
+  );
+
+  const tokenScriptIndex = html.indexOf('window.__AGENT_TOKEN__');
+  const moduleScriptIndex = html.indexOf('type="module"');
+  expect(tokenScriptIndex).toBeGreaterThan(-1);
+  expect(moduleScriptIndex).toBeGreaterThan(-1);
+  expect(tokenScriptIndex).toBeLessThan(moduleScriptIndex);
+
+  const hostile = renderIndexHtml(
+    '</script><script>alert(1)</script>',
+    distHtml,
+  );
+  expect(hostile).not.toContain('</script><script>alert(1)</script>');
+  expect(hostile).toContain(
+    '\\u003c/script>\\u003cscript>alert(1)\\u003c/script>',
+  );
+});
+
 test('startWebServer boots on an ephemeral port, mints a token, and serves it', async () => {
   const { server, token, port } = startWebServer({ port: 0 });
   try {
