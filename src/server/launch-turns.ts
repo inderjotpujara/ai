@@ -12,12 +12,16 @@ import type { Agent } from '../core/agent-def.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import type { CrewBuilderDeps } from '../crew-builder/types.ts';
+import { resolveDestDir } from '../provisioning/dest-dir.ts';
+import { runModelPullBridge } from '../provisioning/pull-bridge.ts';
+import { providerFor } from '../provisioning/registry.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import {
   toBuildResultDto,
   toCrewBuildResultDto,
 } from './builders/map-result.ts';
 import type { RunCrewTurn } from './crews/run.ts';
+import type { RunModelPullTurn } from './models/pull.ts';
 import type { RunWorkflowTurn } from './workflows/run.ts';
 
 /**
@@ -143,4 +147,22 @@ export function createRealRunBuilderTurn(runsRoot: string): RunBuilderTurn {
         await cleanup();
       }
     });
+}
+
+/**
+ * Real, non-test `RunModelPullTurn`: `withRunTelemetry` (no MCP mount — a
+ * pull mounts nothing) scopes `runModelPullBridge` (Task 15) with the REAL
+ * `providerFor` (`src/provisioning/registry.ts`, the exact function
+ * `runProvision`'s CLI path uses) and `resolveDestDir()`. No external cancel
+ * this phase — an internally-owned `AbortController` is created per pull
+ * (wiring a user-triggered cancel is a natural follow-on, not required here).
+ */
+export function createRealRunModelPull(runsRoot: string): RunModelPullTurn {
+  return ({ runtime, provider, modelRef, runId }) =>
+    withRunTelemetry({ runsRoot, runId }, () =>
+      runModelPullBridge(
+        { runtime, provider, modelRef, signal: new AbortController().signal },
+        { providerFor, destDir: resolveDestDir() },
+      ),
+    );
 }

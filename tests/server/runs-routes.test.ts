@@ -41,6 +41,8 @@ const deps: ServerDeps = {
   runCrewTurn: noCrewRun,
   runWorkflowTurn: noWorkflowRun,
   runBuilderTurn: noBuilderRun,
+  runModelPull: async () => {},
+  freeDiskBytes: async () => Number.MAX_SAFE_INTEGER,
 };
 
 let server: ReturnType<typeof Bun.serve>;

@@ -1,12 +1,14 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
+import { freeDiskBytes } from '../provisioning/cli-deps.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createConsentRegistry } from './consent/registry.ts';
 import {
   createRealRunBuilderTurn,
   createRealRunCrewTurn,
+  createRealRunModelPull,
   createRealRunWorkflowTurn,
 } from './launch-turns.ts';
 import { mintSessionToken } from './security/token.ts';
@@ -62,6 +64,7 @@ export function startWebServer(opts: StartOptions = {}): {
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
+  const runModelPull = createRealRunModelPull(runsRoot);
   const consent = createConsentRegistry();
   // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
   // across the per-request `/api/chat` run lifecycle since the upload and
@@ -89,6 +92,8 @@ export function startWebServer(opts: StartOptions = {}): {
     runCrewTurn,
     runWorkflowTurn,
     runBuilderTurn,
+    runModelPull,
+    freeDiskBytes,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

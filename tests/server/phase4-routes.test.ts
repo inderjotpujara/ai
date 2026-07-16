@@ -32,6 +32,8 @@ function deps(): ServerDeps {
     runCrewTurn: async () => {},
     runWorkflowTurn: async () => {},
     runBuilderTurn: async () => ({ kind: 'declined' }),
+    runModelPull: async () => {},
+    freeDiskBytes: async () => Number.MAX_SAFE_INTEGER,
   };
 }
 

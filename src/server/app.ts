@@ -16,6 +16,9 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleModelList } from './models/list.ts';
+import type { RunModelPullTurn } from './models/pull.ts';
+import { handleModelPull } from './models/pull.ts';
 import { handleRunDetail } from './runs/detail.ts';
 import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
@@ -53,6 +56,10 @@ export type ServerDeps = {
   runWorkflowTurn: RunWorkflowTurn;
   /** Launches the agent/crew/workflow guided-build flow (Phase 5, Task 11/12). */
   runBuilderTurn: RunBuilderTurn;
+  /** Launches a model download to completion (Phase 5, Task 17). */
+  runModelPull: RunModelPullTurn;
+  /** Free-disk-space probe for the Models inventory route (Task 16). */
+  freeDiskBytes: () => Promise<number>;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -168,6 +175,17 @@ async function handleApi(
         if (req.method === 'POST' && url.pathname === '/api/builders/build') {
           rec.status(200);
           return handleBuilderBuild(req, deps);
+        }
+        if (req.method === 'GET' && url.pathname === '/api/models') {
+          rec.status(200);
+          return handleModelList({ freeDiskBytes: deps.freeDiskBytes });
+        }
+        if (req.method === 'POST' && url.pathname === '/api/models/pull') {
+          rec.status(200);
+          return handleModelPull(req, {
+            runsRoot: deps.runsRoot,
+            runModelPull: deps.runModelPull,
+          });
         }
         // /run sub-path matches MUST precede the bare-:name/:id detail
         // matches below — same ordering discipline as the stream-before-
