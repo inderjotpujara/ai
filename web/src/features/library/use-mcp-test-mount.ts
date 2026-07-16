@@ -36,28 +36,46 @@ const McpServerPartSchema = z.object({
   transient: z.boolean().optional(),
 });
 
+/**
+ * AI-SDK UI-message-stream error part — same shape/precedent as
+ * `use-build-events.ts`'s `ErrorFrameSchema` (`{ type: 'error', errorText }`),
+ * emitted when `createUIMessageStream`'s `execute` rejects (`onError` in
+ * `src/server/mcp/test-mount.ts`: e.g. `withRunTelemetry`/`createRun`
+ * failing before the route's own try/catch around `mountOne` even starts).
+ * Without this member `postSseStream`'s `schema.parse` throws on the frame
+ * and the fold loop dies silently (finding #2).
+ */
+const ErrorFrameSchema = z.object({
+  type: z.literal('error'),
+  errorText: z.string(),
+});
+type ErrorFrame = z.infer<typeof ErrorFrameSchema>;
+
 /** Raw wire union `postSseStream` validates each mcp-test-mount SSE frame
  *  against, before `useMcpTestMount.start()` unwraps the envelope (see
  *  `unwrapWireFrame`). */
 export const McpTestMountWireFrameSchema = z.union([
   StatusEnvelopeSchema,
   McpServerPartSchema,
+  ErrorFrameSchema,
 ]);
 type McpTestMountWireFrame = z.infer<typeof McpTestMountWireFrameSchema>;
 
 /** Logical frame `foldMcpTestMountFrame` operates on: a flat `StatusEvent`
- *  (envelope already stripped) or the one-shot terminal data part. Unlike
- *  the builder-build flow, `test-mount.ts` never writes narration
- *  `text-delta` parts — `data-mcp-mount` progress rides the StatusEvent
- *  envelope instead, and the fold below turns it into a narration line. */
+ *  (envelope already stripped), the one-shot terminal data part, or the
+ *  error part. Unlike the builder-build flow, `test-mount.ts` never writes
+ *  narration `text-delta` parts — `data-mcp-mount` progress rides the
+ *  StatusEvent envelope instead, and the fold below turns it into a
+ *  narration line. */
 export type McpTestMountFrame =
   | StatusEvent
-  | { type: 'data-mcp-server'; data: unknown };
+  | { type: 'data-mcp-server'; data: unknown }
+  | ErrorFrame;
 
 /** Strips the `{ type, data, transient }` envelope off a wire frame — same
  *  `unwrapWireFrame` logic as `use-build-events.ts` (Task 13). */
 function unwrapWireFrame(frame: McpTestMountWireFrame): McpTestMountFrame {
-  if (frame.type === 'data-mcp-server') return frame;
+  if (frame.type === 'data-mcp-server' || frame.type === 'error') return frame;
   return frame.data;
 }
 
@@ -73,6 +91,9 @@ export type McpTestMountState = {
   pendingConfirm?: PendingConfirm;
   result?: McpServerDTO;
   done: boolean;
+  /** Set from a wire `error` frame OR a thrown/rejected `start()` call (see
+   *  `start()`'s catch below) — mirrors `BuildFoldState.error`. */
+  error?: string;
 };
 
 const INITIAL_STATE: McpTestMountState = { narration: [], done: false };
@@ -110,6 +131,15 @@ export function foldMcpTestMountFrame(
         result: frame.data as McpServerDTO,
         pendingConfirm: undefined,
       };
+    case 'error':
+      // Finding #2: surface the stream-failure error frame instead of
+      // silently dying inside the fold loop.
+      return {
+        ...state,
+        error: frame.errorText,
+        done: true,
+        pendingConfirm: undefined,
+      };
     default:
       return state;
   }
@@ -129,27 +159,46 @@ export function useMcpTestMount() {
 
   const start = useCallback(async (name: string, signal?: AbortSignal) => {
     setState(INITIAL_STATE);
-    for await (const wireFrame of postSseStream(
-      '/api/mcp/test-mount',
-      { name },
-      McpTestMountWireFrameSchema,
-      signal,
-    )) {
-      const frame = unwrapWireFrame(wireFrame);
-      setState((prev) => foldMcpTestMountFrame(prev, frame));
+    try {
+      for await (const wireFrame of postSseStream(
+        '/api/mcp/test-mount',
+        { name },
+        McpTestMountWireFrameSchema,
+        signal,
+      )) {
+        const frame = unwrapWireFrame(wireFrame);
+        setState((prev) => foldMcpTestMountFrame(prev, frame));
+      }
+    } catch (err) {
+      // A thrown/rejected stream (network drop, non-2xx response, schema
+      // mismatch) must surface the same way a wire `error` frame does —
+      // never leave the caller with an unhandled rejection and a frozen tab
+      // (finding #2).
+      setState((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : String(err),
+        done: true,
+      }));
     }
   }, []);
 
-  const respond = useCallback((value: boolean) => {
-    setState((prev) => {
-      if (!prev.pendingConfirm || !prev.runId) return prev;
-      void createSseTransport().respond(prev.runId, {
-        promptId: prev.pendingConfirm.promptId,
+  const respond = useCallback(
+    (value: boolean) => {
+      // Minor #5: read the pending confirm from the CURRENT render's closure
+      // and fire the POST once, OUTSIDE the setState updater — see
+      // `use-build-events.ts`'s `respond()` for the full StrictMode
+      // double-invoke rationale.
+      const pending = state.pendingConfirm;
+      const runId = state.runId;
+      if (!pending || !runId) return;
+      setState((prev) => ({ ...prev, pendingConfirm: undefined }));
+      void createSseTransport().respond(runId, {
+        promptId: pending.promptId,
         value,
       });
-      return { ...prev, pendingConfirm: undefined };
-    });
-  }, []);
+    },
+    [state.pendingConfirm, state.runId],
+  );
 
   return { state, start, respond };
 }

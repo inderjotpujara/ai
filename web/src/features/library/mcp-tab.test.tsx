@@ -205,4 +205,30 @@ describe('McpTab', () => {
     );
     vi.unstubAllGlobals();
   });
+
+  // Finding #2 (IMPORTANT): clicking "Test mount" fires `start()` from a bare
+  // onClick with no await — a rejected stream (server restart, non-2xx) must
+  // surface via `state.error`, not become an unhandled rejection that leaves
+  // the tab looking frozen.
+  it('shows an error instead of freezing when the test-mount stream fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/mcp')) return jsonResponse({ items: servers });
+        if (url.endsWith('/api/mcp/test-mount')) {
+          return new Response('server error', { status: 500 });
+        }
+        return jsonResponse({ items: [] });
+      }),
+    );
+    renderAt('/library');
+    fireEvent.click(await screen.findByTestId('library-tab-mcp'));
+    await screen.findByText('read_file');
+
+    fireEvent.click(screen.getByText('Test mount'));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('alert')).toHaveTextContent(/failed/i);
+    vi.unstubAllGlobals();
+  });
 });

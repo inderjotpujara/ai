@@ -89,7 +89,20 @@ export function McpTab() {
               {s.reason && (
                 <span className="text-[var(--color-muted)]">{s.reason}</span>
               )}
-              <Button onClick={() => start(s.name)}>Test mount</Button>
+              <Button
+                onClick={() => {
+                  // `start()` already catches internally and surfaces
+                  // failures onto `state.error` (`use-mcp-test-mount.ts`),
+                  // but this fire-and-forget onClick still attaches a
+                  // `.catch` so nothing here becomes an unhandled rejection
+                  // either (finding #2).
+                  start(s.name).catch(() => {
+                    // no-op: `state.error` above already reflects the failure.
+                  });
+                }}
+              >
+                Test mount
+              </Button>
             </li>
           ))}
         </ul>
@@ -113,10 +126,16 @@ export function McpTab() {
           </Button>
         </div>
 
+        {state.error && (
+          <p role="alert" className="text-sm text-[var(--color-muted)]">
+            {state.error}
+          </p>
+        )}
         {state.narration.length > 0 && (
           <ul className="font-mono text-xs text-[var(--color-muted)]">
-            {state.narration.map((line) => (
-              <li key={line}>{line}</li>
+            {state.narration.map((line, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: an append-only narration log for one in-flight test-mount (minor #8: `key={line}` collided on duplicate identical lines, e.g. two "warn: ..." retries)
+              <li key={i}>{line}</li>
             ))}
           </ul>
         )}

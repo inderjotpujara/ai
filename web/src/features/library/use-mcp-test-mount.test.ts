@@ -73,6 +73,24 @@ describe('foldMcpTestMountFrame', () => {
     });
     expect(next.done).toBe(true);
   });
+
+  // Finding #2 (IMPORTANT): the shared POST-SSE contract has no error lane —
+  // an AI-SDK `{ type: 'error', errorText }` frame (`onError` in
+  // `src/server/mcp/test-mount.ts`) must fold into a surfaced error state,
+  // not crash `postSseStream`'s `schema.parse` and die silently.
+  it('folds an error frame into a terminal error state', () => {
+    const withConfirm = {
+      ...INITIAL,
+      pendingConfirm: { promptId: 'p1', kind: 'mcp-mount', question: 'x' },
+    };
+    const next = foldMcpTestMountFrame(withConfirm, {
+      type: 'error',
+      errorText: 'stream error: mount seam threw',
+    });
+    expect(next.error).toBe('stream error: mount seam threw');
+    expect(next.done).toBe(true);
+    expect(next.pendingConfirm).toBeUndefined();
+  });
 });
 
 describe('useMcpTestMount (integration: real enveloped wire bytes)', () => {
@@ -155,5 +173,58 @@ describe('useMcpTestMount (integration: real enveloped wire bytes)', () => {
       }),
     ).resolves.not.toThrow();
     expect(result.current.state.runId).toBe('run-x');
+  });
+
+  // Finding #2: an error frame mid-stream must surface as
+  // `result.current.state.error`, not throw out of `start()`.
+  it('surfaces a mid-stream error frame instead of dying in the fold loop', async () => {
+    const encoder = new TextEncoder();
+    const lines = [
+      'data: {"type":"data-run-start","data":{"type":"data-run-start","runId":"run-err"},"transient":true}\n\n',
+      'data: {"type":"error","errorText":"stream error: boom"}\n\n',
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const line of lines) controller.enqueue(encoder.encode(line));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }),
+    );
+
+    const { result } = renderHook(() => useMcpTestMount());
+
+    await expect(
+      act(async () => {
+        await result.current.start('gh');
+      }),
+    ).resolves.not.toThrow();
+
+    await waitFor(() => expect(result.current.state.done).toBe(true));
+    expect(result.current.state.error).toBe('stream error: boom');
+  });
+
+  // A thrown/rejected stream (non-2xx response) must ALSO surface via
+  // `error` — `start()` itself must never reject.
+  it('surfaces a rejected stream (non-2xx response) as an error, not a hang', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('not found', { status: 404 })),
+    );
+
+    const { result } = renderHook(() => useMcpTestMount());
+
+    await expect(
+      act(async () => {
+        await result.current.start('gh');
+      }),
+    ).resolves.not.toThrow();
+
+    expect(result.current.state.done).toBe(true);
+    expect(result.current.state.error).toBeTruthy();
   });
 });

@@ -66,6 +66,39 @@ describe('foldBuildFrame', () => {
     });
     expect(next.done).toBe(true);
   });
+
+  // Minor #4: a stale confirm button must not render alongside the
+  // terminal result.
+  it('clears a pending confirm on data-run-end', () => {
+    const withConfirm = {
+      ...INITIAL,
+      pendingConfirm: { promptId: 'p1', kind: 'build', question: 'x' },
+    };
+    const next = foldBuildFrame(withConfirm, {
+      type: StatusEventType.RunEnd,
+      runId: 'run-abc',
+      outcome: 'written',
+    });
+    expect(next.pendingConfirm).toBeUndefined();
+  });
+
+  // Finding #2 (IMPORTANT): the shared POST-SSE contract has no error lane —
+  // an AI-SDK `{ type: 'error', errorText }` frame (`onError` in
+  // `src/server/builders/build.ts`) must fold into a surfaced error state,
+  // not crash `postSseStream`'s `schema.parse` and die silently.
+  it('folds an error frame into a terminal error state', () => {
+    const withConfirm = {
+      ...INITIAL,
+      pendingConfirm: { promptId: 'p1', kind: 'build', question: 'x' },
+    };
+    const next = foldBuildFrame(withConfirm, {
+      type: 'error',
+      errorText: 'stream error: server restarted mid-build',
+    });
+    expect(next.error).toBe('stream error: server restarted mid-build');
+    expect(next.done).toBe(true);
+    expect(next.pendingConfirm).toBeUndefined();
+  });
 });
 
 describe('useBuildEvents (integration: real enveloped wire bytes)', () => {
@@ -118,5 +151,61 @@ describe('useBuildEvents (integration: real enveloped wire bytes)', () => {
       files: ['a.ts'],
     });
     expect(result.current.pendingConfirm).toBeUndefined();
+  });
+
+  // Finding #2: an error frame mid-stream (server restart, `createRun`
+  // failure, etc.) must surface as `result.current.error`, not throw out of
+  // `start()` and leave the caller with an unhandled rejection.
+  it('surfaces a mid-stream error frame instead of dying in the fold loop', async () => {
+    const encoder = new TextEncoder();
+    const lines = [
+      'data: {"type":"data-run-start","data":{"type":"data-run-start","runId":"run-err","task":"x"},"transient":true}\n\n',
+      'data: {"type":"error","errorText":"stream error: boom"}\n\n',
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const line of lines) controller.enqueue(encoder.encode(line));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }),
+    );
+
+    const { result } = renderHook(() => useBuildEvents());
+
+    await expect(
+      act(async () => {
+        await result.current.start({ kind: 'agent', need: 'x' });
+      }),
+    ).resolves.not.toThrow();
+
+    await waitFor(() => expect(result.current.done).toBe(true));
+    expect(result.current.error).toBe('stream error: boom');
+  });
+
+  // A thrown/rejected stream (network drop before any frame, a non-2xx
+  // response) must ALSO surface via `error` — `start()` itself must never
+  // reject, or every call site would need its own try/catch to avoid an
+  // unhandled rejection freezing the tab.
+  it('surfaces a rejected stream (non-2xx response) as an error, not a hang', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('not found', { status: 404 })),
+    );
+
+    const { result } = renderHook(() => useBuildEvents());
+
+    await expect(
+      act(async () => {
+        await result.current.start({ kind: 'agent', need: 'x' });
+      }),
+    ).resolves.not.toThrow();
+
+    expect(result.current.done).toBe(true);
+    expect(result.current.error).toBeTruthy();
   });
 });

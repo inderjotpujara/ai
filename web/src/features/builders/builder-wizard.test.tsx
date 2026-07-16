@@ -185,4 +185,22 @@ describe('BuilderWizard', () => {
     expect(posted[0]?.body).toEqual({ promptId: 'p1', value: true });
     vi.unstubAllGlobals();
   });
+
+  // Finding #2 (IMPORTANT): a stream failure (an AI-SDK error frame, or the
+  // whole POST rejecting) must show an error, not freeze the wizard with no
+  // feedback. Drives the real `<BuilderWizard>` through a non-2xx response.
+  it('shows an error instead of freezing when the build stream fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('server error', { status: 500 })),
+    );
+    renderWizard();
+    fireEvent.change(screen.getByTestId('wizard-need'), {
+      target: { value: 'x' },
+    });
+    fireEvent.click(screen.getByTestId('wizard-submit'));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('alert')).toHaveTextContent(/failed/i);
+    vi.unstubAllGlobals();
+  });
 });

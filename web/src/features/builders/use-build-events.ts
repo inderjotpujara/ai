@@ -50,6 +50,20 @@ const BuildResultPartSchema = z.object({
 });
 type BuildResultPart = z.infer<typeof BuildResultPartSchema>;
 
+/** AI-SDK UI-message-stream error part (`ai`'s `UIMessageStreamPart` "error"
+ *  member — `{ type: 'error', errorText: string }`), emitted when
+ *  `createUIMessageStream`'s `execute` rejects (`onError` in
+ *  `src/server/builders/build.ts`: server restart mid-stream, a `createRun`
+ *  failure, or any throw outside the route's own inner try/catch). Without
+ *  this member in the wire union, `postSseStream`'s `schema.parse` throws on
+ *  the frame and the fold loop dies silently — the priority finding this
+ *  fixes. */
+const ErrorFrameSchema = z.object({
+  type: z.literal('error'),
+  errorText: z.string(),
+});
+type ErrorFrame = z.infer<typeof ErrorFrameSchema>;
+
 /** Raw wire union `postSseStream` validates each builder-build SSE frame
  *  against, before `useBuildEvents.start()` unwraps the StatusEvent
  *  envelope (see `unwrapWireFrame`). */
@@ -57,6 +71,7 @@ export const BuilderWireFrameSchema = z.union([
   StatusEnvelopeSchema,
   BuildResultPartSchema,
   TextPartSchema,
+  ErrorFrameSchema,
 ]);
 type BuilderWireFrame = z.infer<typeof BuilderWireFrameSchema>;
 
@@ -65,18 +80,23 @@ type BuilderWireFrame = z.infer<typeof BuilderWireFrameSchema>;
  *  part. Kept separate from `BuilderWireFrame` so the pure fold function
  *  (unit-tested exactly like `foldSpan`/`foldEvent` elsewhere) never has to
  *  know about the wire envelope. */
-export type BuilderFrame = StatusEvent | BuildResultPart | TextPart;
+export type BuilderFrame =
+  | StatusEvent
+  | BuildResultPart
+  | TextPart
+  | ErrorFrame;
 
 /** Strips the `{ type, data, transient }` envelope off a StatusEvent wire
  *  frame — `.data` IS the flat `StatusEvent` (see `StatusEnvelopeSchema`
- *  above). The build-result part and text parts are not enveloped the same
- *  way and pass through unchanged. */
+ *  above). The build-result part, text parts, and the error part are not
+ *  enveloped the same way and pass through unchanged. */
 function unwrapWireFrame(frame: BuilderWireFrame): BuilderFrame {
   if (
     frame.type === 'data-build-result' ||
     frame.type === 'text-start' ||
     frame.type === 'text-delta' ||
-    frame.type === 'text-end'
+    frame.type === 'text-end' ||
+    frame.type === 'error'
   ) {
     return frame;
   }
@@ -98,6 +118,11 @@ export type BuildFoldState = {
    *  against `BuildResultDtoSchema` before rendering. */
   result?: unknown;
   done: boolean;
+  /** Set from a wire `error` frame (`ErrorFrameSchema` above) OR a thrown/
+   *  rejected `start()` call (network drop, schema mismatch, server restart
+   *  mid-stream) — see `start()`'s catch below. Once set the build is
+   *  terminal; the wizard renders it instead of freezing silently. */
+  error?: string;
 };
 
 /** Pure fold: one `BuilderFrame` in, next state out — unit-tested exactly
@@ -119,11 +144,22 @@ export function foldBuildFrame(
         },
       };
     case StatusEventType.RunEnd:
-      return { ...state, done: true };
+      // Minor #4: a stale confirm button must not render alongside the
+      // terminal result — mirrors `foldMcpTestMountFrame`'s terminal clear.
+      return { ...state, done: true, pendingConfirm: undefined };
     case 'data-build-result':
-      return { ...state, result: frame.data };
+      return { ...state, result: frame.data, pendingConfirm: undefined };
     case 'text-delta':
       return { ...state, narration: [...state.narration, frame.delta] };
+    case 'error':
+      // Finding #2: surface the stream-failure error frame instead of
+      // silently dying inside the fold loop.
+      return {
+        ...state,
+        error: frame.errorText,
+        done: true,
+        pendingConfirm: undefined,
+      };
     default:
       return state;
   }
@@ -145,29 +181,49 @@ export function useBuildEvents() {
       signal?: AbortSignal,
     ) => {
       setState(INITIAL_STATE);
-      for await (const wireFrame of postSseStream(
-        '/api/builders/build',
-        body,
-        BuilderWireFrameSchema,
-        signal,
-      )) {
-        const frame = unwrapWireFrame(wireFrame);
-        setState((prev) => foldBuildFrame(prev, frame));
+      try {
+        for await (const wireFrame of postSseStream(
+          '/api/builders/build',
+          body,
+          BuilderWireFrameSchema,
+          signal,
+        )) {
+          const frame = unwrapWireFrame(wireFrame);
+          setState((prev) => foldBuildFrame(prev, frame));
+        }
+      } catch (err) {
+        // A thrown/rejected stream (network drop before the first frame, a
+        // non-2xx response, a schema mismatch) must surface the same way a
+        // wire `error` frame does — never leave the caller with an unhandled
+        // rejection and a frozen tab (finding #2).
+        setState((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : String(err),
+          done: true,
+        }));
       }
     },
     [],
   );
 
-  const respond = useCallback((value: boolean) => {
-    setState((prev) => {
-      if (!prev.pendingConfirm || !prev.runId) return prev;
-      void createSseTransport().respond(prev.runId, {
-        promptId: prev.pendingConfirm.promptId,
+  const respond = useCallback(
+    (value: boolean) => {
+      // Minor #5: read the pending confirm from the CURRENT render's closure
+      // and fire the POST once, OUTSIDE the setState updater. Under
+      // StrictMode (`web/src/main.tsx`) an updater passed to `setState` runs
+      // twice; a network call inside one double-POSTs (the 2nd 404s and
+      // rejects unhandled). The state clear below is still a pure updater.
+      const pending = state.pendingConfirm;
+      const runId = state.runId;
+      if (!pending || !runId) return;
+      setState((prev) => ({ ...prev, pendingConfirm: undefined }));
+      void createSseTransport().respond(runId, {
+        promptId: pending.promptId,
         value,
       });
-      return { ...prev, pendingConfirm: undefined };
-    });
-  }, []);
+    },
+    [state.pendingConfirm, state.runId],
+  );
 
   return { ...state, start, respond };
 }

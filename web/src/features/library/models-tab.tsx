@@ -3,6 +3,7 @@ import {
   ModelListResponseSchema,
   RunLaunchResponseSchema,
   SpanDtoSchema,
+  SpanStatus,
 } from '@contracts';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '../../shared/contract/client.ts';
@@ -15,7 +16,7 @@ import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
  *  duplicated here as a literal string. */
 const PULL_PERCENT_ATTR = 'model.pull.progress.percent';
 
-type PullState = { percent?: number; done: boolean };
+type PullState = { percent?: number; done: boolean; failed?: boolean };
 
 function formatSize(bytes?: number): string {
   if (bytes === undefined) return '—';
@@ -48,10 +49,23 @@ function usePullWatch(runId: string | undefined): PullState {
               setState((prev) => ({ ...prev, percent }));
             }
           }
+          // Minor #10: the root `model.pull` span (`inSpan`,
+          // `src/telemetry/spans.ts`) closes with an ERROR status when the
+          // download throws — distinguish that from a normal completion so a
+          // FAILED pull doesn't render "Done".
+          if (span.name === 'model.pull' && span.status === SpanStatus.Error) {
+            if (!cancelled) setState((prev) => ({ ...prev, failed: true }));
+          }
         }
         if (!cancelled) setState((prev) => ({ ...prev, done: true }));
       } catch {
-        if (!cancelled) setState((prev) => ({ ...prev, done: true }));
+        // The stream itself rejecting (network drop, non-2xx response,
+        // schema mismatch — same failure class as finding #2) is ALSO a
+        // failed pull, not a completed one; previously this branch set only
+        // `done`, so a pull that never finished still rendered "Done".
+        if (!cancelled) {
+          setState((prev) => ({ ...prev, done: true, failed: true }));
+        }
       }
     })();
     return () => {
@@ -65,15 +79,27 @@ function usePullWatch(runId: string | undefined): PullState {
 
 function ModelRow({ item }: { item: ModelInventoryDTO }) {
   const [runId, setRunId] = useState<string | undefined>(undefined);
+  const [launchError, setLaunchError] = useState<string | undefined>(undefined);
   const pull = usePullWatch(runId);
 
   async function handlePull() {
-    const res = await apiFetch('/models/pull', {
-      method: 'POST',
-      body: { runtime: item.runtime, modelRef: item.model },
-      schema: RunLaunchResponseSchema,
-    });
-    setRunId(res.runId);
+    setLaunchError(undefined);
+    try {
+      const res = await apiFetch('/models/pull', {
+        method: 'POST',
+        body: { runtime: item.runtime, modelRef: item.model },
+        schema: RunLaunchResponseSchema,
+      });
+      setRunId(res.runId);
+    } catch (err) {
+      // A rejected launch call (network drop, non-2xx) previously left the
+      // Pull button silently inert with an unhandled rejection (finding #2,
+      // extended here to the row's own launch call alongside `usePullWatch`
+      // above).
+      setLaunchError(
+        err instanceof Error ? err.message : 'failed to start pull',
+      );
+    }
   }
 
   return (
@@ -97,20 +123,29 @@ function ModelRow({ item }: { item: ModelInventoryDTO }) {
             data-testid={`models-progress-${item.model}`}
             className="font-mono text-sm text-[var(--color-muted)]"
           >
-            {pull.percent !== undefined
-              ? `${pull.percent}%`
-              : pull.done
-                ? 'Done'
-                : '0%'}
+            {pull.failed
+              ? 'Failed'
+              : pull.percent !== undefined
+                ? `${pull.percent}%`
+                : pull.done
+                  ? 'Done'
+                  : '0%'}
           </span>
         ) : (
-          <Button
-            data-testid={`models-pull-${item.model}`}
-            disabled={!item.fits}
-            onClick={handlePull}
-          >
-            Pull
-          </Button>
+          <>
+            <Button
+              data-testid={`models-pull-${item.model}`}
+              disabled={!item.fits}
+              onClick={handlePull}
+            >
+              Pull
+            </Button>
+            {launchError && (
+              <p role="alert" className="text-xs text-[var(--color-muted)]">
+                {launchError}
+              </p>
+            )}
+          </>
         )}
       </td>
     </tr>
