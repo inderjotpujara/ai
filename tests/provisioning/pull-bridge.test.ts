@@ -61,25 +61,6 @@ test('N onProgress ticks land as N+2 spans; lifecycle flips to Done only once th
   }
 });
 
-test('a rejecting provider marks the root Failed (mapRunToDto agrees)', async () => {
-  const runsRoot = await mkdtemp(join(tmpdir(), 'pull-bridge-fail-'));
-  try {
-    await runModelPullBridge(
-      {
-        runtime: RuntimeKind.Ollama,
-        provider: ProviderKind.Ollama,
-        modelRef: 'x',
-        signal: new AbortController().signal,
-      },
-      { providerFor: () => fakeProvider(2, true), destDir: '/tmp/unused' },
-    ).catch(() => {}); // swallow here — the real caller (Task 17) does the same at the fire-and-watch layer
-    // The bridge itself must be run under a telemetry scope for spans.jsonl to exist:
-  } finally {
-    // no-op; the real assertion happens in the scoped variant below
-  }
-  await rm(runsRoot, { recursive: true, force: true });
-});
-
 test('a rejecting provider marks the root Failed, scoped under withRunTelemetry (mapRunToDto agrees)', async () => {
   const runsRoot = await mkdtemp(join(tmpdir(), 'pull-bridge-fail-scoped-'));
   const runId = 'run-pull-fail-scoped';
