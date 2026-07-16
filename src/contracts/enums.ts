@@ -163,6 +163,23 @@ export enum McpAuthKind {
   OAuth = 'oauth',
 }
 
+/** Addressable mount-status snapshot value for one row of `McpServerDTO`.
+ *  Contract-owned — no engine mirror (the engine's own per-run
+ *  mounted/skipped result, `src/mcp/mount.ts`, is a narrower, un-addressable
+ *  concept; `McpMountStatusEntry` in `src/mcp/mcp-dto.ts` stays a plain
+ *  `'mounted' | 'skipped'` literal union rather than this enum, deliberately,
+ *  so its `.record(name, status)` call sites keep taking bare string
+ *  literals) — so no parity test is needed, matching `RunKind`/`BuilderKind`.
+ *  Named `McpServerStatus`, not `McpMountStatus`, to avoid colliding with the
+ *  unrelated `McpMountStatus` factory-return type in
+ *  `src/server/mcp/mount-status.ts` (the addressable snapshot store itself).
+ *  Slice 30b Phase 5 Task 20. */
+export enum McpServerStatus {
+  Mounted = 'mounted',
+  Skipped = 'skipped',
+  Dormant = 'dormant',
+}
+
 /** Which builder flow a build request targets. Contract-owned — no engine
  *  mirror needed (`src/crew-builder`'s `Shape` type covers only
  *  'crew'|'workflow'; 'agent' is the agent-builder's separate flow). Slice

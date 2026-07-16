@@ -5,6 +5,7 @@ import {
   CrewProcess,
   DegradeKind,
   McpAuthKind,
+  McpServerStatus,
   McpTransportKind,
   RunKind,
   RunLifecycle,
@@ -397,7 +398,7 @@ export const McpServerDtoSchema = z.object({
   kind: z.enum(McpTransportKind),
   agents: z.array(z.string()).optional(),
   authKind: z.enum(McpAuthKind),
-  status: z.enum(['mounted', 'skipped', 'dormant']),
+  status: z.enum(McpServerStatus),
   reason: z.string().optional(),
 });
 export type McpServerDTO = z.infer<typeof McpServerDtoSchema>;

@@ -7,6 +7,7 @@ import {
 } from '../../src/contracts/dto.ts';
 import {
   McpAuthKind,
+  McpServerStatus,
   McpTransportKind,
   RuntimeKind,
 } from '../../src/contracts/enums.ts';
@@ -48,7 +49,7 @@ test('McpServerDtoSchema accepts a mounted stdio server', () => {
     name: 'filesystem',
     kind: McpTransportKind.Stdio,
     authKind: McpAuthKind.Static,
-    status: 'mounted',
+    status: McpServerStatus.Mounted,
   });
-  expect(s.status).toBe('mounted');
+  expect(s.status).toBe(McpServerStatus.Mounted);
 });
