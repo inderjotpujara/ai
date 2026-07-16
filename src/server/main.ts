@@ -1,8 +1,14 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
+import { RuntimeKind } from '../core/types.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
+import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
+import { makeCrossEncoderReranker } from '../memory/reranker.ts';
+import { createMemoryStore } from '../memory/store.ts';
 import { freeDiskBytes } from '../provisioning/cli-deps.ts';
+import { createModelManager } from '../resource/model-manager.ts';
+import { runtimeFor } from '../runtime/registry.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createConsentRegistry } from './consent/registry.ts';
@@ -85,6 +91,28 @@ export function startWebServer(opts: StartOptions = {}): {
   // mkdirs this dir before writing (the write path was already safe); this
   // covers the read path too.
   mkdirSync(uploadsDir, { recursive: true });
+  // Mirrors src/cli/memory.ts's makeRealStore — one embedder instance shared
+  // by embedTexts/embedQuery, the Ollama-backed model manager for
+  // ensureReady, cross-encoder rerank on by default (defaultRerank() in
+  // retrieve.ts still gates actual use behind AGENT_MEMORY_RERANK).
+  const memoryEmbedModel =
+    process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
+  const memoryManager = createModelManager();
+  const memoryEmbedder = makeEmbedder({
+    ensureReady: (decl) => memoryManager.ensureReady(decl),
+    control: runtimeFor(RuntimeKind.Ollama).control,
+    model: memoryEmbedModel,
+  });
+  const memoryStore = createMemoryStore(
+    { embedModel: memoryEmbedModel },
+    {
+      embedTexts: memoryEmbedder.embed,
+      embedQuery: async (text) =>
+        (await memoryEmbedder.embed([text]))[0] as number[],
+      probe: probeEmbedder,
+      reranker: makeCrossEncoderReranker(),
+    },
+  );
   const deps: ServerDeps = {
     token,
     policy,
@@ -103,6 +131,7 @@ export function startWebServer(opts: StartOptions = {}): {
     mcpConfigPath,
     mcpMountStatus,
     mountOne,
+    memoryStore,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

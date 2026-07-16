@@ -2,10 +2,25 @@ import { expect, test } from 'bun:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { MemoryStore } from '../../src/memory/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
+
+// None of these tests exercise a memory route, so a throwing fake keeps the
+// fixture honest about what's actually under test here.
+const unusedMemoryStore = {
+  stats: async () => {
+    throw new Error('memoryStore should not be invoked by these tests');
+  },
+  recall: async () => {
+    throw new Error('memoryStore should not be invoked by these tests');
+  },
+  ingest: async () => {
+    throw new Error('memoryStore should not be invoked by these tests');
+  },
+} as unknown as MemoryStore;
 
 const TOKEN = 'a'.repeat(64);
 // None of these tests exercise POST /api/upload or an /api/chat body with
@@ -45,6 +60,7 @@ function deps(): ServerDeps {
     mcpConfigPath,
     mcpMountStatus: createMcpMountStatus(),
     mountOne: async () => ({ outcome: 'mounted' }),
+    memoryStore: unusedMemoryStore,
   };
 }
 

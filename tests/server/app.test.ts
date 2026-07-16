@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { MemoryStore } from '../../src/memory/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
@@ -41,6 +42,19 @@ const unusedRunBuilderTurn: RunBuilderTurn = async () => {
 const unusedMountOne: ServerDeps['mountOne'] = async () => {
   throw new Error('mountOne should not be invoked by these tests');
 };
+// None of these tests exercise a memory route either — a fake store whose
+// methods throw keeps the fixtures honest about what's actually under test.
+const unusedMemoryStore = {
+  stats: async () => {
+    throw new Error('memoryStore should not be invoked by these tests');
+  },
+  recall: async () => {
+    throw new Error('memoryStore should not be invoked by these tests');
+  },
+  ingest: async () => {
+    throw new Error('memoryStore should not be invoked by these tests');
+  },
+} as unknown as MemoryStore;
 // A bare, never-populated mcp.json — these tests don't exercise /api/mcp.
 const mcpConfigPath = join(mkdtempSync(join(tmpdir(), 'app-mcp-')), 'mcp.json');
 writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
@@ -61,6 +75,7 @@ const deps: ServerDeps = {
   mcpConfigPath,
   mcpMountStatus: createMcpMountStatus(),
   mountOne: unusedMountOne,
+  memoryStore: unusedMemoryStore,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -136,6 +151,7 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     mcpConfigPath,
     mcpMountStatus: createMcpMountStatus(),
     mountOne: unusedMountOne,
+    memoryStore: unusedMemoryStore,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -182,6 +198,7 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     mcpConfigPath,
     mcpMountStatus: createMcpMountStatus(),
     mountOne: unusedMountOne,
+    memoryStore: unusedMemoryStore,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -283,6 +300,7 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     mcpConfigPath,
     mcpMountStatus: createMcpMountStatus(),
     mountOne: unusedMountOne,
+    memoryStore: unusedMemoryStore,
   };
   const symlinkServer = Bun.serve({
     port: 0,

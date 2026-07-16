@@ -12,8 +12,9 @@ import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 
 const TOKEN = 'a'.repeat(64);
-const uploadsDir = mkdtempSync(join(tmpdir(), 'phase5-mcp-uploads-'));
-const runsRoot = mkdtempSync(join(tmpdir(), 'phase5-mcp-runs-'));
+const uploadsDir = mkdtempSync(join(tmpdir(), 'phase5-memory-uploads-'));
+const runsRoot = mkdtempSync(join(tmpdir(), 'phase5-memory-runs-'));
+writeFileSync(join(uploadsDir, 'abc.md'), '# hi');
 const unusedRunChatTurn: RunChatTurn = async () => {
   throw new Error('runChatTurn should not be invoked by these tests');
 };
@@ -26,22 +27,16 @@ const unusedRunWorkflowTurn: RunWorkflowTurn = async () => {
 const unusedRunBuilderTurn: RunBuilderTurn = async () => {
   throw new Error('runBuilderTurn should not be invoked by these tests');
 };
-// None of these tests exercise a memory route, so a throwing fake keeps the
-// fixture honest about what's actually under test here.
-const unusedMemoryStore = {
-  stats: async () => {
-    throw new Error('memoryStore should not be invoked by these tests');
-  },
-  recall: async () => {
-    throw new Error('memoryStore should not be invoked by these tests');
-  },
-  ingest: async () => {
-    throw new Error('memoryStore should not be invoked by these tests');
-  },
+const fakeMemoryStore = {
+  stats: async () => ({ default: 1 }),
+  recall: async () => [
+    { id: 'd#0', source: 'd.md', text: 'hi', score: 1, namespace: '' },
+  ],
+  ingest: async () => ({ chunks: 1, skipped: false }),
 } as unknown as MemoryStore;
 
 function mcpConfigPath(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'phase5-mcp-config-'));
+  const dir = mkdtempSync(join(tmpdir(), 'phase5-memory-mcp-'));
   const path = join(dir, 'mcp.json');
   writeFileSync(path, JSON.stringify({ mcpServers: {} }));
   return path;
@@ -65,7 +60,7 @@ function deps(): ServerDeps {
     mcpConfigPath: mcpConfigPath(),
     mcpMountStatus: createMcpMountStatus(),
     mountOne: async () => ({ outcome: 'mounted' }),
-    memoryStore: unusedMemoryStore,
+    memoryStore: fakeMemoryStore,
   };
 }
 
@@ -74,7 +69,6 @@ function authGet(path: string): Request {
     headers: { Authorization: `Bearer ${TOKEN}`, Host: 'localhost:0' },
   });
 }
-
 function authPost(path: string, body: unknown): Request {
   return new Request(`http://localhost:0${path}`, {
     method: 'POST',
@@ -87,47 +81,58 @@ function authPost(path: string, body: unknown): Request {
   });
 }
 
-test('GET /api/mcp, POST /api/mcp/add, POST /api/mcp/test-mount are wired', async () => {
+test('unauthenticated requests to all three memory routes are 401 (perimeter gate)', async () => {
   const fetch = buildFetch(deps());
-  expect((await fetch(authGet('/api/mcp'))).status).toBe(200);
-  const add = await fetch(
-    authPost('/api/mcp/add', { name: 'gh', server: { command: 'bun' } }),
-  );
-  expect(add.status).toBe(200);
-  const testMount = await fetch(
-    authPost('/api/mcp/test-mount', { name: 'gh' }),
-  );
-  expect(testMount.status).toBe(200);
-});
-
-test('/api/mcp routes are perimeter-gated (401 without a token)', async () => {
-  const fetch = buildFetch(deps());
-  const noAuth = (path: string, init: RequestInit = {}) =>
+  const noAuth = (path: string, init?: RequestInit): Request =>
     new Request(`http://localhost:0${path}`, {
       ...init,
-      headers: { ...init.headers, Host: 'localhost:0' },
+      headers: { Host: 'localhost:0', ...(init?.headers ?? {}) },
     });
-  expect((await fetch(noAuth('/api/mcp'))).status).toBe(401);
+  expect((await fetch(noAuth('/api/memory/spaces'))).status).toBe(401);
   expect(
     (
       await fetch(
-        noAuth('/api/mcp/add', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ name: 'gh', server: { command: 'bun' } }),
-        }),
+        noAuth('/api/memory/default/recall', { method: 'POST', body: '{}' }),
       )
     ).status,
   ).toBe(401);
   expect(
     (
       await fetch(
-        noAuth('/api/mcp/test-mount', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ name: 'gh' }),
-        }),
+        noAuth('/api/memory/default/ingest', { method: 'POST', body: '{}' }),
       )
     ).status,
   ).toBe(401);
+});
+
+test('GET /api/memory/spaces, POST recall + ingest are wired', async () => {
+  const fetch = buildFetch(deps());
+  const spacesRes = await fetch(authGet('/api/memory/spaces'));
+  expect(spacesRes.status).toBe(200);
+  expect(await spacesRes.json()).toEqual([{ name: 'default', chunkCount: 1 }]);
+
+  const recallRes = await fetch(
+    authPost('/api/memory/default/recall', { query: 'hi' }),
+  );
+  expect(recallRes.status).toBe(200);
+  expect(await recallRes.json()).toEqual([
+    { id: 'd#0', source: 'd.md', text: 'hi', score: 1 },
+  ]);
+
+  const ingestRes = await fetch(
+    authPost('/api/memory/default/ingest', { fileId: 'abc.md' }),
+  );
+  expect(ingestRes.status).toBe(200);
+  expect(await ingestRes.json()).toEqual({ chunks: 1, skipped: false });
+});
+
+test(':space param routes do not shadow the exact-match /api/memory/spaces route', async () => {
+  const fetch = buildFetch(deps());
+  // A literal space segment named "spaces" only collides if a sub-path like
+  // /recall or /ingest follows it — /api/memory/spaces itself is matched as
+  // the exact-string route first, per app.ts's registration order.
+  const res = await fetch(
+    authPost('/api/memory/spaces/recall', { query: 'hi' }),
+  );
+  expect(res.status).toBe(200);
 });

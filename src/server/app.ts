@@ -1,4 +1,5 @@
 import { explain } from '../errors/boundary.ts';
+import type { MemoryStore } from '../memory/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
@@ -21,6 +22,9 @@ import { handleMcpList } from './mcp/list.ts';
 import type { McpMountOne } from './mcp/mount-one.ts';
 import type { McpMountStatus } from './mcp/mount-status.ts';
 import { handleMcpTestMount } from './mcp/test-mount.ts';
+import { handleMemoryIngest } from './memory/ingest.ts';
+import { handleMemoryRecall } from './memory/recall.ts';
+import { handleMemorySpaces } from './memory/spaces.ts';
 import { handleModelList } from './models/list.ts';
 import type { RunModelPullTurn } from './models/pull.ts';
 import { handleModelPull } from './models/pull.ts';
@@ -75,6 +79,8 @@ export type ServerDeps = {
    *  field name must line up structurally like `runsRoot`/`runCrewTurn` do for
    *  the crew/workflow routes. */
   mountOne: McpMountOne;
+  /** The memory/RAG store engine-touching routes call into (Phase 5). */
+  memoryStore: MemoryStore;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -240,6 +246,30 @@ async function handleApi(
         }
         if (req.method === 'POST' && url.pathname === '/api/mcp/test-mount') {
           const res = await handleMcpTestMount(req, deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/memory/spaces') {
+          rec.status(200);
+          return handleMemorySpaces(deps);
+        }
+        // Checked as an exact match BEFORE the :space regexes below, so a
+        // literal space named "spaces" is unreachable via /recall/ingest
+        // sub-paths only — never a collision here since "spaces" has no
+        // further sub-path of its own.
+        const memRecall = url.pathname.match(
+          /^\/api\/memory\/([^/]+)\/recall$/,
+        );
+        if (req.method === 'POST' && memRecall?.[1]) {
+          const res = await handleMemoryRecall(req, deps, memRecall[1]);
+          rec.status(res.status);
+          return res;
+        }
+        const memIngest = url.pathname.match(
+          /^\/api\/memory\/([^/]+)\/ingest$/,
+        );
+        if (req.method === 'POST' && memIngest?.[1]) {
+          const res = await handleMemoryIngest(req, deps, memIngest[1]);
           rec.status(res.status);
           return res;
         }
