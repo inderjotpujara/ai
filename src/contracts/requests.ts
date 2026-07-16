@@ -142,10 +142,26 @@ export const MemoryRecallRequestSchema = z.object({
 export type MemoryRecallRequest = z.infer<typeof MemoryRecallRequestSchema>;
 
 /** `POST /api/mcp/add` body (spec §4.2.6) — the raw `mcpServers.<name>` value,
- *  mirroring `PackEntry.server` (`src/mcp/types.ts:84`). */
+ *  mirroring `PackEntry.server` (`src/mcp/types.ts:84`). Bounded the same way
+ *  `BuilderBuildRequestSchema.need` bounds its perimeter (Phase 4): `name` has
+ *  no existing length convention elsewhere in `src/mcp/`, so `.max(128)` is a
+ *  generous-but-finite cap; `server` gets a `.superRefine` on its serialized
+ *  size (not a keyed-count check — a server value can legitimately have a few
+ *  keys with one huge one, e.g. a long `args` array or `env` blob) capped at
+ *  the same `20_000`-char perimeter as `BuilderBuildRequestSchema.need`, so a
+ *  single `POST /api/mcp/add` can't grow/wedge the shared `mcp.json` that
+ *  `doWrite` (`src/mcp/write.ts`) `JSON.stringify`s it into (Phase 5 T22
+ *  review: unbounded input to a shared persistent file). */
 export const McpAddRequestSchema = z.object({
-  name: z.string().min(1),
-  server: z.record(z.string(), z.unknown()),
+  name: z.string().min(1).max(128),
+  server: z.record(z.string(), z.unknown()).superRefine((server, ctx) => {
+    if (JSON.stringify(server).length > 20_000) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'server value exceeds 20,000-character serialized size cap',
+      });
+    }
+  }),
 });
 export type McpAddRequest = z.infer<typeof McpAddRequestSchema>;
 

@@ -44,6 +44,22 @@ test('McpAddRequestSchema accepts a raw server value', () => {
   expect(r.name).toBe('filesystem');
 });
 
+test('McpAddRequestSchema rejects an over-long name (resource-exhaustion bound)', () => {
+  const result = McpAddRequestSchema.safeParse({
+    name: 'x'.repeat(129),
+    server: { command: 'npx' },
+  });
+  expect(result.success).toBe(false);
+});
+
+test('McpAddRequestSchema rejects an over-large server blob (resource-exhaustion bound)', () => {
+  const result = McpAddRequestSchema.safeParse({
+    name: 'filesystem',
+    server: { env: { PAYLOAD: 'x'.repeat(20_001) } },
+  });
+  expect(result.success).toBe(false);
+});
+
 test('ModelListResponseSchema + BuilderRegistryListResponseSchema wrap items', () => {
   expect(ModelListResponseSchema.parse({ items: [] }).items).toEqual([]);
   expect(
