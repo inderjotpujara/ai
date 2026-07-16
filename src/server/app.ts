@@ -1,5 +1,11 @@
 import { explain } from '../errors/boundary.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
+import type { RunBuilderTurn } from './builders/build.ts';
+import { handleBuilderBuild } from './builders/build.ts';
+import {
+  handleBuilderAgentList,
+  handleBuilderCrewList,
+} from './builders/list.ts';
 import { handleChat } from './chat/handler.ts';
 import type { RunChatTurn } from './chat/run-turn.ts';
 import type { ConsentRegistry } from './consent/registry.ts';
@@ -45,6 +51,8 @@ export type ServerDeps = {
   /** Launches a workflow run to completion under its own `withMcpRun` scope
    *  (Phase 4, Task 11/12). */
   runWorkflowTurn: RunWorkflowTurn;
+  /** Launches the agent/crew/workflow guided-build flow (Phase 5, Task 11/12). */
+  runBuilderTurn: RunBuilderTurn;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -148,6 +156,18 @@ async function handleApi(
         if (req.method === 'GET' && url.pathname === '/api/workflows') {
           rec.status(200);
           return handleWorkflowList();
+        }
+        if (req.method === 'GET' && url.pathname === '/api/builders/agents') {
+          rec.status(200);
+          return handleBuilderAgentList();
+        }
+        if (req.method === 'GET' && url.pathname === '/api/builders/crews') {
+          rec.status(200);
+          return handleBuilderCrewList();
+        }
+        if (req.method === 'POST' && url.pathname === '/api/builders/build') {
+          rec.status(200);
+          return handleBuilderBuild(req, deps);
         }
         // /run sub-path matches MUST precede the bare-:name/:id detail
         // matches below — same ordering discipline as the stream-before-

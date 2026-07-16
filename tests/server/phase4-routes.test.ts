@@ -31,6 +31,7 @@ function deps(): ServerDeps {
     runsRoot,
     runCrewTurn: async () => {},
     runWorkflowTurn: async () => {},
+    runBuilderTurn: async () => ({ kind: 'declined' }),
   };
 }
 

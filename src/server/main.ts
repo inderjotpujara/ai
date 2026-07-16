@@ -5,6 +5,7 @@ import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createConsentRegistry } from './consent/registry.ts';
 import {
+  createRealRunBuilderTurn,
   createRealRunCrewTurn,
   createRealRunWorkflowTurn,
 } from './launch-turns.ts';
@@ -60,6 +61,7 @@ export function startWebServer(opts: StartOptions = {}): {
   const runChatTurn = createRealRunChatTurn(createLazyEngine(runsRoot));
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
+  const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
   const consent = createConsentRegistry();
   // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
   // across the per-request `/api/chat` run lifecycle since the upload and
@@ -86,6 +88,7 @@ export function startWebServer(opts: StartOptions = {}): {
     runsRoot,
     runCrewTurn,
     runWorkflowTurn,
+    runBuilderTurn,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

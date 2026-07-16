@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
+import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import type { RunCrewTurn } from '../../src/server/crews/run.ts';
@@ -25,6 +26,9 @@ const noCrewRun: RunCrewTurn = async () => {
 const noWorkflowRun: RunWorkflowTurn = async () => {
   throw new Error('unused');
 };
+const noBuilderRun: RunBuilderTurn = async () => {
+  throw new Error('unused');
+};
 const deps: ServerDeps = {
   token: TOKEN,
   policy,
@@ -36,6 +40,7 @@ const deps: ServerDeps = {
   runsRoot,
   runCrewTurn: noCrewRun,
   runWorkflowTurn: noWorkflowRun,
+  runBuilderTurn: noBuilderRun,
 };
 
 let server: ReturnType<typeof Bun.serve>;

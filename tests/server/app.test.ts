@@ -3,6 +3,7 @@ import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
+import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import type { RunCrewTurn } from '../../src/server/crews/run.ts';
@@ -29,6 +30,11 @@ const unusedRunCrewTurn: RunCrewTurn = async () => {
 const unusedRunWorkflowTurn: RunWorkflowTurn = async () => {
   throw new Error('runWorkflowTurn should not be invoked by these tests');
 };
+// None of these tests exercise POST /api/builders/build either — same
+// throwing-stub discipline as the other launch turns above.
+const unusedRunBuilderTurn: RunBuilderTurn = async () => {
+  throw new Error('runBuilderTurn should not be invoked by these tests');
+};
 const deps: ServerDeps = {
   token: TOKEN,
   policy,
@@ -40,6 +46,7 @@ const deps: ServerDeps = {
   runsRoot,
   runCrewTurn: unusedRunCrewTurn,
   runWorkflowTurn: unusedRunWorkflowTurn,
+  runBuilderTurn: unusedRunBuilderTurn,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -109,6 +116,7 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     runsRoot,
     runCrewTurn: unusedRunCrewTurn,
     runWorkflowTurn: unusedRunWorkflowTurn,
+    runBuilderTurn: unusedRunBuilderTurn,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -149,6 +157,7 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     runsRoot,
     runCrewTurn: unusedRunCrewTurn,
     runWorkflowTurn: unusedRunWorkflowTurn,
+    runBuilderTurn: unusedRunBuilderTurn,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -244,6 +253,7 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     runsRoot,
     runCrewTurn: unusedRunCrewTurn,
     runWorkflowTurn: unusedRunWorkflowTurn,
+    runBuilderTurn: unusedRunBuilderTurn,
   };
   const symlinkServer = Bun.serve({
     port: 0,
