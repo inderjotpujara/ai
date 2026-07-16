@@ -197,3 +197,94 @@ tests/server/mcp-test-mount.test.ts` → 139 pass / 0 fail; `bun test tests/serv
 → 163 pass / 0 fail. Files: `src/run/run-dto.ts`, `src/contracts/enums.ts`,
 `src/contracts/requests.ts`, `src/server/mcp/test-mount.ts`, `src/mcp/mcp-dto.ts`
 + tests + `docs/architecture.md`, `docs/ROADMAP.md`. No `web/**` touched.
+
+## Final-review fix wave (Fixer 2) — WEB
+
+**Finding #2 (IMPORTANT) — shared POST-SSE contract had no error lane.** Both
+`postSseStream` call sites (`useBuildEvents`, `useMcpTestMount`) validate every
+SSE frame against a zod wire union before folding it. Neither union had a
+member for the AI-SDK UI-message-stream error part
+(`{ type: 'error', errorText: string }`) that `createUIMessageStream`'s
+`onError` in `src/server/builders/build.ts` / `src/server/mcp/test-mount.ts`
+emits when `execute` rejects (server restart mid-stream, a `createRun` failure,
+etc. — confirmed the exact shape by reading `ai`'s `index.d.ts`). Missing that
+member meant `schema.parse` threw INSIDE the fold loop and the `for await`
+simply died — no state update, no error, tab just froze.
+
+Fixed end to end in both hooks (`web/src/features/builders/use-build-events.ts`,
+`web/src/features/library/use-mcp-test-mount.ts`):
+1. Added `ErrorFrameSchema = { type: z.literal('error'), errorText: z.string() }`
+   to `BuilderWireFrameSchema` / `McpTestMountWireFrameSchema`, and to the
+   logical `BuilderFrame` / `McpTestMountFrame` unions (passed through
+   `unwrapWireFrame` unchanged, same as the other unenveloped parts).
+2. `foldBuildFrame` / `foldMcpTestMountFrame` gained an `'error'` case: sets
+   `state.error = frame.errorText`, `done: true`, clears `pendingConfirm`.
+3. `start()` in both hooks now wraps its `for await` in try/catch: a
+   thrown/rejected stream (network drop before the first frame, a non-2xx
+   response, a schema mismatch) is caught INSIDE the hook and folded into the
+   same `error` field — `start()` itself never rejects, so no call site can
+   leak an unhandled rejection regardless of whether it awaits/catches.
+4. Call sites still wrap the call defensively and now render the error via
+   the existing `role="alert"` idiom (T18/T29 precedent):
+   `builder-wizard.tsx` (wrapped in `RegionErrorBoundary`, new `{error &&
+   <p role="alert">}`), `mcp-tab.tsx` (`start(s.name).catch(() => {})` +
+   `{state.error && <p role="alert">}`), `models-tab.tsx` (see minor #10 —
+   `handlePull` now has its own try/catch + `launchError` alert).
+
+**Minor #4** — `foldBuildFrame`'s `RunEnd` case never cleared `pendingConfirm`
+(mirroring `foldMcpTestMountFrame`'s terminal `data-mcp-server` clear); fixed
+— both `RunEnd` and `data-build-result` now clear it.
+
+**Minor #5** — both `respond()`s called `createSseTransport().respond()`
+INSIDE a `setState` updater; under StrictMode (`web/src/main.tsx`) the updater
+runs twice, double-POSTing (2nd 404s, unhandled rejection). Fixed in both
+hooks: `respond()` now reads `pendingConfirm`/`runId` from the callback's own
+closure (via `useCallback` deps), clears state with a separate pure updater,
+then fires the POST exactly once outside any updater.
+
+**Minor #10** — `models-tab.tsx`'s `usePullWatch` mapped every stream end/error
+to `done: true`, so a FAILED pull rendered "Done". Fixed: (a) a `model.pull`
+root span (`src/telemetry/spans.ts`'s `inSpan`) closing with `SpanStatus.Error`
+now sets `failed: true`; (b) the stream's own catch branch now sets
+`failed: true` too (previously only `done`). `ModelRow` renders `Failed` before
+falling back to percent/Done/0%. Also added a `launchError` state + catch
+around `handlePull`'s own `apiFetch('/models/pull', ...)` call (was unguarded —
+the Pull button went silently inert on a rejected launch).
+
+**Minor #8** — `mcp-tab.tsx` used `key={line}` for narration lines, colliding
+on duplicate identical lines (e.g. two "warn: ..." retries). Switched to the
+existing index-key + `biome-ignore` idiom already used in
+`builder-wizard.tsx` (`key={i}`, append-only list).
+
+**Tests added** (vitest, `await`/`waitFor`-driven, no sleeps):
+- `use-build-events.test.ts`: fold clears `pendingConfirm` on `RunEnd`; fold
+  turns an `error` frame into `{error, done: true, pendingConfirm: undefined}`;
+  integration test streaming a real `{"type":"error","errorText":"stream error: boom"}`
+  frame mid-stream → `result.current.error` set, `start()` resolves (no throw);
+  integration test against a 404 response → `error` set, `start()` resolves.
+- `use-mcp-test-mount.test.ts`: same three (fold-clears-confirm precedent
+  already existed for `data-mcp-server`; added fold-error-frame + both
+  mid-stream-error and rejected-stream integration tests).
+- `builder-wizard.test.tsx`: full component test — 500 response from
+  `/api/builders/build` → `getByRole('alert')` shows a "...failed..." message
+  instead of the wizard hanging.
+- `mcp-tab.test.tsx`: full component test — 500 response from
+  `/api/mcp/test-mount` after clicking "Test mount" → `getByRole('alert')`
+  shows the failure instead of the tab looking frozen.
+- `models-tab.test.tsx`: (a) a `model.pull` span with `status: 'error'` on the
+  run stream → progress cell shows "Failed", not "Done"; (b) a 500 from
+  `POST /api/models/pull` → `getByRole('alert')` shows an error, Pull button
+  isn't silently inert.
+
+**Gate:** root `bun run typecheck` clean · `cd web && bun run typecheck` clean ·
+`cd web && bun run test` → **39 files / 161 tests, all pass** (5 touched files
+account for 31 of those, 8 new); `bun run lint:file` on the 10 changed files →
+0 errors, 0 warnings (biome's `--write` fixed 3 pure-formatting nits before the
+final clean run — no logic changes from that pass).
+
+**Fix commit:** `9d62b67` — `fix(web): SSE error lane in builder/mcp folds +
+call-site catches + fold/respond fixes (Phase 5 final review)`. Files (10, all
+`web/**`): `use-build-events.ts`(+`.test.ts`), `use-mcp-test-mount.ts`
+(+`.test.ts`), `builder-wizard.tsx`(+`.test.tsx`), `mcp-tab.tsx`(+`.test.tsx`),
+`models-tab.tsx`(+`.test.tsx`). No non-`web/**` file edited (Fixer 1's lane
+left untouched).
