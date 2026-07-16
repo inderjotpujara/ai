@@ -102,6 +102,29 @@ test('a valid markdown-document upload (memory ingest) writes into the confined 
   expect(body.uploadId).toMatch(/^[0-9a-f]{32}\.md$/);
 });
 
+test('an empty content-type falls back to the .md name extension (browser quirk: text/markdown is unsniffed)', async () => {
+  const file = new File(['# Notes'], 'x.md', { type: '' });
+  const res = await handleUpload(uploadRequest(file), { uploadsDir });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { uploadId: string };
+  expect(body.uploadId).toMatch(/^[0-9a-f]{32}\.md$/);
+});
+
+test('an empty content-type falls back to the .txt name extension', async () => {
+  const file = new File(['hello'], 'x.txt', { type: '' });
+  const res = await handleUpload(uploadRequest(file), { uploadsDir });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { uploadId: string };
+  expect(body.uploadId).toMatch(/^[0-9a-f]{32}\.txt$/);
+});
+
+test('an empty content-type with a non-allowlisted name extension is still rejected with 400', async () => {
+  const file = new File(['MZ'], 'x.exe', { type: '' });
+  const res = await handleUpload(uploadRequest(file), { uploadsDir });
+  expect(res.status).toBe(400);
+  expect(readdirSync(uploadsDir)).toEqual([]);
+});
+
 test('an oversize upload is rejected with 400', async () => {
   const oversized = new Uint8Array(MAX_UPLOAD_BYTES + 1);
   const file = new File([oversized], 'big.png', { type: 'image/png' });

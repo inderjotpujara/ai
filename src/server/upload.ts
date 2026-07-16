@@ -30,6 +30,33 @@ const EXT_BY_MEDIA_TYPE: Record<string, string> = {
   'text/markdown': 'md',
 };
 
+/** Every extension `EXT_BY_MEDIA_TYPE` already accepts — the fallback below
+ *  may only resolve to one of THESE, never widen what's accepted. */
+const ACCEPTED_EXTS = new Set(Object.values(EXT_BY_MEDIA_TYPE));
+
+/**
+ * Resolve the server-side extension for an upload. Primarily keyed off
+ * `file.type`, but browsers report an EMPTY `file.type` for some extensions
+ * that have no registered MIME sniffing on the client (notably `.md` —
+ * `text/markdown` is not a browser-recognized type, so an `<input
+ * accept=".md,.txt">` file picker can hand back `type: ""`). In that case,
+ * fall back to the extension in the file's NAME — but only when it's already
+ * in `ACCEPTED_EXTS` (the same doc/image types above), so this never accepts
+ * a type the endpoint doesn't already support. The result only ever labels
+ * the server-minted random filename (`${randomBytes}.${ext}`); the client
+ * name is still never used for the write path itself.
+ */
+function resolveExt(file: Blob): string | undefined {
+  const byType = EXT_BY_MEDIA_TYPE[file.type];
+  if (byType) return byType;
+
+  const name = file instanceof File ? file.name : '';
+  const dot = name.lastIndexOf('.');
+  if (dot === -1) return undefined;
+  const nameExt = name.slice(dot + 1).toLowerCase();
+  return ACCEPTED_EXTS.has(nameExt) ? nameExt : undefined;
+}
+
 export type UploadDeps = { uploadsDir: string };
 
 /**
@@ -76,7 +103,7 @@ export async function handleUpload(
     return json({ error: 'invalid upload: missing file field' }, 400);
   }
 
-  const ext = EXT_BY_MEDIA_TYPE[file.type];
+  const ext = resolveExt(file);
   if (!ext) {
     return json(
       { error: `invalid upload: unsupported media type ${file.type}` },
