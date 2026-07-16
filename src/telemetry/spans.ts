@@ -165,6 +165,15 @@ export const ATTR = {
   // Chat feedback (Slice 30b Phase 2; Slice 31 consumes it for the eval loop)
   FEEDBACK_MESSAGE_ID: 'chat.feedback.message_id',
   FEEDBACK_RATING: 'chat.feedback.rating',
+  // Model pull (Slice 30b Phase 5, §7.2)
+  MODEL_PULL_RUNTIME: 'model.pull.runtime',
+  MODEL_PULL_MODEL_REF: 'model.pull.model_ref',
+  MODEL_PULL_OUTCOME: 'model.pull.outcome',
+  MODEL_PULL_PHASE: 'model.pull.progress.phase',
+  MODEL_PULL_PERCENT: 'model.pull.progress.percent',
+  MODEL_PULL_BYTES_COMPLETED: 'model.pull.progress.bytes_completed',
+  MODEL_PULL_BYTES_TOTAL: 'model.pull.progress.bytes_total',
+  MODEL_PULL_SPEED_BPS: 'model.pull.progress.speed_bytes_per_sec',
 } as const;
 
 export type ModelSelectInfo = {
@@ -698,6 +707,58 @@ export function withProvisionSpan<T>(
     span.setAttribute(ATTR.PROVISION_SNAPSHOT_FALLBACK, info.snapshotFallback);
     span.setAttribute(ATTR.PROVISION_RUNTIME, info.runtimes);
     return fn(span);
+  });
+}
+
+export type ModelPullSpanInfo = { runtime: string; modelRef: string };
+
+/** Root span for one model download (Slice 30b Phase 5, §7.2). Stays open for
+ *  the WHOLE download so `model.pull.progress` ticks (below) nest under it
+ *  via OTel active-context propagation — the same mechanism `withStepSpan`
+ *  relies on nesting under `crew.run`/`workflow.run`. The body reports the
+ *  terminal outcome via the returned recorder; a thrown `fn` marks the span
+ *  ERROR via `inSpan`'s own catch, same as every other root-span helper. */
+export function withModelPullSpan<T>(
+  info: ModelPullSpanInfo,
+  fn: (rec: { outcome: (o: string) => void }) => Promise<T>,
+): Promise<T> {
+  return inSpan('model.pull', async (span) => {
+    span.setAttribute(ATTR.MODEL_PULL_RUNTIME, info.runtime);
+    span.setAttribute(ATTR.MODEL_PULL_MODEL_REF, info.modelRef);
+    return fn({
+      outcome: (o) => span.setAttribute(ATTR.MODEL_PULL_OUTCOME, o),
+    });
+  });
+}
+
+export type PullProgressTick = {
+  phase: string;
+  percent: number | null;
+  bytesCompleted: number;
+  bytesTotal: number | null;
+  speedBytesPerSec: number | null;
+};
+
+/** One short-lived child span per `DownloadProgress` tick (§7.2's fix for
+ *  "nothing renders until the download finishes": `JsonlFileExporter` only
+ *  appends a span when THAT span closes, and `model.pull`'s root stays open
+ *  for the whole download). MUST be called from inside `withModelPullSpan`'s
+ *  `fn` (or a descendant of it) so active-context propagation nests it under
+ *  the open root. Opens and closes synchronously within one call; safe under
+ *  rapid/concurrent ticks (`inSpan`'s `finally { span.end() }` ends THIS
+ *  call's own span instance regardless of any other in-flight tick). */
+export function recordPullProgressTick(p: PullProgressTick): Promise<void> {
+  return inSpan('model.pull.progress', async (span) => {
+    span.setAttribute(ATTR.MODEL_PULL_PHASE, p.phase);
+    if (p.percent !== null)
+      span.setAttribute(ATTR.MODEL_PULL_PERCENT, p.percent);
+    span.setAttribute(ATTR.MODEL_PULL_BYTES_COMPLETED, p.bytesCompleted);
+    if (p.bytesTotal !== null) {
+      span.setAttribute(ATTR.MODEL_PULL_BYTES_TOTAL, p.bytesTotal);
+    }
+    if (p.speedBytesPerSec !== null) {
+      span.setAttribute(ATTR.MODEL_PULL_SPEED_BPS, p.speedBytesPerSec);
+    }
   });
 }
 
