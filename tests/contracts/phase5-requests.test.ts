@@ -33,6 +33,21 @@ test('MemoryRecallRequestSchema requires a query', () => {
   expect(() => MemoryRecallRequestSchema.parse({})).toThrow();
 });
 
+test('MemoryRecallRequestSchema rejects an over-long query (resource-exhaustion bound)', () => {
+  const result = MemoryRecallRequestSchema.safeParse({
+    query: 'x'.repeat(4_001),
+  });
+  expect(result.success).toBe(false);
+});
+
+test('MemoryRecallRequestSchema rejects an over-large topK (resource-exhaustion bound)', () => {
+  const result = MemoryRecallRequestSchema.safeParse({
+    query: 'what is the plan',
+    topK: 51,
+  });
+  expect(result.success).toBe(false);
+});
+
 test('McpAddRequestSchema accepts a raw server value', () => {
   const r = McpAddRequestSchema.parse({
     name: 'filesystem',

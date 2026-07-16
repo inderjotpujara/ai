@@ -133,11 +133,19 @@ export type ModelPullRequest = z.infer<typeof ModelPullRequestSchema>;
 /** `POST /api/memory/:space/recall` body (spec §4.2.5). `space` is a path
  *  param on the real route, not this body — kept here too (optional) so the
  *  schema is reusable if a future caller posts a bare query without a path
- *  param (e.g. an internal test harness). */
+ *  param (e.g. an internal test harness). Bounded the same way
+ *  `BuilderBuildRequestSchema.need`/`McpAddRequestSchema` bound their
+ *  perimeters (Phase 4/5): `query.max(4_000)` is generous for a natural-
+ *  language recall question (a full paragraph, not a document — well under
+ *  the `20_000` ceiling used for free-text bodies elsewhere) while still
+ *  finite; `topK.max(50)` caps how many ranked chunks a single recall can
+ *  request — `retrieve()` (`src/memory/retrieve.ts:74`) fetches
+ *  `topK * 4` candidates from LanceDB per call, so an unbounded `topK` is a
+ *  resource-exhaustion vector (Phase 5 T6 review: unbounded `query`/`topK`). */
 export const MemoryRecallRequestSchema = z.object({
-  query: z.string().min(1),
+  query: z.string().min(1).max(4_000),
   space: z.string().optional(),
-  topK: z.number().int().positive().optional(),
+  topK: z.number().int().positive().max(50).optional(),
 });
 export type MemoryRecallRequest = z.infer<typeof MemoryRecallRequestSchema>;
 
