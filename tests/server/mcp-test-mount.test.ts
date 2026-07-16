@@ -138,3 +138,67 @@ test('[ADVERSARIAL] the consent bridge genuinely suspends execute() until resolv
   }
   expect(askedOutcome).toBe('approved');
 });
+
+test('[REVIEW-FIX a] an abandoned/never-answered consent hits the wall-clock cap → DECLINE terminal (skipped), emits terminal + RunEnd, and execute completes (no hang)', async () => {
+  // Fail-closed wall-clock cap: force a tiny confirmWaitMs via the SAME env
+  // var `confirmWaitMs()` reads (T11), so the test doesn't wait ~15min.
+  const prev = process.env.AGENT_BUILDER_CONFIRM_WAIT_MS;
+  process.env.AGENT_BUILDER_CONFIRM_WAIT_MS = '20';
+  try {
+    const mcpConfigPath = writeConfig({
+      mcpServers: { gh: { command: 'bun' } },
+    });
+    // A consent registry whose port() NEVER settles — the human closed the
+    // tab. mountOne awaits ask(); the wall-clock cap must decline it.
+    let outcome: boolean | undefined;
+    const mountOne: McpMountOne = async (_entry, opts) => {
+      outcome = await opts.ask('Mount "gh"?'); // resolves to false on timeout
+      return outcome
+        ? { outcome: 'mounted', toolCount: 1 }
+        : { outcome: 'skipped', reason: 'consent timed out' };
+    };
+
+    const res = await handleMcpTestMount(req({ name: 'gh' }), {
+      runsRoot: tmpRunsRoot(),
+      mcpConfigPath,
+      mcpMountStatus: createMcpMountStatus(),
+      consent: createConsentRegistry(),
+      mountOne,
+    });
+
+    // If the cap didn't fire, res.text() would hang and bun's test timeout
+    // would fail this test — reaching this line proves execute() completed.
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(outcome).toBe(false); // timed-out consent settled as a DECLINE
+    expect(text).toContain('"outcome":"skipped"');
+    expect(text).toContain('"reason":"consent timed out"');
+    expect(text.match(/data-mcp-server/g)).toHaveLength(1); // terminal once
+    expect(text).toContain('data-run-end');
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_BUILDER_CONFIRM_WAIT_MS;
+    else process.env.AGENT_BUILDER_CONFIRM_WAIT_MS = prev;
+  }
+});
+
+test('[REVIEW-FIX b] a THROWING mount seam still emits a terminal data-mcp-server frame + RunEnd, exactly once', async () => {
+  const mcpConfigPath = writeConfig({ mcpServers: { gh: { command: 'bun' } } });
+  const mountOne: McpMountOne = async () => {
+    throw new Error('reg.close blew up');
+  };
+
+  const res = await handleMcpTestMount(req({ name: 'gh' }), {
+    runsRoot: tmpRunsRoot(),
+    mcpConfigPath,
+    mcpMountStatus: createMcpMountStatus(),
+    consent: createConsentRegistry(),
+    mountOne,
+  });
+
+  const text = await res.text();
+  expect(res.status).toBe(200); // never a 500 — the throw is caught
+  expect(text.match(/data-mcp-server/g)).toHaveLength(1); // terminal EXACTLY once
+  expect(text).toContain('"status":"skipped"');
+  expect(text).toContain('reg.close blew up'); // error surfaced as the reason
+  expect(text).toContain('data-run-end'); // run still reaches a terminal end
+});
