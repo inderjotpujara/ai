@@ -149,6 +149,17 @@ export const MemoryRecallRequestSchema = z.object({
 });
 export type MemoryRecallRequest = z.infer<typeof MemoryRecallRequestSchema>;
 
+/** `POST /api/memory/:space/ingest` body — the ALREADY-UPLOADED file's opaque
+ *  id (the Phase-2 `/api/upload` id pattern, `<32 hex>.ext`), never a raw
+ *  filesystem path (Phase 5 FORK-3: ingest reads only confined uploaded
+ *  bytes, mirroring the D17 fix that disabled `ingestMedia`'s server-side
+ *  `autoDetectPaths`). `.max(256)` bounds the string well above any real
+ *  upload id so an unbounded client value never reaches `confineToDir`/fs. */
+export const MemoryIngestRequestSchema = z.object({
+  fileId: z.string().min(1).max(256),
+});
+export type MemoryIngestRequest = z.infer<typeof MemoryIngestRequestSchema>;
+
 /** `POST /api/mcp/add` body (spec §4.2.6) — the raw `mcpServers.<name>` value,
  *  mirroring `PackEntry.server` (`src/mcp/types.ts:84`). Bounded the same way
  *  `BuilderBuildRequestSchema.need` bounds its perimeter (Phase 4): `name` has

@@ -81,12 +81,25 @@ test('a symlink planted inside the uploads dir cannot be used to read outside it
   expect(() => confineToDir('escape.png', uploadsDir)).toThrow();
 });
 
-test('a non-image media type is rejected with 400', async () => {
-  const file = new File(['plain text'], 'notes.txt', { type: 'text/plain' });
+test('an unsupported media type is rejected with 400', async () => {
+  // `text/plain`/`text/markdown` are now allow-listed (memory-ingest
+  // documents, Phase 5) — use a type that's still unsupported (no PDF/office
+  // parsing exists, per `store.ingest`'s `readFileSync(path, 'utf8')`).
+  const file = new File(['%PDF-1.4'], 'doc.pdf', { type: 'application/pdf' });
   const res = await handleUpload(uploadRequest(file), { uploadsDir });
 
   expect(res.status).toBe(400);
   expect(readdirSync(uploadsDir)).toEqual([]);
+});
+
+test('a valid markdown-document upload (memory ingest) writes into the confined dir with a .md extension', async () => {
+  const file = new File(['# Notes\n\nhello'], 'notes.md', {
+    type: 'text/markdown',
+  });
+  const res = await handleUpload(uploadRequest(file), { uploadsDir });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { uploadId: string };
+  expect(body.uploadId).toMatch(/^[0-9a-f]{32}\.md$/);
 });
 
 test('an oversize upload is rejected with 400', async () => {

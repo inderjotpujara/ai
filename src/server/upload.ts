@@ -23,6 +23,11 @@ const EXT_BY_MEDIA_TYPE: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/webp': 'webp',
   'image/gif': 'gif',
+  // Memory-ingest documents (Slice 30b Phase 5) — plain text/markdown only;
+  // `store.ingest` reads utf8 text (`src/memory/store.ts:121`), no PDF/office
+  // parsing exists yet.
+  'text/plain': 'txt',
+  'text/markdown': 'md',
 };
 
 export type UploadDeps = { uploadsDir: string };
