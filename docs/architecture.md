@@ -844,6 +844,7 @@ sequenceDiagram
     participant Mem as server/memory/{spaces,recall,ingest}.ts
 
     Browser->>Build: POST /api/builders/build {kind, need} (SSE)
+    Build-->>Browser: data-run-start {runId} (first frame)
     Build->>BuilderCore: runBuilderTurn → buildAgent or buildCrewOrWorkflow
     BuilderCore-->>Build: narration text-deltas + confirm/confirmReuse asks
     Build->>Consent: register promptId, await answer
@@ -865,6 +866,7 @@ sequenceDiagram
     Browser->>Mcp: POST /api/mcp/add {name, server}
     Mcp->>Mcp: Zod-validate → 400 | write.ts atomic write → re-read → 200 McpServerDTO
     Browser->>Mcp: POST /api/mcp/test-mount {name} (SSE)
+    Mcp-->>Browser: data-run-start {runId} (first frame)
     Mcp->>Consent: mountOne's ConsentDeps.ask bridged to ConfirmPort (isTTY forced true)
     Browser->>Mcp: POST /api/runs/:id/respond {promptId, value}
     Mcp-->>Browser: data-mcp-mount (progress) + data-confirm + data-mcp-server (terminal) + data-run-end
@@ -4401,11 +4403,15 @@ the same shape as Phases 3/4:
   `part.data`. Adversarially verified by two parallel Opus reviewers (lens A:
   concurrency/streaming — suspend/resume correctness, abort semantics; lens
   B: wire-contract/handler/security) — both "SOUND, could not refute."
-- **`GET /api/builders`** (`list.ts`) — browse the agent/crew/workflow
-  builder "registries" (really: the existing `agents/index.ts` +
-  `CREWS`/`WORKFLOWS` maps, projected the same read-only way Phase 4's
-  crew/workflow browse does) so the wizard can show what already exists
-  before proposing something new.
+- **`GET /api/builders/agents`** (`list.ts`, `handleBuilderAgentList`) and
+  **`GET /api/builders/crews`** (`list.ts`, `handleBuilderCrewList`) — browse
+  the agent/crew/workflow builder "registries" (really: the existing
+  `agents/index.ts` + `CREWS`/`WORKFLOWS` maps, projected the same read-only
+  way Phase 4's crew/workflow browse does, as bare name lists via
+  `BuilderRegistryListResponseSchema`) so the wizard can show what already
+  exists before proposing something new. (There is no `GET /api/builders`
+  root route — the two sub-routes are the only wired builder-browse
+  endpoints, both in `list.ts`, wired in `app.ts`.)
 - **`GET /api/models`** (`list.ts`/`discover.ts`) — installed + pullable
   inventory: `buildRegistry()` (provider-agnostic, all four runtimes, no
   hardcoded model names) fit-ranked via the existing `fitAndRank` (§13);

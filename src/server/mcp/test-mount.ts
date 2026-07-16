@@ -75,12 +75,19 @@ export async function handleMcpTestMount(
         writer.write({ type: e.type, data: e, transient: true });
       events({ type: StatusEventType.RunStart, runId });
 
+      // The run's terminal outcome must reflect the ACTUAL mount result
+      // ('mounted'/'skipped'/'dormant'), mirroring the builder route's
+      // `outcome: result.kind` (`src/server/builders/build.ts:127`) — a flat
+      // 'done' on every path (including a declined/timed-out/thrown mount)
+      // mislabels a failed mount as a success in the Runs list.
+      let runOutcome = 'done';
       await withRunTelemetry({ runsRoot: deps.runsRoot, runId }, async () => {
         if (!entry) {
           // Reachable only when `dormant` matched above (the 404 guard rules
           // out "neither"); the `if (dormant)` both documents that and lets TS
           // narrow it without a non-null assertion.
           if (dormant) {
+            runOutcome = 'dormant';
             events({
               type: StatusEventType.McpMount,
               server: body.name,
@@ -130,6 +137,7 @@ export async function handleMcpTestMount(
         } catch (err) {
           reason = err instanceof Error ? err.message : String(err);
         }
+        runOutcome = status;
         deps.mcpMountStatus.record(entry.name, status, reason);
         events({
           type: StatusEventType.McpMount,
@@ -143,7 +151,7 @@ export async function handleMcpTestMount(
         });
       });
 
-      events({ type: StatusEventType.RunEnd, runId, outcome: 'done' });
+      events({ type: StatusEventType.RunEnd, runId, outcome: runOutcome });
     },
     onError: (err) =>
       `stream error: ${err instanceof Error ? err.message : String(err)}`,

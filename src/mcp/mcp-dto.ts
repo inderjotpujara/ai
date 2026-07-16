@@ -68,8 +68,11 @@ export function mapMcpEntryToDto(
 /** A dormant entry never reached `ensureConsent`/`mount` (env vars unset), so
  *  it's always `authKind: Static` here — an OAuth dormant entry would need
  *  its raw `auth` field, which `McpConfig.dormant` doesn't retain (only
- *  `kind`, Task 19); this is a documented, harmless simplification since a
- *  dormant row's Test-Mount action is disabled in the web UI anyway. */
+ *  `kind`, Task 19); this is a documented, harmless simplification. Test-Mount
+ *  on a dormant row IS enabled in the web UI: the server matches the dormant
+ *  entry and emits its terminal `data-mcp-server` frame (`status: dormant`)
+ *  via `handleMcpTestMount`'s dormant branch — the row just can't reach an
+ *  OAuth path, which is why `authKind` is unconditionally Static. */
 export function mapMcpDormantToDto(
   d: McpConfig['dormant'][number],
 ): McpServerDTO {

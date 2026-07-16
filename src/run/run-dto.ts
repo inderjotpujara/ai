@@ -25,9 +25,14 @@ const NANOS_PER_MS = 1e6;
 const OTEL_STATUS_ERROR = 2;
 
 /** Root span names that anchor a run: an agent/crew/workflow run, an
- *  agent/crew build (Phase 5), or a model pull (Phase 5). Recognizing all
- *  six is what keeps a finished build/pull from reading as perpetually
- *  in-flight (spec §7.2). */
+ *  agent/crew build (Phase 5), a model pull (Phase 5), a one-off MCP
+ *  test-mount (`mcp.mount`, Phase 5 final review), or a memory recall/ingest
+ *  (`memory.recall`/`memory.ingest`, Phase 5 final review). Recognizing every
+ *  ephemeral-run root is what keeps a finished build/pull/test-mount/recall/
+ *  ingest from reading as perpetually in-flight (spec §7.2): an unrecognized
+ *  root leaves `runRootSummary` reporting lifecycle Running / durationMs 0
+ *  forever, so the run leaves a ghost "running" row in `GET /api/runs` whose
+ *  live-tail never stops. */
 const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
   'agent.run',
   'crew.run',
@@ -35,13 +40,17 @@ const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
   'agent.build',
   'crew.build',
   'model.pull',
+  'mcp.mount',
+  'memory.recall',
+  'memory.ingest',
 ]);
 
 /** Derive what a run IS from the names of its root spans. A crew/workflow
  *  root wins over an agent root (a crew nests agent runs); a build/pull root
  *  is checked next (these never co-occur with a run root in the same
- *  process); everything else (chat's ui.stream, or no recognized root) is
- *  Chat. */
+ *  process); the ephemeral test-mount (`mcp.mount`) and memory
+ *  (`memory.recall`/`memory.ingest`) roots map to their own kinds; everything
+ *  else (chat's ui.stream, or no recognized root) is Chat. */
 export function deriveRunKind(rootSpanNames: string[]): RunKind {
   if (rootSpanNames.includes('crew.run')) return RunKind.Crew;
   if (rootSpanNames.includes('workflow.run')) return RunKind.Workflow;
@@ -49,6 +58,9 @@ export function deriveRunKind(rootSpanNames: string[]): RunKind {
   if (rootSpanNames.includes('crew.build')) return RunKind.Build;
   if (rootSpanNames.includes('agent.build')) return RunKind.Build;
   if (rootSpanNames.includes('model.pull')) return RunKind.Pull;
+  if (rootSpanNames.includes('mcp.mount')) return RunKind.Mcp;
+  if (rootSpanNames.includes('memory.recall')) return RunKind.Memory;
+  if (rootSpanNames.includes('memory.ingest')) return RunKind.Memory;
   return RunKind.Chat;
 }
 

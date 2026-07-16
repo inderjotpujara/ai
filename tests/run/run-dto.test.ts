@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RunDtoSchema } from '../../src/contracts/dto.ts';
-import { RunLifecycle, SpanStatus } from '../../src/contracts/enums.ts';
+import {
+  RunKind,
+  RunLifecycle,
+  SpanStatus,
+} from '../../src/contracts/enums.ts';
 import { mapRunToDto } from '../../src/run/run-dto.ts';
 import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
 
@@ -344,6 +348,69 @@ test('schema-invalid degrade line is skipped; run still maps + validates', async
     attempts: 2,
   });
   expect(parsed.degraded).toBe(true);
+});
+
+// Phase 5 final-review regression (Fable's repro): a COMPLETED memory.recall
+// run must resolve to a terminal lifecycle (Done) with a real duration + the
+// Memory kind — NOT a perpetual "running" ghost row whose live-tail never
+// stops. Before RUN_ROOT_NAMES/deriveRunKind recognized `memory.recall`, its
+// root was unrecognized so runRootSummary read Running / durationMs 0 forever
+// and the kind fell back to Chat.
+test('[FINAL-REVIEW REGRESSION] completed memory.recall run → Done + real duration + Memory kind, not perpetual Running', async () => {
+  await writeRun('run-recall', [
+    span({
+      name: 'memory.recall',
+      spanId: 'm',
+      startUnixNano: 5_000_000_000,
+      durationMs: 17,
+      attributes: { 'memory.space': 'default', 'memory.returned': 3 },
+    }),
+    span({
+      name: 'memory.embed',
+      spanId: 'e',
+      parentSpanId: 'm',
+      startUnixNano: 5_001_000_000,
+      durationMs: 4,
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-recall');
+  expect(dto?.lifecycle).toBe(RunLifecycle.Done);
+  expect(dto?.lifecycle).not.toBe(RunLifecycle.Running);
+  expect(dto?.durationMs).toBe(17);
+  expect(dto?.kind).toBe(RunKind.Memory);
+  RunDtoSchema.parse(dto);
+});
+
+test('[FINAL-REVIEW] completed memory.ingest run → Done + Memory kind', async () => {
+  await writeRun('run-ingest', [
+    span({
+      name: 'memory.ingest',
+      spanId: 'i',
+      startUnixNano: 6_000_000_000,
+      durationMs: 25,
+      attributes: { 'memory.space': 'default', 'memory.source': 'notes.md' },
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-ingest');
+  expect(dto?.lifecycle).toBe(RunLifecycle.Done);
+  expect(dto?.durationMs).toBe(25);
+  expect(dto?.kind).toBe(RunKind.Memory);
+});
+
+test('[FINAL-REVIEW] completed mcp.mount (test-mount) run → Done + Mcp kind', async () => {
+  await writeRun('run-mount', [
+    span({
+      name: 'mcp.mount',
+      spanId: 'm',
+      startUnixNano: 7_000_000_000,
+      durationMs: 8,
+      attributes: { 'mcp.server.count': 1, 'mcp.tool.count': 3 },
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-mount');
+  expect(dto?.lifecycle).toBe(RunLifecycle.Done);
+  expect(dto?.durationMs).toBe(8);
+  expect(dto?.kind).toBe(RunKind.Mcp);
 });
 
 test('run tokens sum across multiple gen spans; token-less spans omit tokens', async () => {

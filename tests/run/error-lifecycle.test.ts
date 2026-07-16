@@ -55,13 +55,13 @@ test('mapRunToDto: error.json + NO spans.jsonl at all → terminal Failed, outco
   expect(dto?.artifacts.map((a) => a.name)).toContain('error.json');
 });
 
-test('mapRunToDto: error.json + spans.jsonl with only a non-root span (mcp.mount) → terminal Failed, outcome=error', async () => {
+test('mapRunToDto: error.json + spans.jsonl with only a non-root span (agent.delegation) → terminal Failed, outcome=error', async () => {
   const dir = await writeErrorJson('run-early-2');
   await writeSpans(dir, [
     span({
-      name: 'mcp.mount',
+      name: 'agent.delegation',
       spanId: 'm1',
-      attributes: { 'mcp.server': 'fs' },
+      attributes: { 'agent.delegation.target': 'researcher' },
     }),
   ]);
   const dto = await mapRunToDto(root, 'run-early-2');
@@ -88,14 +88,14 @@ test('mapRunToDto: a completed crew.run root wins over a coincidental error.json
 test('mapRunToDto: an in-flight run with no error.json stays Running (unaffected)', async () => {
   const dir = join(root, 'run-inflight');
   await mkdir(dir, { recursive: true });
-  await writeSpans(dir, [span({ name: 'mcp.mount', spanId: 'm1' })]);
+  await writeSpans(dir, [span({ name: 'agent.delegation', spanId: 'm1' })]);
   const dto = await mapRunToDto(root, 'run-inflight');
   expect(dto?.lifecycle).toBe(RunLifecycle.Running);
 });
 
 test('summarizeRunListItem: error.json + spans.jsonl with only a non-root span → terminal Failed, outcome=error', async () => {
   const dir = await writeErrorJson('run-early-list');
-  await writeSpans(dir, [span({ name: 'mcp.mount', spanId: 'm1' })]);
+  await writeSpans(dir, [span({ name: 'agent.delegation', spanId: 'm1' })]);
   const item = await summarizeRunListItem(root, 'run-early-list');
   expect(item?.lifecycle).toBe(RunLifecycle.Failed);
   expect(item?.outcome).toBe('error');
@@ -117,7 +117,7 @@ test('summarizeRunListItem: a stale cached Running is rescued to Failed when err
   // key never invalidates; a cached Running item would otherwise stick forever.
   const dir = join(root, 'run-stale-cache');
   await mkdir(dir, { recursive: true });
-  await writeSpans(dir, [span({ name: 'mcp.mount', spanId: 'm1' })]);
+  await writeSpans(dir, [span({ name: 'agent.delegation', spanId: 'm1' })]);
   const first = await summarizeRunListItem(root, 'run-stale-cache');
   expect(first?.lifecycle).toBe(RunLifecycle.Running); // caches Running
   // No spans change — only error.json is added.

@@ -105,10 +105,14 @@ export enum CrewProcess {
   Hierarchical = 'hierarchical',
 }
 
-/** What a run IS (chat/agent/crew/workflow/build/pull), derived by the mapper
- *  from the run's root span name. Distinct from RunOrigin (HOW a run was
- *  triggered). Build/Pull added Slice 30b Phase 5 — contract-owned, no engine
- *  mirror needed (see `deriveRunKind`, Task 2). */
+/** What a run IS (chat/agent/crew/workflow/build/pull/mcp/memory), derived by
+ *  the mapper from the run's root span name. Distinct from RunOrigin (HOW a run
+ *  was triggered). Build/Pull added Slice 30b Phase 5; Mcp/Memory added in the
+ *  Phase 5 final review to recognize the ephemeral runs minted by
+ *  `POST /api/mcp/test-mount` (`mcp.mount` root) and
+ *  `POST /api/memory/:space/{recall,ingest}` (`memory.recall`/`memory.ingest`
+ *  roots) — without them those runs read as perpetually Running. All are
+ *  contract-owned, no engine mirror needed (see `deriveRunKind`, Task 2). */
 export enum RunKind {
   Chat = 'chat',
   Agent = 'agent',
@@ -116,6 +120,8 @@ export enum RunKind {
   Workflow = 'workflow',
   Build = 'build',
   Pull = 'pull',
+  Mcp = 'mcp',
+  Memory = 'memory',
 }
 
 /** Wire mirror of `src/verified-build/types.ts` VerifiedLevel (isomorphic

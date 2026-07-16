@@ -26,6 +26,13 @@ function tmpRunsRoot(): string {
   return mkdtempSync(join(tmpdir(), 'mcp-testmount-runs-'));
 }
 
+/** Pull the `outcome` off the terminal `data-run-end` SSE frame (minor #6). */
+function runEndOutcome(text: string): string | undefined {
+  const idx = text.indexOf('data-run-end');
+  if (idx === -1) return undefined;
+  return text.slice(idx).match(/"outcome":"([^"]+)"/)?.[1];
+}
+
 test('mounts an entry: streams mounting→mounted progress + the terminal DTO', async () => {
   const mcpConfigPath = writeConfig({ mcpServers: { gh: { command: 'bun' } } });
   const mountOne: McpMountOne = async () => ({
@@ -46,6 +53,9 @@ test('mounts an entry: streams mounting→mounted progress + the terminal DTO', 
   expect(text).toContain('"outcome":"mounted"');
   expect(text).toContain('data-mcp-server');
   expect(text).toContain('"status":"mounted"');
+  // FINAL-REVIEW minor #6: the terminal RunEnd carries the ACTUAL result
+  // outcome (not a flat 'done'), mirroring the builder route.
+  expect(runEndOutcome(text)).toBe('mounted');
 });
 
 test('a declined/failed mount reports "skipped" with a reason, never a 500', async () => {
@@ -67,6 +77,8 @@ test('a declined/failed mount reports "skipped" with a reason, never a 500', asy
   expect(res.status).toBe(200);
   expect(text).toContain('"outcome":"skipped"');
   expect(text).toContain('"reason":"consent not granted"');
+  // minor #6: a skipped mount ends the run as 'skipped', not 'done'.
+  expect(runEndOutcome(text)).toBe('skipped');
 });
 
 test('an unknown server name → 404, before any run is minted', async () => {
@@ -201,4 +213,5 @@ test('[REVIEW-FIX b] a THROWING mount seam still emits a terminal data-mcp-serve
   expect(text).toContain('"status":"skipped"');
   expect(text).toContain('reg.close blew up'); // error surfaced as the reason
   expect(text).toContain('data-run-end'); // run still reaches a terminal end
+  expect(runEndOutcome(text)).toBe('skipped'); // minor #6: not a flat 'done'
 });

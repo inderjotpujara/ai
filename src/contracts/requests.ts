@@ -2,9 +2,7 @@ import { z } from 'zod';
 import {
   CrewListItemDtoSchema,
   McpServerDtoSchema,
-  MemorySpaceDtoSchema,
   ModelInventoryDtoSchema,
-  RetrievalResultDtoSchema,
   RunListItemDtoSchema,
   WorkflowListItemDtoSchema,
 } from './dto.ts';
@@ -163,10 +161,13 @@ export type MemoryIngestRequest = z.infer<typeof MemoryIngestRequestSchema>;
 /** `POST /api/memory/:space/ingest` response — projects `MemoryStore.ingest`'s
  *  actual return shape (`src/memory/store.ts:119`, `Promise<{ chunks: number;
  *  skipped: boolean }>`) onto the wire, matching every sibling response
- *  schema's idiom (`UploadResponseSchema`, `RetrievalResponseSchema`,
- *  `MemorySpaceListResponseSchema`, `RunLaunchResponseSchema`) so T29's web
- *  Memory tab has a single source of truth to parse against instead of an
- *  untyped store passthrough (Phase 5 T27 review). */
+ *  schema's idiom (`UploadResponseSchema`, `RunLaunchResponseSchema`) so T29's
+ *  web Memory tab has a single source of truth to parse against instead of an
+ *  untyped store passthrough (Phase 5 T27 review). The `:space/recall` and
+ *  `:space/spaces` routes deliberately return BARE arrays per spec §4.2 (no
+ *  `{items}` wrapper), so no `RetrievalResponseSchema`/
+ *  `MemorySpaceListResponseSchema` exists — they were removed in the Phase 5
+ *  final review as orphan/unused. */
 export const MemoryIngestResponseSchema = z.object({
   chunks: z.number(),
   skipped: z.boolean(),
@@ -204,18 +205,6 @@ export const ModelListResponseSchema = z.object({
   items: z.array(ModelInventoryDtoSchema),
 });
 export type ModelListResponse = z.infer<typeof ModelListResponseSchema>;
-
-export const MemorySpaceListResponseSchema = z.object({
-  items: z.array(MemorySpaceDtoSchema),
-});
-export type MemorySpaceListResponse = z.infer<
-  typeof MemorySpaceListResponseSchema
->;
-
-export const RetrievalResponseSchema = z.object({
-  items: z.array(RetrievalResultDtoSchema),
-});
-export type RetrievalResponse = z.infer<typeof RetrievalResponseSchema>;
 
 export const McpListResponseSchema = z.object({
   items: z.array(McpServerDtoSchema),

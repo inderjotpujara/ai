@@ -15,3 +15,9 @@ test('deriveRunKind maps build/pull roots to RunKind.Build/RunKind.Pull (Phase 5
   expect(deriveRunKind(['crew.build'])).toBe(RunKind.Build);
   expect(deriveRunKind(['model.pull'])).toBe(RunKind.Pull);
 });
+
+test('deriveRunKind maps mcp.mount/memory.* roots to RunKind.Mcp/RunKind.Memory (Phase 5 final review)', () => {
+  expect(deriveRunKind(['mcp.mount'])).toBe(RunKind.Mcp);
+  expect(deriveRunKind(['memory.recall'])).toBe(RunKind.Memory);
+  expect(deriveRunKind(['memory.ingest'])).toBe(RunKind.Memory);
+});
