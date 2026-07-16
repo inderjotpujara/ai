@@ -39,6 +39,32 @@ test('resolves an uploaded fileId and calls store.ingest with the confined path'
   expect(await res.json()).toEqual({ chunks: 1, skipped: false });
 });
 
+test('projects the response through MemoryIngestResponseSchema — exactly {chunks, skipped}, no leaked store-internal fields', async () => {
+  const uploadsDir = mkdtempSync(join(tmpdir(), 'memory-ingest-uploads-'));
+  const runsRoot = mkdtempSync(join(tmpdir(), 'memory-ingest-runs-'));
+  writeFileSync(join(uploadsDir, 'abc123.md'), '# hi');
+  const fakeStore = {
+    // Simulate a store that returns extra internal fields — the handler
+    // must project down to exactly the DTO shape, not pass this through.
+    ingest: async () =>
+      ({ chunks: 2, skipped: false, internal: 'leak-me-not' }) as {
+        chunks: number;
+        skipped: boolean;
+      },
+  } as unknown as MemoryStore;
+
+  const res = await handleMemoryIngest(
+    ingestReq({ fileId: 'abc123.md' }),
+    { memoryStore: fakeStore, runsRoot, uploadsDir },
+    'default',
+  );
+
+  expect(res.status).toBe(200);
+  const parsed = (await res.json()) as Record<string, unknown>;
+  expect(parsed).toEqual({ chunks: 2, skipped: false });
+  expect(Object.keys(parsed).sort()).toEqual(['chunks', 'skipped']);
+});
+
 test('an unknown/escaping fileId 400s before any engine work (confineToDir guard)', async () => {
   const uploadsDir = mkdtempSync(join(tmpdir(), 'memory-ingest-uploads-'));
   const runsRoot = mkdtempSync(join(tmpdir(), 'memory-ingest-runs-'));

@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test';
-import { MemoryIngestRequestSchema } from '../../src/contracts/requests.ts';
+import {
+  MemoryIngestRequestSchema,
+  MemoryIngestResponseSchema,
+} from '../../src/contracts/requests.ts';
 
 test('MemoryIngestRequestSchema requires a fileId string', () => {
   expect(MemoryIngestRequestSchema.parse({ fileId: 'abc123.md' }).fileId).toBe(
@@ -14,4 +17,20 @@ test('MemoryIngestRequestSchema rejects an unbounded fileId (defense in depth)',
   expect(() =>
     MemoryIngestRequestSchema.parse({ fileId: 'a'.repeat(1_000) }),
   ).toThrow();
+});
+
+test('MemoryIngestResponseSchema accepts a valid ingest result', () => {
+  expect(
+    MemoryIngestResponseSchema.parse({ chunks: 3, skipped: false }),
+  ).toEqual({ chunks: 3, skipped: false });
+  expect(
+    MemoryIngestResponseSchema.parse({ chunks: 0, skipped: true }),
+  ).toEqual({ chunks: 0, skipped: true });
+});
+
+test('MemoryIngestResponseSchema rejects a malformed store response', () => {
+  expect(() =>
+    MemoryIngestResponseSchema.parse({ chunks: '3', skipped: false }),
+  ).toThrow();
+  expect(() => MemoryIngestResponseSchema.parse({ chunks: 3 })).toThrow();
 });

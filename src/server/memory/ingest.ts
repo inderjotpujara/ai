@@ -1,5 +1,8 @@
 import { withRunTelemetry } from '../../cli/with-run.ts';
-import { MemoryIngestRequestSchema } from '../../contracts/index.ts';
+import {
+  MemoryIngestRequestSchema,
+  MemoryIngestResponseSchema,
+} from '../../contracts/index.ts';
 import type { MemoryStore } from '../../memory/store.ts';
 import { newRunId } from '../../run/run-id.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
@@ -72,5 +75,11 @@ export async function handleMemoryIngest(
     { runsRoot: deps.runsRoot, runId },
     () => deps.memoryStore.ingest(path, { space, at: Date.now() }),
   );
-  return json(result, 200);
+  return json(
+    MemoryIngestResponseSchema.parse({
+      chunks: result.chunks,
+      skipped: result.skipped,
+    }),
+    200,
+  );
 }

@@ -160,6 +160,19 @@ export const MemoryIngestRequestSchema = z.object({
 });
 export type MemoryIngestRequest = z.infer<typeof MemoryIngestRequestSchema>;
 
+/** `POST /api/memory/:space/ingest` response — projects `MemoryStore.ingest`'s
+ *  actual return shape (`src/memory/store.ts:119`, `Promise<{ chunks: number;
+ *  skipped: boolean }>`) onto the wire, matching every sibling response
+ *  schema's idiom (`UploadResponseSchema`, `RetrievalResponseSchema`,
+ *  `MemorySpaceListResponseSchema`, `RunLaunchResponseSchema`) so T29's web
+ *  Memory tab has a single source of truth to parse against instead of an
+ *  untyped store passthrough (Phase 5 T27 review). */
+export const MemoryIngestResponseSchema = z.object({
+  chunks: z.number(),
+  skipped: z.boolean(),
+});
+export type MemoryIngestResponse = z.infer<typeof MemoryIngestResponseSchema>;
+
 /** `POST /api/mcp/add` body (spec §4.2.6) — the raw `mcpServers.<name>` value,
  *  mirroring `PackEntry.server` (`src/mcp/types.ts:84`). Bounded the same way
  *  `BuilderBuildRequestSchema.need` bounds its perimeter (Phase 4): `name` has
