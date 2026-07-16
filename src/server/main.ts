@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
 import { RuntimeKind } from '../core/types.ts';
@@ -22,19 +22,65 @@ import { createRealMcpMountOne } from './mcp/mount-one.ts';
 import { createMcpMountStatus } from './mcp/mount-status.ts';
 import { mintSessionToken } from './security/token.ts';
 
+// The built web/ SPA (`cd web && bun run build`) lands at web/dist/, two
+// directories up from this file (src/server/ -> src/ -> repo root).
+const WEB_DIST_DIR = join(import.meta.dir, '..', '..', 'web', 'dist');
+const WEB_DIST_INDEX_PATH = join(WEB_DIST_DIR, 'index.html');
+
 /**
- * Minimal served page for Phase 1 (no web/ build yet). The token is injected as
- * `window.__AGENT_TOKEN__` so the future frontend reads it from the served HTML
- * rather than a network round-trip. Phase 1b replaces this with the Vite build.
+ * Reads the built web/dist/index.html, if it exists. Returns undefined (never
+ * throws) when the web/ app hasn't been built yet, so callers can cleanly
+ * fall back to the Phase-1 stub — keeps unbuilt/Ollama-free dev + tests
+ * working without a `web/dist` present.
  */
-export function renderIndexHtml(token: string): string {
+function readWebDistIndexHtml(): string | undefined {
+  try {
+    if (existsSync(WEB_DIST_INDEX_PATH)) {
+      return readFileSync(WEB_DIST_INDEX_PATH, 'utf8');
+    }
+  } catch {
+    // Fall through to the stub — a partially-written/unreadable dist index
+    // should never crash server boot.
+  }
+  return undefined;
+}
+
+// Matches the built SPA's ES module entry script tag, e.g.
+// `<script type="module" crossorigin src="/assets/index-XXXX.js"></script>`.
+const MODULE_SCRIPT_TAG = /<script\s+type="module"[^>]*>/i;
+
+/**
+ * Served index page. When `distIndexHtml` (the built web/dist/index.html) is
+ * given, the session token is injected as a `<script>` into its `<head>`,
+ * BEFORE the bundle's module script tag, so `window.__AGENT_TOKEN__` is
+ * defined before the app script runs — all of the dist HTML's existing tags
+ * (module script + stylesheet link) are preserved untouched. Without a dist
+ * index (the app hasn't been built), falls back to the minimal Phase-1 stub
+ * page used by Ollama-free/unbuilt dev and tests.
+ */
+export function renderIndexHtml(token: string, distIndexHtml?: string): string {
   // JSON.stringify does not escape `</`, so a token value could break out of
   // the <script> tag; escape `<` to a unicode escape before interpolating.
   const safeToken = JSON.stringify(token).replace(/</g, '\\u003c');
+  const tokenScript = `<script>window.__AGENT_TOKEN__=${safeToken};</script>`;
+  if (distIndexHtml !== undefined) {
+    if (MODULE_SCRIPT_TAG.test(distIndexHtml)) {
+      return distIndexHtml.replace(
+        MODULE_SCRIPT_TAG,
+        (match) => tokenScript + match,
+      );
+    }
+    // No module script found (unexpected build output shape) — still inject
+    // into <head> so the token is available, rather than silently dropping it.
+    return distIndexHtml.replace(
+      /<head(\s[^>]*)?>/i,
+      (match) => match + tokenScript,
+    );
+  }
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<title>AI Local Agent</title>' +
-    `<script>window.__AGENT_TOKEN__=${safeToken};</script>` +
+    tokenScript +
     '</head><body><div id="root"></div></body></html>'
   );
 }
@@ -113,12 +159,18 @@ export function startWebServer(opts: StartOptions = {}): {
       reranker: makeCrossEncoderReranker(),
     },
   );
+  // Serve the real built app when it exists (`cd web && bun run build`);
+  // fall back to the Phase-1 stub otherwise (unbuilt/Ollama-free dev + tests).
+  const distIndexHtml = readWebDistIndexHtml();
+  const staticDir =
+    opts.staticDir ?? (existsSync(WEB_DIST_DIR) ? WEB_DIST_DIR : undefined);
+
   const deps: ServerDeps = {
     token,
     policy,
     recordIo,
-    staticDir: opts.staticDir,
-    indexHtml: renderIndexHtml(token),
+    staticDir,
+    indexHtml: renderIndexHtml(token, distIndexHtml),
     runChatTurn,
     consent,
     uploadsDir,
