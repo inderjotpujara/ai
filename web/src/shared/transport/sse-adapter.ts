@@ -108,3 +108,45 @@ export function createSseTransport(): ChatTransport {
     },
   };
 }
+
+/**
+ * POST-body SSE stream (Phase 5): unlike `createSseTransport().stream()`
+ * (GET-only, hardcoded to `/api/runs/:id/stream` or `/api/chat`), the
+ * builder-build route (and, later, mcp-test-mount) is a POST that carries a
+ * JSON body and streams its response. Reuses the same frame reader
+ * (`readSseStream`) so the wire format stays identical; no `runId`-based path
+ * selection since the caller already knows its own path.
+ *
+ * The response is an AI-SDK UI-message stream (`createUIMessageStreamResponse`
+ * server-side — see `src/server/builders/build.ts`), which always terminates
+ * with a raw `data: [DONE]\n\n` sentinel line (`JsonToSseTransformStream`'s
+ * `flush`). That line is NOT JSON — `JSON.parse('[DONE]')` throws — so it is
+ * detected and skipped here rather than fed to `schema.parse`.
+ */
+export async function* postSseStream<T>(
+  path: string,
+  body: unknown,
+  schema: ZodType<T>,
+  signal?: AbortSignal,
+): AsyncGenerator<T & { eventId: string }> {
+  const res = await fetch(path, {
+    method: 'POST',
+    signal,
+    headers: {
+      Authorization: `Bearer ${sessionToken()}`,
+      Accept: 'text/event-stream',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) {
+    throw new ApiError(`stream request to ${path} failed`, res.status);
+  }
+  for await (const frame of readSseStream(res.body)) {
+    if (frame.data === '[DONE]') continue; // terminal sentinel, not a payload
+    const parsed = schema.parse(JSON.parse(frame.data));
+    yield { ...(parsed as object), eventId: frame.id ?? '' } as T & {
+      eventId: string;
+    };
+  }
+}

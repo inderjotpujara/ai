@@ -1,6 +1,7 @@
 import { SpanDtoSchema } from '@contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createSseTransport } from './sse-adapter.ts';
+import { z } from 'zod';
+import { createSseTransport, postSseStream } from './sse-adapter.ts';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -155,5 +156,86 @@ describe('createSseTransport stream() payload schema', () => {
     }
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ spanId: 's1', eventId: 's1' });
+  });
+});
+
+describe('postSseStream', () => {
+  function sseBody(
+    frames: { id?: string; data: unknown }[],
+  ): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    const text = frames
+      .map(
+        (f) =>
+          `${f.id ? `id: ${f.id}\n` : ''}data: ${JSON.stringify(f.data)}\n\n`,
+      )
+      .join('');
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(text));
+        controller.close();
+      },
+    });
+  }
+
+  it('POSTs a JSON body and yields parsed, schema-validated frames with eventId', async () => {
+    const FrameSchema = z.object({
+      type: z.string(),
+      value: z.number().optional(),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        expect(init.method).toBe('POST');
+        expect(JSON.parse(init.body as string)).toEqual({ need: 'x' });
+        return new Response(
+          sseBody([{ id: 'e1', data: { type: 'a', value: 1 } }]),
+          {
+            status: 200,
+          },
+        );
+      }),
+    );
+    const out: unknown[] = [];
+    for await (const frame of postSseStream(
+      '/api/builders/build',
+      { need: 'x' },
+      FrameSchema,
+    )) {
+      out.push(frame);
+    }
+    expect(out).toEqual([{ type: 'a', value: 1, eventId: 'e1' }]);
+    vi.unstubAllGlobals();
+  });
+
+  it('is [DONE]-tolerant: the trailing `data: [DONE]` sentinel (the AI-SDK UI-message-stream terminator, e.g. `createUIMessageStreamResponse`) is ignored, not JSON.parse-crashed', async () => {
+    const FrameSchema = z.object({
+      type: z.string(),
+      value: z.number().optional(),
+    });
+    const encoder = new TextEncoder();
+    const raw = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('id: e1\ndata: {"type":"a","value":1}\n\n'),
+        );
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(raw, { status: 200 })),
+    );
+    const out: unknown[] = [];
+    for await (const frame of postSseStream(
+      '/api/builders/build',
+      {},
+      FrameSchema,
+    )) {
+      out.push(frame);
+    }
+    expect(out).toEqual([{ type: 'a', value: 1, eventId: 'e1' }]);
+    vi.unstubAllGlobals();
   });
 });
