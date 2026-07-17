@@ -228,15 +228,14 @@ export async function handleChat(
           // spans already prove that round-trip is not instant).
           if (sessionId && deps.memoryStore) {
             const userText = lastUserMsg ? textOf(lastUserMsg) : '';
-            void deps.memoryStore.rememberOnce(
-              `user: ${userText}\nassistant: ${assistantText}`,
-              {
+            void deps.memoryStore
+              .rememberOnce(`user: ${userText}\nassistant: ${assistantText}`, {
                 space: CHAT_MEMORY_SPACE,
                 namespace: sessionId,
                 source: `chat:${sessionId}:${assistantMsgId}`,
                 at: Date.now(),
-              },
-            );
+              })
+              .catch(() => {});
           }
           rec.outcome(result.kind);
         } catch (err) {
