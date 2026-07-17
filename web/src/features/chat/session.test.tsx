@@ -82,29 +82,43 @@ describe('ChatArea session id (Slice 30b Phase 6, D2)', () => {
   it('rehydrates a stored sessionId on mount: GETs /api/sessions/:id and calls setMessages with the mapped transcript', async () => {
     const storedId = crypto.randomUUID();
     localStorage.setItem(SESSION_KEY, storedId);
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          id: storedId,
-          title: 'Old chat',
-          owner: 'local',
-          createdAt: 1,
-          updatedAt: 1,
-          messages: [
-            { id: 'm1', role: 'user', text: 'hello' },
-            { id: 'm2', role: 'assistant', text: 'hi there' },
-          ],
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
+    // Task T55: `SessionsSidebar` (AppShell) also fetches on mount
+    // (`/api/sessions?limit=10`), so (a) a single reused `Response` instance
+    // would throw "Body has already been used" once both consumers read it,
+    // and (b) `mock.calls[0]` is no longer reliably the rehydrate GET (the
+    // sidebar's own fetch may land first). Branch by URL for a fresh
+    // response per call, and locate the rehydrate call by its exact URL
+    // instead of assuming index 0.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes('limit=10')
+        ? new Response(JSON.stringify({ items: [], total: 0 }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(
+            JSON.stringify({
+              id: storedId,
+              title: 'Old chat',
+              owner: 'local',
+              createdAt: 1,
+              updatedAt: 1,
+              messages: [
+                { id: 'm1', role: 'user', text: 'hello' },
+                { id: 'm2', role: 'assistant', text: 'hi there' },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
     );
     vi.stubGlobal('fetch', fetchMock);
 
     renderAt('/');
 
     await waitFor(() => expect(setMessages).toHaveBeenCalledTimes(1));
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toBe(`/api/sessions/${storedId}`);
+    const rehydrateCall = fetchMock.mock.calls.find(([u]) =>
+      String(u).includes(`/api/sessions/${storedId}`),
+    );
+    expect(rehydrateCall?.[0]).toBe(`/api/sessions/${storedId}`);
     const rehydrated = setMessages.mock.calls[0]?.[0] as {
       id: string;
       role: string;
@@ -121,11 +135,25 @@ describe('ChatArea session id (Slice 30b Phase 6, D2)', () => {
   });
 
   it('does nothing on mount when localStorage has no stored sessionId', async () => {
-    const fetchMock = vi.fn();
+    // Task T55: `SessionsSidebar` (AppShell) unconditionally fetches
+    // `/api/sessions?limit=10` on its own mount regardless of chat session
+    // state, so `fetch` is no longer expected to stay uncalled overall — the
+    // real assertion here is that no session-rehydrate GET (`/api/sessions/:id`)
+    // happens without a stored sessionId.
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL) =>
+        new Response(JSON.stringify({ items: [], total: 0 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
     vi.stubGlobal('fetch', fetchMock);
     renderAt('/');
     await screen.findByTestId('area-chat');
-    expect(fetchMock).not.toHaveBeenCalled();
+    const rehydrateCalls = fetchMock.mock.calls.filter(([u]) =>
+      /\/api\/sessions\/[^/?]+$/.test(String(u)),
+    );
+    expect(rehydrateCalls).toHaveLength(0);
     expect(setMessages).not.toHaveBeenCalled();
   });
 

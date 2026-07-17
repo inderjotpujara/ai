@@ -61,13 +61,25 @@ describe('Composer drag-drop / paste-image attachments', () => {
     sendMessage.mockClear();
     mockStatus = 'ready';
     localStorage.clear();
+    // Task T55: `SessionsSidebar` now mounts (AppShell) alongside the
+    // composer under test and independently fetches `/api/sessions?limit=10`
+    // on mount. A single reused `Response` instance (the previous
+    // `mockResolvedValue(new Response(...))`) can only have its body read
+    // once, so the sidebar's own fetch would consume it before the upload
+    // fetch does, throwing "Body has already been used". Branch by URL and
+    // return a fresh `Response` per call instead.
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ uploadId: 'dropped-abc123.png' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).includes('/api/sessions')
+          ? new Response(JSON.stringify({ items: [], total: 0 }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            })
+          : new Response(JSON.stringify({ uploadId: 'dropped-abc123.png' }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }),
       ),
     );
   });

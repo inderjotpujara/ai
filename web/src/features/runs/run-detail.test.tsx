@@ -149,6 +149,11 @@ describe('RunDetail', () => {
       vi.fn(async (input: string) => {
         const url = String(input);
         if (url.includes('/stream')) return emptyStream();
+        // Task T55: `SessionsSidebar` (AppShell) also fetches
+        // `/api/sessions?limit=10` on mount; it must not be counted as a
+        // run-snapshot fetch attempt by this test's no-retry assertion.
+        if (url.includes('/api/sessions'))
+          return jsonResponse({ items: [], total: 0 });
         runFetchCount += 1;
         return new Response(JSON.stringify({ error: 'boom' }), {
           status: 500,
