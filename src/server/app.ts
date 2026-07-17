@@ -37,6 +37,7 @@ import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
 import { handleSessionDelete } from './sessions/delete.ts';
 import { handleSessionDetail } from './sessions/detail.ts';
+import { handleSessionExport } from './sessions/export.ts';
 import { handleSessionList } from './sessions/list.ts';
 import { handleSessionRename } from './sessions/rename.ts';
 import { handleUpload } from './upload.ts';
@@ -285,11 +286,19 @@ async function handleApi(
           rec.status(200);
           return handleSessionList(new URLSearchParams(url.search), deps);
         }
-        // Bare-:id match shared by GET/PATCH/DELETE. NOTE for Increment 4:
-        // when `/api/sessions/:id/export` is added, it MUST be registered
-        // BEFORE this regex (the same stream-before-detail ordering
-        // discipline as `/api/runs/:id/stream` above), or this bare-:id
-        // match would swallow "export" as a session id.
+        // Export match MUST precede the bare-:id detail/rename/delete match,
+        // same ordering discipline as `/api/runs/:id/stream` vs
+        // `/api/runs/:id` above — otherwise the bare-:id regex below would
+        // swallow "export" as a session id.
+        const sessionExportMatch = url.pathname.match(
+          /^\/api\/sessions\/([^/]+)\/export$/,
+        );
+        if (req.method === 'GET' && sessionExportMatch?.[1]) {
+          const res = await handleSessionExport(sessionExportMatch[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        // Bare-:id match shared by GET/PATCH/DELETE.
         const sessionDetail = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
         if (req.method === 'GET' && sessionDetail?.[1]) {
           const res = handleSessionDetail(sessionDetail[1], deps);
