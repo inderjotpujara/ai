@@ -24,3 +24,16 @@ test('an invalid number falls back to the default (env-fallback-only rule)', () 
   expect(values.AGENT_MAX_DELEGATION_DEPTH).toBe(5);
   expect(sources.AGENT_MAX_DELEGATION_DEPTH).toBe('default');
 });
+
+test('AGENT_SESSIONS_PATH defaults to "sessions" (Slice 30b Phase 6)', () => {
+  const { values, sources } = loadConfig({});
+  expect(values.AGENT_SESSIONS_PATH).toBe('sessions');
+  expect(sources.AGENT_SESSIONS_PATH).toBe('default');
+});
+test('AGENT_SESSIONS_PATH honors an env override (Slice 30b Phase 6)', () => {
+  const { values, sources } = loadConfig({
+    AGENT_SESSIONS_PATH: '/tmp/custom-sessions',
+  });
+  expect(values.AGENT_SESSIONS_PATH).toBe('/tmp/custom-sessions');
+  expect(sources.AGENT_SESSIONS_PATH).toBe('env');
+});

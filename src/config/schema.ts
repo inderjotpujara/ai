@@ -155,6 +155,14 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     doc: "Enable reranking on recall; '0' disables (memory/retrieve.ts defaultRerank).",
   },
 
+  // --- Session persistence (src/session/*, Slice 30b Phase 6) ---
+  {
+    env: 'AGENT_SESSIONS_PATH',
+    kind: 'string',
+    def: 'sessions',
+    doc: 'Directory for the session/chat-history SQLite store (session/store.ts createSessionStore), mirroring AGENT_MEMORY_PATH.',
+  },
+
   // --- Verification / anti-hallucination (src/verification/config.ts) ---
   {
     env: 'AGENT_VERIFY_MODEL',
