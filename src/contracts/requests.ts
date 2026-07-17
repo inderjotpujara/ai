@@ -33,9 +33,19 @@ export const UiMessageLikeSchema = z.object({
 });
 export type UiMessageLike = z.infer<typeof UiMessageLikeSchema>;
 
+/** Matches `crypto.randomUUID()`'s output shape (RFC 4122 v4): 8-4-4-4-12 hex
+ *  groups, version nibble '4', variant nibble in [89ab]. Slice 30b Phase 6,
+ *  D2 — the session id is client-minted; this is the ONLY validation gate
+ *  before it's used as a SQLite primary key. */
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export const ChatRequestSchema = z.object({
   messages: z.array(UiMessageLikeSchema),
-  sessionId: z.string().optional(),
+  /** Client-minted via `crypto.randomUUID()` (D2); the server never mints
+   *  one. A malformed id is rejected at this SAME parse call — no separate
+   *  validation branch in `handleChat` (Slice 30b Phase 6). */
+  sessionId: z.string().regex(SESSION_ID_PATTERN).optional(),
   /** Ids returned by a prior `POST /api/upload` (Slice 30b Phase 2, Task 16)
    *  — media-by-reference: the browser never sends a raw filesystem path,
    *  only the opaque id the upload endpoint minted. */
