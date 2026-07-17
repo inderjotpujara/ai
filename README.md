@@ -97,17 +97,24 @@ Mini.
 > agent/crew/workflow build wizard with live narration and mid-flow consent,
 > and a 3-tab Library (Models — inventory + live-progress pull; MCP —
 > browse/status, add-server, test-mount with real consent + OAuth, closing
-> the D10 gap; Memory — spaces/stats, upload→ingest, recall search). Next:
-> **Slice 30b Phase 6**.
+> the D10 gap; Memory — spaces/stats, upload→ingest, recall search). Browser
+> voice remains Phases 7–8. **Phase 6 — Persistence + product — has now
+> landed too**: chat survives a reload (client-minted session id, idempotent
+> upsert, persist-at-start/persist-at-completion); recall reads a dedicated
+> `chat` memory space and every completed turn auto-ingests itself back in;
+> a real Sessions history (list/detail/rename/delete/Markdown export)
+> replaces the placeholder nav area; and client-side long-run completion
+> notifications (toast + optional OS `Notification`) close the loop on "did
+> my crew/workflow run finish." Next: **Slice 30b Phase 7**.
 > **Slices 23/24/25 remain held** on the `ai@7` provider blocker. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 > **Status:** Slice 30b **Phases 1 (web backend foundation), 1b (frontend
 > scaffold), 2 (streaming chat + live rail), 3 (Runs history + live
-> trace waterfall), 4 (Crews & Workflows browse/run/watch), and 5
-> (Builders + Library) have
+> trace waterfall), 4 (Crews & Workflows browse/run/watch), 5
+> (Builders + Library), and 6 (Persistence + product) have
 > landed** — this is
-> still a **partial-slice** landing (Phases 6–8 remain; the Slice-30b
+> still a **partial-slice** landing (Phases 7–8 remain; the Slice-30b
 > capability line item is not yet flipped to fully ✅ shipped). **Phase 2**
 > turns the Phase-1b Chat area live: the browser sends a real turn to
 > `POST /api/chat` and the **top-level orchestrator streams its answer
@@ -263,6 +270,46 @@ Mini.
 > 150 pass, 39 files (web, Vitest/happy-dom). See
 > [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server,
 > §"Builders + Library".
+>
+> **Phase 6 — Persistence + product — has now landed too**: chat survives a
+> reload. **Sessions:** a new `src/session/` `SessionStore` (`bun:sqlite`,
+> the identical WAL/`busy_timeout`/`foreign_keys` pragma trio + `db/migrate.ts`
+> runner the memory store already uses) persists a **client-minted**
+> `sessionId` (v4-UUID-regex-validated at the same `ChatRequestSchema.parse()`
+> call `handleChat` already makes; the server never mints one itself) via
+> idempotent `INSERT OR IGNORE` — a retried POST is a safe no-op.
+> `POST /api/chat` upserts the session and appends the user message
+> **before** any engine work, and appends the assistant message only
+> **after** `runChatTurn` resolves (turn-boundary persistence — the "visible
+> gap never partial" contract was adversarially verified by two parallel
+> Opus reviewers). `GET/PATCH/DELETE /api/sessions(/:id)` +
+> `GET /api/sessions/:id/export` give the browser a real **Sessions**
+> history: a searchable, cursor-paginated list (mirroring Runs' opaque
+> cursor), detail/rehydrate-on-reload, rename, delete, and a Markdown export
+> fetched with the bearer token rather than linked (a bare `<a href>` would
+> 401 through the existing perimeter). **Recall + auto-ingest:**
+> `runChatSession` gains one optional `memoryStore` dependency shared by CLI
+> and server alike — recall now reads a dedicated `chat` memory space
+> (space-wide, no namespace, so a session remembers across itself) via the
+> pre-existing `injectRecall`, and every completed turn writes itself back
+> in via a new `MemoryStore.rememberOnce` (content-hash-deduped, so a
+> retried/duplicate turn never double-ingests), fired **after** the SSE
+> stream ends — the browser never waits on it. **Notifications:** a
+> client-side `AppShell` hook polls the existing `GET /api/runs` on an
+> interval and diffs each run's lifecycle (baseline-then-diff, so
+> already-terminal runs never fire on mount); a qualifying
+> `Running→Done/Failed` transition above a minimum duration fires a toast
+> plus an optional, permission-gated OS `Notification` — no new server
+> endpoint, no event bus (adversarially verified, 2 Opus lenses). **Honest
+> caveats, not silently dropped:** `parentMessageId` is written to the
+> `messages` table but not consumed for threading — regenerate/edit+resend
+> stay linear this phase, reserved for Slice 41; there is no JSON export
+> (Markdown only); there is no server-push/global SSE event bus; there is no
+> session retention/GC; and the CLI gets the recall **READ** benefit only —
+> no CLI-side session persistence. Full suite: 1549 pass/36 skip/0 fail
+> (root) + 204 pass, 48 files (web, Vitest/happy-dom). See
+> [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server,
+> §"Persistence — Sessions + chat recall".
 >
 > **Previously:** Slice 30a — **concurrency & lifecycle core + ops
 > surface**, the production foundation the local web UI (Slice 30b) needs
@@ -576,6 +623,45 @@ cross-invocation persistence, and the browser voice surface. See
 [`docs/architecture.md`](docs/architecture.md) §"Web frontend",
 §"Streaming chat".
 
+**Persistence + product (web UI — Slice 30b Phase 6).** Chat now survives a
+reload. A new `src/session/` `SessionStore` (`bun:sqlite`, the identical
+WAL/`busy_timeout`/`foreign_keys` pragma trio + `db/migrate.ts` migration
+runner the memory store already uses) persists a **client-minted**
+`sessionId` (v4-UUID-regex-validated at the same `ChatRequestSchema.parse()`
+call `handleChat` already makes) via idempotent `INSERT OR IGNORE` — a
+retried POST is a safe no-op. `POST /api/chat` upserts the session and
+appends the user message **before** any engine work, and appends the
+assistant message only **after** `runChatTurn` resolves (turn-boundary
+persistence — the "visible gap never partial" contract was adversarially
+verified by two parallel Opus reviewers). `GET/PATCH/DELETE
+/api/sessions(/:id)` + `GET /api/sessions/:id/export` give the browser a
+real **Sessions** history — a searchable, cursor-paginated list (mirroring
+Runs' opaque cursor), detail/rehydrate-on-reload, rename, delete, and a
+Markdown export (fetched with the bearer token rather than linked, since a
+bare `<a href>` would 401 through the existing perimeter). **Recall +
+auto-ingest:** `runChatSession` gains one optional `memoryStore` dependency
+shared by CLI and server — recall now reads a dedicated `chat` memory space
+(space-wide, no namespace, so a session remembers across itself) via the
+pre-existing `injectRecall`, and every completed turn writes itself back in
+via a new `MemoryStore.rememberOnce` (content-hash-deduped, so a
+retried/duplicate turn never double-ingests), fired **after** the SSE
+stream ends — the browser never waits on it. **Notifications:** a
+client-side `AppShell` hook polls the existing `GET /api/runs` on an
+interval and diffs each run's lifecycle (baseline-then-diff, so
+already-terminal runs never fire on mount); a qualifying
+`Running→Done/Failed` transition above a minimum duration fires a toast
+plus an optional, permission-gated OS `Notification` — no new server
+endpoint, no event bus (adversarially verified, 2 Opus lenses). **Honest
+caveats, not silently dropped:** `parentMessageId` is written to the
+`messages` table but not consumed for threading — regenerate/edit+resend
+stay linear this phase, reserved for Slice 41; there is no JSON export
+(Markdown only); there is no server-push/global SSE event bus; there is no
+session retention/GC; and the CLI gets the recall **READ** benefit only —
+no CLI-side session persistence. Full suite: 1549 pass/36 skip/0 fail
+(root) + 204 pass, 48 files (web, Vitest/happy-dom). See
+[`docs/architecture.md`](docs/architecture.md) §"Persistence — Sessions +
+chat recall".
+
 ---
 
 ## Quick start
@@ -780,8 +866,8 @@ higher concurrency via vMLX) can slot in the same way later. See
 | **28** | **Hardware-adaptive media generation + reachable gen degrade** (Slice-27 follow-on) — a **parallel gen-fit selector** (`generate/select.ts` `selectGenModel`) prescribes a machine-appropriate generation model per modality: env-pin authoritative (`AGENT_{IMAGE,VOICE,VIDEO}_MODEL`) → uncensored filter → **largest-that-fits** by footprint vs the live hardware budget (`weightsBytes`/`liveBudgetBytes`) → installed/consent walk (`isGenModelInstalled` honors `HF_HOME`; consent-gate a pull, decline → next-installed) → `undefined` on no-fit (graceful degrade, never crashes). Candidate ladders in `generate/catalog.ts` (`GenModelCandidate`, **not** a `ModelDeclaration` — gen has no runtime/`LanguageModel`, so it rides a path *parallel* to the main selector). Chosen repo is injected via the existing `GenOpts.model` seam (image/speech unchanged; `ltxStrategy` gains `--model`, Wan graph gains a checkpoint node). `createGenerateTools` now runs via **`runGenJob`** (engine→strategy map, video passes the other-engine `fallback` + `serverReachable`) so the one-shot↔server degrade + ComfyUI/Wan lane are reachable; `runGenJob` drops the engine-specific repo when degrading cross-engine. `gen.fit.*` telemetry (`recordGenFit`). **Live-verified:** image auto-fit → real FLUX-schnell-4bit PNG, speech auto-fit → real Kokoro WAV, video degrades gracefully (no fitting model cached — auto-renders once one is present). Adversarial review caught + fixed 2 real bugs (env-pin engine misroute; enum-cast fallback). See [`docs/architecture.md`](docs/architecture.md) §22 | ✅ Done |
 | **29** | **CLI voice input (STT), re-scoped** (Phase F) — new `src/voice/` subsystem: tap-to-toggle mic capture (`--voice`, ffmpeg `avfoundation` + `silencedetect` auto-stop) or file transcription (`--voice-in <path>`), transcribed via **sherpa-onnx** (moonshine-tiny model, `bun run setup:voice`) and spliced into the prompt exactly like `--audio`'s text-splice (§22). Transcription runs behind an execution seam — **in-process** `sherpa-onnx-node` (default, a day-1 spike confirmed it loads under Bun) or a **node-subprocess** worker (`AGENT_VOICE_EXEC=subprocess`) — chosen because the same recognizer family ships a browser-WASM build, reusable by Slice 30b's web UI. Auto-stop uses ffmpeg `silencedetect`, not a real-time VAD model — a disclosed refinement from the original re-scope. Degrade-never-crash: a missing model/addon, failed capture, or silence all warn + ledger rather than crash. Original "voice in/out + streaming CLI" scope was built and **reset** (archived on branch `slice-29-voice-streaming-cli`) — voice-out/barge-in/hold-to-talk deferred to Slice 30b's browser-native AEC. See [`docs/architecture.md`](docs/architecture.md) §23 | ✅ Done |
 | **30a** | **Concurrency & lifecycle core + ops surface** (Phase F/ops — production foundation ahead of the web UI, split out after a production-readiness audit) — **Concurrency & lifecycle:** collision-free run ids (`run/run-id.ts` `newRunId()`, replacing collision-prone `run-<pid>`); a **per-run telemetry router** (`telemetry/run-router.ts` — one global OTel provider fronted by a `RunRoutingSpanProcessor` that routes spans by run-id-in-context, replacing the old process-global `setGlobalTracerProvider` swap that corrupted concurrent runs); cooperative **cancellation** (`withWallClock(ms, fn(signal), external?)` now actually aborts the work it races, not just the timer; an `AbortSignal` threads `runChat`→`runOrchestrator`→`runDefinedAgent`→`runAgent`→`generateText` — wired end to end, no live trigger yet); a central child-process registry + signal-clean shutdown (`process/child-registry.ts` + `process/lifecycle.ts` — `SIGINT`/`SIGTERM` drains `onShutdown` callbacks then kills every registered child); sqlite `WAL`+`busy_timeout`; a model-manager admission mutex (serializes `ensureReady`, empirically closes a concurrent-load race); `db/migrate.ts` schema migrations + a memory embedder-mismatch guard (`ensureSpace` now throws instead of silently serving a stale embedder). **Ops surface:** a structured, run-id-stamped logger (`log/logger.ts`); a documented config schema (`config/schema.ts`, 64 `AGENT_*` entries, `bun run config`); `bun run status` (Ollama reachability, loaded models, live RAM, version); app versioning (`0.2.0`, `--version`, `bun run start` — the 30b web-UI scaffold entry point); a top-level error boundary (`errors/boundary.ts`, actionable hints + `error.json` persistence); a usage rollup (`bun run usage`, aggregates token/latency from existing `spans.jsonl`); and the **first CI pipeline** (`.github/workflows/ci.yml` — docs:check → typecheck → lint → test on every push/PR). Full suite 1108 pass/36 skip/0 fail. See [`docs/architecture.md`](docs/architecture.md) §§4, 7, 11, 21 | ✅ Done |
-| **30b** | **Local web UI — Phases 1 (web backend) + 1b (frontend scaffold) + 2 (streaming chat + live rail) + 3 (Runs history + live trace waterfall) + 4 (Crews & Workflows browse/run/watch) + 5 (Builders + Library)** (Phase F, multi-phase slice, stacks on 30a) — **Phase 1:** an isomorphic Zod wire protocol (`src/contracts/`: enums, read-model DTOs, transient-SSE `StatusEvent` union, inbound request schemas) + a thin `Bun.serve` BFF (`src/server/`: per-session bearer token, port-scoped Host/Origin allowlist, realpath media-path confinement, `/api/health`, COOP/COEP static serving, `server.request` telemetry, `bun run web`); live-verified against the real running server (curl + Chrome). **Phase 1b:** the browser frontend scaffold — `web/` as a Bun workspace member (Vite 8 + React 19 + Tailwind v4 + Vitest/happy-dom), Blueprint-Mono light+dark design tokens + `ThemeProvider`, Base-UI `Button`/`Dialog` + per-region error boundary, a token'd contract client + a bidirectional transport-port **interface** (both via a `@contracts` alias), a TanStack Router app shell over the 7 nav areas + run-detail, and a ⌘K palette skeleton (26 web component tests). **Phase 2:** turns Chat live — `POST /api/chat` streams the top-level orchestrator's answer token-by-token (specialists stay batch, narrated via a new `EventSink`) over an AI-SDK v6 UI-message SSE response, built on additive engine seams (`core/events.ts`'s `EventSink`, `core/agent.ts`'s `StreamSink`/`streamText` path draining inside `withWallClock`, `cli/run-chat-session.ts`'s shared CLI/server turn runner); the server adds `POST /api/runs/:id/respond` (consent back-channel, unguessable `promptId`), `POST /api/upload` (confined image upload — a security finding here, D17, closed the server-side `ingestMedia` auto-detect hole an HTTP-attacker could otherwise reach), and `POST /api/feedback`; the web app ships a real streaming `features/chat/` (`useChat`+`DefaultChatTransport`, AI-Elements/`streamdown`) with Stop/copy/regenerate/edit-resend/👍👎/data-confirm/drag-drop-upload, plus `features/agents/`'s live agent/model rail. Chat stays **stateless per request** (no `SessionStore` — Phase 6). **Phase 3:** Runs history + live trace waterfall — three new `GET` endpoints (`src/server/runs/{list,detail,stream}.ts`, `confineToDir`-guarded `:id` on both detail and stream, a new `runsRoot` server dep) backed by a new `src/run/run-dto.ts` mapper (`mapRunToDto`/`summarizeRunListItem`, an mtime-keyed summary cache, a shared name-agnostic run-root helper so `crew.run`/`workflow.run` roots report correctly too) and `src/run/artifacts.ts` (`readRunArtifacts`, the extended `ArtifactKind`); the web ships a searchable/faceted/paginated Runs list and a run-detail view whose `@visx` waterfall live-tails a running trace via the Phase-1b transport port's first real consumer (`stream(runId, cursor, schema)`). **Phase 4:** Crews & Workflows browse/run/watch — new browse endpoints (`src/server/crews/`, `src/server/workflows/`) project the `CREWS`/`WORKFLOWS` registries via new pure mappers (`crew-dto.ts`/`workflow-dto.ts`, edges via `effectiveDeps` verbatim) to list/detail DTOs; a **fire-and-watch** launch (`POST .../:id/run` → `launch-turns.ts`, the same `withMcpRun`+`runCrewCli`/`runFlow` path the CLIs use, run **detached**, `error.json` on throw, adversarially reviewed) mints a runId and returns immediately; the browser then reuses Phase 3's `GET /api/runs/:id/stream` **verbatim** to watch it, overlaying live per-step status on a new generic `@xyflow/react` `DagView` (`web/src/shared/dag/`) fed by process-aware `workflowGraph`/`crewGraph` (D7a — sequential crews render a task-DAG, hierarchical crews a manager→members delegation star); a new `RunKind`-based kind facet makes launched runs findable in the Runs list. Two documented limitations: hierarchical crews never light up (no per-step spans to overlay) and the graph is only reliably drawable once the run's root span closes for a cold-opened run (worked around for the primary flow via a URL-param handoff). **Phase 5:** Builders + Library — the last two stub nav areas go live. A new `POST /api/builders/build` SSE route streams a guided agent/crew/workflow build wizard (narration + mid-flow `data-confirm` consent/reuse-offer + a one-shot terminal `BuildResultDTO`), wrapping the pre-existing `agent.build`/`crew.build` spans with no new span kind (adversarially reviewed, 2 Opus lenses). `GET /api/models` + `POST /api/models/pull` add a Models tab (provider-agnostic inventory, fire-and-watch pull) whose live progress rides a **pull→spans bridge** — each tick is its own short-lived `model.pull.progress` child span, so the **existing** `GET /api/runs/:id/stream` surfaces it with zero new stream code (also adversarially reviewed). `GET /api/mcp` + `POST /api/mcp/add` + `POST /api/mcp/test-mount` add an MCP tab whose test-mount is the `ConsentRegistry`'s **first real caller**, closing decision D10 (a never-approved server can now get real interactive consent + OAuth from the browser); `src/mcp/mount.ts` has zero diff. `GET /api/memory/spaces` + recall/ingest give memory its first web consumer (fork-3 confined upload-then-ingest). Deferred, not silently dropped: media-gen model management (read-only-at-most), no ANN index, recall not yet wired into chat, MCP entries addable/testable but not editable/removable. See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server, §"Web frontend", §"Streaming chat", §"Runs", §"Crews & Workflows", §"Builders + Library" | 🚧 In progress — Phases 1, 1b, 2, 3, 4 & 5 landed |
-| **Next (product line)** | Toward a local **n8n × CrewAI**: **F** local web UI (**Slice 30b Phase 6 onward** — cross-invocation persistence and voice, stacking on the Phase 1/1b/2/3/4/5 foundation; rich, interruptible voice lives here, on browser-native `getUserMedia` AEC + `keydown`/`keyup` hold-to-talk, completing what Slice 29's CLI STT started); **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) — held on the `ai@7` provider blocker (Slices 23/24/25); Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38) | Planned |
+| **30b** | **Local web UI — Phases 1 (web backend) + 1b (frontend scaffold) + 2 (streaming chat + live rail) + 3 (Runs history + live trace waterfall) + 4 (Crews & Workflows browse/run/watch) + 5 (Builders + Library) + 6 (Persistence + product)** (Phase F, multi-phase slice, stacks on 30a) — **Phase 1:** an isomorphic Zod wire protocol (`src/contracts/`: enums, read-model DTOs, transient-SSE `StatusEvent` union, inbound request schemas) + a thin `Bun.serve` BFF (`src/server/`: per-session bearer token, port-scoped Host/Origin allowlist, realpath media-path confinement, `/api/health`, COOP/COEP static serving, `server.request` telemetry, `bun run web`); live-verified against the real running server (curl + Chrome). **Phase 1b:** the browser frontend scaffold — `web/` as a Bun workspace member (Vite 8 + React 19 + Tailwind v4 + Vitest/happy-dom), Blueprint-Mono light+dark design tokens + `ThemeProvider`, Base-UI `Button`/`Dialog` + per-region error boundary, a token'd contract client + a bidirectional transport-port **interface** (both via a `@contracts` alias), a TanStack Router app shell over the 7 nav areas + run-detail, and a ⌘K palette skeleton (26 web component tests). **Phase 2:** turns Chat live — `POST /api/chat` streams the top-level orchestrator's answer token-by-token (specialists stay batch, narrated via a new `EventSink`) over an AI-SDK v6 UI-message SSE response, built on additive engine seams (`core/events.ts`'s `EventSink`, `core/agent.ts`'s `StreamSink`/`streamText` path draining inside `withWallClock`, `cli/run-chat-session.ts`'s shared CLI/server turn runner); the server adds `POST /api/runs/:id/respond` (consent back-channel, unguessable `promptId`), `POST /api/upload` (confined image upload — a security finding here, D17, closed the server-side `ingestMedia` auto-detect hole an HTTP-attacker could otherwise reach), and `POST /api/feedback`; the web app ships a real streaming `features/chat/` (`useChat`+`DefaultChatTransport`, AI-Elements/`streamdown`) with Stop/copy/regenerate/edit-resend/👍👎/data-confirm/drag-drop-upload, plus `features/agents/`'s live agent/model rail. Chat stays **stateless per request** (no `SessionStore` — Phase 6). **Phase 3:** Runs history + live trace waterfall — three new `GET` endpoints (`src/server/runs/{list,detail,stream}.ts`, `confineToDir`-guarded `:id` on both detail and stream, a new `runsRoot` server dep) backed by a new `src/run/run-dto.ts` mapper (`mapRunToDto`/`summarizeRunListItem`, an mtime-keyed summary cache, a shared name-agnostic run-root helper so `crew.run`/`workflow.run` roots report correctly too) and `src/run/artifacts.ts` (`readRunArtifacts`, the extended `ArtifactKind`); the web ships a searchable/faceted/paginated Runs list and a run-detail view whose `@visx` waterfall live-tails a running trace via the Phase-1b transport port's first real consumer (`stream(runId, cursor, schema)`). **Phase 4:** Crews & Workflows browse/run/watch — new browse endpoints (`src/server/crews/`, `src/server/workflows/`) project the `CREWS`/`WORKFLOWS` registries via new pure mappers (`crew-dto.ts`/`workflow-dto.ts`, edges via `effectiveDeps` verbatim) to list/detail DTOs; a **fire-and-watch** launch (`POST .../:id/run` → `launch-turns.ts`, the same `withMcpRun`+`runCrewCli`/`runFlow` path the CLIs use, run **detached**, `error.json` on throw, adversarially reviewed) mints a runId and returns immediately; the browser then reuses Phase 3's `GET /api/runs/:id/stream` **verbatim** to watch it, overlaying live per-step status on a new generic `@xyflow/react` `DagView` (`web/src/shared/dag/`) fed by process-aware `workflowGraph`/`crewGraph` (D7a — sequential crews render a task-DAG, hierarchical crews a manager→members delegation star); a new `RunKind`-based kind facet makes launched runs findable in the Runs list. Two documented limitations: hierarchical crews never light up (no per-step spans to overlay) and the graph is only reliably drawable once the run's root span closes for a cold-opened run (worked around for the primary flow via a URL-param handoff). **Phase 5:** Builders + Library — the last two stub nav areas go live. A new `POST /api/builders/build` SSE route streams a guided agent/crew/workflow build wizard (narration + mid-flow `data-confirm` consent/reuse-offer + a one-shot terminal `BuildResultDTO`), wrapping the pre-existing `agent.build`/`crew.build` spans with no new span kind (adversarially reviewed, 2 Opus lenses). `GET /api/models` + `POST /api/models/pull` add a Models tab (provider-agnostic inventory, fire-and-watch pull) whose live progress rides a **pull→spans bridge** — each tick is its own short-lived `model.pull.progress` child span, so the **existing** `GET /api/runs/:id/stream` surfaces it with zero new stream code (also adversarially reviewed). `GET /api/mcp` + `POST /api/mcp/add` + `POST /api/mcp/test-mount` add an MCP tab whose test-mount is the `ConsentRegistry`'s **first real caller**, closing decision D10 (a never-approved server can now get real interactive consent + OAuth from the browser); `src/mcp/mount.ts` has zero diff. `GET /api/memory/spaces` + recall/ingest give memory its first web consumer (fork-3 confined upload-then-ingest). Deferred, not silently dropped: media-gen model management (read-only-at-most), no ANN index, recall not yet wired into chat, MCP entries addable/testable but not editable/removable. **Phase 6:** Persistence + product — chat survives a reload via a new `src/session/` `SessionStore` (`bun:sqlite`, mirrors `createMemoryStore`'s shape) that persists a client-minted `sessionId` (v4-UUID-regex-validated) through idempotent `INSERT OR IGNORE` upserts; `POST /api/chat` persists the user message before any engine work and the assistant message only after `runChatTurn` resolves (turn-boundary persistence, adversarially reviewed); `GET/PATCH/DELETE /api/sessions(/:id)` + `GET /api/sessions/:id/export` give the browser a real Sessions history (search/cursor-paginated list, detail/rehydrate, rename, delete, bearer-fetched Markdown export); `runChatSession` gains an optional `memoryStore` so recall reads a dedicated `chat` memory space and every completed turn auto-ingests itself back in via a new `rememberOnce` (content-hash-deduped, fire-and-forget); a client-side `AppShell` hook polls `GET /api/runs` and diffs lifecycle transitions (baseline-then-diff, adversarially reviewed) to fire a toast plus an optional OS `Notification` on a qualifying long-run completion. Honest caveats: `parentMessageId` is written but unused (reserved for Slice 41); no JSON export; no server-push/global SSE event bus; no session retention/GC; the CLI gets the recall READ benefit only. See [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server, §"Web frontend", §"Streaming chat", §"Runs", §"Crews & Workflows", §"Builders + Library", §"Persistence — Sessions + chat recall" | 🚧 In progress — Phases 1, 1b, 2, 3, 4, 5 & 6 landed |
+| **Next (product line)** | Toward a local **n8n × CrewAI**: **F** local web UI (**Slice 30b Phase 7 onward** — voice, stacking on the Phase 1/1b/2/3/4/5/6 foundation; rich, interruptible voice lives here, on browser-native `getUserMedia` AEC + `keydown`/`keyup` hold-to-talk, completing what Slice 29's CLI STT started); **E** automate (always-on daemon + secure remote access, **Slice 24**; scheduled/triggered agents, 25) — held on the `ai@7` provider blocker (Slices 23/24/25); Codex heavy-lifting backup (Slice 22) deferred to the very end (Slice 38) | Planned |
 
 **Full long-range roadmap** — the n8n × CrewAI vision, the six product phases,
 the continuous hardware-aware engine line, and the recommended sequence:
