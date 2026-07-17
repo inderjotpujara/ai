@@ -39,6 +39,42 @@ function toSessionRow(r: SessionRowRaw): SessionRow {
   };
 }
 
+/** A stored chat message, RAW (`parts` un-decoded to whatever JSON the
+ *  caller passed) — distinct from the wire `ChatMessageDTO` (which flattens
+ *  to a `text` string); that projection is the server layer's job, not
+ *  this store's. */
+export type StoredMessage = {
+  id: string;
+  sessionId: string;
+  parentMessageId: string | undefined;
+  role: string;
+  parts: unknown;
+  createdAt: number;
+  degraded: boolean | undefined;
+};
+
+type MessageRowRaw = {
+  id: string;
+  session_id: string;
+  parent_message_id: string | null;
+  role: string;
+  parts: string;
+  created_at: number;
+  degraded: number | null;
+};
+
+function toStoredMessage(r: MessageRowRaw): StoredMessage {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    parentMessageId: r.parent_message_id ?? undefined,
+    role: r.role,
+    parts: JSON.parse(r.parts) as unknown,
+    createdAt: r.created_at,
+    degraded: r.degraded === null ? undefined : r.degraded === 1,
+  };
+}
+
 /** Reserved second constructor arg — kept only for signature parity with
  *  `createMemoryStore(config, deps)` (`src/memory/store.ts:29`) and as a
  *  future test seam (e.g. a clock override). Empty today (spec D1). */
@@ -103,11 +139,58 @@ export function createSessionStore(
     tx();
   }
 
+  function appendMessage(
+    sessionId: string,
+    msg: {
+      id: string;
+      role: string;
+      parts: unknown;
+      parentMessageId?: string;
+      degraded?: boolean;
+    },
+    at: number,
+  ): void {
+    // INSERT OR IGNORE on the message id: a retried/duplicate POST for the
+    // SAME message id is a safe no-op (spec D4/D6/§7.1(d)).
+    db.run(
+      `INSERT OR IGNORE INTO messages
+       (id, session_id, parent_message_id, role, parts, created_at, degraded)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        msg.id,
+        sessionId,
+        msg.parentMessageId ?? null,
+        msg.role,
+        JSON.stringify(msg.parts),
+        at,
+        msg.degraded === undefined ? null : msg.degraded ? 1 : 0,
+      ],
+    );
+    // Touch activity timestamps so listSessions's sort key advances.
+    // run_id is deliberately NOT touched here — this signature carries no
+    // runId; see this task's design note.
+    db.run(
+      'UPDATE sessions SET updated_at = ?, last_message_at = ? WHERE id = ?',
+      [at, at, sessionId],
+    );
+  }
+
+  function getMessages(sessionId: string): StoredMessage[] {
+    const rows = db
+      .query(
+        'SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC',
+      )
+      .all(sessionId) as MessageRowRaw[];
+    return rows.map(toStoredMessage);
+  }
+
   return {
     upsertSession,
     getSession,
     renameSession,
     deleteSession,
+    appendMessage,
+    getMessages,
     close: (): void => db.close(),
   };
 }
