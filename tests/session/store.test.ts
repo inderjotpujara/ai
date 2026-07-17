@@ -60,3 +60,32 @@ describe('upsertSession / getSession', () => {
     expect(store.getSession('s2')?.title).toBe('Two');
   });
 });
+
+describe('renameSession / deleteSession', () => {
+  test('renameSession updates title and updatedAt', () => {
+    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
+    store.renameSession('s1', 'My renamed chat', 2_000);
+    const row = store.getSession('s1');
+    expect(row?.title).toBe('My renamed chat');
+    expect(row?.updatedAt).toBe(2_000);
+  });
+
+  test('renameSession on an absent id is a silent no-op (never throws)', () => {
+    expect(() => store.renameSession('nope', 'New title', 1)).not.toThrow();
+    expect(store.getSession('nope')).toBeUndefined();
+  });
+
+  test('deleteSession removes the session row', () => {
+    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
+    store.deleteSession('s1');
+    expect(store.getSession('s1')).toBeUndefined();
+  });
+
+  test('deleteSession on an absent id is a silent no-op (never throws)', () => {
+    expect(() => store.deleteSession('nope')).not.toThrow();
+  });
+
+  // NOTE: the full cascade assertion (messages also gone) is added for real
+  // in Task 7 Step 3, once appendMessage/getMessages exist — this task only
+  // proves the session-row half of the delete.
+});

@@ -85,9 +85,29 @@ export function createSessionStore(
     return r ? toSessionRow(r) : undefined;
   }
 
+  function renameSession(id: string, title: string, at: number): void {
+    db.run('UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?', [
+      title,
+      at,
+      id,
+    ]);
+  }
+
+  function deleteSession(id: string): void {
+    // Transaction: delete messages THEN the session row (spec §4.3) — a
+    // crash mid-delete never leaves orphaned messages with no parent.
+    const tx = db.transaction(() => {
+      db.run('DELETE FROM messages WHERE session_id = ?', [id]);
+      db.run('DELETE FROM sessions WHERE id = ?', [id]);
+    });
+    tx();
+  }
+
   return {
     upsertSession,
     getSession,
+    renameSession,
+    deleteSession,
     close: (): void => db.close(),
   };
 }
