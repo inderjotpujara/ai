@@ -4,6 +4,7 @@ import {
   McpServerDtoSchema,
   ModelInventoryDtoSchema,
   RunListItemDtoSchema,
+  SessionListItemDtoSchema,
   WorkflowListItemDtoSchema,
 } from './dto.ts';
 import {
@@ -224,3 +225,31 @@ export const BuilderRegistryListResponseSchema = z.object({
 export type BuilderRegistryListResponse = z.infer<
   typeof BuilderRegistryListResponseSchema
 >;
+
+/** `GET /api/sessions?search=&cursor=&limit=` query — mirrors
+ *  `RunListQuerySchema`'s shape (Phase 3) minus the outcome/degraded/kind
+ *  facets that don't apply to sessions. Slice 30b Phase 6 (spec D10/§4.1). */
+export const SessionListQuerySchema = z.object({
+  search: z.string().optional(),
+  limit: z.coerce.number().int().positive().max(200).default(25),
+  cursor: z.string().optional(),
+});
+export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
+
+/** `GET /api/sessions` response — byte-for-byte `RunListResponseSchema`'s
+ *  shape (Phase 3): same opaque-cursor contract with the client, just backed
+ *  by a real SQL keyset page instead of an in-process array (spec D10). */
+export const SessionListResponseSchema = z.object({
+  items: z.array(SessionListItemDtoSchema),
+  nextCursor: z.string().optional(),
+  total: z.number(),
+});
+export type SessionListResponse = z.infer<typeof SessionListResponseSchema>;
+
+/** `PATCH /api/sessions/:id` body — bounded the same way every other
+ *  free-text body is (`BuilderBuildRequestSchema.need`, etc). Slice 30b
+ *  Phase 6 (spec §4.1). */
+export const SessionRenameRequestSchema = z.object({
+  title: z.string().min(1).max(200),
+});
+export type SessionRenameRequest = z.infer<typeof SessionRenameRequestSchema>;
