@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { SessionListItemDTO } from '../contracts/index.ts';
 import { migrate } from '../db/migrate.ts';
 import { SESSION_MIGRATIONS } from './migrations.ts';
 
@@ -73,6 +74,26 @@ function toStoredMessage(r: MessageRowRaw): StoredMessage {
     createdAt: r.created_at,
     degraded: r.degraded === null ? undefined : r.degraded === 1,
   };
+}
+
+function encodeSessionCursor(sortKey: number, id: string): string {
+  return Buffer.from(`${sortKey}:${id}`).toString('base64url');
+}
+
+function decodeSessionCursor(
+  cursor: string,
+): { sortKey: number; id: string } | undefined {
+  try {
+    const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+    const idx = decoded.indexOf(':');
+    if (idx === -1) return undefined;
+    const sortKey = Number(decoded.slice(0, idx));
+    const id = decoded.slice(idx + 1);
+    if (!Number.isFinite(sortKey) || id.length === 0) return undefined;
+    return { sortKey, id };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Reserved second constructor arg — kept only for signature parity with
@@ -184,11 +205,74 @@ export function createSessionStore(
     return rows.map(toStoredMessage);
   }
 
+  function listSessions(q: {
+    search?: string;
+    cursor?: string;
+    limit: number;
+  }): { items: SessionListItemDTO[]; nextCursor?: string; total: number } {
+    const searchClause = q.search ? 'AND lower(title) LIKE ?' : '';
+    const searchArgs: (string | number)[] = q.search
+      ? [`%${q.search.toLowerCase()}%`]
+      : [];
+
+    const totalRow = db
+      .query(`SELECT COUNT(*) as n FROM sessions WHERE 1 = 1 ${searchClause}`)
+      .get(...searchArgs) as { n: number };
+
+    // A malformed cursor is treated as absent (page 1), never thrown — the
+    // list endpoint must degrade gracefully on a tampered/garbage cursor
+    // value, matching runs/list.ts's decodeCursorId precedent.
+    const cursor = q.cursor ? decodeSessionCursor(q.cursor) : undefined;
+    const cursorClause = cursor
+      ? `AND (COALESCE(last_message_at, created_at) < ?
+          OR (COALESCE(last_message_at, created_at) = ? AND id > ?))`
+      : '';
+    const cursorArgs: (string | number)[] = cursor
+      ? [cursor.sortKey, cursor.sortKey, cursor.id]
+      : [];
+
+    // Fetch one extra row to detect "more remain" without a second query.
+    const rows = db
+      .query(
+        `SELECT * FROM sessions WHERE 1 = 1 ${searchClause} ${cursorClause}
+         ORDER BY COALESCE(last_message_at, created_at) DESC, id ASC
+         LIMIT ?`,
+      )
+      .all(...searchArgs, ...cursorArgs, q.limit + 1) as SessionRowRaw[];
+
+    const hasMore = rows.length > q.limit;
+    const page = rows.slice(0, q.limit);
+    const items: SessionListItemDTO[] = page.map((r) => {
+      const row = toSessionRow(r);
+      return {
+        id: row.id,
+        title: row.title,
+        owner: row.owner,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        lastMessageAt: row.lastMessageAt,
+        runId: row.runId,
+      };
+    });
+
+    const lastRaw = page[page.length - 1];
+    const nextCursor =
+      hasMore && lastRaw
+        ? encodeSessionCursor(
+            lastRaw.last_message_at ?? lastRaw.created_at,
+            lastRaw.id,
+          )
+        : undefined;
+
+    return { items, nextCursor, total: totalRow.n };
+  }
+
   return {
     upsertSession,
     getSession,
     renameSession,
     deleteSession,
+    listSessions,
     appendMessage,
     getMessages,
     close: (): void => db.close(),
