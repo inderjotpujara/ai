@@ -59,11 +59,25 @@ const MODULE_SCRIPT_TAG = /<script\s+type="module"[^>]*>/i;
  * index (the app hasn't been built), falls back to the minimal Phase-1 stub
  * page used by Ollama-free/unbuilt dev and tests.
  */
-export function renderIndexHtml(token: string, distIndexHtml?: string): string {
+export type NotifyConfig = { pollMs: number; minDurationMs: number };
+
+const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
+  pollMs: 5_000,
+  minDurationMs: 60_000,
+};
+
+export function renderIndexHtml(
+  token: string,
+  distIndexHtml?: string,
+  notify: NotifyConfig = DEFAULT_NOTIFY_CONFIG,
+): string {
   // JSON.stringify does not escape `</`, so a token value could break out of
   // the <script> tag; escape `<` to a unicode escape before interpolating.
   const safeToken = JSON.stringify(token).replace(/</g, '\\u003c');
-  const tokenScript = `<script>window.__AGENT_TOKEN__=${safeToken};</script>`;
+  const tokenScript =
+    `<script>window.__AGENT_TOKEN__=${safeToken};` +
+    `window.__AGENT_NOTIFY_POLL_MS__=${JSON.stringify(notify.pollMs)};` +
+    `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${JSON.stringify(notify.minDurationMs)};</script>`;
   if (distIndexHtml !== undefined) {
     if (MODULE_SCRIPT_TAG.test(distIndexHtml)) {
       return distIndexHtml.replace(
@@ -183,7 +197,10 @@ export function startWebServer(opts: StartOptions = {}): {
     policy,
     recordIo,
     staticDir,
-    indexHtml: renderIndexHtml(token, distIndexHtml),
+    indexHtml: renderIndexHtml(token, distIndexHtml, {
+      pollMs: cfg.AGENT_WEB_NOTIFY_POLL_MS as number,
+      minDurationMs: cfg.AGENT_WEB_NOTIFY_MIN_DURATION_MS as number,
+    }),
     runChatTurn,
     consent,
     uploadsDir,

@@ -100,3 +100,18 @@ test("startWebServer mkdirs the uploads dir at boot, so a chat request with a bo
     server.stop(true);
   }
 });
+
+test('renderIndexHtml also injects the notify-poll config (defaults) alongside the token', () => {
+  const html = renderIndexHtml('tok-777');
+  expect(html).toContain('window.__AGENT_NOTIFY_POLL_MS__=5000');
+  expect(html).toContain('window.__AGENT_NOTIFY_MIN_DURATION_MS__=60000');
+});
+
+test('renderIndexHtml threads an explicit notify config through', () => {
+  const html = renderIndexHtml('tok-888', undefined, {
+    pollMs: 1234,
+    minDurationMs: 99_999,
+  });
+  expect(html).toContain('window.__AGENT_NOTIFY_POLL_MS__=1234');
+  expect(html).toContain('window.__AGENT_NOTIFY_MIN_DURATION_MS__=99999');
+});
