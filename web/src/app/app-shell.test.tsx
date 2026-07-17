@@ -55,4 +55,9 @@ describe('AppShell', () => {
       await screen.findByRole('button', { name: /theme/i }),
     ).toBeInTheDocument();
   });
+
+  it('mounts a ToastHost so useToast works anywhere under AppShell', async () => {
+    renderAt('/');
+    expect(await screen.findByTestId('toast-host')).toBeInTheDocument();
+  });
 });
