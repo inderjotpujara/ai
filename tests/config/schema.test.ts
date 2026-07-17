@@ -37,3 +37,16 @@ test('AGENT_SESSIONS_PATH honors an env override (Slice 30b Phase 6)', () => {
   expect(values.AGENT_SESSIONS_PATH).toBe('/tmp/custom-sessions');
   expect(sources.AGENT_SESSIONS_PATH).toBe('env');
 });
+
+test('AGENT_WEB_NOTIFY_POLL_MS defaults to 5000', () => {
+  const { values, sources } = loadConfig({});
+  expect(values.AGENT_WEB_NOTIFY_POLL_MS).toBe(5_000);
+  expect(sources.AGENT_WEB_NOTIFY_POLL_MS).toBe('default');
+});
+test('AGENT_WEB_NOTIFY_MIN_DURATION_MS defaults to 60000 and stays a large margin over the default poll interval (spec §7.2 invariant)', () => {
+  const { values } = loadConfig({});
+  expect(values.AGENT_WEB_NOTIFY_MIN_DURATION_MS).toBe(60_000);
+  expect(values.AGENT_WEB_NOTIFY_MIN_DURATION_MS as number).toBeGreaterThan(
+    (values.AGENT_WEB_NOTIFY_POLL_MS as number) * 10,
+  );
+});
