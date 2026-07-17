@@ -47,6 +47,7 @@ import type { CapabilitySignature } from '../verified-build/types.ts';
 import { ReuseKind } from '../verified-build/types.ts';
 import { createCliVoiceDeps } from '../voice/cli-io.ts';
 import { ingestVoice } from '../voice/ingest.ts';
+import { makeRealStore } from './memory.ts';
 import { shouldOfferCrew } from './offer-crew.ts';
 import { runChatSession } from './run-chat-session.ts';
 import { createSelectHook } from './select-hook.ts';
@@ -244,6 +245,13 @@ async function main(): Promise<void> {
   };
 
   const registry = await buildRegistry();
+  // READ-only recall benefit for the CLI (D5): the CLI never writes to the
+  // `chat` memory space (it has no sessionId to namespace an auto-ingest
+  // write under — see run-chat-session.ts's CHAT_MEMORY_SPACE doc comment),
+  // but `runChatSession`'s `injectRecall` call benefits identically to the
+  // server whenever a memoryStore is present. Construction is cheap +
+  // synchronous (mirrors src/server/main.ts's own construction discipline).
+  const { store: memoryStore, manager: memoryManager } = makeRealStore({});
 
   try {
     await withMcpRun(
@@ -324,6 +332,7 @@ async function main(): Promise<void> {
               ledger,
               routerNumCtx,
               mediaStore: store,
+              memoryStore,
             },
           });
           for (const warning of warnings) console.error(`media: ${warning}`);
@@ -416,6 +425,8 @@ async function main(): Promise<void> {
     );
   } finally {
     await manager.unloadAll();
+    await memoryManager.unloadAll();
+    memoryStore.close();
   }
 }
 
