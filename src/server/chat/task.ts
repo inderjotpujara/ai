@@ -4,7 +4,7 @@ import type { UiMessageLike } from '../../contracts/requests.ts';
 const FENCE_TAG = 'TRANSCRIPT';
 
 /** Concatenate a message's text parts, skipping empty/missing ones. */
-function textOf(message: UiMessageLike): string {
+export function textOf(message: UiMessageLike): string {
   return message.parts
     .map((p) => p.text)
     .filter((t): t is string => Boolean(t))
@@ -53,4 +53,15 @@ export function buildTaskFromMessages(messages: UiMessageLike[]): string {
     FENCE_TAG,
     `Current request: ${latestUserText}`,
   ].join('\n');
+}
+
+/** The most recent `user`-role message, or undefined if there is none —
+ *  shared by `handleChat`'s turn-boundary persistence (Slice 30b Phase 6,
+ *  D3/D4), which needs the message object itself (id/role/parts) rather
+ *  than `buildTaskFromMessages`'s flattened task string. */
+export function latestUserMessage(
+  messages: UiMessageLike[],
+): UiMessageLike | undefined {
+  const idx = messages.findLastIndex((m) => m.role === ChatRole.User);
+  return idx === -1 ? undefined : messages[idx];
 }
