@@ -537,7 +537,7 @@ graph TD
 | **Server** | `src/server/` | `Bun.serve` web BFF, still no business logic of its own (Slice 30b — Phase 1 perimeter; Phase 2 below adds the live routes): localhost security perimeter (bearer token, Host/Origin allowlist, media-path confinement), `/api/health`, COOP/COEP static serving, `server.request` telemetry span, typed-error handling, `bun run web` entry — **plus (Phase 2, full narrative below)** `POST /api/chat` (SSE UI-message-stream handler over a lazily-built engine — nothing warms at server boot), `POST /api/runs/:id/respond` (the consent back-channel), `POST /api/upload` (confined image upload, media-by-reference), and `POST /api/feedback` (chat.feedback telemetry) — **plus (Phase 3, `src/server/runs/`, full narrative below)** `GET /api/runs` (`list.ts`, cache-fronted cursor-paginated summaries), `GET /api/runs/:id` (`detail.ts`, full `RunDTO`), and `GET /api/runs/:id/stream` (`stream.ts`, live-tailing SSE wrapped in a `runs.stream` span) — `confineToDir` guards the `:id` path segment on **both** detail and stream, and a new `runsRoot` dep on `ServerDeps` (wired from `main.ts`) is what all three read — **plus (Phase 4, `src/server/crews/` + `src/server/workflows/` + `launch-turns.ts`, full narrative below)** `GET /api/crews[/:name]`/`GET /api/workflows[/:id]` (browse — no `confineToDir`, registry-map lookups only) and `POST /api/crews/:name/run`/`POST /api/workflows/:id/run` (the fire-and-watch launch contract: pre-created run dir, detached turn, `error.json` on throw) backed by `launch-turns.ts`'s `createRealRunCrewTurn`/`createRealRunWorkflowTurn` (same `createLazyEngine`/`withMcpRun` path as `bun run crew`/`bun run flow`); `ServerDeps` gains `runCrewTurn`/`runWorkflowTurn` | `node:crypto`, `telemetry/spans.ts`, `errors/boundary.ts`, `cli/run-chat-session.ts` (Phase 2), `run/run-dto.ts` (Phase 3), `crew/crew-dto.ts` + `workflow/workflow-dto.ts` + `crews/`/`workflows/` registries + `cli/crew.ts`/`cli/flow.ts`'s underlying `runCrewCli`/`runFlow` (Phase 4) — **plus (Phase 5, `src/server/{builders,models,mcp,memory}/`, full narrative below)** `POST /api/builders/build` (SSE guided-build stream, `builders/build.ts` + `adapter.ts` + `config.ts` + `map-result.ts` + `list.ts`'s registry browse), `GET /api/models` + `POST /api/models/pull` (`models/list.ts`/`discover.ts`/`pull.ts`, fire-and-watch — rides the **existing** `/api/runs/:id/stream`, no new stream), `GET /api/mcp` + `POST /api/mcp/add` + `POST /api/mcp/test-mount` (`mcp/list.ts`/`add.ts`/`test-mount.ts`/`mount-one.ts`/`mount-status.ts` — the `ConsentRegistry`'s first real callers, closing the D10 silent-skip gap), `GET /api/memory/spaces` + `POST /api/memory/:space/{recall,ingest}` (`memory/spaces.ts`/`recall.ts`/`ingest.ts`) |
 | **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`) — **plus (Phase 4, full narrative below)** real `features/crews/` and `features/workflows/` list+detail screens with a **▶ Run** launch button, a generic `shared/dag/` `@xyflow/react` `DagView` (+ deterministic `layeredPositions` layout, no `dagre`) fed by `workflow-graph.ts`/`crew-graph.ts` (D7a's process-aware crew split), a run-detail live DAG overlay (D8, `features/runs/run-dag.ts`) with a Graph/Waterfall toggle, a Runs kind facet, and `jump-to-crew`/`jump-to-workflow` ⌘K commands — **plus (Phase 5, full narrative below)** real `features/builders/` (Agent/Crew/Workflow mode toggle, streamed narration + proposal `DagView` + mid-flow consent) and a real 3-tab `features/library/` (Models — inventory + live-progress pull; Memory — spaces/stats + upload→ingest + recall; MCP — browse/status + add-server + test-mount). Settings remains a stub; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
-| **Session / Chat history** | `src/session/` | Cross-invocation persistence for web chat conversations (Slice 30b Phase 6, in progress — schema-only so far, see the phase spec for the full narrative): `migrations.ts`'s `SESSION_MIGRATIONS` (one migration, schema owned by `db/migrate.ts`, mirrors `memory/sqlite-store.ts`'s `MEMORY_MIGRATIONS` idiom) creates `sessions` (`id` PK, `title`, `owner` default `'local'`, `created_at`/`updated_at`, nullable `last_message_at`/`run_id`) and `messages` (`id` PK, `session_id` FK→`sessions(id)`, nullable `parent_message_id`, `role`, `parts` JSON text, `created_at`, nullable `degraded`) plus `idx_messages_session(session_id, created_at)`. `parent_message_id` is written but unused this phase (reserved for Slice 41's edit-in-place threading); `degraded` flags an assistant turn that saw a `StatusEventType.Degrade` event. The store/read-model/API land in later Phase 6 tasks | `db/migrate.ts` |
+| **Session / Chat history** | `src/session/` | Cross-invocation persistence for web chat conversations (Slice 30b Phase 6, complete — full narrative in §3g above): `migrations.ts`'s `SESSION_MIGRATIONS` (one migration, schema owned by `db/migrate.ts`, mirrors `memory/sqlite-store.ts`'s `MEMORY_MIGRATIONS` idiom) creates `sessions` (`id` PK, `title`, `owner` default `'local'`, `created_at`/`updated_at`, nullable `last_message_at`/`run_id`) and `messages` (`id` PK, `session_id` FK→`sessions(id)`, nullable `parent_message_id`, `role`, `parts` JSON text, `created_at`, nullable `degraded`) plus `idx_messages_session(session_id, created_at)`. `parent_message_id` is written but unused this phase (reserved for Slice 41's edit-in-place threading); `degraded` flags an assistant turn that saw a `StatusEventType.Degrade` event. `store.ts`'s `createSessionStore` (mirrors `createMemoryStore`'s factory-returns-closure shape, reuses the WAL/busy_timeout/foreign_keys pragma trio from `memory/sqlite-store.ts`) exposes `upsertSession`/`getSession`/`renameSession`/`deleteSession`/`listSessions`/`appendMessage`/`getMessages` — every write is `INSERT OR IGNORE` on the row/message id, so a retried request for the same `sessionId`/message is a safe no-op, never a constraint-violation throw. Two consumers: `server/chat/handler.ts`'s `handleChat` calls `upsertSession` + `appendMessage` at both turn boundaries (user message before any engine work, assistant message only after `runChatTurn` resolves); `server/sessions/{list,detail,rename,delete,export}.ts` read/mutate/export the store for the browser's Sessions surface (`GET/PATCH/DELETE /api/sessions(/:id)`, `GET /api/sessions/:id/export` → Markdown) | `db/migrate.ts` |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
@@ -884,6 +884,65 @@ sequenceDiagram
 
 ---
 
+### 3g. Persistence — Sessions + chat recall (browser REST, Slice 30b Phase 6)
+
+Cross-invocation memory for web chat, closing the "no persistence yet" gap
+called out at the end of §2's Web-frontend row. Two independent additions
+ride the existing `POST /api/chat` SSE handler with **no new transport**:
+turn-boundary persistence into a new `SessionStore` (`src/session/`,
+`bun:sqlite`) and an opt-in recall/auto-ingest pass through the pre-existing
+memory layer (§11) via a new `chat` memory space. A third addition, `GET/PATCH/
+DELETE /api/sessions(/:id)` + `GET /api/sessions/:id/export`, is a plain REST
+read/mutate/export surface over the same store — no SSE, no run.
+
+```mermaid
+sequenceDiagram
+    actor Browser as Browser (Chat)
+    participant Chat as server/chat/handler.ts (handleChat)
+    participant SS as session/store.ts (SessionStore)
+    participant RCS as cli/run-chat-session.ts (runChatSession)
+    participant Recall as memory/recall-tool.ts (injectRecall)
+    participant MS as memory/store.ts (MemoryStore)
+    participant Sessions as server/sessions/{list,detail,rename,delete,export}.ts
+
+    Browser->>Chat: POST /api/chat {sessionId, messages, ...} (SSE)
+    Chat->>SS: upsertSession(sessionId) + appendMessage(user msg) — BEFORE any engine work (D3, §7.1(a))
+    Chat->>RCS: runChatTurn(task, ...)
+    RCS->>Recall: injectRecall(memoryStore, {space:'chat'}, task) — space-wide, no namespace (D5)
+    Recall-->>RCS: task prefixed with recalled context, or unchanged if none found
+    RCS-->>Chat: streamed answer (unchanged token stream)
+    Chat->>SS: appendMessage(assistant msg, degraded?, runId?) — only after runChatTurn resolves (D4/D7, §7.1(b))
+    Chat--)MS: void rememberOnce(turn text, {space:'chat', namespace:sessionId, source:`chat:${sessionId}:${assistantMsgId}`}) (D6, fire-and-forget)
+    Chat-->>Browser: SSE stream ends (never waits on the rememberOnce round-trip)
+
+    Browser->>Sessions: GET /api/sessions?search=&cursor=&limit=
+    Sessions->>SS: listSessions(...)
+    Sessions-->>Browser: 200 {items, nextCursor?, total} (SessionListItemDTO[])
+    Browser->>Sessions: GET /api/sessions/:id
+    Sessions->>SS: getSession + getMessages
+    Sessions-->>Browser: 200 SessionDTO (session row + ChatMessageDTO[] transcript), or 404
+    Browser->>Sessions: PATCH /api/sessions/:id {title}
+    Sessions->>SS: renameSession (404 first if unknown id — SessionStore's UPDATE is a silent no-op)
+    Sessions-->>Browser: 200 {ok:true} | 404
+    Browser->>Sessions: DELETE /api/sessions/:id
+    Sessions->>SS: deleteSession (one transaction: messages then the session row)
+    Sessions-->>Browser: 200 {ok:true} | 404
+    Browser->>Sessions: GET /api/sessions/:id/export
+    Sessions->>SS: getSession + getMessages (raw store read, not the DTO projection)
+    Sessions-->>Browser: 200 text/markdown (renderSessionMarkdown), or 404 JSON
+```
+
+Two things this diagram deliberately does **not** show, because nothing
+changed: the Settings notification opt-in + toast/poll flow (T59/T62, web
+`features/notifications/`) is a **web-only** addition riding the
+already-documented `GET /api/runs` (§ "Runs" below) — `useRunNotifications`
+polls that existing endpoint on an interval and diffs lifecycle transitions
+client-side (`notify-diff.ts`); it adds zero server-side routes, schema, or
+telemetry. And `SessionStore`'s writes are synchronous local SQLite —
+no span, no run, same treatment as `run-store.ts` (see §7 below).
+
+---
+
 ## 4. Resource model (Apple Silicon; admission mutex, Slice 30a)
 
 Live budgeting + dynamic context sizing (Slices 4–5, 7).
@@ -973,6 +1032,23 @@ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewa
 **`RunKind` — what a run IS, not how it started (Slice 30b Phase 4).** `src/run/run-dto.ts`'s `deriveRunKind(rootSpanNames)` reads a run's *existing* root-span names (`crew.run`/`workflow.run`/`agent.run`, else `Chat`) — no new span or attribute — and stamps the contract-owned `RunKind` enum onto `RunDTO.kind`/`RunListItemDTO.kind`. It is distinct from `RunOrigin` (how a run was *triggered* — manual/schedule/webhook/…, still reserved). The web Runs browser (§ "Runs" below) surfaces a **kind facet** (`RunListQuery.kind`) so a crew/workflow run launched from the new Crews/Workflows areas (§ "Crews & Workflows" below) is findable in the same list chat/agent runs live in.
 
 **`RunKind.Build`/`RunKind.Pull` (Slice 30b Phase 5).** `deriveRunKind` gains two more recognized root-span names: `agent.build`/`crew.build` → `Build` (the guided-build wizard, § "Builders + Library" below) and `model.pull` → `Pull` (the Models-tab pull, same section) — purely additive, every pre-existing root name/kind mapping is untouched. The per-run routing section above (`spans.ts`) also gains a second incremental-progress case beyond Phase 4's workflow step spans: `model.pull`'s progress ticks are each their own short-lived `model.pull.progress` **child span** (opens and closes synchronously per tick), so `SimpleSpanProcessor` flushes each tick to `spans.jsonl` immediately and the live-tailing stream surfaces it as an orphan child while the root stays open — no mid-span attribute mutation the stream format can't express, and no new stream code (§ "Builders + Library" below, the pull→spans bridge).
+
+**Persistence — Sessions + chat recall (Slice 30b Phase 6, § "Persistence" /
+§3g above).** `memory.recall`'s span (already wired since Slice 12) is reused
+**unchanged** for chat's `injectRecall` call — nothing new to instrument
+there. A new `withMemoryRememberSpan` helper (`spans.ts`) opens a
+`memory.remember` span (attributes: `memory.space`, `memory.namespace`,
+`memory.remember.skipped`) around `rememberOnce`; it lands in the **same**
+chat turn's already-open `ui.stream` span — no ephemeral run-minting needed
+here, unlike Phase 5's standalone Memory-tab routes, since it fires from
+inside `handleChat`'s existing `execute` callback. `SessionStore`'s raw
+`bun:sqlite` writes (`upsertSession`/`appendMessage`/`renameSession`/
+`deleteSession`) get **no new spans** — synchronous, sub-millisecond local
+IO, the same treatment `run-store.ts` already gets. The web notification
+poll (`features/notifications/`, T59/T62) emits **no new server telemetry**
+either: every tick is just another `GET /api/runs` request under the
+existing `withServerRequestSpan` — the diff/dedup logic is pure client-side
+code with nothing to instrument server-side.
 
 ---
 
@@ -1302,6 +1378,24 @@ garbage before it reaches the store); file upload for ingest goes through
 the shared `confineToDir(fileId, uploadsDir)` guard (fork-3 — only a
 server-minted `fileId`, never a client-supplied path, ever reaches
 `memoryStore.ingest`). Corrects any stale "no web consumer" framing above.
+
+### Chat recall + auto-ingest (Slice 30b Phase 6)
+
+`injectRecall` (`recall-tool.ts`, defined since Slice 12 but unused in
+practice until now) gets its **first real caller**: `runChatSession`
+(`src/cli/run-chat-session.ts`, shared by the CLI and `server/chat/handler.ts`)
+calls it with `{space: CHAT_MEMORY_SPACE}` (`CHAT_MEMORY_SPACE = 'chat'`) and
+**no namespace** — recall is space-wide across every session, not scoped to
+the current one, so an earlier conversation's facts can surface in a new
+chat. `rememberOnce` (D6) is a new, additive method on the `MemoryStore`
+closure returned by `createMemoryStore` (`store.ts`): it reuses the store's
+existing `seenDoc`/`recordDoc` dedup guard (the same pair `ingest`'s
+duplicate-skip path already uses), keyed on a synthetic
+`chat:${sessionId}:${assistantMessageId}` source id so a retried/duplicate
+auto-ingest for the same assistant turn is a safe skip, never a duplicate
+row. `handleChat` calls it **fire-and-forget** (`void`, never awaited) after
+a turn completes, so the SSE response never waits on the embedding
+round-trip.
 
 ### Telemetry
 
