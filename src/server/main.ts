@@ -9,6 +9,7 @@ import { createMemoryStore } from '../memory/store.ts';
 import { freeDiskBytes } from '../provisioning/cli-deps.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { runtimeFor } from '../runtime/registry.ts';
+import { createSessionStore } from '../session/store.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createConsentRegistry } from './consent/registry.ts';
@@ -159,6 +160,13 @@ export function startWebServer(opts: StartOptions = {}): {
       reranker: makeCrossEncoderReranker(),
     },
   );
+  // Cheap + synchronous, mirroring memoryStore's own construction discipline
+  // just above (SqliteStore's constructor runs mkdirSync + opens the db +
+  // migrates — no Ollama/network dependency at construction time).
+  const sessionStore = createSessionStore(
+    { path: String(cfg.AGENT_SESSIONS_PATH) },
+    {},
+  );
   // Serve the real built app when it exists (`cd web && bun run build`);
   // fall back to the Phase-1 stub otherwise (unbuilt/Ollama-free dev + tests).
   const distIndexHtml = readWebDistIndexHtml();
@@ -184,6 +192,7 @@ export function startWebServer(opts: StartOptions = {}): {
     mcpMountStatus,
     mountOne,
     memoryStore,
+    sessionStore,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

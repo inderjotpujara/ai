@@ -10,6 +10,7 @@ import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import type { RunCrewTurn } from '../../src/server/crews/run.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
+import type { SessionStore } from '../../src/session/store.ts';
 
 const TOKEN = 'a'.repeat(64);
 const uploadsDir = mkdtempSync(join(tmpdir(), 'phase5-memory-uploads-'));
@@ -34,6 +35,33 @@ const fakeMemoryStore = {
   ],
   ingest: async () => ({ chunks: 1, skipped: false }),
 } as unknown as MemoryStore;
+
+// None of these tests exercise a session route either — same throwing-stub
+// discipline used elsewhere for stores this test file doesn't exercise.
+const unusedSessionStore = {
+  listSessions: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  getSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  upsertSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  renameSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  deleteSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  appendMessage: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  getMessages: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  close: () => {},
+} as unknown as SessionStore;
 
 function mcpConfigPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'phase5-memory-mcp-'));
@@ -61,6 +89,7 @@ function deps(): ServerDeps {
     mcpMountStatus: createMcpMountStatus(),
     mountOne: async () => ({ outcome: 'mounted' }),
     memoryStore: fakeMemoryStore,
+    sessionStore: unusedSessionStore,
   };
 }
 

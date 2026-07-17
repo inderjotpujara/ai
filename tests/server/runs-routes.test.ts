@@ -10,6 +10,7 @@ import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import type { RunCrewTurn } from '../../src/server/crews/run.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
+import type { SessionStore } from '../../src/session/store.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -44,6 +45,32 @@ const noMemoryStore = {
     throw new Error('unused');
   },
 } as unknown as MemoryStore;
+// None of these tests exercise a session route either — same throwing-stub
+// discipline as noMemoryStore above.
+const noSessionStore = {
+  listSessions: () => {
+    throw new Error('unused');
+  },
+  getSession: () => {
+    throw new Error('unused');
+  },
+  upsertSession: () => {
+    throw new Error('unused');
+  },
+  renameSession: () => {
+    throw new Error('unused');
+  },
+  deleteSession: () => {
+    throw new Error('unused');
+  },
+  appendMessage: () => {
+    throw new Error('unused');
+  },
+  getMessages: () => {
+    throw new Error('unused');
+  },
+  close: () => {},
+} as unknown as SessionStore;
 // None of these tests exercise /api/mcp routes, so a bare never-populated
 // mcp.json suffices.
 const mcpConfigPath = join(
@@ -69,6 +96,7 @@ const deps: ServerDeps = {
   mcpMountStatus: createMcpMountStatus(),
   mountOne: async () => ({ outcome: 'mounted' }),
   memoryStore: noMemoryStore,
+  sessionStore: noSessionStore,
 };
 
 let server: ReturnType<typeof Bun.serve>;

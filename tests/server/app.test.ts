@@ -10,6 +10,7 @@ import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import type { RunCrewTurn } from '../../src/server/crews/run.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
+import type { SessionStore } from '../../src/session/store.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -55,6 +56,32 @@ const unusedMemoryStore = {
     throw new Error('memoryStore should not be invoked by these tests');
   },
 } as unknown as MemoryStore;
+// None of these tests exercise a session route either — same
+// throwing-stub discipline as unusedMemoryStore above.
+const unusedSessionStore = {
+  listSessions: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  getSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  upsertSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  renameSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  deleteSession: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  appendMessage: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  getMessages: () => {
+    throw new Error('sessionStore should not be invoked by these tests');
+  },
+  close: () => {},
+} as unknown as SessionStore;
 // A bare, never-populated mcp.json — these tests don't exercise /api/mcp.
 const mcpConfigPath = join(mkdtempSync(join(tmpdir(), 'app-mcp-')), 'mcp.json');
 writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
@@ -76,6 +103,7 @@ const deps: ServerDeps = {
   mcpMountStatus: createMcpMountStatus(),
   mountOne: unusedMountOne,
   memoryStore: unusedMemoryStore,
+  sessionStore: unusedSessionStore,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -152,6 +180,7 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     mcpMountStatus: createMcpMountStatus(),
     mountOne: unusedMountOne,
     memoryStore: unusedMemoryStore,
+    sessionStore: unusedSessionStore,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -199,6 +228,7 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     mcpMountStatus: createMcpMountStatus(),
     mountOne: unusedMountOne,
     memoryStore: unusedMemoryStore,
+    sessionStore: unusedSessionStore,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -301,6 +331,7 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     mcpMountStatus: createMcpMountStatus(),
     mountOne: unusedMountOne,
     memoryStore: unusedMemoryStore,
+    sessionStore: unusedSessionStore,
   };
   const symlinkServer = Bun.serve({
     port: 0,

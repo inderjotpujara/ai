@@ -1,5 +1,6 @@
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
+import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
@@ -34,6 +35,10 @@ import { handleRunStream } from './runs/stream.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import { createTokenGuard } from './security/token.ts';
+import { handleSessionDelete } from './sessions/delete.ts';
+import { handleSessionDetail } from './sessions/detail.ts';
+import { handleSessionList } from './sessions/list.ts';
+import { handleSessionRename } from './sessions/rename.ts';
 import { handleUpload } from './upload.ts';
 import { handleWorkflowDetail } from './workflows/detail.ts';
 import { handleWorkflowList } from './workflows/list.ts';
@@ -81,6 +86,9 @@ export type ServerDeps = {
   mountOne: McpMountOne;
   /** The memory/RAG store engine-touching routes call into (Phase 5). */
   memoryStore: MemoryStore;
+  /** The session/chat-history store chat persistence + the Sessions UI read
+   *  and write through (Slice 30b Phase 6). */
+  sessionStore: SessionStore;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -270,6 +278,31 @@ async function handleApi(
         );
         if (req.method === 'POST' && memIngest?.[1]) {
           const res = await handleMemoryIngest(req, deps, memIngest[1]);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/sessions') {
+          rec.status(200);
+          return handleSessionList(new URLSearchParams(url.search), deps);
+        }
+        // Bare-:id match shared by GET/PATCH/DELETE. NOTE for Increment 4:
+        // when `/api/sessions/:id/export` is added, it MUST be registered
+        // BEFORE this regex (the same stream-before-detail ordering
+        // discipline as `/api/runs/:id/stream` above), or this bare-:id
+        // match would swallow "export" as a session id.
+        const sessionDetail = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+        if (req.method === 'GET' && sessionDetail?.[1]) {
+          const res = handleSessionDetail(sessionDetail[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'PATCH' && sessionDetail?.[1]) {
+          const res = await handleSessionRename(req, deps, sessionDetail[1]);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'DELETE' && sessionDetail?.[1]) {
+          const res = handleSessionDelete(deps, sessionDetail[1]);
           rec.status(res.status);
           return res;
         }
