@@ -11,6 +11,7 @@ import { CrewsArea } from '../features/crews/index.tsx';
 import { LibraryArea } from '../features/library/index.tsx';
 import { RunsArea } from '../features/runs/index.tsx';
 import { RunDetail } from '../features/runs/run-detail.tsx';
+import { SessionDetail } from '../features/sessions/session-detail.tsx';
 import { SessionsArea } from '../features/sessions/sessions-area.tsx';
 import { SettingsArea } from '../features/settings/index.tsx';
 import { WorkflowsArea } from '../features/workflows/index.tsx';
@@ -49,6 +50,7 @@ const runDetailRoute = createRoute({
 export const routeTree = rootRoute.addChildren([
   route('/', ChatArea),
   route('/sessions', SessionsArea),
+  route('/sessions/$sessionId', SessionDetail),
   route('/crews', CrewsArea),
   route('/crews/$crewName', CrewDetail),
   route('/workflows', WorkflowsArea),
