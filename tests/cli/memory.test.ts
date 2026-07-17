@@ -12,6 +12,10 @@ function fakeStore() {
       calls.push('ingest');
       return { chunks: 2, skipped: false };
     },
+    rememberOnce: async () => {
+      calls.push('rememberOnce');
+      return { skipped: false };
+    },
     recall: async () => {
       calls.push('recall');
       return [{ id: 'a#0', text: 'hi', source: 'a', score: 0, namespace: '' }];

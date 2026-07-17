@@ -54,6 +54,9 @@ export const ATTR = {
   MEMORY_RETURNED: 'memory.returned',
   MEMORY_RERANKED: 'memory.reranked',
   MEMORY_EMBED_MODEL: 'memory.embed_model',
+  /** Slice 30b Phase 6 (D6) — whether a `rememberOnce` auto-ingest call was
+   *  a dedup no-op. */
+  MEMORY_REMEMBER_SKIPPED: 'memory.remember.skipped',
   VERIFICATION_SUPPORTED: 'verification.supported',
   VERIFICATION_FAITHFULNESS: 'verification.faithfulness',
   VERIFICATION_UNSUPPORTED: 'verification.unsupported_claims',
@@ -631,6 +634,30 @@ export function withMemoryIngestSpan<T>(
     span.setAttribute('memory.source', info.source);
     if (info.chunks != null) span.setAttribute('memory.chunks', info.chunks);
     return fn();
+  });
+}
+
+export type MemoryRememberInfo = { space: string; namespace?: string };
+
+/** Span for one `rememberOnce` auto-ingest call (Slice 30b Phase 6, D6):
+ *  unlike `withMemoryIngestSpan` (whose caller checks `seenDoc` BEFORE
+ *  opening the span, so a dedup-skip never appears in the trace at all),
+ *  this span wraps the WHOLE call including the dedup check — the
+ *  `skipped` attribute is what makes "how often does chat auto-ingest
+ *  dedup-skip" answerable straight from spans, since chat callers never
+ *  pre-check `seenDoc` themselves. */
+export function withMemoryRememberSpan<T extends { skipped: boolean }>(
+  info: MemoryRememberInfo,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('memory.remember', async (span) => {
+    span.setAttribute(ATTR.MEMORY_SPACE, info.space);
+    if (info.namespace) {
+      span.setAttribute(ATTR.MEMORY_NAMESPACE, info.namespace);
+    }
+    const result = await fn();
+    span.setAttribute(ATTR.MEMORY_REMEMBER_SKIPPED, result.skipped);
+    return result;
   });
 }
 
