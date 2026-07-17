@@ -7,6 +7,7 @@ import { CommandPalette } from './command-palette.tsx';
 
 const NAV: { to: string; label: string }[] = [
   { to: '/', label: 'Chat' },
+  { to: '/sessions', label: 'Sessions' },
   { to: '/crews', label: 'Crews' },
   { to: '/workflows', label: 'Workflows' },
   { to: '/builders', label: 'Builders' },

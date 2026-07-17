@@ -21,10 +21,11 @@ function renderAt(path: string) {
 }
 
 describe('AppShell', () => {
-  it('renders navigation for all 7 areas', async () => {
+  it('renders navigation for all 8 areas', async () => {
     renderAt('/');
     for (const label of [
       'Chat',
+      'Sessions',
       'Crews',
       'Workflows',
       'Builders',
