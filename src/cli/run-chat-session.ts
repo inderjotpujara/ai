@@ -12,9 +12,17 @@ import {
   ingestMedia,
 } from '../media/ingest.ts';
 import type { MediaStore } from '../media/store.ts';
+import { injectRecall } from '../memory/recall-tool.ts';
+import type { MemoryStore } from '../memory/store.ts';
 import type { DegradationLedger } from '../reliability/ledger.ts';
 import type { RunHandle } from '../run/run-store.ts';
 import { type ChatDeps, runChat } from './run-chat.ts';
+
+/** The dedicated memory space every chat turn recalls from and auto-ingests
+ *  into (Slice 30b Phase 6, D5/D6). The single source of truth — `handler.ts`
+ *  (T30) imports this SAME constant for its `rememberOnce` auto-ingest call
+ *  so the two can never drift apart. */
+export const CHAT_MEMORY_SPACE = 'chat';
 
 export type ChatSessionDeps = {
   registry: MountedRegistry; // the MCP-scoped reg (has forAgent(name): ToolSet)
@@ -26,6 +34,12 @@ export type ChatSessionDeps = {
   mediaStore: MediaStore;
   /** Test seam — defaults to the real runChat. Mirrors runDefinedAgent's runAgentImpl. */
   runChatImpl?: (deps: ChatDeps) => Promise<OrchestratorResult>;
+  /** Optional (Slice 30b Phase 6, D5): when present, `runChatSession` prepends
+   *  recalled context from the shared `chat` memory space before running the
+   *  orchestrator. CLI (`src/cli/chat.ts`, T31) wires it for the READ benefit
+   *  only; the server (`src/server/chat/run-turn.ts`, T30) wires it for both
+   *  read (here) and write (`handleChat`'s `rememberOnce` auto-ingest). */
+  memoryStore?: MemoryStore;
 };
 
 export type ChatSessionInput = {
@@ -79,6 +93,13 @@ export async function runChatSession(
     );
     task = ingested.prompt;
     warnings.push(...ingested.warnings);
+  }
+  if (deps.memoryStore) {
+    task = await injectRecall(
+      deps.memoryStore,
+      { space: CHAT_MEMORY_SPACE },
+      task,
+    );
   }
   const orchestrator = createSuperAgent(
     (name) => deps.registry.forAgent(name),

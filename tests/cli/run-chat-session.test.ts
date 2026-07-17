@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  CHAT_MEMORY_SPACE,
   type ChatSessionDeps,
   runChatSession,
 } from '../../src/cli/run-chat-session.ts';
@@ -16,6 +17,7 @@ import type { ResourceCapture } from '../../src/core/resource-capture.ts';
 import type { MountedRegistry } from '../../src/mcp/mount.ts';
 import type { MediaStore } from '../../src/media/store.ts';
 import type { MediaItem, MediaKind } from '../../src/media/types.ts';
+import type { MemoryStore } from '../../src/memory/store.ts';
 import type { RunHandle } from '../../src/run/run-store.ts';
 
 /** A MediaStore that records the src paths handed to `putFile`, so a test can
@@ -116,6 +118,49 @@ describe('runChatSession', () => {
     }
     expect(logSpy).not.toHaveBeenCalled();
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('with no memoryStore configured, the task is unchanged (existing behavior, no recall)', async () => {
+    const scripted: OrchestratorResult = { kind: 'answer', text: 'hi' };
+    const result = await runChatSession({
+      task: 'what did we discuss last time?',
+      deps: fakeDeps({ runChatImpl: async () => scripted }),
+    });
+    expect(result.task).toBe('what did we discuss last time?');
+  });
+
+  it('with a memoryStore configured, injectRecall prepends recalled context to the task (space="chat")', async () => {
+    const scripted: OrchestratorResult = { kind: 'answer', text: 'hi' };
+    const recallCalls: { query: string; opts: { space?: string } }[] = [];
+    const fakeMemoryStore = {
+      recall: async (query: string, opts: { space?: string }) => {
+        recallCalls.push({ query, opts });
+        return [
+          {
+            id: 'd#0',
+            source: 'chat:sess-1:m1',
+            text: 'we discussed cats',
+            score: 1,
+            namespace: '',
+          },
+        ];
+      },
+    } as unknown as MemoryStore;
+    const result = await runChatSession({
+      task: 'what did we discuss last time?',
+      deps: fakeDeps({
+        runChatImpl: async () => scripted,
+        memoryStore: fakeMemoryStore,
+      }),
+    });
+    expect(result.task).toContain('we discussed cats');
+    expect(result.task).toContain('what did we discuss last time?');
+    expect(recallCalls).toHaveLength(1);
+    expect(recallCalls[0]?.opts.space).toBe('chat');
+  });
+
+  it('CHAT_MEMORY_SPACE is the literal "chat" (the single source of truth handler.ts must match, T30)', () => {
+    expect(CHAT_MEMORY_SPACE).toBe('chat');
   });
 
   // D17 (server path): the task text is attacker-controlled over HTTP, so the
