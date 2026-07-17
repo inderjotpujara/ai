@@ -32,6 +32,7 @@ describe('ChatArea', () => {
     sendMessage.mockClear();
     mockStatus = 'ready';
     mockMessages = [];
+    localStorage.clear();
   });
 
   it('renders assistant message text via message.parts -> Response', async () => {
@@ -46,12 +47,17 @@ describe('ChatArea', () => {
     expect(await screen.findByText('Hello world')).toBeInTheDocument();
   });
 
-  it('submits typed text via sendMessage and clears the input', async () => {
+  it('submits typed text via sendMessage (threading a freshly-minted sessionId) and clears the input', async () => {
     renderAt('/');
     const textarea = await screen.findByPlaceholderText(/./i);
     fireEvent.change(textarea, { target: { value: 'ping' } });
     fireEvent.click(screen.getByRole('button', { name: /send/i }));
-    expect(sendMessage).toHaveBeenCalledWith({ text: 'ping' });
+    // Slice 30b Phase 6 (D2): every send threads a body.sessionId now —
+    // minted fresh here since this test never rehydrates a stored one.
+    expect(sendMessage).toHaveBeenCalledWith(
+      { text: 'ping' },
+      { body: { sessionId: expect.any(String) } },
+    );
     expect((textarea as HTMLTextAreaElement).value).toBe('');
   });
 

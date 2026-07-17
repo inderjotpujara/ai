@@ -39,6 +39,7 @@ describe('ChatArea conversation actions', () => {
     setMessages.mockClear();
     mockStatus = 'ready';
     mockMessages = [];
+    localStorage.clear();
 
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText: vi.fn() },
@@ -185,6 +186,10 @@ describe('ChatArea conversation actions', () => {
     // Truncates to BEFORE the edited user message (index 0) — drops it and
     // everything after, since the edited text is resent as a fresh turn.
     expect(updater(mockMessages)).toEqual([]);
-    expect(sendMessage).toHaveBeenCalledWith({ text: 'edited question' });
+    // Slice 30b Phase 6 (D2): every send threads a body.sessionId, edit+resend included.
+    expect(sendMessage).toHaveBeenCalledWith(
+      { text: 'edited question' },
+      { body: { sessionId: expect.any(String) } },
+    );
   });
 });

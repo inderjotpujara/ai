@@ -60,6 +60,7 @@ describe('Composer drag-drop / paste-image attachments', () => {
   beforeEach(() => {
     sendMessage.mockClear();
     mockStatus = 'ready';
+    localStorage.clear();
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -108,20 +109,28 @@ describe('Composer drag-drop / paste-image attachments', () => {
     await waitFor(() =>
       expect(sendMessage).toHaveBeenCalledWith(
         { text: 'look at this' },
-        { body: { uploadIds: ['dropped-abc123.png'] } },
+        {
+          body: {
+            uploadIds: ['dropped-abc123.png'],
+            sessionId: expect.any(String),
+          },
+        },
       ),
     );
     expect(screen.queryByText('cat.png')).not.toBeInTheDocument();
   });
 
-  it('a plain text send with no attachment calls sendMessage with just { text } (regression: no empty body override)', async () => {
+  it('a plain text send with no attachment carries sessionId but no uploadIds key (Slice 30b Phase 6: sessionId always threads; uploadIds is attachment-only)', async () => {
     renderAt('/');
     const textarea = await screen.findByPlaceholderText(/./i);
     fireEvent.change(textarea, { target: { value: 'no image here' } });
     fireEvent.click(screen.getByRole('button', { name: /send/i }));
 
     await waitFor(() =>
-      expect(sendMessage).toHaveBeenCalledWith({ text: 'no image here' }),
+      expect(sendMessage).toHaveBeenCalledWith(
+        { text: 'no image here' },
+        { body: { sessionId: expect.any(String) } },
+      ),
     );
   });
 });
