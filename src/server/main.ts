@@ -113,10 +113,6 @@ export function startWebServer(opts: StartOptions = {}): {
 
   const policy = { port, allowedOrigins };
   const runsRoot = 'runs';
-  // Lazy engine: nothing (registry build, model manager, MCP mount) runs at
-  // boot — only on the FIRST `/api/chat` request — so server startup and the
-  // perimeter/health tests stay Ollama-free.
-  const runChatTurn = createRealRunChatTurn(createLazyEngine(runsRoot));
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
@@ -166,6 +162,15 @@ export function startWebServer(opts: StartOptions = {}): {
   const sessionStore = createSessionStore(
     { path: String(cfg.AGENT_SESSIONS_PATH) },
     {},
+  );
+  // Lazy engine: nothing (registry build, model manager, MCP mount) runs at
+  // boot — only on the FIRST `/api/chat` request — so server startup and the
+  // perimeter/health tests stay Ollama-free. `memoryStore` threads through so
+  // `runChatSession`'s `injectRecall` call (Slice 30b Phase 6, D5) gets the
+  // SAME store instance the auto-ingest write path (below) uses.
+  const runChatTurn = createRealRunChatTurn(
+    createLazyEngine(runsRoot),
+    memoryStore,
   );
   // Serve the real built app when it exists (`cd web && bun run build`);
   // fall back to the Phase-1 stub otherwise (unbuilt/Ollama-free dev + tests).

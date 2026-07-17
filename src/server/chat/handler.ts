@@ -1,9 +1,11 @@
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
+import { CHAT_MEMORY_SPACE } from '../../cli/run-chat-session.ts';
 import { ChatRole, StatusEventType } from '../../contracts/enums.ts';
 import { ChatRequestSchema } from '../../contracts/requests.ts';
 import type { StreamSink } from '../../core/agent.ts';
 import type { EventSink } from '../../core/events.ts';
 import type { IngestFlags } from '../../media/ingest.ts';
+import type { MemoryStore } from '../../memory/store.ts';
 import type { SessionStore } from '../../session/store.ts';
 import { withUiStreamSpan } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
@@ -14,13 +16,15 @@ import { buildTaskFromMessages, latestUserMessage, textOf } from './task.ts';
 /** `uploadsDir` is optional so existing fakes/tests that never send
  *  `uploadIds` (and so never touch upload-path resolution) don't need to
  *  supply it; the real server (`src/server/main.ts`) always sets it.
- *  `sessionStore` is optional for the identical reason: pre-existing chat
- *  tests that never exercise persistence keep passing untouched, while the
- *  real server always supplies one (Slice 30b Phase 6, D3/D4). */
+ *  `sessionStore`/`memoryStore` are optional for the identical reason: every
+ *  pre-existing chat test that never exercises persistence/auto-ingest keeps
+ *  passing untouched, while the real server always supplies both (Slice 30b
+ *  Phase 6, D3/D4/D5/D6). */
 export type ChatHandlerDeps = {
   runChatTurn: RunChatTurn;
   uploadsDir?: string;
   sessionStore?: SessionStore;
+  memoryStore?: MemoryStore;
 };
 
 function json(body: unknown, status: number): Response {
@@ -50,8 +54,17 @@ function json(body: unknown, status: number): Response {
  * value the stream-outcome branch already computes, no extra stream tap; a
  * thrown/aborted turn skips straight to `catch`, so the assistant row is
  * simply never written (§7.1(b)/(e) — a deliberate, visible gap, not
- * silent data loss). See `tests/server/chat-handler-persistence.test.ts`
- * for the adversarially-verified requirements (§7.1 a–e).
+ * silent data loss).
+ *
+ * Auto-ingest (Slice 30b Phase 6, D5/D6): when `sessionId` + `memoryStore`
+ * are both present, the completed turn (user ask + assistant answer) is
+ * fire-and-forgotten into the shared `chat` memory space via
+ * `rememberOnce` — deliberately NOT awaited, so the SSE response is free to
+ * end without waiting on an embedding round-trip.
+ *
+ * See `tests/server/chat-handler-persistence.test.ts` (T26) and
+ * `tests/server/chat-handler-auto-ingest.test.ts` (this task) for the
+ * adversarially-verified requirements.
  */
 export async function handleChat(
   req: Request,
@@ -192,9 +205,9 @@ export async function handleChat(
           // connection/turn leaves the assistant row simply absent, never
           // partial. The assistant message's id is server-minted: the AI-SDK
           // client mints its own display id independently, so there is no
-          // client-generated id available here to reuse (this same id is
-          // what Increment 3/T30's `rememberOnce` source string is built
-          // from, keeping every turn's auto-ingest dedup key unique).
+          // client-generated id available here to reuse — this same id is
+          // what the auto-ingest `source` string below is built from,
+          // keeping every turn's dedup key unique (§7.1(d)).
           const assistantMsgId = `asst-${crypto.randomUUID()}`;
           if (sessionId && deps.sessionStore) {
             deps.sessionStore.appendMessage(
@@ -207,6 +220,22 @@ export async function handleChat(
                 runId: capturedRunId,
               },
               Date.now(),
+            );
+          }
+          // Auto-ingest (D5/D6): fire-and-forget — `void`, never awaited —
+          // so the SSE response can end without waiting on an embedding
+          // round-trip (the store's own `memory.recall`/`memory.ingest`
+          // spans already prove that round-trip is not instant).
+          if (sessionId && deps.memoryStore) {
+            const userText = lastUserMsg ? textOf(lastUserMsg) : '';
+            void deps.memoryStore.rememberOnce(
+              `user: ${userText}\nassistant: ${assistantText}`,
+              {
+                space: CHAT_MEMORY_SPACE,
+                namespace: sessionId,
+                source: `chat:${sessionId}:${assistantMsgId}`,
+                at: Date.now(),
+              },
             );
           }
           rec.outcome(result.kind);
