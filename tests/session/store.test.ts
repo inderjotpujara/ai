@@ -293,3 +293,57 @@ describe('listSessions', () => {
     });
   });
 });
+
+describe('appendMessage runId write path (Phase 6 Incr 2 — closes Increment 1s flagged gap)', () => {
+  beforeEach(() => {
+    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
+  });
+
+  test('appendMessage with runId writes sessions.run_id', () => {
+    store.appendMessage(
+      's1',
+      { id: 'm1', role: 'assistant', parts: [], runId: 'run-abc' },
+      1_500,
+    );
+    expect(store.getSession('s1')?.runId).toBe('run-abc');
+  });
+
+  test('appendMessage without runId leaves sessions.run_id untouched (stays undefined)', () => {
+    store.appendMessage('s1', { id: 'm1', role: 'user', parts: [] }, 1_500);
+    expect(store.getSession('s1')?.runId).toBeUndefined();
+  });
+
+  test('a LATER appendMessage without runId does not CLEAR a previously-written runId', () => {
+    store.appendMessage(
+      's1',
+      { id: 'm1', role: 'assistant', parts: [], runId: 'run-abc' },
+      1_000,
+    );
+    store.appendMessage('s1', { id: 'm2', role: 'user', parts: [] }, 2_000);
+    expect(store.getSession('s1')?.runId).toBe('run-abc');
+  });
+
+  test('a LATER appendMessage with a NEW runId overwrites the previous one', () => {
+    store.appendMessage(
+      's1',
+      { id: 'm1', role: 'assistant', parts: [], runId: 'run-abc' },
+      1_000,
+    );
+    store.appendMessage(
+      's1',
+      { id: 'm2', role: 'assistant', parts: [], runId: 'run-xyz' },
+      2_000,
+    );
+    expect(store.getSession('s1')?.runId).toBe('run-xyz');
+  });
+
+  test('listSessions surfaces the written runId on SessionListItemDTO', () => {
+    store.appendMessage(
+      's1',
+      { id: 'm1', role: 'assistant', parts: [], runId: 'run-xyz' },
+      1_000,
+    );
+    const page = store.listSessions({ limit: 10 });
+    expect(page.items[0]?.runId).toBe('run-xyz');
+  });
+});

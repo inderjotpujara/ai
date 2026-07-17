@@ -168,6 +168,7 @@ export function createSessionStore(
       parts: unknown;
       parentMessageId?: string;
       degraded?: boolean;
+      runId?: string;
     },
     at: number,
   ): void {
@@ -187,13 +188,22 @@ export function createSessionStore(
         msg.degraded === undefined ? null : msg.degraded ? 1 : 0,
       ],
     );
-    // Touch activity timestamps so listSessions's sort key advances.
-    // run_id is deliberately NOT touched here — this signature carries no
-    // runId; see this task's design note.
-    db.run(
-      'UPDATE sessions SET updated_at = ?, last_message_at = ? WHERE id = ?',
-      [at, at, sessionId],
-    );
+    // Touch activity timestamps unconditionally; only touch run_id when the
+    // caller actually supplied one — a runId-less call (e.g. the user-message
+    // persist, which runs BEFORE the orchestrator even starts and so cannot
+    // know a runId yet) must never CLEAR a run_id a prior call already wrote
+    // (Phase 6 Incr 2, closes Increment 1's flagged gap).
+    if (msg.runId !== undefined) {
+      db.run(
+        'UPDATE sessions SET updated_at = ?, last_message_at = ?, run_id = ? WHERE id = ?',
+        [at, at, msg.runId, sessionId],
+      );
+    } else {
+      db.run(
+        'UPDATE sessions SET updated_at = ?, last_message_at = ? WHERE id = ?',
+        [at, at, sessionId],
+      );
+    }
   }
 
   function getMessages(sessionId: string): StoredMessage[] {
