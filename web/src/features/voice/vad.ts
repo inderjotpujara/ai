@@ -44,6 +44,14 @@ export function createSegmenter(opts: SegmenterOpts): Segmenter {
   let buffer: Float32Array[] = [];
   let inSegment = false;
   let silentMsAccumulated = 0;
+  // Count of consecutive trailing SILENT chunks since the last speech chunk
+  // (Fix 5). Used to trim the closing silence by CHUNK COUNT rather than by
+  // re-summing float durations backward: `silentMsAccumulated` is summed
+  // forward while a backward re-sum is not bit-associative on variable-length
+  // chunks (the real downsampler emits them), so a float `>=` tie could shift
+  // the trim boundary by ±1 chunk. Counting the trailing silent chunks is
+  // exact — they are precisely the chunks pushed after the last speech chunk.
+  let trailingSilentCount = 0;
   const listeners = new Set<(frames: VoiceFrames) => void>();
 
   function chunkDurationMs(chunk: Float32Array): number {
@@ -64,6 +72,7 @@ export function createSegmenter(opts: SegmenterOpts): Segmenter {
   function emit(): void {
     inSegment = false;
     silentMsAccumulated = 0;
+    trailingSilentCount = 0;
     if (buffer.length === 0) return;
     const samples = concat(buffer);
     buffer = [];
@@ -72,20 +81,12 @@ export function createSegmenter(opts: SegmenterOpts): Segmenter {
   }
 
   function closeSustainedSilence(): void {
-    // Trim the trailing silent chunks themselves back off the emitted
-    // audio: walk back from the end, summing each chunk's duration, until
-    // the accumulated trim matches the silence total we tracked — that
-    // boundary is exactly the end of the last speech-bearing chunk.
-    let trimmedMs = 0;
-    let cut = buffer.length;
-    for (let i = buffer.length - 1; i >= 0; i -= 1) {
-      const chunk = buffer[i];
-      if (chunk === undefined) break;
-      trimmedMs += chunkDurationMs(chunk);
-      cut = i;
-      if (trimmedMs >= silentMsAccumulated) break;
-    }
-    buffer = buffer.slice(0, cut);
+    // Trim the trailing silent chunks themselves back off the emitted audio.
+    // Trim by COUNT (`trailingSilentCount`, tracked as frames arrive) — the
+    // trailing silent chunks are exactly the ones pushed after the last
+    // speech chunk, so dropping that many lands the boundary precisely at the
+    // end of the last speech-bearing chunk, with no float re-summation (Fix 5).
+    buffer = buffer.slice(0, buffer.length - trailingSilentCount);
     emit();
   }
 
@@ -100,11 +101,13 @@ export function createSegmenter(opts: SegmenterOpts): Segmenter {
       buffer.push(chunk);
       inSegment = true;
       silentMsAccumulated = 0;
+      trailingSilentCount = 0; // speech resumed — the trailing-silence run resets
       return;
     }
     if (!inSegment) return; // silence before any speech started this cycle
     buffer.push(chunk);
     silentMsAccumulated += chunkDurationMs(chunk);
+    trailingSilentCount += 1;
     if (silentMsAccumulated >= silenceMs) closeSustainedSilence();
   }
 
@@ -116,6 +119,7 @@ export function createSegmenter(opts: SegmenterOpts): Segmenter {
     buffer = [];
     inSegment = false;
     silentMsAccumulated = 0;
+    trailingSilentCount = 0;
   }
 
   function onSegment(cb: (frames: VoiceFrames) => void): () => void {

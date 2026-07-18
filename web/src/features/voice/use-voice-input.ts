@@ -67,6 +67,12 @@ export function useVoiceInput(
   const engineRef = useRef<SttEngine | null>(null);
   const captureRef = useRef<AudioCapture | null>(null);
   const segmenterRef = useRef<Segmenter | null>(null);
+  // Identity token for "whose transcribe results are still wanted". Set at
+  // gesture start; kept alive across a GRACEFUL stop (stopHold/toggleTap) so
+  // the flush's final IS delivered; nulled only on a DESTRUCTIVE teardown
+  // (cancel / disable / unmount) so a late transcribe settle can't deliver
+  // onFinal, repaint status, or setState after the session ended (Fix 4).
+  const activeSegmenterRef = useRef<Segmenter | null>(null);
   const gestureRef = useRef<'hold' | 'tap' | null>(null);
   const readyRef = useRef(false);
   const unsubRef = useRef<() => void>(() => {});
@@ -112,6 +118,7 @@ export function useVoiceInput(
       if (captureRef.current) void captureRef.current.stop();
       captureRef.current = null;
       segmenterRef.current = null;
+      activeSegmenterRef.current = null; // invalidate any in-flight transcribe tail (Fix 4)
       gestureRef.current = null;
       engine.close();
       engineRef.current = null;
@@ -142,6 +149,7 @@ export function useVoiceInput(
         frameMs: FRAME_MS,
       });
       segmenterRef.current = segmenter;
+      activeSegmenterRef.current = segmenter;
 
       const offSegment = segmenter.onSegment((frames) => {
         setStatus('transcribing');
@@ -150,10 +158,20 @@ export function useVoiceInput(
         engine
           .transcribe(frames)
           .then((text) => {
+            // Gate the ENTIRE settle on session identity (Fix 4): a
+            // destructive teardown (cancel/disable/unmount) that lands
+            // while transcribe is in flight nulls this token, so a late
+            // resolve must NOT deliver onFinal, repaint status, or setState
+            // post-unmount. A graceful stop keeps the token, so the flush's
+            // final still lands here.
+            if (activeSegmenterRef.current !== segmenter) return;
             if (text) opts.onFinal(text);
+            setInterim('');
+            setStatus(gestureRef.current ? 'listening' : 'ready');
           })
-          .catch(() => setError('transcription failed'))
-          .finally(() => {
+          .catch(() => {
+            if (activeSegmenterRef.current !== segmenter) return;
+            setError('transcription failed');
             setInterim('');
             setStatus(gestureRef.current ? 'listening' : 'ready');
           });
@@ -161,6 +179,14 @@ export function useVoiceInput(
 
       const capture = deps.createCapture();
       captureRef.current = capture;
+      // Tap-mode serialization queue (Fix 3): each tap chunk must be
+      // classified by the async `detectSpeech()` worker round-trip before
+      // segmentation, and those round-trips can resolve OUT OF submission
+      // order. A serial promise chain — await each chunk's classify +
+      // pushFrame before the next chunk's detection starts — guarantees
+      // pushFrame runs in ARRIVAL order (serial await is fine at VAD
+      // cadence). Local to this gesture, so a new gesture starts fresh.
+      let tapQueue: Promise<void> = Promise.resolve();
       const offChunk = capture.onChunk((chunk) => {
         // Hold-to-talk (`gated: false`) ignores `isSpeech` entirely — the
         // gesture itself is the segment boundary (vad.ts) — so push the
@@ -175,10 +201,17 @@ export function useVoiceInput(
           segmenter.pushFrame(chunk, true);
           return;
         }
-        engine
-          .detectSpeech(chunk)
-          .then((isSpeech) => segmenter.pushFrame(chunk, isSpeech))
-          .catch(() => segmenter.pushFrame(chunk, false));
+        tapQueue = tapQueue.then(async () => {
+          if (segmenterRef.current !== segmenter) return; // gesture ended
+          let isSpeech = false;
+          try {
+            isSpeech = await engine.detectSpeech(chunk);
+          } catch {
+            isSpeech = false;
+          }
+          if (segmenterRef.current !== segmenter) return; // ended mid round-trip
+          segmenter.pushFrame(chunk, isSpeech);
+        });
       });
       const offLevel = capture.onLevel((rms) => setLevel(rms));
       unsubRef.current = () => {
@@ -189,7 +222,21 @@ export function useVoiceInput(
 
       capture
         .start()
-        .then(() => setStatus('listening'))
+        .then(() => {
+          // Guard the deferred resolve on capture identity (Fix 2): a quick
+          // press+release (or double toggleTap) before getUserMedia
+          // resolves supersedes this capture — stopHold/endGesture already
+          // nulled captureRef and called stop() (a NO-OP while start() was
+          // still pending). If we blindly setStatus('listening') here we'd
+          // paint a phantom listening state with no session AND leave the
+          // real mic LIVE (hot-mic leak). So bail and stop the superseded
+          // capture; a later gesture then owns captureRef cleanly.
+          if (captureRef.current !== capture) {
+            void capture.stop();
+            return;
+          }
+          setStatus('listening');
+        })
         .catch((err: unknown) => {
           // Always land on 'error' here — a mic-permission denial must
           // never be swallowed back into 'ready' just because the STT
@@ -216,6 +263,10 @@ export function useVoiceInput(
 
   const stopHold = useCallback(() => {
     if (gestureRef.current !== 'hold') return;
+    // Accepted release-boundary behavior: a sub-chunk the worklet posted but
+    // whose onChunk message hasn't dispatched at this exact stopHold instant
+    // is dropped (it never reached the segmenter). Fine — the residual is
+    // sub-frame audio, and flush() below preserves everything already buffered.
     segmenterRef.current?.flush(); // §7.1 (c): never drop the release-boundary residual
     endGesture('ready');
   }, [endGesture]);
@@ -232,6 +283,7 @@ export function useVoiceInput(
 
   const cancel = useCallback(() => {
     if (gestureRef.current === null) return;
+    activeSegmenterRef.current = null; // invalidate any in-flight transcribe tail (Fix 4)
     segmenterRef.current?.reset(); // discard buffered audio — never transcribe
     endGesture('ready');
   }, [endGesture]);

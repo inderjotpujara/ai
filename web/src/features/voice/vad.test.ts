@@ -268,6 +268,37 @@ describe('createSegmenter — tap-to-toggle (gated: true)', () => {
     expect(onSegment).not.toHaveBeenCalled();
   });
 
+  it('trims trailing silence by chunk count on VARIABLE-length chunks (Fix 5): the boundary lands exactly at the last speech chunk, no ±1 float-tie drift', () => {
+    // The real downsampler emits variable-length chunks, so trimming must not
+    // depend on re-summing float durations two different ways. Speech chunks
+    // of 500 + 300 samples, then silent chunks of 700 + 900 samples
+    // (durations 43.75ms + 56.25ms = 100ms) close at silenceMs=100 and must
+    // be trimmed WHOLLY off, leaving exactly the two speech chunks.
+    const segmenter = createSegmenter({
+      silenceMs: 100,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(500, 0.6), true);
+    segmenter.pushFrame(tone(300, 0.7), true);
+    segmenter.pushFrame(tone(700, 0), false); // 43.75ms silent
+    expect(onSegment).not.toHaveBeenCalled();
+    segmenter.pushFrame(tone(900, 0), false); // +56.25ms = 100ms >= silenceMs
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    const frames = onSegment.mock.calls[0]?.[0] as VoiceFrames;
+    // Exactly the two speech chunks (500 + 300 = 800 samples), silence gone.
+    expect(Array.from(frames.samples as Float32Array)).toEqual(
+      Array.from(
+        new Float32Array([
+          ...new Float32Array(500).fill(0.6),
+          ...new Float32Array(300).fill(0.7),
+        ]),
+      ),
+    );
+  });
+
   it('flush() during an open (not-yet-silence-closed) tap-toggle segment closes it immediately with whatever is buffered', () => {
     const segmenter = createSegmenter({
       silenceMs: 1000,

@@ -108,14 +108,16 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
     const id = nextId++;
     return new Promise<boolean>((resolve, reject) => {
       pendingDetect.set(id, { resolve, reject });
-      worker.postMessage(
-        {
-          kind: 'detectSpeech',
-          id,
-          chunk: chunk16k,
-        } satisfies SttWorkerRequest,
-        [chunk16k.buffer],
-      );
+      // NO transfer list here (unlike transcribe below): detectSpeech is
+      // classify-only and the caller (use-voice-input.ts tap path) reuses
+      // this SAME chunk for segmenter.pushFrame immediately after. A
+      // transfer would DETACH the caller's view → an empty buffer gets
+      // segmented → vad.ts concat() breaks. Send it by structured-clone.
+      worker.postMessage({
+        kind: 'detectSpeech',
+        id,
+        chunk: chunk16k,
+      } satisfies SttWorkerRequest);
     });
   }
 

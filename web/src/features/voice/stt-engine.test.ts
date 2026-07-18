@@ -12,8 +12,17 @@ class FakeSttWorker {
   onmessage: ((event: MessageEvent) => void) | null = null;
   posted: unknown[] = [];
   terminated = false;
-  postMessage(msg: unknown) {
+  postMessage(msg: unknown, transfer?: Transferable[]) {
     this.posted.push(msg);
+    // Faithfully mimic the real Worker.postMessage transfer semantics: a
+    // buffer in the transfer list is DETACHED on the sender's side. This is
+    // what lets us prove Fix 1 — detectSpeech must NOT transfer (else it
+    // detaches the caller's chunk), transcribe still must.
+    if (transfer) {
+      for (const t of transfer) {
+        if (t instanceof ArrayBuffer) structuredClone(t, { transfer: [t] });
+      }
+    }
   }
   terminate() {
     this.terminated = true;
@@ -186,6 +195,21 @@ describe('createSttEngine', () => {
     });
     await expect(detectPromise).rejects.toThrow('VAD model not loaded');
     expect(await transcribePromise).toBe('ok');
+  });
+
+  it('detectSpeech sends the chunk by structured-clone (no transfer) so the caller can reuse it, while transcribe still transfers its buffer (Fix 1)', () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    // detectSpeech is classify-only; the tap-mode caller reuses this SAME
+    // chunk for segmenter.pushFrame right after, so it must stay attached.
+    const chunk = new Float32Array([0.1, 0.2, 0.3]);
+    void engine.detectSpeech(chunk);
+    expect(chunk.byteLength).toBe(12); // still attached (3 × 4 bytes)
+    expect(chunk.length).toBe(3);
+    // transcribe's concat buffer is NOT reused by the caller, so it stays
+    // transferred (zero-copy) — detached here proves the transfer still fires.
+    const samples = new Float32Array([0.4, 0.5]);
+    void engine.transcribe({ samples, sampleRate: 16000 });
+    expect(samples.byteLength).toBe(0); // detached by transfer
   });
 
   it('close() terminates the worker', () => {
