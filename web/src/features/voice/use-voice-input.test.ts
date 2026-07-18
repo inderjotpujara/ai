@@ -386,6 +386,57 @@ describe('useVoiceInput', () => {
     expect(onFinal).not.toHaveBeenCalled();
   });
 
+  it('back-to-back gestures: a first utterance whose transcribe is still in flight when a SECOND gesture starts is NOT dropped — its final still lands (per-session validity set)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    const firstGate = deferred<string>();
+    let transcribeCall = 0;
+    engine.transcribe = vi.fn(() => {
+      transcribeCall += 1;
+      // First gesture's transcribe is deferred (still in flight when gesture
+      // 2 begins); the second resolves normally.
+      return transcribeCall === 1 ? firstGate.promise : Promise.resolve('two');
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    // Gesture 1: speak, release → transcribe1 fires but stays pending.
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(engine.transcribe).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    // Gesture 2 starts BEFORE transcribe1 has resolved.
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+
+    // Now transcribe1 resolves — its final must STILL be delivered (append
+    // semantics) and must NOT stomp gesture 2's live 'listening' status.
+    await act(async () => {
+      firstGate.resolve('one');
+      await Promise.resolve();
+    });
+    expect(onFinal).toHaveBeenCalledWith('one'); // first utterance NOT dropped
+    expect(result.current.status).toBe('listening'); // gesture 2 still live
+
+    // Gesture 2 still works end-to-end and delivers its own final.
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(engine.transcribe).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onFinal).toHaveBeenCalledWith('two'));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(onFinal).toHaveBeenCalledTimes(2);
+  });
+
   it('when enabled is false from the start, status is disabled and no engine/capture is ever created', () => {
     const createEngine = vi.fn();
     const createCapture = vi.fn();

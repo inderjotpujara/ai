@@ -114,3 +114,26 @@ Added `use-voice-input.test.ts` describe "tap-mode Transferable-detach integrati
 
 ## Concern
 - Full-suite run emits a happy-dom `DetachedBrowserFrame.abort` teardown trace; it is pre-existing environment-teardown noise (absent when the three voice files run alone) and all 267 tests pass.
+
+---
+
+## Review-fix append (Phase 7) — back-to-back gesture final-drop regression
+
+**Commit:** (see below) — `fix(voice): deliver in-flight finals across back-to-back gestures (per-session validity set) [review fix]`
+
+**Context:** the prior consolidated fix `ab7fde5` (Fix 4) used a single `activeSegmenterRef` "latest session" token. A re-review found this introduced ONE new Important regression: after a graceful `stopHold` (gestureRef null, transcribe1 still in flight), a new `startHold` was permitted and overwrote `activeSegmenterRef = segmenter2`. When transcribe1 then resolved, its tail gate `activeSegmenterRef !== segmenter1` returned early and **silently dropped `onFinal(text1)`** — the first push-to-talk utterance was lost with no error. The single token conflated "destructively torn down" with "superseded by a newer gesture."
+
+**Fix (`web/src/features/voice/use-voice-input.ts`):** replaced the single `activeSegmenterRef` token with a per-session validity `Set<Segmenter>` (`validSegmentersRef`).
+- `startGesture`: ADD the new segmenter (does NOT clear existing entries — a prior in-flight transcribe stays valid).
+- graceful `endGesture` (stopHold / toggleTap stop): set left intact (the just-flushed segment's transcribe still delivers its final).
+- destructive teardown (effect cleanup on disable/unmount, and `cancel()`): `.clear()` the whole set (suppress all in-flight tails).
+- transcribe `.then/.catch`: every side effect (`onFinal`/`setStatus`/`setError`/`setInterim`) gated on `validSegmentersRef.current.has(segmenter)`; a `.finally` REMOVES the segmenter so the set can't grow unbounded across gestures.
+- Status is still derived from the CURRENT `gestureRef`, so a superseded final delivers `onFinal(text1)` (append semantics) WITHOUT stomping a live gesture-2's `listening` status back to `ready`.
+
+**Minor hardening:** wrapped the one unguarded synchronous `segmenter.pushFrame(chunk, isSpeech)` call in the tap-mode serial promise-queue in a try/catch, so a throw degrades to a no-op for that chunk instead of rejecting `tapQueue` (queue-poison / unhandled-rejection guard).
+
+**Tests (`use-voice-input.test.ts`):** added a regression test — startHold→speak→stopHold (transcribe1 deferred) → startHold (gesture2) → resolve transcribe1 → asserts `onFinal('one')` was delivered (not dropped), gesture-2 status stays `listening` (not stomped), and gesture-2 completes end-to-end delivering its own `onFinal('two')`.
+
+**Gate:** `cd web && bun run typecheck` (clean) + `bun run test -- src/features/voice/use-voice-input.test.ts` → **17 passed**; `bun run lint:file` (biome, from repo root) on both files → clean.
+
+**Mutation-check:** reverted the source to the old latest-wins behavior (clear-then-add so only the newest segmenter stays valid) and re-ran — the new regression test went **RED** (`expected onFinal to be called with ['one']; Number of calls: 0`), confirming it pins the regression. Restored the fix → 17/17 GREEN. All pre-existing tests (graceful delivery, disable/unmount suppression, ordering, teardown, capture-identity, Transferable-detach) stayed green throughout.
