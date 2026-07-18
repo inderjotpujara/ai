@@ -1,7 +1,7 @@
 import { useNavigate } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
 import { Dialog } from '../shared/ui/dialog.tsx';
-import { type Command, navCommands } from './commands.ts';
+import { type Command, commands, runCommand } from './commands.ts';
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -23,8 +23,8 @@ export function CommandPalette() {
   const results = useMemo<Command[]>(() => {
     const q = query.trim().toLowerCase();
     return q
-      ? navCommands.filter((c) => c.label.toLowerCase().includes(q))
-      : navCommands;
+      ? commands.filter((c) => c.label.toLowerCase().includes(q))
+      : commands;
   }, [query]);
 
   function reset() {
@@ -48,7 +48,7 @@ export function CommandPalette() {
       e.preventDefault();
       const cmd = results[selected];
       if (cmd) {
-        cmd.run(navigate);
+        runCommand(cmd, navigate);
         onOpenChange(false);
       }
     }
@@ -94,7 +94,7 @@ export function CommandPalette() {
             }`}
             onMouseEnter={() => setSelected(i)}
             onClick={() => {
-              c.run(navigate);
+              runCommand(c, navigate);
               onOpenChange(false);
             }}
           >

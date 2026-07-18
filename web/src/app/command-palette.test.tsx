@@ -38,4 +38,12 @@ describe('CommandPalette', () => {
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
   });
+
+  it('runs the selected command via runCommand (nav-kind, unchanged end-to-end behavior)', async () => {
+    render(<CommandPalette />);
+    await userEvent.keyboard('{Meta>}k{/Meta}');
+    await userEvent.type(screen.getByRole('combobox'), 'settings');
+    await userEvent.keyboard('{Enter}');
+    expect(navigate).toHaveBeenCalledWith({ to: '/settings' });
+  });
 });

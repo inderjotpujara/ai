@@ -2,64 +2,114 @@ import type { useNavigate } from '@tanstack/react-router';
 
 type NavigateFn = ReturnType<typeof useNavigate>;
 
-export type Command = {
+/** Phase 8 D8: `Command` now supports two shapes — `Nav` (the original,
+ *  navigates somewhere) and `Action` (a no-arg side effect, e.g. toggling a
+ *  setting). `enum` per this repo's "enum over string-literal unions for
+ *  finite sets" convention. */
+export enum CommandKind {
+  Nav = 'nav',
+  Action = 'action',
+}
+
+type NavCommand = {
   id: string;
   label: string;
-  run: (nav: NavigateFn) => void;
+  kind: CommandKind.Nav;
+  run: (nav: NavigateFn) => void | Promise<void>;
 };
 
-// Phase 1b: only navigation commands are wireable. Launch-agent/crew/workflow
-// and switch-model land with their features (⌘K completeness = Phase 8).
-// jump-to-run, jump-to-crew, and jump-to-workflow are wired below; Phase 8
-// extends jump-to-run to jump to a specific recent run.
-export const navCommands: Command[] = [
-  { id: 'go-chat', label: 'Go to Chat', run: (n) => n({ to: '/' }) },
-  { id: 'go-crews', label: 'Go to Crews', run: (n) => n({ to: '/crews' }) },
+type ActionCommand = {
+  id: string;
+  label: string;
+  kind: CommandKind.Action;
+  run: () => void;
+};
+
+export type Command = NavCommand | ActionCommand;
+
+/** The one dispatch point for running a `Command` (D8) — callers (the
+ *  palette's Enter-key handler and its click handler) never branch on
+ *  `cmd.kind` themselves. */
+export function runCommand(
+  cmd: Command,
+  nav: NavigateFn,
+): void | Promise<void> {
+  return cmd.kind === CommandKind.Action ? cmd.run() : cmd.run(nav);
+}
+
+// Renamed from `navCommands` (Phase 8 D8) — this array now holds the
+// widened `Command` union; Task 16 appends `Action`-kind entries here.
+export const commands: Command[] = [
+  {
+    id: 'go-chat',
+    label: 'Go to Chat',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/' }),
+  },
+  {
+    id: 'go-crews',
+    label: 'Go to Crews',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/crews' }),
+  },
   {
     id: 'go-workflows',
     label: 'Go to Workflows',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/workflows' }),
   },
   {
     id: 'go-builders',
     label: 'Go to Builders',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/builders' }),
   },
-  { id: 'go-runs', label: 'Go to Runs', run: (n) => n({ to: '/runs' }) },
+  {
+    id: 'go-runs',
+    label: 'Go to Runs',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/runs' }),
+  },
   {
     id: 'go-library',
     label: 'Go to Library',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/library' }),
   },
   {
     id: 'go-settings',
     label: 'Go to Settings',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/settings' }),
   },
-  { id: 'jump-to-run', label: 'Jump to Runs', run: (n) => n({ to: '/runs' }) },
+  {
+    id: 'jump-to-run',
+    label: 'Jump to Runs',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/runs' }),
+  },
   {
     id: 'jump-to-crew',
     label: 'Jump to Crews',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/crews' }),
   },
   {
     id: 'jump-to-workflow',
     label: 'Jump to Workflows',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/workflows' }),
   },
   {
     id: 'jump-to-sessions',
     label: 'Jump to Sessions',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/sessions' }),
   },
-  // A true prefilled-query jump would need /sessions to accept a URL search
-  // param and SessionsArea to read it on mount — real ⌘K completeness is
-  // explicitly Phase 8 (this file's own comment, above). Kept as a second
-  // plain nav command for now (spec §4.5's own hedge: "kept to the
-  // 'navigation-command' shape").
   {
     id: 'search-sessions',
     label: 'Search Sessions',
+    kind: CommandKind.Nav,
     run: (n) => n({ to: '/sessions' }),
   },
 ];
