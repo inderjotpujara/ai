@@ -66,6 +66,15 @@ export function useVoiceInput(
   const engineRef = useRef<SttEngine | null>(null);
   const captureRef = useRef<AudioCapture | null>(null);
   const segmenterRef = useRef<Segmenter | null>(null);
+  // The latest segment to BEGIN transcribing (set when its '…' placeholder is
+  // painted in onSegment), independent of whether a gesture is still active.
+  // §7.1 (d) gates interim display on THIS, not `segmenterRef` — a graceful
+  // stop nulls `segmenterRef` before the still-valid transcription's interim
+  // arrives, so gating interim on `segmenterRef` would wrongly drop the
+  // current transcription's own interim. Gating on the latest transcribing
+  // segment keeps the current one's interim while dropping an OLD, superseded
+  // segment's late interim in a back-to-back gesture (no cross-bleed).
+  const latestSegmentRef = useRef<Segmenter | null>(null);
   // Validity SET of "whose transcribe results are still wanted" — one entry
   // per still-live segmenter, NOT a single latest-wins token. A segmenter is
   // ADDED at gesture start and stays valid across a GRACEFUL stop
@@ -161,16 +170,27 @@ export function useVoiceInput(
       const offSegment = segmenter.onSegment((frames) => {
         setStatus('transcribing');
         setInterim('…');
+        // This segment is now the most recent to begin transcribing — its
+        // interim owns the composer until a newer segment supersedes it.
+        latestSegmentRef.current = segmenter;
+        // §7.1 (c): a settled final (or failure) always wins over a late
+        // interim for THIS request. Checked first so a straggling interim
+        // after the promise settles short-circuits before consulting the
+        // validity set / latest-segment ref — both of which a subsequent
+        // gesture may already have reused.
+        let finalized = false;
         engine
           .transcribe(frames, (text) => {
             // D6: real streamed interim text replaces the static '…'
-            // placeholder as Moonshine decodes. The three adversarial
-            // guards (dropped-for-invalidated-segmenter, back-to-back
-            // gesture isolation, final-wins-over-late-interim) land in
-            // Task 12 — deliberately absent here.
+            // placeholder as Moonshine decodes, behind three adversarial
+            // guards (§7.1):
+            if (finalized) return; // (c) final wins over a late interim
+            if (!validSegmentersRef.current.has(segmenter)) return; // (a) drop interim of a segmenter invalidated by a destructive teardown
+            if (latestSegmentRef.current !== segmenter) return; // (d) never bleed an OLD segment's interim into a newer gesture's display
             setInterim(text);
           })
           .then((text) => {
+            finalized = true;
             // Gate every side effect on PER-SESSION validity: a destructive
             // teardown (cancel/disable/unmount) cleared the set, so a late
             // resolve must NOT deliver onFinal, repaint status, or setState
@@ -185,6 +205,7 @@ export function useVoiceInput(
             setStatus(gestureRef.current ? 'listening' : 'ready');
           })
           .catch(() => {
+            finalized = true;
             if (!validSegmentersRef.current.has(segmenter)) return;
             setError('transcription failed');
             setInterim('');

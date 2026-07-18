@@ -532,6 +532,129 @@ describe('useVoiceInput', () => {
     expect(seen[2]?.startsWith('Hello')).toBe(true);
   });
 
+  it('§7.1 (a): interim messages for a segmenter invalidated by a destructive teardown are dropped, never displayed', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {}); // never resolves
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold()); // flushes → transcribe() starts, interim '…'
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+
+    // Start a NEW gesture and cancel it — this is the destructive path that
+    // clears validSegmentersRef.current entirely (Fix 4), invalidating the
+    // FIRST segment's still-in-flight transcribe too.
+    act(() => result.current.startHold());
+    act(() => result.current.cancel());
+
+    const interimAtCancel = result.current.interim;
+    act(() => capturedOnInterim?.('should-not-appear'));
+    expect(result.current.interim).toBe(interimAtCancel);
+    expect(result.current.interim).not.toBe('should-not-appear');
+  });
+
+  it("§7.1 (d): a back-to-back gesture never shows the OLD segment's late interim as if it were the NEW segment's", async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    const captured: Array<(text: string) => void> = [];
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      if (onInterim) captured.push(onInterim);
+      return new Promise<string>(() => {}); // neither segment's decode ever resolves
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    // Segment A: hold, release (graceful stop — stays VALID for its final).
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+    const onInterimA = captured[0];
+    act(() => onInterimA?.('A-partial'));
+    await waitFor(() => expect(result.current.interim).toBe('A-partial'));
+
+    // Segment B starts BEFORE A's decode resolves — a genuine back-to-back
+    // gesture. B becomes segmenterRef.current; A is still in
+    // validSegmentersRef (graceful stop), so A's FINAL would still be
+    // allowed to land later — but A's INTERIM must not bleed into B's slot.
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+
+    // A's decode is STILL in flight and fires another interim chunk late —
+    // this must never overwrite B's display.
+    act(() => onInterimA?.('A-partial-late'));
+    expect(result.current.interim).toBe('…'); // still B's placeholder, not A's text
+
+    const onInterimB = captured[1];
+    act(() => onInterimB?.('B-partial'));
+    await waitFor(() => expect(result.current.interim).toBe('B-partial'));
+    act(() => onInterimA?.('A-partial-even-later'));
+    expect(result.current.interim).toBe('B-partial'); // still B's, A never bleeds in
+  });
+
+  it('§7.1 (c): the final transcribeResult always wins over a late-arriving interim for the same request id', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    const transcribeGate = deferred<string>();
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return transcribeGate.promise;
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+
+    act(() => capturedOnInterim?.('partial'));
+    await waitFor(() => expect(result.current.interim).toBe('partial'));
+
+    // The final resolves — interim is cleared, onFinal fires.
+    act(() => transcribeGate.resolve('final text'));
+    await waitFor(() => expect(onFinal).toHaveBeenCalledWith('final text'));
+    await waitFor(() => expect(result.current.interim).toBe(''));
+
+    // A LATE interim for the SAME (already-settled) request id must not
+    // stomp the cleared, finalized state.
+    act(() => capturedOnInterim?.('late-after-final'));
+    expect(result.current.interim).toBe('');
+  });
+
   it('when enabled is false from the start, status is disabled and no engine/capture is ever created', () => {
     const createEngine = vi.fn();
     const createCapture = vi.fn();
