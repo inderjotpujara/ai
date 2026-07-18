@@ -66,10 +66,18 @@ const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
   minDurationMs: 60_000,
 };
 
+export type VoiceWindowConfig = { defaultModel: string; vadSilenceMs: number };
+
+const DEFAULT_VOICE_CONFIG: VoiceWindowConfig = {
+  defaultModel: 'moonshine-base',
+  vadSilenceMs: 800,
+};
+
 export function renderIndexHtml(
   token: string,
   distIndexHtml?: string,
   notify: NotifyConfig = DEFAULT_NOTIFY_CONFIG,
+  voice: VoiceWindowConfig = DEFAULT_VOICE_CONFIG,
 ): string {
   // JSON.stringify does not escape `</`, so a token value could break out of
   // the <script> tag; escape `<` to a unicode escape before interpolating.
@@ -77,7 +85,9 @@ export function renderIndexHtml(
   const tokenScript =
     `<script>window.__AGENT_TOKEN__=${safeToken};` +
     `window.__AGENT_NOTIFY_POLL_MS__=${JSON.stringify(notify.pollMs)};` +
-    `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${JSON.stringify(notify.minDurationMs)};</script>`;
+    `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${JSON.stringify(notify.minDurationMs)};` +
+    `window.__AGENT_VOICE_DEFAULT_MODEL__=${JSON.stringify(voice.defaultModel)};` +
+    `window.__AGENT_VOICE_VAD_SILENCE_MS__=${JSON.stringify(voice.vadSilenceMs)};</script>`;
   if (distIndexHtml !== undefined) {
     if (MODULE_SCRIPT_TAG.test(distIndexHtml)) {
       return distIndexHtml.replace(
@@ -197,10 +207,18 @@ export function startWebServer(opts: StartOptions = {}): {
     policy,
     recordIo,
     staticDir,
-    indexHtml: renderIndexHtml(token, distIndexHtml, {
-      pollMs: cfg.AGENT_WEB_NOTIFY_POLL_MS as number,
-      minDurationMs: cfg.AGENT_WEB_NOTIFY_MIN_DURATION_MS as number,
-    }),
+    indexHtml: renderIndexHtml(
+      token,
+      distIndexHtml,
+      {
+        pollMs: cfg.AGENT_WEB_NOTIFY_POLL_MS as number,
+        minDurationMs: cfg.AGENT_WEB_NOTIFY_MIN_DURATION_MS as number,
+      },
+      {
+        defaultModel: cfg.AGENT_WEB_VOICE_DEFAULT_MODEL as string,
+        vadSilenceMs: cfg.AGENT_WEB_VOICE_VAD_SILENCE_MS as number,
+      },
+    ),
     runChatTurn,
     consent,
     uploadsDir,

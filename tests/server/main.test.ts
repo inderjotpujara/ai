@@ -115,3 +115,22 @@ test('renderIndexHtml threads an explicit notify config through', () => {
   expect(html).toContain('window.__AGENT_NOTIFY_POLL_MS__=1234');
   expect(html).toContain('window.__AGENT_NOTIFY_MIN_DURATION_MS__=99999');
 });
+
+test('renderIndexHtml also injects the voice config (defaults) alongside the token', () => {
+  const html = renderIndexHtml('tok-999');
+  expect(html).toContain(
+    'window.__AGENT_VOICE_DEFAULT_MODEL__="moonshine-base"',
+  );
+  expect(html).toContain('window.__AGENT_VOICE_VAD_SILENCE_MS__=800');
+});
+
+test('renderIndexHtml threads an explicit voice config through', () => {
+  const html = renderIndexHtml('tok-1000', undefined, undefined, {
+    defaultModel: 'moonshine-tiny',
+    vadSilenceMs: 1200,
+  });
+  expect(html).toContain(
+    'window.__AGENT_VOICE_DEFAULT_MODEL__="moonshine-tiny"',
+  );
+  expect(html).toContain('window.__AGENT_VOICE_VAD_SILENCE_MS__=1200');
+});
