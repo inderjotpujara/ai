@@ -102,6 +102,14 @@ describe('MicButton', () => {
     expect(screen.getByTestId('voice-waveform')).toBeInTheDocument();
   });
 
+  it('renders the interim busy indicator while transcribing (C3 — wires the previously-dead interim signal)', () => {
+    useVoiceInputMock.mockReturnValue(
+      baseVoice({ status: 'transcribing', interim: '…' }),
+    );
+    render(<MicButton onFinal={vi.fn()} />);
+    expect(screen.getByTestId('mic-interim')).toHaveTextContent('…');
+  });
+
   it('shows a subtle CPU-mode hint when WebGPU is absent (D9 — invisible-beyond-load degrade)', () => {
     vi.stubGlobal('navigator', {});
     useVoiceInputMock.mockReturnValue(baseVoice());

@@ -79,15 +79,20 @@ export function renderIndexHtml(
   notify: NotifyConfig = DEFAULT_NOTIFY_CONFIG,
   voice: VoiceWindowConfig = DEFAULT_VOICE_CONFIG,
 ): string {
-  // JSON.stringify does not escape `</`, so a token value could break out of
-  // the <script> tag; escape `<` to a unicode escape before interpolating.
-  const safeToken = JSON.stringify(token).replace(/</g, '\\u003c');
+  // JSON.stringify does not escape `</`, so a value could break out of the
+  // <script> tag; escape `<` to a unicode escape before interpolating. Every
+  // interpolation below MUST route through this helper — routing them all
+  // through one shared function (rather than inlining `.replace(/</g, ...)`
+  // at each call site) means the escaping can't silently drift out of sync
+  // as new globals are added (it did for `voice.defaultModel`, a STRING
+  // value, before this fix — the numeric globals were never at risk).
+  const safeJson = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
   const tokenScript =
-    `<script>window.__AGENT_TOKEN__=${safeToken};` +
-    `window.__AGENT_NOTIFY_POLL_MS__=${JSON.stringify(notify.pollMs)};` +
-    `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${JSON.stringify(notify.minDurationMs)};` +
-    `window.__AGENT_VOICE_DEFAULT_MODEL__=${JSON.stringify(voice.defaultModel)};` +
-    `window.__AGENT_VOICE_VAD_SILENCE_MS__=${JSON.stringify(voice.vadSilenceMs)};</script>`;
+    `<script>window.__AGENT_TOKEN__=${safeJson(token)};` +
+    `window.__AGENT_NOTIFY_POLL_MS__=${safeJson(notify.pollMs)};` +
+    `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${safeJson(notify.minDurationMs)};` +
+    `window.__AGENT_VOICE_DEFAULT_MODEL__=${safeJson(voice.defaultModel)};` +
+    `window.__AGENT_VOICE_VAD_SILENCE_MS__=${safeJson(voice.vadSilenceMs)};</script>`;
   if (distIndexHtml !== undefined) {
     if (MODULE_SCRIPT_TAG.test(distIndexHtml)) {
       return distIndexHtml.replace(

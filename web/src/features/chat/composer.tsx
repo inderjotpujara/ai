@@ -1,6 +1,7 @@
 import type { ClipboardEvent, DragEvent } from 'react';
 import { useState } from 'react';
 import { PromptInput } from '../../shared/ai-elements/prompt-input.tsx';
+import { isVoiceInputEnabled } from '../settings/index.tsx';
 import { MicButton } from '../voice/mic-button.tsx';
 import { uploadImage } from './attachments.ts';
 
@@ -119,9 +120,11 @@ export function Composer({
           ))}
         </ul>
       )}
-      <div className="flex items-center gap-2 px-3 pt-2">
-        <MicButton onFinal={handleVoiceFinal} />
-      </div>
+      {isVoiceInputEnabled() && (
+        <div className="flex items-center gap-2 px-3 pt-2">
+          <MicButton onFinal={handleVoiceFinal} />
+        </div>
+      )}
       <PromptInput
         value={value}
         onChange={setValue}

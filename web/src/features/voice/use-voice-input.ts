@@ -32,7 +32,6 @@ export type UseVoiceInputOpts = {
   model: ModelTier;
   silenceMs: number;
   onFinal: (text: string) => void;
-  onInterim?: (text: string) => void;
 };
 
 /** Injected factories — the test seam. Real callers get the module
@@ -161,8 +160,12 @@ export function useVoiceInput(
 
       const offSegment = segmenter.onSegment((frames) => {
         setStatus('transcribing');
+        // The busy indicator is genuinely just "…" — this pipeline has no
+        // streaming partial transcript (a documented limitation), so
+        // `interim` is a status flag consumed via the hook's own return
+        // value (`MicButton` renders it when `status === 'transcribing'`),
+        // not a caller-supplied callback.
         setInterim('…');
-        opts.onInterim?.('…');
         engine
           .transcribe(frames)
           .then((text) => {
@@ -274,13 +277,7 @@ export function useVoiceInput(
           );
         });
     },
-    [
-      opts.silenceMs,
-      opts.onFinal,
-      opts.onInterim,
-      endGesture,
-      deps.createCapture,
-    ],
+    [opts.silenceMs, opts.onFinal, endGesture, deps.createCapture],
   );
 
   const startHold = useCallback(() => startGesture('hold'), [startGesture]);

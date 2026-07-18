@@ -1,5 +1,5 @@
-// D10: built on Rung 1 (require-corp + CDN CORS fetch); empirically confirmed
-// at Task 17 live-verify. Fallback ladder if CDN blocked: (2) COEP
+// D10: built on Rung 1 (require-corp + CDN CORS fetch); to be confirmed at
+// Task 17 live-verify. Fallback ladder if CDN blocked: (2) COEP
 // credentialless, (3) self-host models via env.localModelPath. See spec D10.
 //
 // Runs inside a dedicated Web Worker (D4) — transformers.js's heavier

@@ -7,7 +7,10 @@ import { defineConfig } from 'vite';
 // (SharedArrayBuffer) for STT/VAD inference (Slice 30b Phase 7, D1/D8 —
 // originally put in place for a since-rejected sherpa-onnx WASM plan, see
 // docs/architecture.md's Voice section). The model-weight CDN fetch under
-// `require-corp` was proven/adjusted by the Task 7 D10 spike — see
+// `require-corp` is built on the Rung-1 reasoned assumption of D10's
+// fallback ladder — the genuinely empirical spike (does it actually load
+// under these headers in a real browser) was carried forward to Task 17's
+// live-verify, not run standalone here — see
 // `web/src/features/voice/stt.worker.ts`'s header comment for which rung of
 // the fallback ladder this repo actually ships on.
 const isolation = {

@@ -134,3 +134,14 @@ test('renderIndexHtml threads an explicit voice config through', () => {
   );
   expect(html).toContain('window.__AGENT_VOICE_VAD_SILENCE_MS__=1200');
 });
+
+test('renderIndexHtml escapes a hostile voice.defaultModel STRING value against </script> breakout (S1 fix — every JSON.stringify interpolation in the tokenScript must route through the shared safeJson escaper, not just the token)', () => {
+  const html = renderIndexHtml('tok-1001', undefined, undefined, {
+    defaultModel: '</script><script>alert(1)</script>',
+    vadSilenceMs: 800,
+  });
+  expect(html).not.toContain('</script><script>alert(1)</script>');
+  expect(html).toContain(
+    'window.__AGENT_VOICE_DEFAULT_MODEL__="\\u003c/script>\\u003cscript>alert(1)\\u003c/script>"',
+  );
+});

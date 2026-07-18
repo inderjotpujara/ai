@@ -5,7 +5,6 @@ import { Waveform } from './waveform.tsx';
 
 export type MicButtonProps = {
   onFinal: (text: string) => void;
-  onInterim?: (text: string) => void;
 };
 
 const DEFAULT_SILENCE_MS = 800;
@@ -30,14 +29,13 @@ function hasWebGpu(): boolean {
  * starts/stops a VAD-gated tap-to-toggle session. Renders nothing when
  * voice input is disabled in Settings (D7).
  */
-export function MicButton({ onFinal, onInterim }: MicButtonProps) {
+export function MicButton({ onFinal }: MicButtonProps) {
   const enabled = isVoiceInputEnabled();
   const voice = useVoiceInput({
     enabled,
     model: voiceModelTier(),
     silenceMs: configuredSilenceMs(),
     onFinal,
-    onInterim,
   });
 
   if (!enabled) return null;
@@ -95,6 +93,14 @@ export function MicButton({ onFinal, onInterim }: MicButtonProps) {
         Tap
       </button>
       {voice.status === 'listening' && <Waveform level={voice.level} />}
+      {voice.status === 'transcribing' && (
+        <span
+          data-testid="mic-interim"
+          className="text-xs text-[var(--color-muted)]"
+        >
+          {voice.interim || 'transcribing…'}
+        </span>
+      )}
       {busy && (
         <span className="text-xs text-[var(--color-muted)]">
           Loading voice model…

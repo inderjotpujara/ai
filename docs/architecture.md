@@ -4676,7 +4676,7 @@ concrete engine differs.
 | File | Responsibility |
 |---|---|
 | `audio-capture.ts` | `createAudioCapture()` — `getUserMedia({audio:{echoCancellation,noiseSuppression,autoGainControl}})` + an `AudioWorkletProcessor` (`downsample-worklet.ts`) downsampling the browser's native rate to 16kHz mono; `createDownsampler(inputRate)` is the pure, carry-state resample core (mirrors §23's `carryPcmChunk` byte-carry idiom, adapted to fractional-sample carry rather than byte alignment) |
-| `downsample-worklet.ts` | The `AudioWorkletProcessor` registration wrapping `createDownsampler`, running on the audio-rendering thread; posts fixed-size 16kHz `Float32Array` chunks back to the main thread via a transferable `postMessage` |
+| `downsample-worklet.ts` | The `AudioWorkletProcessor` registration wrapping `createDownsampler`, running on the audio-rendering thread; posts variable-length (per audio-render quantum) 16kHz `Float32Array` chunks back to the main thread via a transferable `postMessage` |
 | `stt-engine.ts` | `createSttEngine({model})` — boots a dedicated Web Worker (`stt.worker.ts`) hosting transformers.js's Moonshine (ASR) + Silero (VAD) pipeline, Cache-API-persisted, WebGPU-preferred/WASM-fallback; `ready()`/`onProgress()`/`detectSpeech()`/`transcribe()`/`close()` |
 | `stt.worker.ts` | The actual Web Worker body: loads `ModelTier`-selected Moonshine + Silero via `AutoModel`/`AutoProcessor`, exposes a `{load,detectSpeech,transcribe}` request / `{progress,ready,detectSpeechResult,transcribeResult,error}` response message protocol; exports WebGPU device detection as pure, unit-testable logic (everything past that boundary — real model load/inference — is validated at live-verify, not by an automated test, since there is no WASM/ONNX runtime under Vitest/happy-dom) |
 | `model-tier.ts` | `enum ModelTier` (base/tiny) — the shared selector both `stt.worker.ts` and `settings/index.tsx` import |
@@ -4691,9 +4691,11 @@ concrete engine differs.
 exception to the isomorphic zod-only convention: it never crosses an HTTP
 wire in this phase, so there is no round-trip to validate); `src/voice/
 types.ts` re-exports it rather than redefining it — one definition, two
-importers, no drift. `CaptureSource` is mirrored into
-`src/contracts/enums.ts` with a parity test
-(`tests/contracts/capture-source-parity.test.ts`).
+importers, no drift. `CaptureSource` is single-sourced in
+`src/contracts/enums.ts` and re-exported by `src/voice/types.ts` the same
+way, with a parity test
+(`tests/contracts/capture-source-parity.test.ts`) guarding against future
+redefinition drift.
 `AGENT_WEB_VOICE_DEFAULT_MODEL`/`AGENT_WEB_VOICE_VAD_SILENCE_MS` follow the
 `AGENT_WEB_NOTIFY_*` env-fallback convention (`src/config/schema.ts`),
 plumbed to the browser as
@@ -4779,8 +4781,9 @@ zero-new-server-routes scope deliberately avoids.
 
 - **No live streaming interim transcript.** `SttEngine.transcribe()`
   returns only a final string (no partial-result callback in this phase's
-  worker protocol); `useVoiceInput`'s `interim`/`onInterim` surface a
-  transient "…" busy indicator while a segment is transcribing, not a
+  worker protocol); `useVoiceInput`'s `interim` return value surfaces a
+  transient "…" busy indicator (rendered by `mic-button.tsx` while
+  `status === 'transcribing'`) while a segment is transcribing, not a
   word-by-word live partial. A true streaming ASR partial is a forward-item.
 - **`mic-button.tsx` exposes hold-to-talk and tap-to-toggle as two
   separate buttons**, not one button that disambiguates a quick tap from a
