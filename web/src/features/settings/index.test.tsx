@@ -67,6 +67,16 @@ describe('SettingsArea', () => {
       await screen.findByText('Enable OS notifications'),
     ).toBeInTheDocument();
   });
+
+  it('exposes aria-pressed on the OS-notify toggle reflecting its state (D1)', async () => {
+    stubNotification('granted');
+    renderAt('/settings');
+    const btn = await screen.findByTestId('notify-os-toggle');
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(btn);
+    expect(await screen.findByText('OS notifications: on')).toBeInTheDocument();
+    expect(btn).toHaveAttribute('aria-pressed', 'true');
+  });
 });
 
 describe('SettingsArea — voice input', () => {
@@ -112,5 +122,13 @@ describe('SettingsArea — voice input', () => {
     expect(await screen.findByLabelText(/voice model tier/i)).toBe(
       screen.getByTestId('voice-model-tier'),
     );
+  });
+
+  it('exposes aria-pressed on the voice-input toggle reflecting its state (D1)', async () => {
+    renderAt('/settings');
+    const btn = await screen.findByTestId('voice-input-toggle');
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(btn);
+    expect(btn).toHaveAttribute('aria-pressed', 'true');
   });
 });

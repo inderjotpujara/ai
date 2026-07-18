@@ -136,6 +136,7 @@ export function SettingsArea() {
         <Button
           data-testid="notify-os-toggle"
           variant={enabled ? 'accent' : 'default'}
+          aria-pressed={enabled}
           onClick={handleToggle}
         >
           {enabled ? 'OS notifications: on' : 'Enable OS notifications'}
@@ -155,6 +156,7 @@ export function SettingsArea() {
         <Button
           data-testid="voice-input-toggle"
           variant={voiceEnabled ? 'accent' : 'default'}
+          aria-pressed={voiceEnabled}
           onClick={() => setVoiceEnabled((v) => !v)}
         >
           {voiceEnabled ? 'Voice input: on' : 'Enable voice input'}
