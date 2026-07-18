@@ -655,6 +655,249 @@ describe('useVoiceInput', () => {
     expect(result.current.interim).toBe('');
   });
 
+  // ------------------------------------------------------------------
+  // §7.1 VAD tap-toggle correlation (per-SEGMENT, not per-segmenter).
+  //
+  // A tap-toggle gesture's SINGLE segmenter emits MANY segments (one per
+  // speech→silence cycle). The §7.1 guards must therefore correlate on a
+  // per-segment token, not on the segmenter object — otherwise segment 1's
+  // settled transcribe would invalidate segment 2 of the SAME live gesture.
+  // ------------------------------------------------------------------
+
+  // Drain the async tap-mode serialization queue (each chunk awaits an
+  // async detectSpeech round-trip before pushFrame).
+  async function drainTapQueue(ticks = 8) {
+    for (let i = 0; i < ticks; i++) await Promise.resolve();
+  }
+
+  it('§7.1 Critical #1: a tap-toggle gesture emitting TWO segments delivers the SECOND segment’s onFinal AND streams its interim (per-segment token, not per-segmenter)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    // Content-based VAD: a non-zero chunk is speech, a zero chunk is silence.
+    engine.detectSpeech = vi.fn(async (chunk: Float32Array) =>
+      chunk.some((v) => v !== 0),
+    );
+    const gates: Array<ReturnType<typeof deferred<string>>> = [];
+    const interimCbs: Array<((text: string) => void) | undefined> = [];
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      const gate = deferred<string>();
+      gates.push(gate);
+      interimCbs.push(onInterim);
+      return gate.promise;
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 10, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+
+    const speech = () => new Float32Array(8000).fill(0.5); // 500ms speech
+    const silence = () => new Float32Array(8000); // 500ms silence ≥ silenceMs
+
+    // Cycle 1: speech then silence → segment 1 closes and begins transcribing.
+    await act(async () => {
+      emitChunk(speech());
+      await drainTapQueue();
+      emitChunk(silence());
+      await drainTapQueue();
+    });
+    await waitFor(() => expect(gates).toHaveLength(1));
+
+    // Segment 1's final resolves — its transcribe SETTLES (its finally deletes
+    // segment 1's token). On the pre-fix per-segmenter code this deletes the
+    // one shared segmenter, poisoning segment 2 below.
+    await act(async () => {
+      gates[0]?.resolve('one');
+      await drainTapQueue();
+    });
+    expect(onFinal).toHaveBeenCalledWith('one');
+
+    // Cycle 2 of the SAME still-active tap gesture → segment 2.
+    await act(async () => {
+      emitChunk(speech());
+      await drainTapQueue();
+      emitChunk(silence());
+      await drainTapQueue();
+    });
+    await waitFor(() => expect(gates).toHaveLength(2));
+
+    // Segment 2's interim MUST stream (pre-fix: dropped — segmenter deleted).
+    act(() => interimCbs[1]?.('seg2-partial'));
+    await waitFor(() => expect(result.current.interim).toBe('seg2-partial'));
+
+    // Segment 2's final MUST be delivered (pre-fix: early-returned, lost).
+    await act(async () => {
+      gates[1]?.resolve('two');
+      await drainTapQueue();
+    });
+    expect(onFinal).toHaveBeenCalledWith('two');
+    expect(onFinal).toHaveBeenCalledTimes(2);
+  });
+
+  it('§7.1 Critical #2: two overlapping segments of ONE tap gesture — an older segment’s late interim never paints over the newer segment’s, and the display stays monotonic', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    engine.detectSpeech = vi.fn(async (chunk: Float32Array) =>
+      chunk.some((v) => v !== 0),
+    );
+    const interimCbs: Array<((text: string) => void) | undefined> = [];
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      interimCbs.push(onInterim);
+      return new Promise<string>(() => {}); // neither segment’s decode resolves
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 10, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+
+    const speech = () => new Float32Array(8000).fill(0.5);
+    const silence = () => new Float32Array(8000);
+
+    // Segment 1 begins transcribing (its decode stays in flight).
+    await act(async () => {
+      emitChunk(speech());
+      await drainTapQueue();
+      emitChunk(silence());
+      await drainTapQueue();
+    });
+    await waitFor(() => expect(interimCbs).toHaveLength(1));
+    act(() => interimCbs[0]?.('A-partial'));
+    await waitFor(() => expect(result.current.interim).toBe('A-partial'));
+
+    // Segment 2 of the SAME gesture begins — it now owns the display.
+    await act(async () => {
+      emitChunk(speech());
+      await drainTapQueue();
+      emitChunk(silence());
+      await drainTapQueue();
+    });
+    await waitFor(() => expect(interimCbs).toHaveLength(2));
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+
+    // Segment 1 (older, SAME segmenter) fires a late interim — pre-fix this
+    // painted over segment 2 because the per-segmenter guard cannot tell two
+    // segments of one segmenter apart. Post-fix the per-segment token drops it.
+    act(() => interimCbs[0]?.('A-partial-late'));
+    expect(result.current.interim).toBe('…');
+
+    act(() => interimCbs[1]?.('B-partial'));
+    await waitFor(() => expect(result.current.interim).toBe('B-partial'));
+    act(() => interimCbs[0]?.('A-partial-even-later'));
+    expect(result.current.interim).toBe('B-partial'); // monotonic, no bleed
+  });
+
+  it('§7.1 (a) tap variant: interim of a tap segment invalidated by a destructive teardown (cancel) is dropped', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    engine.detectSpeech = vi.fn(async () => true);
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {}); // never resolves
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    await act(async () => {
+      emitChunk(new Float32Array(512).fill(0.5));
+      await drainTapQueue();
+    });
+    // toggleTap again → flush → segment emitted, transcribe starts, interim '…'.
+    await act(async () => {
+      result.current.toggleTap();
+      await drainTapQueue();
+    });
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+
+    // Destructive teardown: start a new gesture then cancel → clears ALL tokens.
+    act(() => result.current.startHold());
+    act(() => result.current.cancel());
+
+    const interimAtCancel = result.current.interim;
+    act(() => capturedOnInterim?.('should-not-appear'));
+    expect(result.current.interim).toBe(interimAtCancel);
+    expect(result.current.interim).not.toBe('should-not-appear');
+  });
+
+  it("§7.1 (d) tap variant: back-to-back tap gestures never show the OLD tap segment's late interim as the NEW one's", async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    engine.detectSpeech = vi.fn(async () => true);
+    const captured: Array<(text: string) => void> = [];
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      if (onInterim) captured.push(onInterim);
+      return new Promise<string>(() => {}); // neither decode resolves
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    // Tap gesture A: start, speak, stop (graceful — A stays valid for its final).
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    await act(async () => {
+      emitChunk(new Float32Array(512).fill(0.5));
+      await drainTapQueue();
+    });
+    await act(async () => {
+      result.current.toggleTap();
+      await drainTapQueue();
+    });
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+    const onInterimA = captured[0];
+    act(() => onInterimA?.('A-partial'));
+    await waitFor(() => expect(result.current.interim).toBe('A-partial'));
+
+    // Tap gesture B starts before A's decode resolves.
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    await act(async () => {
+      emitChunk(new Float32Array(512).fill(0.5));
+      await drainTapQueue();
+    });
+    await act(async () => {
+      result.current.toggleTap();
+      await drainTapQueue();
+    });
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+
+    act(() => onInterimA?.('A-partial-late'));
+    expect(result.current.interim).toBe('…'); // still B's placeholder
+
+    const onInterimB = captured[1];
+    act(() => onInterimB?.('B-partial'));
+    await waitFor(() => expect(result.current.interim).toBe('B-partial'));
+    act(() => onInterimA?.('A-partial-even-later'));
+    expect(result.current.interim).toBe('B-partial'); // A never bleeds in
+  });
+
   it('when enabled is false from the start, status is disabled and no engine/capture is ever created', () => {
     const createEngine = vi.fn();
     const createCapture = vi.fn();

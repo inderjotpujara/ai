@@ -66,26 +66,32 @@ export function useVoiceInput(
   const engineRef = useRef<SttEngine | null>(null);
   const captureRef = useRef<AudioCapture | null>(null);
   const segmenterRef = useRef<Segmenter | null>(null);
-  // The latest segment to BEGIN transcribing (set when its '…' placeholder is
-  // painted in onSegment), independent of whether a gesture is still active.
-  // §7.1 (d) gates interim display on THIS, not `segmenterRef` — a graceful
-  // stop nulls `segmenterRef` before the still-valid transcription's interim
-  // arrives, so gating interim on `segmenterRef` would wrongly drop the
-  // current transcription's own interim. Gating on the latest transcribing
-  // segment keeps the current one's interim while dropping an OLD, superseded
+  // The latest SEGMENT (per-segment token, minted in onSegment) to BEGIN
+  // transcribing — set when its '…' placeholder is painted — independent of
+  // whether a gesture is still active. §7.1 (d) gates interim display on THIS
+  // token, not on the segmenter: a single VAD tap-toggle segmenter emits MANY
+  // segments (one per speech→silence cycle), so a segmenter identity cannot
+  // tell two segments of the SAME gesture apart — an older segment's late
+  // interim would bleed over a newer segment's display. Per-segment tokens
+  // fix that (Critical #2). It also keeps the current segment's interim across
+  // a graceful stop (which nulls `segmenterRef` before the still-valid
+  // transcription's interim arrives) while dropping an OLD, superseded
   // segment's late interim in a back-to-back gesture (no cross-bleed).
-  const latestSegmentRef = useRef<Segmenter | null>(null);
+  const latestSegmentTokenRef = useRef<object | null>(null);
   // Validity SET of "whose transcribe results are still wanted" — one entry
-  // per still-live segmenter, NOT a single latest-wins token. A segmenter is
-  // ADDED at gesture start and stays valid across a GRACEFUL stop
-  // (stopHold/toggleTap) so its flush's final IS delivered — even if a NEWER
-  // gesture has since started (back-to-back push-to-talk: a prior in-flight
-  // transcribe must still land, not be dropped because it was superseded).
-  // Each segmenter is REMOVED once its transcribe settles (bounded growth); a
-  // DESTRUCTIVE teardown (cancel / disable / unmount) CLEARS the whole set so
-  // no in-flight tail can deliver onFinal, repaint status, or setState after
-  // the session ended (Fix 4 + back-to-back regression fix).
-  const validSegmentersRef = useRef<Set<Segmenter>>(new Set());
+  // per still-in-flight SEGMENT token, NOT per segmenter and NOT a single
+  // latest-wins token. A token is ADDED when its segment begins transcribing
+  // (in onSegment) and stays valid across a GRACEFUL stop (stopHold/toggleTap)
+  // so its final IS delivered — even if a NEWER segment/gesture has since
+  // started (a prior in-flight transcribe must still land, not be dropped
+  // because it was superseded). Per SEGMENT (not per segmenter) is essential:
+  // a tap-toggle segmenter emits many segments, so segment 1 settling must NOT
+  // invalidate segment 2 of the SAME live gesture (Critical #1). Each token is
+  // REMOVED once its transcribe settles (bounded growth); a DESTRUCTIVE
+  // teardown (cancel / disable / unmount) CLEARS the whole set so no in-flight
+  // tail can deliver onFinal, repaint status, or setState after the session
+  // ended (Fix 4 + back-to-back regression fix).
+  const validSegmentTokensRef = useRef<Set<object>>(new Set());
   const gestureRef = useRef<'hold' | 'tap' | null>(null);
   const readyRef = useRef(false);
   const unsubRef = useRef<() => void>(() => {});
@@ -131,7 +137,7 @@ export function useVoiceInput(
       if (captureRef.current) void captureRef.current.stop();
       captureRef.current = null;
       segmenterRef.current = null;
-      validSegmentersRef.current.clear(); // invalidate ALL in-flight transcribe tails (Fix 4)
+      validSegmentTokensRef.current.clear(); // invalidate ALL in-flight transcribe tails (Fix 4)
       gestureRef.current = null;
       engine.close();
       engineRef.current = null;
@@ -162,59 +168,71 @@ export function useVoiceInput(
         frameMs: FRAME_MS,
       });
       segmenterRef.current = segmenter;
-      // ADD (do NOT clear) — a prior gesture's in-flight transcribe must stay
-      // valid so its final still lands even as this newer gesture supersedes
-      // it in segmenterRef.
-      validSegmentersRef.current.add(segmenter);
 
       const offSegment = segmenter.onSegment((frames) => {
         setStatus('transcribing');
         setInterim('…');
+        // Mint a fresh PER-SEGMENT token. A tap-toggle segmenter emits many
+        // segments; correlating on the segmenter (as before) let segment 1's
+        // settled transcribe invalidate segment 2 of the SAME live gesture
+        // (Critical #1) and made two same-segmenter segments indistinguishable
+        // (Critical #2). The token is per-segment, so siblings stay isolated.
+        const segToken: object = {};
+        // ADD (do NOT clear) — a prior segment's in-flight transcribe must
+        // stay valid so its final still lands even as this newer segment
+        // supersedes it in segmenterRef / latestSegmentTokenRef.
+        validSegmentTokensRef.current.add(segToken);
         // This segment is now the most recent to begin transcribing — its
         // interim owns the composer until a newer segment supersedes it.
-        latestSegmentRef.current = segmenter;
+        latestSegmentTokenRef.current = segToken;
         // §7.1 (c): a settled final (or failure) always wins over a late
         // interim for THIS request. Checked first so a straggling interim
         // after the promise settles short-circuits before consulting the
-        // validity set / latest-segment ref — both of which a subsequent
-        // gesture may already have reused.
+        // validity set / latest-segment token — both of which a subsequent
+        // segment may already have reused.
         let finalized = false;
         engine
           .transcribe(frames, (text) => {
             // D6: real streamed interim text replaces the static '…'
             // placeholder as Moonshine decodes, behind three adversarial
-            // guards (§7.1):
+            // guards (§7.1), all now keyed on the per-segment token:
             if (finalized) return; // (c) final wins over a late interim
-            if (!validSegmentersRef.current.has(segmenter)) return; // (a) drop interim of a segmenter invalidated by a destructive teardown
-            if (latestSegmentRef.current !== segmenter) return; // (d) never bleed an OLD segment's interim into a newer gesture's display
+            if (!validSegmentTokensRef.current.has(segToken)) return; // (a) drop interim of a segment invalidated by a destructive teardown
+            if (latestSegmentTokenRef.current !== segToken) return; // (d) never bleed an OLD segment's interim over a newer segment's display
             setInterim(text);
           })
           .then((text) => {
             finalized = true;
-            // Gate every side effect on PER-SESSION validity: a destructive
+            // Gate every side effect on PER-SEGMENT validity: a destructive
             // teardown (cancel/disable/unmount) cleared the set, so a late
             // resolve must NOT deliver onFinal, repaint status, or setState
-            // post-unmount. A graceful stop keeps this segmenter valid — so
-            // its flush's final still lands here EVEN IF a newer gesture has
-            // since started (back-to-back push-to-talk). Status is derived
-            // from the CURRENT gestureRef so a superseded final never stomps
-            // a live gesture's state back to 'ready'.
-            if (!validSegmentersRef.current.has(segmenter)) return;
+            // post-unmount. A graceful stop keeps this token valid — so its
+            // final still lands here EVEN IF a newer segment/gesture has since
+            // started. The final (onFinal) is ALWAYS delivered on append
+            // semantics; the shared interim/status display is only touched by
+            // the CURRENT latest segment, so a superseded older segment's
+            // resolve never wipes a newer segment's live interim (Critical #2)
+            // and never stomps a live gesture's state back to 'ready'.
+            if (!validSegmentTokensRef.current.has(segToken)) return;
             if (text) opts.onFinal(text);
-            setInterim('');
-            setStatus(gestureRef.current ? 'listening' : 'ready');
+            if (latestSegmentTokenRef.current === segToken) {
+              setInterim('');
+              setStatus(gestureRef.current ? 'listening' : 'ready');
+            }
           })
           .catch(() => {
             finalized = true;
-            if (!validSegmentersRef.current.has(segmenter)) return;
+            if (!validSegmentTokensRef.current.has(segToken)) return;
             setError('transcription failed');
-            setInterim('');
-            setStatus(gestureRef.current ? 'listening' : 'ready');
+            if (latestSegmentTokenRef.current === segToken) {
+              setInterim('');
+              setStatus(gestureRef.current ? 'listening' : 'ready');
+            }
           })
           .finally(() => {
-            // Bounded growth: drop this segmenter once its transcribe has
-            // settled so the set can't accumulate across many gestures.
-            validSegmentersRef.current.delete(segmenter);
+            // Bounded growth: drop this token once its transcribe has settled
+            // so the set can't accumulate across many segments/gestures.
+            validSegmentTokensRef.current.delete(segToken);
           });
       });
 
@@ -327,7 +345,7 @@ export function useVoiceInput(
 
   const cancel = useCallback(() => {
     if (gestureRef.current === null) return;
-    validSegmentersRef.current.clear(); // invalidate ALL in-flight transcribe tails (Fix 4)
+    validSegmentTokensRef.current.clear(); // invalidate ALL in-flight transcribe tails (Fix 4)
     segmenterRef.current?.reset(); // discard buffered audio — never transcribe
     endGesture('ready');
   }, [endGesture]);
