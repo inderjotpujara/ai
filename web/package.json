@@ -8,7 +8,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:voice-e2e": "vite build && bun run scripts/check-worklet-build.ts && vitest run --config vitest.browser.config.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "^3",
@@ -35,6 +36,9 @@
     "@tailwindcss/vite": "^4",
     "tailwindcss": "^4",
     "vitest": "^4",
+    "@vitest/browser": "^4",
+    "@vitest/browser-playwright": "^4",
+    "playwright": "^1.61.1",
     "happy-dom": "^15",
     "@testing-library/react": "^16",
     "@testing-library/jest-dom": "^6",

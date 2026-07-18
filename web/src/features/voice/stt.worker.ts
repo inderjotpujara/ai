@@ -102,8 +102,24 @@ async function load(model: ModelTier): Promise<void> {
     if (bytes)
       post({ kind: 'progress', loaded: bytes.loaded, total: bytes.total });
   };
+  // On the WASM/CPU fallback, Moonshine's DEFAULT decoder dtype (q4) crashes
+  // ONNX session creation — "TransposeDQWeightsForMatMulNBits Missing required
+  // scale: model.decoder.embed_tokens.weight_merged_0_scale": the quantized
+  // decoder ONNX ships without the scale tensor its MatMulNBits nodes need, so
+  // NO string dtype (q4/q8/fp32) nor the default loads. Only the per-subgraph
+  // fp32 objects below create a working session (verified end-to-end — it
+  // transcribes the fixture clip). WebGPU keeps the transformers.js default
+  // (validated live on Apple Silicon at T17), so this is scoped strictly to
+  // the previously-broken CPU path — the exact path a machine WITHOUT WebGPU
+  // (and the automated headless e2e) takes. Caught by
+  // voice-pipeline.browser.test.ts.
+  const dtype =
+    device === 'wasm'
+      ? ({ encoder_model: 'fp32', decoder_model_merged: 'fp32' } as const)
+      : undefined;
   asrModel = (await AutoModel.from_pretrained(modelId, {
     device,
+    dtype,
     progress_callback,
   })) as PreTrainedModel;
   asrProcessor = await AutoProcessor.from_pretrained(modelId, {});

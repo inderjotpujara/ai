@@ -26,6 +26,11 @@ model-images/*
 # Vite build output (web/ workspace member); never committed
 web/dist/
 
+# Vitest browser-mode (voice e2e) run artifacts — failure screenshots +
+# attachments; regenerated per run, never committed
+web/.vitest-attachments/
+web/src/**/__screenshots__/
+
 # Misc
 *.log
 .DS_Store
