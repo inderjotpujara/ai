@@ -50,3 +50,13 @@ test('AGENT_WEB_NOTIFY_MIN_DURATION_MS defaults to 60000 and stays a large margi
     (values.AGENT_WEB_NOTIFY_POLL_MS as number) * 10,
   );
 });
+test('AGENT_WEB_VOICE_DEFAULT_MODEL defaults to moonshine-base', () => {
+  const { values, sources } = loadConfig({});
+  expect(values.AGENT_WEB_VOICE_DEFAULT_MODEL).toBe('moonshine-base');
+  expect(sources.AGENT_WEB_VOICE_DEFAULT_MODEL).toBe('default');
+});
+test('AGENT_WEB_VOICE_VAD_SILENCE_MS defaults to 800', () => {
+  const { values, sources } = loadConfig({});
+  expect(values.AGENT_WEB_VOICE_VAD_SILENCE_MS).toBe(800);
+  expect(sources.AGENT_WEB_VOICE_VAD_SILENCE_MS).toBe('default');
+});

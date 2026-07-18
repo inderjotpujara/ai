@@ -4647,3 +4647,182 @@ phase, §13). Every new route rides the existing `withServerRequestSpan`
   purpose-built kind; a forward-item, not a correctness gap.
 - **Accessibility polish** (tab-panel `role`/`aria-labelledby` wiring on the
   Library shell) → Phase 8, same bucket as Phase 4's ⌘K breadth.
+
+## Voice (web UI — Slice 30b Phase 7)
+
+Browser voice **input** — hands-free dictation into the Composer's own
+text state — completing the promise §23 explicitly deferred: "Voice-out,
+barge-in, streaming, and true hold-to-talk... belong to Slice 30's browser
+UI, where `getUserMedia` gives real AEC and `keydown`/`keyup` give a real
+hold-to-talk gesture." Dictation only: interim/final transcript text lands
+in the Composer's `value` state, exactly where a typed character would —
+the user still presses Send. No TTS, no barge-in, no interrupting an
+in-flight assistant turn — voice never touches `sendMessage`/`handleSend`.
+
+**D1 — engine choice overrides the parent spec's D8.** The parent Slice-30
+design assumed sherpa-onnx WASM, mirroring §23's CLI engine. Re-validated
+at Phase-7 design time: sherpa-onnx ships no first-party browser package,
+so a working build would mean an Emscripten build from source plus a
+*second* ONNX runtime alongside the one `@huggingface/transformers`
+(transformers.js) already pulls into the tree for other subsystems. Phase
+7 instead runs Moonshine ASR + Silero VAD through transformers.js's own
+`AutoModel`/`AutoProcessor` pipeline — one runtime, already a dependency.
+The `VoiceFrames` contract (mono `Float32Array` @ 16kHz) and the
+`voice.transcribe` span vocabulary carry over from §23 unchanged; only the
+concrete engine differs.
+
+### Module map (`web/src/features/voice/`)
+
+| File | Responsibility |
+|---|---|
+| `audio-capture.ts` | `createAudioCapture()` — `getUserMedia({audio:{echoCancellation,noiseSuppression,autoGainControl}})` + an `AudioWorkletProcessor` (`downsample-worklet.ts`) downsampling the browser's native rate to 16kHz mono; `createDownsampler(inputRate)` is the pure, carry-state resample core (mirrors §23's `carryPcmChunk` byte-carry idiom, adapted to fractional-sample carry rather than byte alignment) |
+| `downsample-worklet.ts` | The `AudioWorkletProcessor` registration wrapping `createDownsampler`, running on the audio-rendering thread; posts variable-length (per audio-render quantum) 16kHz `Float32Array` chunks back to the main thread via a transferable `postMessage` |
+| `stt-engine.ts` | `createSttEngine({model})` — boots a dedicated Web Worker (`stt.worker.ts`) hosting transformers.js's Moonshine (ASR) + Silero (VAD) pipeline, Cache-API-persisted, WebGPU-preferred/WASM-fallback; `ready()`/`onProgress()`/`detectSpeech()`/`transcribe()`/`close()` |
+| `stt.worker.ts` | The actual Web Worker body: loads `ModelTier`-selected Moonshine + Silero via `AutoModel`/`AutoProcessor`, exposes a `{load,detectSpeech,transcribe}` request / `{progress,ready,detectSpeechResult,transcribeResult,error}` response message protocol; exports WebGPU device detection as pure, unit-testable logic (everything past that boundary — real model load/inference — is validated at live-verify, not by an automated test, since there is no WASM/ONNX runtime under Vitest/happy-dom) |
+| `model-tier.ts` | `enum ModelTier` (base/tiny) — the shared selector both `stt.worker.ts` and `settings/index.tsx` import |
+| `vad.ts` | `createSegmenter({silenceMs, gated, frameMs})` — the pure, no-real-model segmentation state machine: hold-to-talk (`gated:false`) buffers every pushed frame regardless of `isSpeech` and closes only on `flush()`; tap-to-toggle (`gated:true`) tracks sustained silence from each chunk's actual sample-derived duration (not a naive frame-count) to close/reopen a segment per speech/silence cycle, trimming the trailing silent frames back off the emitted audio |
+| `use-voice-input.ts` | `useVoiceInput(opts, deps?)` — the orchestrator hook: worker lifecycle (spawn on enable, terminate on disable/unmount), a concurrent-gesture guard (a second gesture while one is active is a no-op), ready-gating (a press before `engine.ready()` resolves is a no-op), `startHold`/`stopHold`/`toggleTap`/`cancel` wired to `audio-capture.ts` + `stt-engine.ts` + `vad.ts` |
+| `mic-button.tsx` | Composer-mounted affordance (D2) — two elements: a genuine hold-to-talk button (`pointerdown`/`up` + `keydown`/`up`) and a small tap-to-toggle button (`onClick`); inline degrade states (loading/error) plus a subtle WebGPU-absent hint |
+| `waveform.tsx` | A live level bar driven by `useVoiceInput`'s `level` stream while listening |
+
+### Contracts + config
+
+`src/contracts/voice.ts` lifts `VoiceFrames` (D5 — a documented, deliberate
+exception to the isomorphic zod-only convention: it never crosses an HTTP
+wire in this phase, so there is no round-trip to validate); `src/voice/
+types.ts` re-exports it rather than redefining it — one definition, two
+importers, no drift. `CaptureSource` is single-sourced in
+`src/contracts/enums.ts` and re-exported by `src/voice/types.ts` the same
+way, with a parity test
+(`tests/contracts/capture-source-parity.test.ts`) guarding against future
+redefinition drift.
+`AGENT_WEB_VOICE_DEFAULT_MODEL`/`AGENT_WEB_VOICE_VAD_SILENCE_MS` follow the
+`AGENT_WEB_NOTIFY_*` env-fallback convention (`src/config/schema.ts`),
+plumbed to the browser as
+`window.__AGENT_VOICE_DEFAULT_MODEL__`/`window.__AGENT_VOICE_VAD_SILENCE_MS__`
+by `renderIndexHtml` (`src/server/main.ts`) — the same injection point the
+notify globals already use, no new mechanism. `settings/index.tsx` gains
+`isVoiceInputEnabled()`/`voiceModelTier()` accessors mirroring
+`isOsNotifyEnabled()`.
+
+### Composer + Settings wiring
+
+`mic-button.tsx` mounts inside `composer.tsx`'s existing
+`composer-dropzone` `<section>`, beside the attachment chips; its
+`onFinal` callback appends the transcript into the Composer's own `value`
+state (`setValue(v => v ? \`${v} ${text}\` : text)`) —
+`handleSubmit`/`onSend`/`sendMessage` are byte-for-byte unchanged (D2).
+
+### Data flow: mic → capture → downsample → worker (VAD + ASR) → composer
+
+Hold-to-talk: `keydown`/`pointerdown` opens `getUserMedia` (if not already
+open) → the AudioWorklet streams 16kHz `Float32Array` chunks to the main
+thread → chunks buffer in the hook, ungated (the key/pointer IS the
+segment boundary) → `keyup`/`pointerup` flushes the worklet's residual
+buffer, closes the segment, and hands the accumulated `VoiceFrames` to
+`stt-engine.ts`'s worker → the worker's Moonshine pass returns text →
+`composer.tsx`'s `setValue` receives it as the final transcript.
+Tap-to-toggle: a single tap opens the same capture path, but `vad.ts`'s
+Silero-gated segmenter now decides segment boundaries — each speech/silence
+cycle closes and transcribes its own segment independently, so a long
+tap-to-toggle session can append several sentences before the user taps
+again to stop. In both modes the transcript never touches
+`sendMessage`/`handleSend` (D2) — it stops at the composer's own `value`,
+exactly where a typed character would land.
+
+### D10 outcome — Rung 1, empirically confirmed
+
+Phase 7 ships on **Rung 1** of D10's fallback ladder: the
+lazy-CDN-download + Cache-API-persist story works unchanged under the
+existing `Cross-Origin-Embedder-Policy: require-corp` header
+(`web/vite.config.ts`, `src/server/isolation-headers.ts`) — a validated
+CORS `fetch()` of the model files satisfies `require-corp`, and the
+onnxruntime-web WASM runtime is served same-origin — so **no
+isolation-header change was made**. This was **confirmed empirically at
+live-verify**: both Moonshine (~130 MB) and Silero VAD load in a real
+browser under these headers, with no CORS/COEP block. The `credentialless`
+→ self-host fallback rungs remain documented (`stt.worker.ts` header) but
+were not needed.
+
+### Live-verify (automated real-browser e2e)
+
+The unit tests run under happy-dom, which has **no `AudioWorklet`, no
+WASM/WebGPU, and a mocked worker** — structurally blind to the real
+transformers.js/Web-Audio integration. A `live`-gated **Vitest browser-mode
+e2e** (`web/src/features/voice/voice-pipeline.browser.test.ts`, run via
+`bun run test:voice-e2e`, excluded from the default suite) closes that gap:
+`@vitest/browser` (`@vitest/browser-playwright` provider) launches real
+Chromium with fake-media flags
+(`--use-file-for-fake-audio-capture=<16 kHz WAV>`) so `getUserMedia` returns
+a speech clip as the mic, then drives the real `MicButton` →
+`useVoiceInput` → worklet → Silero VAD → Moonshine chain and asserts the
+transcript. A fast build-artifact guard additionally asserts the worklet
+chunk is emitted post-`build` (the one bug class a Vite-*dev* browser test
+can't see). This harness caught **three real integration bugs the mocked
+unit tests could not**, all fixed:
+- **Silero VAD load** — `onnx-community/silero-vad` is a custom model (no
+  root `config.json`); the correct call is `AutoModel.from_pretrained(id,
+  { config: { model_type: 'custom' }, dtype: 'fp32' })`, and its inference
+  is stateful (`input`/`sr`/`state` tensors, threaded across calls).
+- **AudioWorklet build-emit** — `new URL('./worklet.ts', import.meta.url)`
+  works in Vite dev but the Rolldown **build** emits no chunk; the fix is
+  the `?worker&url` import (bundles deps into a served module), with the
+  pure downsampler extracted to a zero-import `downsampler.ts`.
+- **WASM decoder dtype** — Moonshine's default q4 decoder crashes ONNX
+  session-init on the CPU/WASM path (missing MatMulNBits scale tensor); the
+  fix pins `dtype: { encoder_model: 'fp32', decoder_model_merged: 'fp32' }`
+  **only** on `device === 'wasm'`, leaving the WebGPU default untouched.
+  (Playwright's Chromium exposes no WebGPU, so the e2e exercises exactly the
+  WASM path a non-WebGPU browser takes — a path the WebGPU dev machine never
+  hits.)
+
+### §7.1/§7.2 hard parts — adversarially verified
+
+Both of the spec's reasoning-heavy pieces went through ultracode
+adversarial-verify, per the plan's HARD-task gate:
+
+- **§7.1 — downsample carry-state + VAD segmentation.**
+  `createDownsampler`'s fractional-sample carry across arbitrary
+  `AudioWorkletProcessor` render-quantum boundaries (no dropped/duplicated
+  samples), and `createSegmenter`'s hold-to-talk (ungated, buffers
+  everything until `flush()`) vs. tap-to-toggle (gated, one transcribe per
+  speech/silence cycle, no double-transcribe on a jittery VAD flip, no
+  truncation of trailing audio at release) — both verified against the
+  spec's (a)–(d) requirements.
+- **§7.2 — worker lifecycle + gesture guard + teardown.**
+  `use-voice-input.ts`'s ready-gating (a press before the worker reports
+  ready is a no-op), the concurrent-gesture guard (a second gesture while
+  one is active cannot start a second overlapping capture session), clean
+  teardown (`MediaStream` tracks stopped, worker terminated — no leaked
+  "hot" mic indicator), and a model-load-failure degrade to text-only
+  input — verified against the spec's (a)–(d) requirements.
+
+### Telemetry
+
+No new span. The browser has no server-side span writer of its own for the
+transcription step in this phase; the transcript rides the normal
+`/api/chat` turn as ordinary composer text, already spanned end-to-end
+(`handleChat`'s existing instrumentation). A dedicated browser-emitted
+`voice.transcribe` beacon is a tracked forward-item — it would need a new
+ingestion route purely for telemetry, which this phase's
+zero-new-server-routes scope deliberately avoids.
+
+### Two documented limitations, not bugs
+
+- **No live streaming interim transcript.** `SttEngine.transcribe()`
+  returns only a final string (no partial-result callback in this phase's
+  worker protocol); `useVoiceInput`'s `interim` return value surfaces a
+  transient "…" busy indicator (rendered by `mic-button.tsx` while
+  `status === 'transcribing'`) while a segment is transcribing, not a
+  word-by-word live partial. A true streaming ASR partial is a forward-item.
+- **`mic-button.tsx` exposes hold-to-talk and tap-to-toggle as two
+  separate buttons**, not one button that disambiguates a quick tap from a
+  deliberate hold by press duration — the design docs left that
+  disambiguation heuristic unspecified, and inventing an undocumented
+  timing threshold was judged riskier than two unambiguous affordances.
+  Consolidating them into one smarter control is a forward-item if real
+  usage shows the two-button layout is confusing.
+
+Note: this section deliberately does NOT flip the 30b capability marker
+anywhere else in the file — Phase 7 landing is a partial-slice landing
+(Phase 8 polish/a11y/live-verify remains).

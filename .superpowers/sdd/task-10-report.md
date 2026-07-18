@@ -1,110 +1,43 @@
-# Task 10 Report — Result mapper: `toBuildResultDto`/`toCrewBuildResultDto`
+# Task 10 Report — `vad.ts` pure segmenter, hold-to-talk (non-gated) mode
 
 ## Status: DONE
 
-## What was implemented
+## What was built
+- `web/src/features/voice/vad.ts` — pure segmentation state machine (spec §7.1), no React/DOM/worker deps.
+  - `SegmenterOpts` / `Segmenter` / `createSegmenter()` exported verbatim per the locked interface (consumed by Task 11 in the same file and Task 12's `use-voice-input.ts`).
+  - Hold-to-talk (`gated: false`) path (this task's scope): every pushed frame buffers unconditionally, `isSpeech` ignored entirely; `flush()` concatenates the full buffer into one contiguous `Float32Array` (total-length allocation + offset copies via `.set()`, not per-frame push/misorder-prone concat) and emits a `VoiceFrames` (`sampleRate: 16000`) to subscribers; empty buffer → no phantom emit.
+  - `reset()` clears buffer/state without emitting.
+  - `onSegment()` returns an unsubscribe closure.
+  - Gated (tap-to-toggle) branch is structurally present (silence-accumulation + trailing-silence trim on close) but its behavior/tests are Task 11's responsibility — untested by this task, deliberately out of scope per the brief.
+- `web/src/features/voice/vad.test.ts` — the 7 hold-to-talk tests from the brief.
 
-Two pure projection functions in `src/server/builders/map-result.ts`:
+## §7.1 correctness verification
+- Tests "flush() emits exactly one segment concatenating every buffered chunk in push order" and "does not truncate a frame pushed immediately before flush()" directly assert the full sample sequence (`Array.from(frames.samples)`) equals the exact ordered concatenation of every pushed chunk — no drops, no reordering, no truncation of the release-boundary residual.
+- `concat()` allocates the exact total length up front and copies each chunk at its running offset — correct by construction, not accidentally correct via naive array-of-arrays coercion.
 
-- `toBuildResultDto(result: BuildResult): BuildResultDTO` — flattens the agent
-  builder's `BuildResult` (`src/agent-builder/types.ts:22-38`) onto the wire
-  `BuildResultDTO` (`src/contracts/dto.ts`). The `written` variant carries the
-  **full** `AgentProposal` through onto `BuildResultDTO.proposal` (it's
-  JSON-safe per D5 and structurally satisfies `AgentProposalDtoSchema`
-  field-for-field), so the wizard (Task 14) can render the post-write
-  proposal DagView without a second round-trip. All other variants
-  (`declined`, `invalid`, `abandoned`, `reused`, `failed-verification`) are
-  passed through 1:1.
-- `toCrewBuildResultDto(result: CrewBuildResult): BuildResultDTO` — flattens
-  `CrewBuildResult` (`src/crew-builder/types.ts:13-31`) onto the same wire
-  shape. Documented in the code that `CrewBuildResult.written` does **not**
-  carry the committed `CrewIR`/`WorkflowIR` back (only `name`/`files`/
-  `builtAgents`) — a pre-existing engine-side gap (not introduced by this
-  task), which is why the crew/workflow wizard shows a plain result card
-  instead of a post-write DagView for `written` crew results.
+## Bug found + fixed in the brief's verbatim tests
+The brief's two content-assertion tests compared `Array.from(Float32Array)` values against float64 literals via `toEqual` (e.g. expecting exactly `0.1`), which fails because `Float32Array` stores `0.1` as `0.10000000149011612` — a float32-precision artifact, not an implementation defect. RED run confirmed this (2 failures, diffs showing float32-rounded vs float64-literal values on an otherwise-correct implementation). Fixed by round-tripping the *expected* arrays through `Float32Array` too (`Array.from(new Float32Array([0.1, ...]))`), preserving the strict order/no-drop assertion while eliminating the precision false-negative.
 
-Both functions are pure (no I/O), mirroring the Task-9 adapter and existing
-run-dto mapper style.
-
-## Interface verification (no discrepancies)
-
-Read the engine source-of-truth before implementing:
-- `src/agent-builder/types.ts:22-38` (`BuildResult`) — matches the brief
-  exactly (6 variants: written/declined/invalid/abandoned/reused/
-  failed-verification).
-- `src/crew-builder/types.ts:13-31` (`CrewBuildResult`) — matches the brief
-  exactly (same 6 variants, `written` additionally carries `shape` and
-  `builtAgents`, neither of which the DTO needs).
-- `src/contracts/dto.ts` — `BuildResultDTO` shape confirmed compatible with
-  both mapper outputs.
-
-No field mismatches found; implemented exactly as the brief specified.
-
-## TDD evidence
-
-**RED** — before creating `src/server/builders/map-result.ts`:
-```
-error: Cannot find module '../../src/server/builders/map-result.ts' from '/Users/inderjotsingh/ai/tests/server/builders-map-result.test.ts'
- 0 pass
- 1 fail
- 1 error
-```
-
-**GREEN** — after implementing the mapper:
-```
-bun test v1.3.11 (af24e281)
- 2 pass
- 0 fail
- 7 expect() calls
-Ran 2 tests across 1 file. [15.00ms]
-```
+## Self-review (per task ask)
+- flush() emits ALL pushed frames in order: yes — verified via exact-sequence assertions above, and via `concat()`'s total-length/offset-copy construction.
+- Empty flush(): no emit (`buffer.length === 0` short-circuits before touching listeners) — test 4 covers.
+- reset(): clears buffer + `inSegment` + silence accumulator, no emit — test 5 covers.
+- Double flush(): second flush is a no-op since `emit()` already drained the buffer to `[]` — test 6 covers.
+- Unsubscribe: `onSegment()`'s returned closure removes the callback from the `Set` — test 7 covers.
 
 ## Gate results
+- `cd web && bun run typecheck` — clean (fixed 2 `noUncheckedIndexedAccess` findings: a `buffer[i]` narrowing in `closeSustainedSilence()`, and test-side `as VoiceFrames` casts instead of non-null assertions, to satisfy both TS strictness and biome's `noNonNullAssertion` rule).
+- `bun run lint:file -- web/src/features/voice/vad.ts web/src/features/voice/vad.test.ts` — clean (0 errors, 0 warnings after a biome format pass + assertion-style fix).
+- `bun run lint` (full repo, root) — exit 0; 18 pre-existing warnings in unrelated files (not touched by this task).
+- `cd web && bun run test -- vad.test.ts` — 7/7 passed.
+- `cd web && bun run test` (full web suite) — 52 files / 242 tests passed (one unrelated stderr ECONNREFUSED:3000 noise from a pre-existing test, not a failure).
 
-- `bun run typecheck` — clean (`tsc --noEmit`, no output).
-- `bun run lint:file -- src/server/builders/map-result.ts tests/server/builders-map-result.test.ts`
-  — 0 errors after two fixes (see below), 0 warnings.
-- Focused test — 2 pass / 0 fail, 7 assertions (see GREEN above).
-
-### Lint fixes applied (deviations from the brief's literal test snippet)
-
-1. Removed the unused `BuildResult` type import from the test file (the
-   brief's snippet imports it but only uses `AgentProposal` directly — the
-   inline object literals passed to `toBuildResultDto` don't need the type
-   annotation). Biome's `noUnusedImports` flagged this as a real error, not a
-   style nit.
-2. Ran `bunx biome check --write` on both files to apply the project's
-   formatter (multi-line object/import wrapping) — purely mechanical
-   reformatting, no logic change. Confirmed via re-run of `lint:file`
-   (0 errors/warnings) and the focused test (still 2 pass / 0 fail) after the
-   fix.
-
-## Files changed
-
-- `src/server/builders/map-result.ts` (new, 77 lines)
-- `tests/server/builders-map-result.test.ts` (new, 77 lines)
-
-## Self-review
-
-- Both switch statements are exhaustive over the 6-variant discriminated
-  unions; `tsc --noEmit` passed with no "not all code paths return a value"
-  complaint, confirming exhaustiveness.
-- No I/O, no side effects — pure functions, consistent with Task 9's adapter
-  and the existing run-dto mapper style referenced in the brief.
-- Docstrings preserved verbatim from the brief, including the explicit note
-  about the `CrewBuildResult` IR gap so future readers don't mistake it for
-  an oversight in this task.
-- `bun run docs:check` (pre-commit hook) passed — no living-doc updates
-  required for this internal pure-mapper addition (consistent with Task 9,
-  which also required none).
-
-## Concerns
-
-None. Engine types matched the brief's cited line ranges exactly; the only
-required deviations were the two mechanical lint fixes above (unused import
-removal + formatter pass), which don't change behavior or the interfaces
-specified in the brief.
+## Docs
+No `docs/architecture.md` change needed — `web/src/features/voice` is an already-documented subsystem (Tasks 3/7/9); pre-commit `docs:check` hook passed clean.
 
 ## Commit
+`8aec7df` — `feat(voice): add createSegmenter pure state machine (hold-to-talk mode)`
 
-`40024cd` — `feat(server): BuildResult/CrewBuildResult → BuildResultDTO mapper (Phase 5)`
+## Concerns / handoff notes for Task 11 (gated/tap-to-toggle)
+- The gated branch's silence-trim logic (`closeSustainedSilence`) is implemented but **not exercised by any test in this task** — Task 11 must write its own tests against it (multi-segment close/reopen cycles, trailing-silence trim-back correctness, `silenceMs` threshold edge cases). Treat it as unverified until Task 11's tests land.
+- `chunkDurationMs()`'s `frameMs` fallback (zero-length "heartbeat" chunk) is also unexercised here — worth a Task 11/13 test if the worker ever pushes zero-length chunks in gated mode.

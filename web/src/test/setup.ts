@@ -68,3 +68,100 @@ beforeEach(() => {
 beforeEach(() => {
   vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
 });
+
+// --- Web Audio / getUserMedia fixtures (Slice 30b Phase 7 voice input) ---
+// happy-dom implements neither `navigator.mediaDevices` nor any Web Audio
+// API (no AudioContext/AudioWorkletNode). These are deliberately minimal,
+// REAL (not `vi.fn()` no-ops) fakes: a track whose `.stop()` flips
+// `readyState` to 'ended' so lifecycle tests can assert genuine teardown
+// (spec §7.2(c)), and an AudioContext/AudioWorkletNode pair whose methods
+// are spies. `audio-capture.test.ts` grabs the constructed node via
+// `getLastAudioWorkletNode()` to simulate a worklet `port.onmessage` chunk —
+// the ONLY way to drive `createAudioCapture`'s chunk/level fan-out under
+// happy-dom, since the real worklet can't run here (Task 5/6 split: the
+// resample math is tested directly against `createDownsampler`, never
+// through this fake).
+export class FakeMediaStreamTrack {
+  readyState: 'live' | 'ended' = 'live';
+  stop() {
+    this.readyState = 'ended';
+  }
+}
+
+export class FakeMediaStream {
+  private tracks = [new FakeMediaStreamTrack()];
+  getTracks() {
+    return this.tracks;
+  }
+}
+
+class FakeAudioWorklet {
+  addModule = vi.fn().mockResolvedValue(undefined);
+}
+
+export class FakeAudioWorkletNode {
+  port: {
+    onmessage: ((event: MessageEvent) => void) | null;
+    close: () => void;
+  } = { onmessage: null, close: vi.fn() };
+  connect = vi.fn();
+  disconnect = vi.fn();
+  constructor(
+    public context: unknown,
+    public name: string,
+    public options?: unknown,
+  ) {
+    lastAudioWorkletNode = this;
+  }
+}
+
+export class FakeAudioContext {
+  sampleRate = 48000;
+  audioWorklet = new FakeAudioWorklet();
+  close = vi.fn().mockResolvedValue(undefined);
+  createMediaStreamSource = vi.fn(() => ({
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  }));
+  constructor() {
+    lastAudioContext = this;
+  }
+}
+
+let lastAudioWorkletNode: FakeAudioWorkletNode | undefined;
+export function getLastAudioWorkletNode(): FakeAudioWorkletNode | undefined {
+  return lastAudioWorkletNode;
+}
+
+let lastAudioContext: FakeAudioContext | undefined;
+export function getLastAudioContext(): FakeAudioContext | undefined {
+  return lastAudioContext;
+}
+
+let lastGetUserMediaConstraints: unknown;
+export function getLastGetUserMediaConstraints(): unknown {
+  return lastGetUserMediaConstraints;
+}
+
+let lastMediaStream: FakeMediaStream | undefined;
+export function getLastMediaStream(): FakeMediaStream | undefined {
+  return lastMediaStream;
+}
+
+beforeEach(() => {
+  lastAudioWorkletNode = undefined;
+  lastAudioContext = undefined;
+  lastGetUserMediaConstraints = undefined;
+  lastMediaStream = undefined;
+  vi.stubGlobal('navigator', {
+    mediaDevices: {
+      getUserMedia: vi.fn((constraints: unknown) => {
+        lastGetUserMediaConstraints = constraints;
+        lastMediaStream = new FakeMediaStream();
+        return Promise.resolve(lastMediaStream);
+      }),
+    },
+  });
+  vi.stubGlobal('AudioContext', FakeAudioContext);
+  vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
+});

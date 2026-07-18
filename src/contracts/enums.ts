@@ -195,3 +195,18 @@ export enum BuilderKind {
   Crew = 'crew',
   Workflow = 'workflow',
 }
+
+/** Lifted here to be the SINGLE source of truth (Slice 30b Phase 7, D5),
+ *  isomorphic-rule-compliant (no `src/voice/` import — that module is
+ *  Node-only, pulling Bun spawn/ffmpeg glue); `src/voice/types.ts`
+ *  re-exports this rather than redefining it. Its only consumers are the
+ *  pre-existing CLI voice pipeline (`src/voice/transcribe.ts`,
+ *  `src/telemetry/spans.ts`'s `VOICE_CAPTURE_SOURCE` `voice.transcribe`
+ *  span attribute) — the browser voice path emits no telemetry and never
+ *  imports this enum. `tests/contracts/capture-source-parity.test.ts` is a
+ *  regression guard against future redefinition drift, not a live
+ *  divergence check. */
+export enum CaptureSource {
+  Mic = 'mic',
+  File = 'file',
+}

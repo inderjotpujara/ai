@@ -1,169 +1,255 @@
-## Task 10: Result mapper — `toBuildResultDto`/`toCrewBuildResultDto`
+### Task 10: `vad.ts` — pure segmenter, hold-to-talk (non-gated) mode
 
 **Files:**
-- Create: `src/server/builders/map-result.ts`
-- Test: `tests/server/builders-map-result.test.ts` (create)
+- Create: `web/src/features/voice/vad.ts`
+- Test: `web/src/features/voice/vad.test.ts`
 
 **Interfaces:**
-- Consumes: `BuildResult` (`src/agent-builder/types.ts:22-38`), `CrewBuildResult` (`src/crew-builder/types.ts:13-31`), `BuildResultDTO` (Task 3).
-- Produces: `toBuildResultDto(result: BuildResult): BuildResultDTO`, `toCrewBuildResultDto(result: CrewBuildResult): BuildResultDTO`.
+- Consumes: `VoiceFrames` (`{ samples: Float32Array; sampleRate: 16000 }`) from `@contracts` (Part A Task 1 — the lifted contract; `src/voice/types.ts` re-exports the same type for the CLI side, so this import is the one, single source).
+- Produces (locked, verbatim — used by Task 11 in the same file, and by Task 12's `use-voice-input.ts`):
+  ```ts
+  export type SegmenterOpts = { silenceMs: number; gated: boolean; frameMs: number };
+  export type Segmenter = {
+    pushFrame(chunk: Float32Array, isSpeech: boolean): void;
+    flush(): void;
+    onSegment(cb: (frames: VoiceFrames) => void): () => void;
+    reset(): void;
+  };
+  export function createSegmenter(opts: SegmenterOpts): Segmenter;
+  ```
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests (hold-to-talk / `gated: false`)**
 
-`tests/server/builders-map-result.test.ts`:
-```typescript
-import { expect, test } from 'bun:test';
-import type { AgentProposal, BuildResult } from '../../src/agent-builder/types.ts';
-import type { CrewBuildResult } from '../../src/crew-builder/types.ts';
-import { toBuildResultDto, toCrewBuildResultDto } from '../../src/server/builders/map-result.ts';
-import { VerifiedLevel } from '../../src/verified-build/types.ts';
+Create `web/src/features/voice/vad.test.ts`:
 
-const proposal: AgentProposal = {
-  name: 'stock_quotes',
-  description: 'fetch quotes',
-  systemPrompt: 'x',
-  modelReq: { role: 'r', requires: [], prefer: 'largest-that-fits' as never },
-  suggestedServers: [],
-  rationale: 'why',
-};
+```ts
+import { describe, expect, it, vi } from 'vitest';
+import { createSegmenter } from './vad.ts';
 
-test('toBuildResultDto flattens every BuildResult variant, carrying the FULL proposal on `written`', () => {
-  expect(
-    toBuildResultDto({ kind: 'written', proposal, files: ['a.ts'], level: VerifiedLevel.Runs }),
-  ).toEqual({
-    kind: 'written',
-    name: 'stock_quotes',
-    files: ['a.ts'],
-    level: VerifiedLevel.Runs,
-    proposal,
+function tone(length: number, fill = 0.5): Float32Array {
+  return new Float32Array(length).fill(fill);
+}
+
+describe('createSegmenter — hold-to-talk (gated: false)', () => {
+  it('buffers every pushed frame regardless of isSpeech, emitting nothing until flush()', () => {
+    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(512), true);
+    segmenter.pushFrame(tone(256), false); // ignored isSpeech — hold mode never gates
+    expect(onSegment).not.toHaveBeenCalled();
   });
-  expect(toBuildResultDto({ kind: 'declined' })).toEqual({ kind: 'declined' });
-  expect(
-    toBuildResultDto({ kind: 'invalid', issues: [{ field: 'name', problem: 'taken' }] }),
-  ).toEqual({ kind: 'invalid', issues: [{ field: 'name', problem: 'taken' }] });
-  expect(toBuildResultDto({ kind: 'abandoned', reason: 'timeout' })).toEqual({
-    kind: 'abandoned',
-    reason: 'timeout',
-  });
-  expect(toBuildResultDto({ kind: 'reused', name: 'existing', similarity: 0.9 })).toEqual({
-    kind: 'reused',
-    name: 'existing',
-    similarity: 0.9,
-  });
-  expect(
-    toBuildResultDto({ kind: 'failed-verification', stage: 'dry-run', detail: 'boom' }),
-  ).toEqual({ kind: 'failed-verification', stage: 'dry-run', detail: 'boom' });
-});
 
-const crewResult: CrewBuildResult = {
-  kind: 'written',
-  shape: 'crew',
-  name: 'research-crew',
-  files: ['crews/research-crew.ts'],
-  builtAgents: ['researcher'],
-  level: VerifiedLevel.Behaves,
-};
+  it('flush() emits exactly one segment concatenating every buffered chunk in push order', () => {
+    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(4, 0.1), true);
+    segmenter.pushFrame(tone(4, 0.2), false);
+    segmenter.pushFrame(tone(4, 0.3), false);
+    segmenter.flush();
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    const frames = onSegment.mock.calls[0][0];
+    expect(frames.sampleRate).toBe(16000);
+    expect(Array.from(frames.samples as Float32Array)).toEqual([
+      0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.3,
+    ]);
+  });
 
-test('toCrewBuildResultDto flattens a written crew result (no IR carried — engine gap, see plan notes)', () => {
-  expect(toCrewBuildResultDto(crewResult)).toEqual({
-    kind: 'written',
-    name: 'research-crew',
-    files: ['crews/research-crew.ts'],
-    level: VerifiedLevel.Behaves,
+  it('does not truncate a frame pushed immediately before flush() (the release-boundary residual, §7.1 c)', () => {
+    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(2, 0.9), true);
+    segmenter.pushFrame(tone(2, 0.8), true); // the trailing "residual" flushed at release
+    segmenter.flush();
+    const frames = onSegment.mock.calls[0][0];
+    expect(Array.from(frames.samples as Float32Array)).toEqual([0.9, 0.9, 0.8, 0.8]);
+  });
+
+  it('flush() with nothing buffered emits nothing (no phantom empty segment)', () => {
+    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.flush();
+    expect(onSegment).not.toHaveBeenCalled();
+  });
+
+  it('reset() clears buffered audio without emitting a segment', () => {
+    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(4), true);
+    segmenter.reset();
+    segmenter.flush();
+    expect(onSegment).not.toHaveBeenCalled();
+  });
+
+  it('a second flush() after an emit is a no-op (buffer already drained)', () => {
+    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(4), true);
+    segmenter.flush();
+    segmenter.flush();
+    expect(onSegment).toHaveBeenCalledTimes(1);
+  });
+
+  it('onSegment() returns an unsubscribe function', () => {
+    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
+    const onSegment = vi.fn();
+    const off = segmenter.onSegment(onSegment);
+    off();
+    segmenter.pushFrame(tone(4), true);
+    segmenter.flush();
+    expect(onSegment).not.toHaveBeenCalled();
   });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `bun test tests/server/builders-map-result.test.ts`
-Expected: FAIL — module not found.
+Run: `cd web && bun run test -- vad.test.ts`
+Expected: FAIL — `Cannot find module './vad.ts'` (or all assertions fail once a stub exists). No implementation exists yet.
 
-- [ ] **Step 3: Create `src/server/builders/map-result.ts`**
+- [ ] **Step 3: Write the implementation**
 
-```typescript
-import type { BuildResult } from '../../agent-builder/types.ts';
-import type { BuildResultDTO } from '../../contracts/dto.ts';
-import type { CrewBuildResult } from '../../crew-builder/types.ts';
+Create `web/src/features/voice/vad.ts`:
 
-/** Flattens `BuildResult` (`src/agent-builder/types.ts:22-38`) onto the wire
- *  shape (Task 3). `written`'s full `AgentProposal` is JSON-safe (D5) and
- *  structurally satisfies `AgentProposalDtoSchema` field-for-field, so it
- *  rides straight onto `BuildResultDTO.proposal` — this is what lets the
- *  wizard (Task 14) render the D6 post-write proposal DagView without a
- *  second round-trip. */
-export function toBuildResultDto(result: BuildResult): BuildResultDTO {
-  switch (result.kind) {
-    case 'written':
-      return {
-        kind: 'written',
-        name: result.proposal.name,
-        files: result.files,
-        level: result.level,
-        proposal: result.proposal,
-      };
-    case 'declined':
-      return { kind: 'declined' };
-    case 'invalid':
-      return { kind: 'invalid', issues: result.issues };
-    case 'abandoned':
-      return { kind: 'abandoned', reason: result.reason };
-    case 'reused':
-      return { kind: 'reused', name: result.name, similarity: result.similarity };
-    case 'failed-verification':
-      return {
-        kind: 'failed-verification',
-        stage: result.stage,
-        detail: result.detail,
-      };
+```ts
+import type { VoiceFrames } from '@contracts';
+
+export type SegmenterOpts = { silenceMs: number; gated: boolean; frameMs: number };
+
+export type Segmenter = {
+  pushFrame(chunk: Float32Array, isSpeech: boolean): void;
+  flush(): void;
+  onSegment(cb: (frames: VoiceFrames) => void): () => void;
+  reset(): void;
+};
+
+/**
+ * Pure segmentation state machine (spec §7.1) — no real VAD model, no
+ * timers. `isSpeech` is supplied by the caller (the worker's Silero pass
+ * per pushed chunk, Task 12). Silence duration is tracked from each
+ * chunk's *actual* sample-derived duration (`chunk.length / 16000 * 1000`
+ * ms), falling back to `frameMs` only for a zero-length "heartbeat" chunk
+ * (a VAD tick with no new audio attached) — this keeps the silence clock
+ * correct regardless of the AudioWorklet's real chunk sizing, rather than
+ * assuming every pushed chunk is exactly `frameMs` long.
+ *
+ * Two modes (`gated`):
+ *  - `false` (hold-to-talk): every pushed frame belongs to the one
+ *    segment, `isSpeech` is ignored entirely — the key/pointer gesture
+ *    itself IS the segment boundary. Only `flush()` closes it, and it
+ *    closes with everything buffered so far (no truncation of the
+ *    release-boundary residual, §7.1 c).
+ *  - `true` (tap-to-toggle): `isSpeech` flips gate segment boundaries —
+ *    a speech frame (re)starts/extends the current segment and resets the
+ *    silence clock; a silent frame is buffered (kept, in case speech
+ *    resumes) and accumulates against `silenceMs`; once sustained silence
+ *    reaches `silenceMs`, the segment closes, with the trailing silent
+ *    chunks trimmed back off the emitted audio (they are not speech).
+ *    A tap-to-toggle session can close/reopen many segments in a row
+ *    (§7.1 b — exactly one transcribe call per speech/silence cycle).
+ */
+export function createSegmenter(opts: SegmenterOpts): Segmenter {
+  const { silenceMs, gated, frameMs } = opts;
+  let buffer: Float32Array[] = [];
+  let inSegment = false;
+  let silentMsAccumulated = 0;
+  const listeners = new Set<(frames: VoiceFrames) => void>();
+
+  function chunkDurationMs(chunk: Float32Array): number {
+    return chunk.length > 0 ? (chunk.length / 16000) * 1000 : frameMs;
   }
-}
 
-/** Flattens `CrewBuildResult` (`src/crew-builder/types.ts:13-31`) onto the
- *  same wire shape. Unlike the agent builder, `CrewBuildResult.written` does
- *  NOT carry the committed `CrewIR`/`WorkflowIR` back to the caller (only
- *  `name`/`files`/`builtAgents`) — an existing engine-side gap, not
- *  introduced here. This is why the crew/workflow wizard (Task 14) shows a
- *  plain result card, not a post-write DagView, for `written`: there is no IR
- *  to derive one from without a source change to `crew-builder/types.ts`. */
-export function toCrewBuildResultDto(result: CrewBuildResult): BuildResultDTO {
-  switch (result.kind) {
-    case 'written':
-      return {
-        kind: 'written',
-        name: result.name,
-        files: result.files,
-        level: result.level,
-      };
-    case 'declined':
-      return { kind: 'declined' };
-    case 'invalid':
-      return { kind: 'invalid', issues: result.issues };
-    case 'abandoned':
-      return { kind: 'abandoned', reason: result.reason };
-    case 'reused':
-      return { kind: 'reused', name: result.name, similarity: result.similarity };
-    case 'failed-verification':
-      return {
-        kind: 'failed-verification',
-        stage: result.stage,
-        detail: result.detail,
-      };
+  function concat(chunks: Float32Array[]): Float32Array {
+    const total = chunks.reduce((sum, c) => sum + c.length, 0);
+    const out = new Float32Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return out;
   }
+
+  function emit(): void {
+    inSegment = false;
+    silentMsAccumulated = 0;
+    if (buffer.length === 0) return;
+    const samples = concat(buffer);
+    buffer = [];
+    const frames: VoiceFrames = { samples, sampleRate: 16000 };
+    for (const cb of listeners) cb(frames);
+  }
+
+  function closeSustainedSilence(): void {
+    // Trim the trailing silent chunks themselves back off the emitted
+    // audio: walk back from the end, summing each chunk's duration, until
+    // the accumulated trim matches the silence total we tracked — that
+    // boundary is exactly the end of the last speech-bearing chunk.
+    let trimmedMs = 0;
+    let cut = buffer.length;
+    for (let i = buffer.length - 1; i >= 0; i -= 1) {
+      trimmedMs += chunkDurationMs(buffer[i]);
+      cut = i;
+      if (trimmedMs >= silentMsAccumulated) break;
+    }
+    buffer = buffer.slice(0, cut);
+    emit();
+  }
+
+  function pushFrame(chunk: Float32Array, isSpeech: boolean): void {
+    if (!gated) {
+      buffer.push(chunk);
+      inSegment = true;
+      return;
+    }
+    if (isSpeech) {
+      buffer.push(chunk);
+      inSegment = true;
+      silentMsAccumulated = 0;
+      return;
+    }
+    if (!inSegment) return; // silence before any speech started this cycle
+    buffer.push(chunk);
+    silentMsAccumulated += chunkDurationMs(chunk);
+    if (silentMsAccumulated >= silenceMs) closeSustainedSilence();
+  }
+
+  function flush(): void {
+    emit();
+  }
+
+  function reset(): void {
+    buffer = [];
+    inSegment = false;
+    silentMsAccumulated = 0;
+  }
+
+  function onSegment(cb: (frames: VoiceFrames) => void): () => void {
+    listeners.add(cb);
+    return () => listeners.delete(cb);
+  }
+
+  return { pushFrame, flush, onSegment, reset };
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `bun test tests/server/builders-map-result.test.ts`
-Expected: PASS.
+Run: `cd web && bun run test -- vad.test.ts`
+Expected: PASS — 7/7 (the 6 hold-to-talk tests above; Task 11 appends tap-toggle tests to the same file).
 
 - [ ] **Step 5: Gate + commit**
 
+Run: `cd web && bun run typecheck && cd web && bun run lint`
+
 ```bash
-bun run typecheck && bun run lint:file -- src/server/builders/map-result.ts tests/server/builders-map-result.test.ts
-git add src/server/builders/map-result.ts tests/server/builders-map-result.test.ts
-git commit -m "feat(server): BuildResult/CrewBuildResult → BuildResultDTO mapper (Phase 5)"
+git add web/src/features/voice/vad.ts web/src/features/voice/vad.test.ts
+git commit -m "feat(voice): add createSegmenter pure state machine (hold-to-talk mode)"
 ```
 
 ---

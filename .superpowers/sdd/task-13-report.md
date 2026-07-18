@@ -60,3 +60,80 @@ To keep `foldBuildFrame` matching the brief's clean flat-`StatusEvent` test shap
 3. Additionally corrected the task's own informal claim that confirm/narration frames are "flat" — narration is flat, but `data-confirm` (like `data-run-start`/`data-run-end`) is envelope-wrapped on the wire, per direct inspection of `build.ts` + `consent/registry.ts`. `foldBuildFrame` still receives it flat (envelope stripped one layer up in `useBuildEvents`), so this only affected the internal wire/unwrap design, not the fold's public test shape.
 
 No other ambiguities found; ready for Task 14 (the guided wizard UI) to consume `useBuildEvents()`.
+
+---
+
+# Adversarial-review fixes — Phase 7 voice pipeline (tap-mode + hook-lifecycle async paths)
+
+Applied a consolidated set of fixes for 2 Critical + 2 Important + 1 Minor defects found by two Opus adversarial verifiers in the tap-mode / hook-lifecycle async paths. Files touched: `web/src/features/voice/{use-voice-input.ts, stt-engine.ts, vad.ts}` + their test files.
+
+## Gate
+- `cd web && bun run typecheck` → clean (`tsc --noEmit`, no output).
+- `cd web && bun run test -- --run src/features/voice/{use-voice-input,stt-engine,vad}.test.ts` → **44 passed** (was 37; +7 new). Full web suite: **267 passed / 53 files**.
+- Lint: `bun run lint:file -- web/src/features/voice/*.{ts}` (biome) → "Checked 6 files. No fixes applied." (clean).
+
+## Per-finding
+
+### 1. [CRITICAL] tap-mode Transferable detach — `stt-engine.ts`
+`detectSpeech` posted the chunk with a transfer list `[chunk16k.buffer]`, detaching the caller's view; the hook reuses that same chunk in `segmenter.pushFrame` → detached/empty array → `vad.ts concat()` corruption / throw on toggle-stop.
+FIX: removed the transfer list from the `detectSpeech` postMessage (structured-clone now); KEPT the transfer list on `transcribe` (its concat buffer is not reused). Verified the only `detectSpeech` caller is the hook tap path (no other caller relied on the transfer).
+Covering tests: `stt-engine.test.ts` "detectSpeech sends the chunk by structured-clone (no transfer) … transcribe still transfers" (asserts `chunk.byteLength===12` intact, `samples.byteLength===0` detached); plus the real-engine gold integration test in `use-voice-input.test.ts` (below).
+
+### 2. [CRITICAL] unguarded `capture.start().then` — `use-voice-input.ts`
+A press+release (or double toggle) before `getUserMedia` resolves left the late `.then` painting a phantom `listening` with no session and a live hot mic.
+FIX: gate the `.then` on `captureRef.current === capture`; if superseded, `void capture.stop()` and bail. `.catch` error handling unchanged.
+Covering test: "a quick startHold→stopHold before capture.start() resolves lands on ready … and stops the superseded capture (Fix 2)".
+
+### 3. [IMPORTANT] async `detectSpeech` ordering — `use-voice-input.ts`
+Tap chunks each went through async `detectSpeech()`; worker responses can resolve out of submission order → out-of-order `pushFrame` → corrupted segmentation.
+FIX: serial promise-chain queue per gesture (`tapQueue = tapQueue.then(async () => { … await detectSpeech; pushFrame })`), guaranteeing in-ARRIVAL-order pushFrame; each step re-checks `segmenterRef.current === segmenter` so a torn-down gesture stops pushing. Hold mode stays synchronous (unchanged — no re-introduced drop race).
+Covering test: "tap-mode: out-of-order detectSpeech resolution still processes chunks in arrival order (serialized queue, Fix 3)".
+
+### 4. [IMPORTANT] unguarded transcribe tail — `use-voice-input.ts`
+A teardown (disable/unmount/cancel) landing while `transcribe` was in flight let the late settle deliver `onFinal`, repaint status, paint a spurious error, and setState post-unmount.
+FIX: added `activeSegmenterRef` session token — set at gesture start, KEPT across a GRACEFUL stop (so the flush's final still lands), nulled only on destructive teardown (cancel / effect-cleanup disable+unmount). The entire tail (`onFinal`, `setStatus`, `setError`, `setInterim`) is gated on `activeSegmenterRef.current === segmenter`. (Note: I intentionally used a dedicated `activeSegmenterRef` rather than the existing `segmenterRef` the finding suggested, because `endGesture` nulls `segmenterRef` on graceful stopHold/toggleTap too — gating on it would have dropped the legitimate final and broken the existing "stopHold … onFinal" test.)
+Covering tests: "a teardown (disable) while transcribe is in flight …" and "a teardown (unmount) while transcribe is in flight …".
+
+### 5. [MINOR] FP trim tie on variable-length chunks — `vad.ts`
+`silentMsAccumulated` summed forward while `closeSustainedSilence` re-summed durations backward → FP non-associativity could shift the trim tie ±1 chunk on variable-length chunks.
+FIX: track `trailingSilentCount` (consecutive trailing silent chunks since last speech; reset on speech, on emit, on reset) and trim by `buffer.slice(0, buffer.length - trailingSilentCount)` — exact, no float re-summation.
+Covering test: "trims trailing silence by chunk count on VARIABLE-length chunks (Fix 5)".
+
+### Accepted boundary behavior (comment only)
+Added a one-line ack in `stopHold`: a sub-chunk the worklet posted but whose `onChunk` message hasn't dispatched at the exact `stopHold` instant is dropped (acceptable release-boundary behavior). No code fix.
+
+## Mutation-check results (revert fix → confirm test RED → restore)
+- **Fix 1** — reverted (re-added transfer list): stt-engine detach test RED **and** gold integration test RED (2 failed). ✅ Restored.
+- **Fix 2** — reverted (`.then(() => setStatus('listening'))`): deferred-start test RED (1 failed). ✅ Restored.
+- **Fix 3** — reverted (parallel `detectSpeech().then`): ordering test RED (1 failed). ✅ Restored.
+- **Fix 4** — reverted (unguarded `.then/.catch/.finally`): both disable + unmount tests RED (2 failed). ✅ Restored.
+- **Fix 5** — mutation check **NOT PRACTICAL**: the FP tie is a ±1 rounding effect that is not deterministically reachable at realistic chunk magnitudes (an empirical search over millions of variable-length sequences found no forward-vs-backward sum divergence). The count-based fix is provably exact and removes the double-summation fragility; the new variable-length-chunk test is a behavioral regression guard (green pre- and post-fix in the FP-benign case), not a red-on-revert mutation check.
+
+## Gold integration test (Fix 1, end-to-end)
+Added `use-voice-input.test.ts` describe "tap-mode Transferable-detach integration (Fix 1, real engine)": drives the REAL `createSttEngine` against an auto-responding fake `Worker` that faithfully detaches transferred buffers (mimicking real `postMessage` transfer semantics). A tap segment (500ms speech + 500ms silence) transcribes intact (`len:8000`) post-fix; reverting Fix 1 detaches the reused chunk → empty segment → RED.
+
+## Concern
+- Full-suite run emits a happy-dom `DetachedBrowserFrame.abort` teardown trace; it is pre-existing environment-teardown noise (absent when the three voice files run alone) and all 267 tests pass.
+
+---
+
+## Review-fix append (Phase 7) — back-to-back gesture final-drop regression
+
+**Commit:** (see below) — `fix(voice): deliver in-flight finals across back-to-back gestures (per-session validity set) [review fix]`
+
+**Context:** the prior consolidated fix `ab7fde5` (Fix 4) used a single `activeSegmenterRef` "latest session" token. A re-review found this introduced ONE new Important regression: after a graceful `stopHold` (gestureRef null, transcribe1 still in flight), a new `startHold` was permitted and overwrote `activeSegmenterRef = segmenter2`. When transcribe1 then resolved, its tail gate `activeSegmenterRef !== segmenter1` returned early and **silently dropped `onFinal(text1)`** — the first push-to-talk utterance was lost with no error. The single token conflated "destructively torn down" with "superseded by a newer gesture."
+
+**Fix (`web/src/features/voice/use-voice-input.ts`):** replaced the single `activeSegmenterRef` token with a per-session validity `Set<Segmenter>` (`validSegmentersRef`).
+- `startGesture`: ADD the new segmenter (does NOT clear existing entries — a prior in-flight transcribe stays valid).
+- graceful `endGesture` (stopHold / toggleTap stop): set left intact (the just-flushed segment's transcribe still delivers its final).
+- destructive teardown (effect cleanup on disable/unmount, and `cancel()`): `.clear()` the whole set (suppress all in-flight tails).
+- transcribe `.then/.catch`: every side effect (`onFinal`/`setStatus`/`setError`/`setInterim`) gated on `validSegmentersRef.current.has(segmenter)`; a `.finally` REMOVES the segmenter so the set can't grow unbounded across gestures.
+- Status is still derived from the CURRENT `gestureRef`, so a superseded final delivers `onFinal(text1)` (append semantics) WITHOUT stomping a live gesture-2's `listening` status back to `ready`.
+
+**Minor hardening:** wrapped the one unguarded synchronous `segmenter.pushFrame(chunk, isSpeech)` call in the tap-mode serial promise-queue in a try/catch, so a throw degrades to a no-op for that chunk instead of rejecting `tapQueue` (queue-poison / unhandled-rejection guard).
+
+**Tests (`use-voice-input.test.ts`):** added a regression test — startHold→speak→stopHold (transcribe1 deferred) → startHold (gesture2) → resolve transcribe1 → asserts `onFinal('one')` was delivered (not dropped), gesture-2 status stays `listening` (not stomped), and gesture-2 completes end-to-end delivering its own `onFinal('two')`.
+
+**Gate:** `cd web && bun run typecheck` (clean) + `bun run test -- src/features/voice/use-voice-input.test.ts` → **17 passed**; `bun run lint:file` (biome, from repo root) on both files → clean.
+
+**Mutation-check:** reverted the source to the old latest-wins behavior (clear-then-add so only the newest segmenter stays valid) and re-ran — the new regression test went **RED** (`expected onFinal to be called with ['one']; Number of calls: 0`), confirming it pins the regression. Restored the fix → 17/17 GREEN. All pre-existing tests (graceful delivery, disable/unmount suppression, ordering, teardown, capture-identity, Transferable-detach) stayed green throughout.

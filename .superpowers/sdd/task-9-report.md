@@ -1,115 +1,87 @@
-# Task 9 Report: Builder confirm/log adapter (pure, unit-tested)
+# Task 9 Report: `@huggingface/transformers` direct dep + Vite worker/optimizeDeps config + isolation-headers.ts comment
 
 Note: this filename was previously used for an unrelated Task 9 from Slice 30b
-Phase 4 (workflow browse handlers). That content is superseded — this is Slice
-30b Phase 5's Task 9 (builder confirm/log adapter), Increment 2 (Builders).
+Phase 5 (builder confirm/log adapter). That content is superseded — this is
+Slice 30b Phase 7's Task 9 (Increment 3 close-out: transformers.js dep +
+Vite worker config).
 
 ## Status: DONE
 
-## What was implemented
-
-Created `src/server/builders/adapter.ts` — the pure, I/O-free bridge (D4) between the
-frozen `BuilderDeps`/`CrewBuilderVerifyDeps` engine hooks (Slices 17/20:
-`confirm: (text: string) => Promise<boolean>`, `confirmReuse?: (kind: ReuseKind, text:
-string) => Promise<boolean>`, `log?: (m: string) => void`) and the server's
-`ConsentRegistry`/SSE writer. Three exports, matching the brief verbatim:
-
-- `confirmViaPort(port: ConfirmPort, events: EventSink, kind: string): (question: string) => Promise<boolean>`
-  — fixed `kind` per call site (e.g. `'build'`); mints `{ kind, question }` through the
-  port on the same event sink the build's narration also writes to, coerces the port's
-  `unknown` resolution to `boolean` via `Boolean(...)`.
-- `confirmReuseViaPort(port: ConfirmPort, events: EventSink): (kind: string, question: string) => Promise<boolean>`
-  — same bridge, but `kind` (the `ReuseKind` value, `'reuse'`/`'offer'`) is supplied per
-  call instead of fixed.
-- `TextPartWriter` type + `logToTextDelta(write: TextPartWriter): (m: string) => void`
-  — bridges the builder's narration hook to a `text-start`/`text-delta`/`text-end`
-  triple per call, each with a fresh incrementing `narration-N` id so the browser
-  renders one line per call rather than a run-on paragraph. `TextPartWriter` is
-  structurally narrower than the AI-SDK `UIMessageStreamWriter['write']`, so
-  `logToTextDelta(writer.write)` type-checks by ordinary contravariance without this
-  module importing `ai`.
-
-No engine-side code changed — this task only adds the adapter.
-
-## TDD evidence
-
-**RED** (module not found, confirmed before implementation):
-```
-bun test tests/server/builders-adapter.test.ts
-error: Cannot find module '../../src/server/builders/adapter.ts' from '/Users/inderjotsingh/ai/tests/server/builders-adapter.test.ts'
-0 pass / 1 fail / 1 error
-```
-
-**GREEN** (after implementing `src/server/builders/adapter.ts` verbatim per brief):
-```
-bun test tests/server/builders-adapter.test.ts
-4 pass
-0 fail
-8 expect() calls
-Ran 4 tests across 1 file. [13.00ms - 15.00ms]
-```
-
-Four tests, all passing:
-1. `confirmViaPort` mints a fixed-kind ask through the port and resolves its answer.
-2. `confirmViaPort` coerces a non-boolean port answer (`undefined`) to `false`.
-3. `confirmReuseViaPort` threads the caller-supplied kind (varies per call: `'reuse'`
-   then `'offer'`).
-4. `logToTextDelta` writes one start/delta/end triple per call with distinct
-   incrementing ids (`narration-0`, `narration-1`).
-
-## Per-task gate (all three, before commit)
-
-- `bun run typecheck` — clean (`tsc --noEmit`, no output/errors).
-- `bun run lint:file -- src/server/builders/adapter.ts tests/server/builders-adapter.test.ts`
-  — 0 errors after one auto-fix pass (`bunx biome check --write` reordered the test's
-  type-only import after the value import and reflowed a long `emit(...)` call across
-  multiple lines — pure formatting, no logic change). Final run: "Checked 2 files in
-  3ms. No fixes applied."
-- Focused tests — 4/4 pass (see GREEN above).
-
-## Files changed
-
-- `src/server/builders/adapter.ts` (new, 55 lines)
-- `tests/server/builders-adapter.test.ts` (new, 60 lines)
-
 ## Commit
+`b9fdea2` — `feat(voice): @huggingface/transformers as a direct web/ dep + Vite worker config (D10)`
+(4 files changed: `web/package.json`, `bun.lock`, `web/vite.config.ts`,
+`src/server/isolation-headers.ts`)
 
-`f0161ab` — `feat(server): builder confirm/confirmReuse/log adapters onto ConfirmPort + SSE writer (Phase 5)`
-(2 files changed, 115 insertions(+); pre-commit `docs:check` passed — no `src/`
-subsystem-doc gap since `builders/` sits under the already-documented `src/server/`
-tree.)
+## Changes
 
-Branch: `slice-30b-phase5-builders-library` (pre-existing branch, unchanged). Only
-`src/server/builders/adapter.ts` and `tests/server/builders-adapter.test.ts` were
-staged — no `git add -A` — working tree had numerous unrelated dirty files from other
-in-flight Phase 5 tasks (`.remember/*`, `.superpowers/sdd/task-*-brief.md`/
-`task-*-report.md`, `.superpowers/sdd/progress.md`); these were deliberately left
-unstaged and NOT included in this commit.
+1. **`web/package.json`**: added `"@huggingface/transformers": "^4.2.0"` to
+   `dependencies`, alphabetically sorted between `@fontsource-variable/geist-mono`
+   and `@tanstack/react-router`, pinned to match root `package.json:43` exactly.
+2. **`bun install`** (repo root): re-resolved; lockfile updated, no version
+   change (already present at root, now also declared by `web/` directly
+   instead of relying on workspace hoisting).
+3. **`web/vite.config.ts`**:
+   - Updated the `isolation` block's comment per the brief (transformers.js
+     threaded WASM, not the rejected sherpa-onnx plan).
+   - Added `optimizeDeps.exclude: ['@huggingface/transformers']` per the brief
+     verbatim (keeps its WASM/ONNX binaries out of esbuild's dev pre-bundling
+     pass).
+   - Added `worker: { format: 'es' }` — **not present in the brief's literal
+     code snippet**, but added because `stt-engine.ts:31` constructs the
+     worker with `new Worker(url, { type: 'module' })`, and `stt.worker.ts`
+     statically imports `@huggingface/transformers` (which itself does
+     dynamic `import()` for backend selection). Vite's default
+     `worker.format` is `'iife'`, which can't express that; leaving it
+     unset would mismatch how the worker is instantiated once Part B wires
+     it in. Flagged as a deliberate, reasoned addition beyond the brief
+     text, not a silent deviation — matches the outer task description's
+     explicit call for "worker config (format 'es')".
+   - Left COOP/COEP headers untouched (still `require-corp`). Confirmed via
+     `stt.worker.ts:1`'s comment that Task 7's D10 spike landed on **Rung 1**
+     (require-corp + CDN CORS), matching the brief's default assumption — no
+     `credentialless` swap needed.
+4. **`src/server/isolation-headers.ts`**: replaced the stale "sherpa WASM
+   SharedArrayBuffer" comment with the brief's transformers.js-accurate
+   wording, verbatim from Step 2 of the brief. Comment-only change.
+
+## Gate results
+- `cd web && bun run typecheck` — PASS (no output/errors)
+- `cd web && bun run test` — PASS, **51 test files / 235 tests**, all green
+  (some expected `ECONNREFUSED` console noise from a pre-existing test
+  hitting a non-running port 3000 — not a failure)
+- `cd web && bun run build` — **ran, PASS**, built in 279ms, no errors.
+  Note: no separate worker/transformers chunk appears in `dist/` yet because
+  `stt-engine.ts` (which references the worker) isn't imported by any app
+  component yet — that wiring is Part B (Tasks 10-18). Confirmed via grep
+  that only `stt-engine.ts`/`stt.worker.test.ts` reference it, nothing
+  reachable from the app entry. Expected at this point in the sequence.
+- Root `bun run typecheck` — PASS
+- Root `bun run lint` — PASS (exit 0; 18 pre-existing warnings elsewhere in
+  the repo — e.g. `tests/server/mcp-add.test.ts`, `tests/server/models-pull.test.ts`
+  — none touching files this task modified)
+- Pre-commit `docs:check` hook ran clean as part of the commit.
 
 ## Self-review
-
-- Implementation is byte-for-byte the brief's Step 3 code (only whitespace differs,
-  from the biome auto-format pass on the test file's imports/wrapping — the adapter
-  file itself needed no reformatting).
-- Verified `ConfirmPort` (`src/server/consent/registry.ts:10-13`) and `EventSink`
-  (`src/core/events.ts`) signatures against the brief's claims before writing: both
-  match exactly (`ConfirmPort = (ask: ConfirmAsk, emit: EventSink) => Promise<unknown>`;
-  `EventSink = (e: StatusEvent) => void`).
-- `Boolean(await port(...))` is the only coercion point — correctly turns the
-  `Promise<unknown>` port contract into the `Promise<boolean>` the engine's
-  `confirm`/`confirmReuse` hooks require; test 2 explicitly locks in the `undefined →
-  false` case.
-- `logToTextDelta`'s closure-scoped counter (`let n = 0`) is per-adapter-instance, not
-  global — each `logToTextDelta(...)` call site gets its own independent narration-id
-  sequence starting at 0, which is what a fresh build run wants (verified by reasoning
-  through the closure semantics, not just by the given test, since the test only
-  exercises one instance).
-- Only two files touched; no incidental changes to unrelated pre-existing modified
-  files in the working tree (confirmed via `git status --short` before staging).
+- Diff scope matches the brief's `git add` list exactly: `web/package.json`,
+  `bun.lock`, `web/vite.config.ts`, `src/server/isolation-headers.ts`.
+- Left numerous unrelated pre-existing modified files (other task
+  briefs/reports, `.remember/*`, `progress.md`) untouched/unstaged —
+  confirmed via `git status --short` before staging.
+- Verified root package.json:43 version string character-for-character
+  before pinning `web/package.json`'s entry to it.
+- Verified D10 rung (Rung 1 vs 2) empirically from `stt.worker.ts`'s own
+  header comment rather than assuming the brief's default — confirmed no
+  `credentialless` swap was needed.
 
 ## Concerns
-
-None. The adapter's output shapes (the `data-confirm` ask parameter, the
-`text-start`/`text-delta`/`text-end` part shapes) are fixed exactly as given in the
-brief and match the existing `ConfirmPort`/`EventSink` contracts with no
-interpretation required. No ambiguity encountered — nothing to flag for Task 11/13.
+- The `worker.format: 'es'` addition is a judgment call beyond the brief's
+  literal snippet — reasoning given above. Recommend the controller/reviewer
+  double-check it against Part B's live-verify (Task 17/18) once the worker
+  is actually wired in and produces a real bundle chunk, to confirm the
+  format choice holds up in practice and not just by static inspection.
+- This task's `bun run build` passing proves the config is *syntactically*
+  and *structurally* sound (transformers.js resolves through Vite's
+  bundler as a direct dep, no build errors), but does NOT yet prove the
+  worker bundles/loads correctly at runtime — `stt-engine.ts`/`stt.worker.ts`
+  are still dead code until Part B wires them into a component. That
+  runtime proof is still pending Task 18 live-verify.

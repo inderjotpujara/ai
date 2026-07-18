@@ -1,128 +1,84 @@
-# Task 4 Report: `src/session/migrations.ts` — `SESSION_MIGRATIONS`
+# Task 4 Report — Settings UI: voice-enable toggle + model-tier selector (Phase 7)
 
-## Summary
+## Status: DONE
 
-Implemented per the brief, verbatim, via TDD. `src/session/` and `tests/session/`
-are new directories (first files in a new module, mirroring `src/memory/`'s
-shape). One migration (`'init-sessions-and-messages'`) creates `sessions` and
-`messages` plus the `idx_messages_session(session_id, created_at)` index
-needed by Task 7's `getMessages` ORDER BY.
+Note: this report file previously held a stale Phase-6 Task 4 report (session
+migrations). That content is unrelated to this Phase-7 Task 4 and has been
+replaced below; the earlier work it described was already committed under its
+own SHA in an earlier phase and is unaffected by this overwrite.
 
-## Confirmed contracts before writing
+## What was done
+Followed the brief's TDD steps exactly; the pre-existing
+`web/src/features/settings/index.tsx` and `index.test.tsx` matched the
+brief's documented "before" state 1:1, so no reconciliation was needed.
 
-Read `src/db/migrate.ts` first, per the task instructions:
-- `Migration = { name: string; up: (db: Database) => void }`.
-- `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending
-  `Migration.up` inside its own transaction, bumps `user_version` after each,
-  and **returns the resulting version number**. A second call against an
-  already-migrated db runs zero loop iterations and returns the same version
-  — this is the idempotency the tests assert.
+1. **RED**: Appended the `describe('SettingsArea — voice input', ...)` block
+   (4 tests) to `web/src/features/settings/index.test.tsx` and added
+   `isVoiceInputEnabled, voiceModelTier` to the import. Ran
+   `bun run test -- settings/index.test.tsx` → confirmed the 4 new tests
+   failed (missing exports / missing `data-testid`), while the 4 pre-existing
+   tests still passed.
+2. **GREEN**: Replaced `web/src/features/settings/index.tsx` with the brief's
+   verbatim implementation: `ModelTier = 'moonshine-base' | 'moonshine-tiny'`
+   (temporary home, per the Task 8 plan), `isVoiceInputEnabled()` /
+   `voiceModelTier()` accessors mirroring `isOsNotifyEnabled()`, a second
+   `<section>` control block (voice-input toggle
+   `data-testid="voice-input-toggle"` + model-tier
+   `<select data-testid="voice-model-tier">`), localStorage keys
+   `agent.voiceInputEnabled` / `agent.voiceModelTier`, default-tier read from
+   `window.__AGENT_VOICE_DEFAULT_MODEL__` falling back to `'moonshine-base'`.
+3. Ran Biome's formatter (`bunx biome check --write`) on the two touched
+   files to fix line-wrap-only formatting diffs surfaced by `lint:file`
+   (multi-line ternary, JSX text wrap) — no logic changes, just formatting
+   per project style.
+4. Committed both files with the exact conventional-commit subject from the
+   brief (`feat(voice): Settings voice-enable toggle + model-tier selector
+   (D7)`), body expanded with a short rationale.
 
-## TDD evidence
+## Files touched
+- `web/src/features/settings/index.tsx` (modified — full replacement per brief)
+- `web/src/features/settings/index.test.tsx` (modified — new describe block appended)
 
-**RED** (before `src/session/migrations.ts` existed):
-```
-error: Cannot find module '../../src/session/migrations.ts' from '/Users/inderjotsingh/ai/tests/session/migrations.test.ts'
-0 pass / 1 fail / 1 error
-```
-
-**GREEN** (after creating `src/session/migrations.ts`, brief's Step 3 code
-verbatim):
-```
-5 pass
-0 fail
-10 expect() calls
-Ran 5 tests across 1 file. [32.00ms]
-```
-
-## Files changed
-
-- `src/session/migrations.ts` (new) — `SESSION_MIGRATIONS: Migration[]`.
-- `tests/session/migrations.test.ts` (new) — 5 tests, brief's Step 1 code
-  verbatim except one biome auto-reflow (see Gate below).
-- `docs/architecture.md` (new module-map row, see Docs below).
-
-## Gate (all three, run before commit)
-
-- `bun run typecheck` → clean, no output.
-- `bun run lint:file -- src/session/migrations.ts tests/session/migrations.test.ts`
-  → 1 formatting error on the first run: biome wanted the
-  `'sessions row defaults owner to \'local\'...'` test name re-quoted to
-  double-quotes (to avoid the escaped single-quote) and the inline object-type
-  cast on `SELECT * FROM sessions` reflowed to multi-line. Both are
-  semantically identical to the brief's snippet (same string, same type). Ran
-  `bunx biome check --write tests/session/migrations.test.ts` to apply the
-  fix, then re-ran both `lint:file` (0 errors) and the focused test (still
-  5/5 pass) to confirm nothing broke.
-- `bun test tests/session/migrations.test.ts` → 5/5 pass (see GREEN above).
-
-## Docs (the hard line)
-
-`src/session/` is a **brand-new subsystem** — this is its first file — so
-`bun run docs:check` (the pre-commit hook) correctly failed on the first
-commit attempt: `subsystem src/session/ is not documented in docs/architecture.md`.
-
-I checked the SDD ledger (`.superpowers/sdd/progress.md`) for precedent before
-deciding how to handle this, since the task brief itself doesn't mention an
-architecture.md edit. Found the exact prior lesson from the Slice-27 media
-subsystem's first task (Task A2): *"new src/<subsystem> first task MUST commit
-the architecture.md row atomically (docs:check passes on working-tree so an
-uncommitted edit masks it)."* I also confirmed (via `grep` across
-`task-*-brief.md`) that the only briefs mentioning `architecture.md` are
-`task-30`/`task-31`, which on inspection are **stale Phase-5 leftovers**
-(landing the already-merged Builders+Library phase), not part of this Phase-6
-plan — so there is no dedicated later "docs" task in this phase's 39-task
-plan that would pick this up instead.
-
-Given that precedent, I added one new module-map table row for
-**Session / Chat history** (`docs/architecture.md`, next to the "DB
-migrations" row) describing exactly what exists today — schema only
-(`SESSION_MIGRATIONS`, the two tables, the index, the two reserved-but-unused
-columns) — and noting the store/API land in later Phase 6 tasks, so the claim
-stays accurate as the module grows. Re-ran `bun run docs:check` → green, then
-committed all three files (`src/session/migrations.ts`,
-`tests/session/migrations.test.ts`, `docs/architecture.md`) atomically in one
-commit, per the lesson above (an uncommitted docs edit would mask the gate on
-a second commit attempt).
-
-I did **not** touch README.md/ROADMAP.md — those are the pre-**push**
-slice-landing gate's concern (a `docs/architecture.md` change on a push to
-`main`), not the pre-**commit** hook, and this branch isn't landing yet
-(Phase 6 has many more increments to go).
+## Gate results (all inline, all green)
+- `cd web && bun run test -- settings/index.test.tsx` → RED first (4 failed /
+  4 passed), then GREEN (8 passed / 8).
+- `cd web && bun run typecheck` (`tsc --noEmit`) → clean, no errors.
+- `cd web && bun run test` (full suite) → **48 files, 208 tests, all passed.**
+- `bun run lint:file -- web/src/features/settings/index.tsx web/src/features/settings/index.test.tsx`
+  → 2 Biome formatting errors on first pass (line-wrap style), fixed via
+  `biome check --write`, re-ran clean (0 errors).
+- Root `bun run docs:check` ran automatically as the pre-commit hook (no
+  `src/**` files touched, only `web/src/features/**` — hook passed with no
+  living-doc changes required).
 
 ## Commit
-
-`ca5a491` — `feat(session): add SESSION_MIGRATIONS (sessions + messages tables) (Phase 6 Incr 1)`
-3 files changed, 138 insertions(+): `src/session/migrations.ts`,
-`tests/session/migrations.test.ts`, `docs/architecture.md`.
+- `06db17b` — `feat(voice): Settings voice-enable toggle + model-tier selector (D7)`
+  (2 files changed, 142 insertions, 2 deletions)
 
 ## Self-review
+- Structure mirrors the OS-notify toggle exactly: same `<Button
+  data-testid>` pattern, same localStorage read/write via `useEffect` +
+  try/catch degrade, same accessor shape (`isVoiceInputEnabled` next to
+  `isOsNotifyEnabled`).
+- No browser permission gating on the voice toggle (plain localStorage flip),
+  per the brief — mic permission is deferred to Task 12's capture start, not
+  toggle time.
+- `defaultModelTier()` correctly falls back to `'moonshine-base'` when
+  `window.__AGENT_VOICE_DEFAULT_MODEL__` is unset (as in tests), and the
+  model-tier `<select>` is `disabled` while voice input is off, matching the
+  UX intent (tier only matters once enabled).
+- No console.log, no deviation from the brief's code beyond Biome's
+  formatting-only reflow.
 
-- Schema matches the brief's verbatim SQL exactly: `sessions(id PK, title
-  NOT NULL, owner NOT NULL DEFAULT 'local', created_at, updated_at,
-  last_message_at NULL, run_id NULL)`, `messages(id PK, session_id NOT NULL
-  REFERENCES sessions(id), parent_message_id NULL, role, parts TEXT NOT NULL,
-  created_at, degraded NULL)`, `idx_messages_session(session_id,
-  created_at)`.
-- One migration only (YAGNI, per the task's explicit instruction) — did not
-  add speculative future migrations or columns.
-- `type`-only imports used for both `Database` and `Migration`, per the
-  global constraints.
-- No `console.log`, no deviation from the brief's code.
-- FK enforcement test explicitly turns `PRAGMA foreign_keys = ON` first,
-  since SQLite doesn't enforce FKs by default — this matches `bun:sqlite`'s
-  real default-off behavior, so the test is asserting real DB behavior, not
-  a false positive.
-
-## Concerns
-
-- None outstanding. The one open question (does a new-subsystem task need to
-  touch `docs/architecture.md` itself) is resolved above using the exact
-  documented ledger precedent, not a guess.
-
-## Note on this report file
-
-This file previously held a stale report from an earlier phase's differently-
-numbered Task 4 (Library enum mirrors, Phase 5). That content has been
-replaced with this Phase 6 Task 4 report; the earlier work it described was
-already committed under its own SHA in an earlier phase and is unaffected.
+## Notes / concerns
+- No divergence between the brief and the real file state — implementation
+  is verbatim per brief, no judgment calls needed.
+- Per the brief, `ModelTier` lives in `settings/index.tsx` temporarily; Task 8
+  is expected to move it to `web/src/features/voice/stt-engine.ts` and switch
+  this file to import it instead — flagged here for whoever picks up Task 8
+  so the duplicate definition doesn't linger past that task.
+- No docs/architecture.md change made or needed (web-only UI addition to an
+  existing documented subsystem, no new subsystem).
+- Root `bun run typecheck`/`lint` were not run since the brief and diff are
+  confined to `web/`; only web-scoped gates applied, consistent with the task
+  instructions.

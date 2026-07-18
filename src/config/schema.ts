@@ -509,6 +509,18 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 60_000,
     doc: "Minimum durationMs a completed Crew/Workflow/Agent run must have crossed before a completion notification fires. Spec §7.2's correctness argument depends on this staying well above AGENT_WEB_NOTIFY_POLL_MS (a run cannot both start and finish inside one poll interval, so it is always observed Running at least once before terminal). Slice 30b Phase 6.",
   },
+  {
+    env: 'AGENT_WEB_VOICE_DEFAULT_MODEL',
+    kind: 'string',
+    def: 'moonshine-base',
+    doc: "Default Moonshine model tier for browser voice input (web/src/features/voice/stt-engine.ts): 'moonshine-base' (~120-150MB, default, better accuracy) or 'moonshine-tiny' (~76MB, faster/lighter). Injected into the served page as window.__AGENT_VOICE_DEFAULT_MODEL__ (server/main.ts renderIndexHtml). Slice 30b Phase 7.",
+  },
+  {
+    env: 'AGENT_WEB_VOICE_VAD_SILENCE_MS',
+    kind: 'number',
+    def: 800,
+    doc: 'Sustained silence (ms) that closes a tap-to-toggle voice segment (web/src/features/voice/vad.ts Segmenter). Injected into the served page as window.__AGENT_VOICE_VAD_SILENCE_MS__ (server/main.ts renderIndexHtml). Slice 30b Phase 7.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in

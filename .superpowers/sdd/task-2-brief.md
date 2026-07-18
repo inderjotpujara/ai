@@ -1,163 +1,79 @@
-## Task 2: Session request/response contracts — `SessionListQuerySchema` / `SessionListResponseSchema` / `SessionRenameRequestSchema`
+### Task 2: Mirror `CaptureSource` into `src/contracts/enums.ts` with a parity test
 
 **Files:**
-- Modify: `src/contracts/requests.ts` (add `SessionListItemDtoSchema` to the existing `./dto.ts` import; append three schemas at the end of the file)
-- Test: `tests/contracts/session-requests.test.ts` (create)
+- Modify: `src/contracts/enums.ts`
+- Modify: `src/voice/types.ts:7-10` (the local `CaptureSource` definition, now removed → re-export)
+- Test: `tests/contracts/capture-source-parity.test.ts`
 
 **Interfaces:**
-- Consumes: `SessionListItemDtoSchema` (Task 1, `src/contracts/dto.ts`).
-- Produces: `SessionListQuerySchema` / `SessionListQuery` = `{ search?: string; limit: number (default 25, coerced, 1-200); cursor?: string }`. `SessionListResponseSchema` / `SessionListResponse` = `{ items: SessionListItemDTO[]; nextCursor?: string; total: number }`. `SessionRenameRequestSchema` / `SessionRenameRequest` = `{ title: string (1-200 chars) }`. All re-exported via `src/contracts/index.ts`'s existing wildcard — no barrel edit needed.
+- Consumes: `src/contracts/enums.ts`'s existing enum-file conventions (mirrors `RuntimeKind`'s "wire mirror + parity test" pattern, `enums.ts:146-154`).
+- Produces: `CaptureSource` enum (`Mic = 'mic'`, `File = 'file'` — values UNCHANGED from the CLI's current definition) importable from `src/contracts/enums.ts`, `src/contracts/index.ts`, and re-exported (not redefined) from `src/voice/types.ts` for `src/voice/transcribe.ts` and `src/telemetry/spans.ts`'s existing import sites.
+
+**⚠ Values preserved (no rename):** the CLI's `CaptureSource` uses lowercase values (`Mic = 'mic'`, `File = 'file'`). This lift is a source-RELOCATION only — the enum values stay byte-identical, so the `voice.transcribe` span's `voice.capture.source` attribute value does NOT change and no existing test needs updating. (The earlier `phase7-interfaces.md` note showing `'Mic'/'File'` was a controller error; preserve `'mic'/'file'`.) `src/voice/transcribe.ts`/`tests/voice/spans.test.ts`/`tests/voice/transcribe.test.ts` reference the enum members (`CaptureSource.Mic`), never the raw string, and `tests/voice/types.test.ts` already asserts `'mic'` — all keep passing unchanged.
 
 - [ ] **Step 1: Write the failing test**
 
-`tests/contracts/session-requests.test.ts`:
-```typescript
+Create `tests/contracts/capture-source-parity.test.ts` (mirrors `tests/contracts/runtime-kind-parity.test.ts`):
+
+```ts
 import { expect, test } from 'bun:test';
-import {
-  SessionListQuerySchema,
-  SessionListResponseSchema,
-  SessionRenameRequestSchema,
-} from '../../src/contracts/index.ts';
+import { CaptureSource as ContractCaptureSource } from '../../src/contracts/enums.ts';
+import { CaptureSource as VoiceCaptureSource } from '../../src/voice/types.ts';
 
-test('SessionListQuerySchema defaults limit to 25 when absent', () => {
-  const parsed = SessionListQuerySchema.parse({});
-  expect(parsed.limit).toBe(25);
-  expect(parsed.search).toBeUndefined();
-  expect(parsed.cursor).toBeUndefined();
-});
-
-test('SessionListQuerySchema coerces a string limit from a query param', () => {
-  const parsed = SessionListQuerySchema.parse({ limit: '10' });
-  expect(parsed.limit).toBe(10);
-});
-
-test('SessionListQuerySchema rejects a limit above 200', () => {
-  expect(() => SessionListQuerySchema.parse({ limit: '500' })).toThrow();
-});
-
-test('SessionListQuerySchema rejects a non-positive limit', () => {
-  expect(() => SessionListQuerySchema.parse({ limit: '0' })).toThrow();
-});
-
-test('SessionListQuerySchema accepts search + cursor', () => {
-  const parsed = SessionListQuerySchema.parse({
-    search: 'cats',
-    cursor: 'b3B0aG9wYXF1ZQ',
-  });
-  expect(parsed.search).toBe('cats');
-  expect(parsed.cursor).toBe('b3B0aG9wYXF1ZQ');
-});
-
-test('SessionListResponseSchema round-trips a page with no nextCursor (last page)', () => {
-  const parsed = SessionListResponseSchema.parse({
-    items: [
-      {
-        id: 'sess-1',
-        title: 'New chat',
-        owner: 'local',
-        createdAt: 1,
-        updatedAt: 1,
-      },
-    ],
-    total: 1,
-  });
-  expect(parsed.items).toHaveLength(1);
-  expect(parsed.nextCursor).toBeUndefined();
-});
-
-test('SessionListResponseSchema round-trips a page with a nextCursor', () => {
-  const parsed = SessionListResponseSchema.parse({
-    items: [],
-    total: 5,
-    nextCursor: 'b3B0aG9wYXF1ZQ',
-  });
-  expect(parsed.nextCursor).toBe('b3B0aG9wYXF1ZQ');
-});
-
-test('SessionRenameRequestSchema accepts a normal title', () => {
-  expect(SessionRenameRequestSchema.parse({ title: 'My renamed chat' }).title).toBe(
-    'My renamed chat',
+test('contract CaptureSource values stay isomorphic with voice (single-sourced post-lift, D5)', () => {
+  expect(Object.values(ContractCaptureSource).sort()).toEqual(
+    Object.values(VoiceCaptureSource).sort(),
   );
 });
-
-test('SessionRenameRequestSchema rejects an empty title', () => {
-  expect(() => SessionRenameRequestSchema.parse({ title: '' })).toThrow();
-});
-
-test('SessionRenameRequestSchema rejects a title over 200 chars', () => {
-  expect(() =>
-    SessionRenameRequestSchema.parse({ title: 'x'.repeat(201) }),
-  ).toThrow();
-});
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/contracts/session-requests.test.ts`
-Expected: FAIL — none of the three schemas are exported yet.
+Run: `bun test tests/contracts/capture-source-parity.test.ts`
+Expected: FAIL — `src/contracts/enums.ts` has no export named `CaptureSource`.
 
-- [ ] **Step 3: Add the `SessionListItemDtoSchema` import and append the three schemas to `src/contracts/requests.ts`**
+- [ ] **Step 3: Write minimal implementation**
 
-Modify the existing `./dto.ts` import block (currently lines 2-8) to its full new content:
-```typescript
-import {
-  CrewListItemDtoSchema,
-  McpServerDtoSchema,
-  ModelInventoryDtoSchema,
-  RunListItemDtoSchema,
-  SessionListItemDtoSchema,
-  WorkflowListItemDtoSchema,
-} from './dto.ts';
+Append to `src/contracts/enums.ts` (after the `McpAuthKind` block, before `McpServerStatus`, or simply at the end of the file — appending at the end is simplest and matches the file's existing "append new enums as features land" pattern):
+
+```ts
+/** Wire mirror of `src/voice/types.ts` CaptureSource (isomorphic rule — no
+ *  `src/voice/` import; that module is Node-only, pulling Bun spawn/ffmpeg
+ *  glue). Lifted to be the SINGLE source of truth (Slice 30b Phase 7, D5) —
+ *  `src/voice/types.ts` re-exports this rather than redefining it, so this
+ *  parity test is a regression guard against future redefinition drift, not
+ *  a live divergence check. Needed as a `voice.transcribe` span attribute
+ *  value (`src/telemetry/spans.ts` `VOICE_CAPTURE_SOURCE`) from the browser
+ *  path. `tests/contracts/capture-source-parity.test.ts` guards value
+ *  parity. */
+export enum CaptureSource {
+  Mic = 'mic',
+  File = 'file',
+}
 ```
 
-Append at the end of the file (after the existing `BuilderRegistryListResponseSchema` block):
-```typescript
-/** `GET /api/sessions?search=&cursor=&limit=` query — mirrors
- *  `RunListQuerySchema`'s shape (Phase 3) minus the outcome/degraded/kind
- *  facets that don't apply to sessions. Slice 30b Phase 6 (spec D10/§4.1). */
-export const SessionListQuerySchema = z.object({
-  search: z.string().optional(),
-  limit: z.coerce.number().int().positive().max(200).default(25),
-  cursor: z.string().optional(),
-});
-export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
+Modify `src/voice/types.ts` — replace the local `CaptureSource` enum (lines 7-10) with a re-export, right below the `VoiceFrames` re-export from Task 1:
 
-/** `GET /api/sessions` response — byte-for-byte `RunListResponseSchema`'s
- *  shape (Phase 3): same opaque-cursor contract with the client, just backed
- *  by a real SQL keyset page instead of an in-process array (spec D10). */
-export const SessionListResponseSchema = z.object({
-  items: z.array(SessionListItemDtoSchema),
-  nextCursor: z.string().optional(),
-  total: z.number(),
-});
-export type SessionListResponse = z.infer<typeof SessionListResponseSchema>;
-
-/** `PATCH /api/sessions/:id` body — bounded the same way every other
- *  free-text body is (`BuilderBuildRequestSchema.need`, etc). Slice 30b
- *  Phase 6 (spec §4.1). */
-export const SessionRenameRequestSchema = z.object({
-  title: z.string().min(1).max(200),
-});
-export type SessionRenameRequest = z.infer<typeof SessionRenameRequestSchema>;
+```ts
+/** Re-exported from contracts (Slice 30b Phase 7, D5) — see the VoiceFrames
+ *  re-export above for the rationale. */
+export { CaptureSource } from '../contracts/enums.ts';
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+No test change is needed — `tests/voice/types.test.ts` already asserts `CaptureSource.Mic` is `'mic'`, which stays true (values preserved).
 
-Run: `bun test tests/contracts/session-requests.test.ts`
-Expected: PASS (all 9 tests).
+- [ ] **Step 4: Run test to verify it passes**
 
-- [ ] **Step 5: Run the full contracts suite (regression check on the shared import edit)**
+Run: `bun test tests/contracts/capture-source-parity.test.ts tests/voice/`
+Expected: PASS (parity test + all pre-existing voice tests, unchanged).
 
-Run: `bun test tests/contracts/`
-Expected: PASS — the `./dto.ts` import list edit only adds a name, it cannot break any existing schema in `requests.ts`.
+Run: `bun run typecheck`
+Expected: PASS.
 
-- [ ] **Step 6: Gate + commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-bun run typecheck && bun run lint:file -- src/contracts/requests.ts tests/contracts/session-requests.test.ts
-git add src/contracts/requests.ts tests/contracts/session-requests.test.ts
-git commit -m "feat(contracts): add SessionListQuery/SessionListResponse/SessionRenameRequest schemas (Phase 6 Incr 1)"
+git add src/contracts/enums.ts src/voice/types.ts tests/contracts/capture-source-parity.test.ts
+git commit -m "feat(voice): mirror CaptureSource into contracts with a parity test (D5)"
 ```
-
----
 

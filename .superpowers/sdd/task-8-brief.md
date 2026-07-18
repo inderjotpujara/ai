@@ -1,232 +1,304 @@
-## Task 8: `listSessions` — SQL keyset cursor pagination (search + `COALESCE` sort + id tie-break)
+### Task 8: `createSttEngine` (main-thread Web Worker host) + mocked-worker tests + canonicalize `ModelTier`
 
 **Files:**
-- Modify: `src/session/store.ts` (add cursor encode/decode helpers, `listSessions`, wire into the returned object; add a `SessionListItemDTO` import from contracts)
-- Modify: `tests/session/store.test.ts` (append a `describe` block)
+- Create: `web/src/features/voice/stt-engine.ts`
+- Test: `web/src/features/voice/stt-engine.test.ts`
+- Modify: `web/src/features/settings/index.tsx` (replace the Task 4 temporary local `ModelTier` with an import from `stt-engine.ts` — single source of truth from here on)
 
 **Interfaces:**
-- Consumes: `SessionListItemDTO` (Task 1, `src/contracts/index.ts`).
-- Produces: `listSessions(q: { search?: string; cursor?: string; limit: number }): { items: SessionListItemDTO[]; nextCursor?: string; total: number }`. Sort key is `COALESCE(last_message_at, created_at)` descending, `id` ascending tie-break (spec D10) — matches `GET /api/runs`'s opaque `base64url(sortKey:id)` cursor CONTRACT with the client (`src/server/runs/list.ts:22-33`'s `encodeCursor`/`decodeCursorId`), but the sort/filter/page happens in SQL, not an in-process array, since sessions live in a real table (spec D10's explicit authorized deviation on internals only). `search` matches case-insensitively against `title` via `LIKE`. `total` reflects the post-search-filter row count (not the page size) — same semantics as `RunListResponseSchema.total`.
+- Consumes: `ModelTier` / `SttWorkerRequest` / `SttWorkerResponse` (Task 7, `stt.worker.ts`); `VoiceFrames` (`@contracts`, Task 1).
+- Produces (VERBATIM per `phase7-interfaces.md`): `export type LoadProgress = { loaded: number; total: number };`, `export type SttEngine = { ready(): Promise<void>; onProgress(cb): () => void; detectSpeech(chunk16k): Promise<boolean>; transcribe(frames): Promise<string>; close(): void };`, `export function createSttEngine(cfg: { model: ModelTier }): SttEngine;`. Consumed by `use-voice-input.ts` (Part B, Task 10+).
 
 - [ ] **Step 1: Write the failing tests**
 
-Append a new `describe` block to `tests/session/store.test.ts`, after `describe('appendMessage / getMessages', ...)`:
-```typescript
-describe('listSessions', () => {
-  test('an empty store returns an empty page with total 0', () => {
-    const page = store.listSessions({ limit: 10 });
-    expect(page.items).toEqual([]);
-    expect(page.total).toBe(0);
-    expect(page.nextCursor).toBeUndefined();
+Create `web/src/features/voice/stt-engine.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createSttEngine } from './stt-engine.ts';
+import type { SttWorkerResponse } from './stt.worker.ts';
+
+/** Minimal fake standing in for the real `Worker` global — captures every
+ *  `postMessage` call and lets the test drive `onmessage` manually to
+ *  simulate a worker response. Real transformers.js/WASM behavior is never
+ *  exercised here (see Task 7's spike + Part B's live-verify for that);
+ *  this suite only asserts the message PROTOCOL is correct. */
+class FakeSttWorker {
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  posted: unknown[] = [];
+  terminated = false;
+  postMessage(msg: unknown) {
+    this.posted.push(msg);
+  }
+  terminate() {
+    this.terminated = true;
+  }
+  emit(response: SttWorkerResponse) {
+    this.onmessage?.({ data: response } as MessageEvent);
+  }
+}
+
+let lastWorker: FakeSttWorker | undefined;
+
+beforeEach(() => {
+  lastWorker = undefined;
+  vi.stubGlobal(
+    'Worker',
+    class {
+      constructor(..._args: unknown[]) {
+        const fake = new FakeSttWorker();
+        lastWorker = fake;
+        return fake as unknown as Worker;
+      }
+    },
+  );
+});
+
+describe('createSttEngine', () => {
+  it('posts a load request for the configured model tier on construction', () => {
+    createSttEngine({ model: 'moonshine-tiny' });
+    expect(lastWorker?.posted).toEqual([{ kind: 'load', model: 'moonshine-tiny' }]);
   });
 
-  test('sorts by COALESCE(last_message_at, created_at) desc — a session with a later message outranks an older-created session with no messages', () => {
-    store.upsertSession('s1', { defaultTitle: 'One', at: 1_000 });
-    store.upsertSession('s2', { defaultTitle: 'Two', at: 2_000 });
-    store.upsertSession('s3', { defaultTitle: 'Three', at: 3_000 });
-    store.appendMessage('s1', { id: 'm1', role: 'user', parts: [] }, 5_000);
-
-    const page = store.listSessions({ limit: 10 });
-    expect(page.items.map((i) => i.id)).toEqual(['s1', 's3', 's2']);
-    expect(page.total).toBe(3);
-    expect(page.nextCursor).toBeUndefined();
-  });
-
-  test('ties on the sort key break by id ascending', () => {
-    store.upsertSession('b', { defaultTitle: 'B', at: 1_000 });
-    store.upsertSession('a', { defaultTitle: 'A', at: 1_000 });
-    const page = store.listSessions({ limit: 10 });
-    expect(page.items.map((i) => i.id)).toEqual(['a', 'b']);
-  });
-
-  test('cursor pagination pages correctly at page boundaries (limit=2 over 5 rows)', () => {
-    for (let i = 0; i < 5; i++) {
-      store.upsertSession(`s${i}`, {
-        defaultTitle: `Session ${i}`,
-        at: 1_000 + i,
-      });
-    }
-    const page1 = store.listSessions({ limit: 2 });
-    expect(page1.items.map((i) => i.id)).toEqual(['s4', 's3']);
-    expect(page1.total).toBe(5);
-    expect(page1.nextCursor).toBeDefined();
-
-    const page2 = store.listSessions({ limit: 2, cursor: page1.nextCursor });
-    expect(page2.items.map((i) => i.id)).toEqual(['s2', 's1']);
-    expect(page2.total).toBe(5);
-    expect(page2.nextCursor).toBeDefined();
-
-    const page3 = store.listSessions({ limit: 2, cursor: page2.nextCursor });
-    expect(page3.items.map((i) => i.id)).toEqual(['s0']);
-    expect(page3.nextCursor).toBeUndefined();
-  });
-
-  test('a malformed cursor is treated as no cursor (returns page 1) rather than throwing', () => {
-    store.upsertSession('s1', { defaultTitle: 'One', at: 1_000 });
-    expect(() =>
-      store.listSessions({ limit: 10, cursor: 'not-a-valid-cursor!!' }),
-    ).not.toThrow();
-  });
-
-  test('search filters by title, case-insensitive substring match', () => {
-    store.upsertSession('s1', { defaultTitle: 'Talking about cats', at: 1_000 });
-    store.upsertSession('s2', { defaultTitle: 'Talking about dogs', at: 2_000 });
-    const page = store.listSessions({ search: 'CATS', limit: 10 });
-    expect(page.items.map((i) => i.id)).toEqual(['s1']);
-    expect(page.total).toBe(1);
-  });
-
-  test('search with no matches returns an empty page, not an error', () => {
-    store.upsertSession('s1', { defaultTitle: 'Talking about cats', at: 1_000 });
-    const page = store.listSessions({ search: 'zzz-no-match', limit: 10 });
-    expect(page.items).toEqual([]);
-    expect(page.total).toBe(0);
-  });
-
-  test('listSessions items carry the exact SessionListItemDTO shape (owner/timestamps present, lastMessageAt/runId optional)', () => {
-    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
-    const page = store.listSessions({ limit: 10 });
-    expect(page.items[0]).toEqual({
-      id: 's1',
-      title: 'New chat',
-      owner: 'local',
-      createdAt: 1_000,
-      updatedAt: 1_000,
+  it('ready() resolves only once the worker reports ready, not before', async () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    let resolved = false;
+    void engine.ready().then(() => {
+      resolved = true;
     });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    lastWorker?.emit({ kind: 'ready' });
+    await engine.ready();
+    expect(resolved).toBe(true);
+  });
+
+  it('forwards progress messages to onProgress subscribers', () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    const onProgress = vi.fn();
+    engine.onProgress(onProgress);
+    lastWorker?.emit({ kind: 'progress', loaded: 50, total: 100 });
+    expect(onProgress).toHaveBeenCalledWith({ loaded: 50, total: 100 });
+  });
+
+  it('onProgress unsubscribe stops further callbacks', () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    const onProgress = vi.fn();
+    const unsubscribe = engine.onProgress(onProgress);
+    unsubscribe();
+    lastWorker?.emit({ kind: 'progress', loaded: 1, total: 2 });
+    expect(onProgress).not.toHaveBeenCalled();
+  });
+
+  it('detectSpeech() resolves with the matching response by request id', async () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    const resultPromise = engine.detectSpeech(new Float32Array([0.1, 0.2]));
+    const posted = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    expect(posted.kind).toBe('detectSpeech');
+    lastWorker?.emit({ kind: 'detectSpeechResult', id: posted.id, isSpeech: true });
+    expect(await resultPromise).toBe(true);
+  });
+
+  it('transcribe() resolves with the matching response by request id', async () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    const resultPromise = engine.transcribe({
+      samples: new Float32Array([0.1]),
+      sampleRate: 16000,
+    });
+    const posted = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    expect(posted.kind).toBe('transcribe');
+    lastWorker?.emit({ kind: 'transcribeResult', id: posted.id, text: 'hello world' });
+    expect(await resultPromise).toBe('hello world');
+  });
+
+  it('two concurrent requests resolve independently, matched by their own id', async () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    const first = engine.transcribe({ samples: new Float32Array([0.1]), sampleRate: 16000 });
+    const second = engine.transcribe({ samples: new Float32Array([0.2]), sampleRate: 16000 });
+    const [firstPosted, secondPosted] = lastWorker!.posted.slice(-2) as {
+      id: number;
+    }[];
+    // Emit out of order to prove matching is by id, not arrival order.
+    lastWorker?.emit({ kind: 'transcribeResult', id: secondPosted.id, text: 'second' });
+    lastWorker?.emit({ kind: 'transcribeResult', id: firstPosted.id, text: 'first' });
+    expect(await first).toBe('first');
+    expect(await second).toBe('second');
+  });
+
+  it('a request-scoped error rejects only that pending call, not ready()', async () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    lastWorker?.emit({ kind: 'ready' });
+    await engine.ready();
+    const resultPromise = engine.transcribe({
+      samples: new Float32Array([0.1]),
+      sampleRate: 16000,
+    });
+    const posted = lastWorker?.posted.at(-1) as { id: number };
+    lastWorker?.emit({ kind: 'error', id: posted.id, message: 'decode failed' });
+    await expect(resultPromise).rejects.toThrow('decode failed');
+  });
+
+  it('close() terminates the worker', () => {
+    const engine = createSttEngine({ model: 'moonshine-base' });
+    engine.close();
+    expect(lastWorker?.terminated).toBe(true);
   });
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/session/store.test.ts`
-Expected: FAIL — `store.listSessions` is not a function yet.
+Run: `cd web && bun run test -- features/voice/stt-engine.test.ts`
+Expected: FAIL — `error: Cannot find module './stt-engine.ts'`.
 
-- [ ] **Step 3: Add cursor helpers + `listSessions` to `src/session/store.ts`**
+- [ ] **Step 3: Write minimal implementation**
 
-Add the contracts import at the top of the file (alongside the existing `bun:sqlite`/`node:fs`/`node:path` imports):
-```typescript
-import type { SessionListItemDTO } from '../contracts/index.ts';
-```
+Create `web/src/features/voice/stt-engine.ts`:
 
-Add the cursor encode/decode helpers near the top of the file, after `toStoredMessage`:
-```typescript
-function encodeSessionCursor(sortKey: number, id: string): string {
-  return Buffer.from(`${sortKey}:${id}`).toString('base64url');
-}
+```ts
+import type { VoiceFrames } from '@contracts';
+import type { ModelTier, SttWorkerRequest, SttWorkerResponse } from './stt.worker.ts';
 
-function decodeSessionCursor(
-  cursor: string,
-): { sortKey: number; id: string } | undefined {
-  try {
-    const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
-    const idx = decoded.indexOf(':');
-    if (idx === -1) return undefined;
-    const sortKey = Number(decoded.slice(0, idx));
-    const id = decoded.slice(idx + 1);
-    if (!Number.isFinite(sortKey) || id.length === 0) return undefined;
-    return { sortKey, id };
-  } catch {
-    return undefined;
-  }
-}
-```
+export type { ModelTier };
+export type LoadProgress = { loaded: number; total: number };
 
-Add `listSessions` after `getMessages` (before the `return { ... }` block):
-```typescript
-  function listSessions(q: {
-    search?: string;
-    cursor?: string;
-    limit: number;
-  }): { items: SessionListItemDTO[]; nextCursor?: string; total: number } {
-    const searchClause = q.search ? 'AND lower(title) LIKE ?' : '';
-    const searchArgs: (string | number)[] = q.search
-      ? [`%${q.search.toLowerCase()}%`]
-      : [];
+export type SttEngine = {
+  ready(): Promise<void>;
+  onProgress(cb: (p: LoadProgress) => void): () => void;
+  detectSpeech(chunk16k: Float32Array): Promise<boolean>;
+  transcribe(frames: VoiceFrames): Promise<string>;
+  close(): void;
+};
 
-    const totalRow = db
-      .query(`SELECT COUNT(*) as n FROM sessions WHERE 1 = 1 ${searchClause}`)
-      .get(...searchArgs) as { n: number };
+type Pending<T> = { resolve: (v: T) => void; reject: (err: Error) => void };
 
-    // A malformed cursor is treated as absent (page 1), never thrown — the
-    // list endpoint must degrade gracefully on a tampered/garbage cursor
-    // value, matching runs/list.ts's decodeCursorId precedent.
-    const cursor = q.cursor ? decodeSessionCursor(q.cursor) : undefined;
-    const cursorClause = cursor
-      ? `AND (COALESCE(last_message_at, created_at) < ?
-          OR (COALESCE(last_message_at, created_at) = ? AND id > ?))`
-      : '';
-    const cursorArgs: (string | number)[] = cursor
-      ? [cursor.sortKey, cursor.sortKey, cursor.id]
-      : [];
+/**
+ * Main-thread host for the STT Web Worker (D4): spawns `stt.worker.ts`,
+ * posts a `load` request for the configured model tier immediately, and
+ * exposes a request/response-matched (by numeric id) API over
+ * `postMessage`. `ready()` resolves only once the worker's `ready` message
+ * arrives — callers (`use-voice-input.ts`, Part B) gate capture start on
+ * this, never on construction alone (spec §7.2).
+ */
+export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
+  const worker = new Worker(new URL('./stt.worker.ts', import.meta.url), {
+    type: 'module',
+  });
 
-    // Fetch one extra row to detect "more remain" without a second query.
-    const rows = db
-      .query(
-        `SELECT * FROM sessions WHERE 1 = 1 ${searchClause} ${cursorClause}
-         ORDER BY COALESCE(last_message_at, created_at) DESC, id ASC
-         LIMIT ?`,
-      )
-      .all(...searchArgs, ...cursorArgs, q.limit + 1) as SessionRowRaw[];
+  const progressListeners = new Set<(p: LoadProgress) => void>();
+  let readyResolve!: () => void;
+  let readyReject!: (err: Error) => void;
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
 
-    const hasMore = rows.length > q.limit;
-    const page = rows.slice(0, q.limit);
-    const items: SessionListItemDTO[] = page.map((r) => {
-      const row = toSessionRow(r);
-      return {
-        id: row.id,
-        title: row.title,
-        owner: row.owner,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-        lastMessageAt: row.lastMessageAt,
-        runId: row.runId,
-      };
-    });
+  let nextId = 1;
+  const pendingDetect = new Map<number, Pending<boolean>>();
+  const pendingTranscribe = new Map<number, Pending<string>>();
 
-    const lastRaw = page[page.length - 1];
-    const nextCursor =
-      hasMore && lastRaw
-        ? encodeSessionCursor(
-            lastRaw.last_message_at ?? lastRaw.created_at,
-            lastRaw.id,
-          )
-        : undefined;
-
-    return { items, nextCursor, total: totalRow.n };
-  }
-```
-Update the returned object to its final Increment-1 shape:
-```typescript
-  return {
-    upsertSession,
-    getSession,
-    renameSession,
-    deleteSession,
-    listSessions,
-    appendMessage,
-    getMessages,
-    close: (): void => db.close(),
+  worker.onmessage = (event: MessageEvent<SttWorkerResponse>) => {
+    const msg = event.data;
+    if (msg.kind === 'progress') {
+      for (const cb of progressListeners) cb({ loaded: msg.loaded, total: msg.total });
+      return;
+    }
+    if (msg.kind === 'ready') {
+      readyResolve();
+      return;
+    }
+    if (msg.kind === 'detectSpeechResult') {
+      pendingDetect.get(msg.id)?.resolve(msg.isSpeech);
+      pendingDetect.delete(msg.id);
+      return;
+    }
+    if (msg.kind === 'transcribeResult') {
+      pendingTranscribe.get(msg.id)?.resolve(msg.text);
+      pendingTranscribe.delete(msg.id);
+      return;
+    }
+    if (msg.kind === 'error') {
+      if (msg.id !== undefined) {
+        pendingDetect.get(msg.id)?.reject(new Error(msg.message));
+        pendingDetect.delete(msg.id);
+        pendingTranscribe.get(msg.id)?.reject(new Error(msg.message));
+        pendingTranscribe.delete(msg.id);
+      } else {
+        readyReject(new Error(msg.message));
+      }
+    }
   };
+
+  worker.postMessage({ kind: 'load', model: cfg.model } satisfies SttWorkerRequest);
+
+  function ready(): Promise<void> {
+    return readyPromise;
+  }
+
+  function onProgress(cb: (p: LoadProgress) => void): () => void {
+    progressListeners.add(cb);
+    return () => progressListeners.delete(cb);
+  }
+
+  function detectSpeech(chunk16k: Float32Array): Promise<boolean> {
+    const id = nextId++;
+    return new Promise<boolean>((resolve, reject) => {
+      pendingDetect.set(id, { resolve, reject });
+      worker.postMessage(
+        { kind: 'detectSpeech', id, chunk: chunk16k } satisfies SttWorkerRequest,
+        [chunk16k.buffer],
+      );
+    });
+  }
+
+  function transcribe(frames: VoiceFrames): Promise<string> {
+    const id = nextId++;
+    return new Promise<string>((resolve, reject) => {
+      pendingTranscribe.set(id, { resolve, reject });
+      worker.postMessage(
+        { kind: 'transcribe', id, samples: frames.samples } satisfies SttWorkerRequest,
+        [frames.samples.buffer],
+      );
+    });
+  }
+
+  function close(): void {
+    worker.terminate();
+    pendingDetect.clear();
+    pendingTranscribe.clear();
+    progressListeners.clear();
+  }
+
+  return { ready, onProgress, detectSpeech, transcribe, close };
+}
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+Update `web/src/features/settings/index.tsx` to canonicalize `ModelTier` (remove the Task 4 temporary local definition, import it instead):
 
-Run: `bun test tests/session/store.test.ts`
-Expected: PASS (all 25 tests — 17 from Tasks 5-7 + 8 new in this task).
+```tsx
+import { useEffect, useState } from 'react';
+import { Button } from '../../shared/ui/button.tsx';
+import type { ModelTier } from '../voice/stt-engine.ts';
+```
 
-- [ ] **Step 5: Run the full session module suite (regression check)**
+(Delete the `export type ModelTier = 'moonshine-base' | 'moonshine-tiny';` block and its preceding doc comment from Task 4 — everything else in the file is unchanged, since `ModelTier`'s literal values are identical, just now imported rather than locally declared. Re-export it so existing/future importers of `settings/index.tsx`'s `ModelTier` keep working:)
 
-Run: `bun test tests/session/`
-Expected: PASS — `tests/session/migrations.test.ts` (5) + `tests/session/store.test.ts` (25) = 30 tests, all green.
+```tsx
+export type { ModelTier };
+```
 
-- [ ] **Step 6: Gate + commit**
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd web && bun run test -- features/voice/stt-engine.test.ts features/settings/index.test.tsx`
+Expected: PASS (9 `stt-engine` tests + all pre-existing + Task 4's `settings` tests, now sourcing `ModelTier` from `stt-engine.ts`).
+
+Run: `cd web && bun run typecheck`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-bun run typecheck && bun run lint:file -- src/session/store.ts tests/session/store.test.ts
-git add src/session/store.ts tests/session/store.test.ts
-git commit -m "feat(session): add listSessions SQL keyset cursor pagination (Phase 6 Incr 1)"
+git add web/src/features/voice/stt-engine.ts web/src/features/voice/stt-engine.test.ts web/src/features/settings/index.tsx
+git commit -m "feat(voice): createSttEngine — mocked-worker-tested message protocol host (D1/D4/D7)"
 ```
-
----
 
