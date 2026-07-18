@@ -40,6 +40,7 @@ import { handleSessionDetail } from './sessions/detail.ts';
 import { handleSessionExport } from './sessions/export.ts';
 import { handleSessionList } from './sessions/list.ts';
 import { handleSessionRename } from './sessions/rename.ts';
+import { handleTelemetry } from './telemetry/handler.ts';
 import { handleUpload } from './upload.ts';
 import { handleWorkflowDetail } from './workflows/detail.ts';
 import { handleWorkflowList } from './workflows/list.ts';
@@ -116,7 +117,15 @@ export function buildFetch(
 
       const url = new URL(req.url);
       if (url.pathname.startsWith('/api')) {
-        if (!guard.verify(req)) return json({ error: 'unauthorized' }, 401);
+        // `navigator.sendBeacon` can't set an Authorization header, so POST
+        // /api/telemetry ALONE also accepts a constant-time-compared ?k= token
+        // (D10). Every other route stays header-only — the exception is scoped
+        // to the beacon, and the Host/Origin perimeter still fronts it.
+        const isBeacon =
+          req.method === 'POST' && url.pathname === '/api/telemetry';
+        if (!guard.verify(req) && !(isBeacon && guard.verifyQuery(url))) {
+          return json({ error: 'unauthorized' }, 401);
+        }
         return await handleApi(req, url, deps);
       }
       return await serveStatic(req, url, deps);
@@ -158,6 +167,11 @@ async function handleApi(
         if (req.method === 'POST' && url.pathname === '/api/feedback') {
           rec.status(200);
           return handleFeedback(req);
+        }
+        if (req.method === 'POST' && url.pathname === '/api/telemetry') {
+          const res = await handleTelemetry(req);
+          rec.status(res.status);
+          return res;
         }
         if (req.method === 'GET' && url.pathname === '/api/runs') {
           rec.status(200);
