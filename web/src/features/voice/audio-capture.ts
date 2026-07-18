@@ -1,10 +1,5 @@
 const OUTPUT_RATE = 16000;
 
-/** Fractional carry state a `createDownsampler` instance threads across
- *  `process()` calls (documented shape; callers never construct one
- *  directly — it lives inside the closure returned by `createDownsampler`). */
-export type DownsampleState = { carry: number };
-
 /**
  * Streaming linear-interpolation resampler from `inputRate` down to the
  * fixed 16 kHz `VoiceFrames` rate. Carries continuous state across

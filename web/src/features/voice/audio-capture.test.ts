@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { createDownsampler } from './audio-capture.ts';
 
+/** Small independent reference resampler: recomputes each output sample
+ *  directly from `p_k = k * ratio` against the full signal with fresh state
+ *  (no carried `prevLast`, no chunk boundaries) — used to correctness-check
+ *  the streaming implementation's output against a from-scratch computation,
+ *  not merely against itself. */
+function naiveResample(signal: Float32Array, ratio: number, k: number): number {
+  const p = k * ratio;
+  const floorP = Math.floor(p);
+  const frac = p - floorP;
+  const s0 = signal[floorP] as number;
+  const s1 = signal[floorP + 1] as number;
+  return s0 + (s1 - s0) * frac;
+}
+
 describe('createDownsampler', () => {
   it('produces exact expected samples for a 3:1 ratio (48k→16k) single-call ramp, zero floating error', () => {
     // x[i] = 3*i so every interpolated point lands exactly on an integer
@@ -51,6 +65,15 @@ describe('createDownsampler', () => {
     expect(chunkedOutput).toEqual(referenceOutput);
   });
 
+  it('linearly interpolates at fractional positions off the 0/0.5 grid (44.1k-style ratio)', () => {
+    const d = createDownsampler(20000); // ratio = 20000/16000 = 1.25
+    const input = new Float32Array([0, 4, 8, 12, 16]); // x[i] = 4i
+    // output positions p_k = 0, 1.25, 2.5, 3.75 → fracs 0, .25, .5, .75
+    // values: 0; lerp(4,8,.25)=5; lerp(8,12,.5)=10; lerp(12,16,.75)=15
+    const out = Array.from(d.process(input));
+    expect(out).toEqual([0, 5, 10, 15]);
+  });
+
   it('is invariant to arbitrary non-128-aligned AudioWorklet-style quantum sizes over a longer signal', () => {
     // A realistic 48k→16k conversion over exactly 1 second (48000 samples),
     // once as native 128-frame render quanta, once chopped into deliberately
@@ -84,6 +107,16 @@ describe('createDownsampler', () => {
     // (k ranges 0..15999, since 15999*3 = 47997 < 47999 = total-1, and
     // 16000*3 = 48000 is not < 47999).
     expect(quantaOutput.length).toBe(16000);
+
+    // Correctness, not just self-consistency: a handful of samples spanning
+    // the start, an early boundary, and the tail, verified against a fresh
+    // naive reference computed directly from the full signal (ratio=3 is
+    // exact/integer here, so frac is always 0 and s0+(s1-s0)*0 === s0 with no
+    // rounding — exact equality is meaningful, same reasoning as the first
+    // test in this file).
+    for (const k of [0, 1, 2, 500, 4999, 8192, 15999]) {
+      expect(quantaOutput[k]).toBe(naiveResample(signal, 3, k));
+    }
   });
 
   it('flush() returns empty (no output sample is ever withheld beyond what process() already emitted) and resets state for reuse', () => {
