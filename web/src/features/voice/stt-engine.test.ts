@@ -193,4 +193,42 @@ describe('createSttEngine', () => {
     engine.close();
     expect(lastWorker?.terminated).toBe(true);
   });
+
+  it('close() rejects outstanding detectSpeech/transcribe/ready promises instead of hanging them forever', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    // Worker never responds to any of these — no 'ready', no result, no error.
+    const readyPromise = engine.ready();
+    const detectPromise = engine.detectSpeech(new Float32Array([0.1]));
+    const transcribePromise = engine.transcribe({
+      samples: new Float32Array([0.2]),
+      sampleRate: 16000,
+    });
+
+    engine.close();
+
+    await expect(readyPromise).rejects.toThrow(/closed/);
+    await expect(detectPromise).rejects.toThrow(/closed/);
+    await expect(transcribePromise).rejects.toThrow(/closed/);
+    expect(lastWorker?.terminated).toBe(true);
+  });
+
+  it('calls made after close() reject fast instead of posting to the terminated worker', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    engine.close();
+    const postedBeforeNewCalls = lastWorker?.posted.length ?? 0;
+
+    await expect(engine.ready()).rejects.toThrow(/closed/);
+    await expect(engine.detectSpeech(new Float32Array([0.1]))).rejects.toThrow(
+      /closed/,
+    );
+    await expect(
+      engine.transcribe({
+        samples: new Float32Array([0.2]),
+        sampleRate: 16000,
+      }),
+    ).rejects.toThrow(/closed/);
+
+    // No new messages posted to the (terminated) worker for the post-close calls.
+    expect(lastWorker?.posted.length ?? 0).toBe(postedBeforeNewCalls);
+  });
 });

@@ -35,10 +35,19 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
   const progressListeners = new Set<(p: LoadProgress) => void>();
   let readyResolve!: () => void;
   let readyReject!: (err: Error) => void;
+  let readySettled = false;
   const readyPromise = new Promise<void>((resolve, reject) => {
     readyResolve = resolve;
     readyReject = reject;
   });
+  // Nobody may ever call ready() (e.g. the caller only uses
+  // detectSpeech/transcribe, or close() lands before ready/error arrives).
+  // Silence the default "unhandled rejection" for that case; callers that DO
+  // call ready() still get the rejection via their own .then/.catch/await —
+  // attaching a handler here doesn't consume it for other listeners.
+  readyPromise.catch(() => {});
+
+  let closed = false;
 
   let nextId = 1;
   const pendingDetect = new Map<number, Pending<boolean>>();
@@ -52,6 +61,7 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
       return;
     }
     if (msg.kind === 'ready') {
+      readySettled = true;
       readyResolve();
       return;
     }
@@ -72,6 +82,7 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
         pendingTranscribe.get(msg.id)?.reject(new Error(msg.message));
         pendingTranscribe.delete(msg.id);
       } else {
+        readySettled = true;
         readyReject(new Error(msg.message));
       }
     }
@@ -83,6 +94,7 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
   } satisfies SttWorkerRequest);
 
   function ready(): Promise<void> {
+    if (closed) return Promise.reject(new Error('stt-engine closed'));
     return readyPromise;
   }
 
@@ -92,6 +104,7 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
   }
 
   function detectSpeech(chunk16k: Float32Array): Promise<boolean> {
+    if (closed) return Promise.reject(new Error('stt-engine closed'));
     const id = nextId++;
     return new Promise<boolean>((resolve, reject) => {
       pendingDetect.set(id, { resolve, reject });
@@ -107,6 +120,7 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
   }
 
   function transcribe(frames: VoiceFrames): Promise<string> {
+    if (closed) return Promise.reject(new Error('stt-engine closed'));
     const id = nextId++;
     return new Promise<string>((resolve, reject) => {
       pendingTranscribe.set(id, { resolve, reject });
@@ -122,9 +136,18 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
   }
 
   function close(): void {
-    worker.terminate();
+    if (closed) return;
+    closed = true;
+    const closeErr = new Error('stt-engine closed');
+    for (const pending of pendingDetect.values()) pending.reject(closeErr);
+    for (const pending of pendingTranscribe.values()) pending.reject(closeErr);
     pendingDetect.clear();
     pendingTranscribe.clear();
+    if (!readySettled) {
+      readySettled = true;
+      readyReject(closeErr);
+    }
+    worker.terminate();
     progressListeners.clear();
   }
 

@@ -1,69 +1,116 @@
-# Task 8 Report: `listSessions` — SQL keyset cursor pagination (Slice 30b Phase 6, Increment 1)
+# Task 8 report: `createSttEngine` (main-thread Web Worker host) + mocked-worker tests + canonicalize `ModelTier`
 
-(Note: this file name was previously used by an earlier Slice-30b-Phase-5
-Task 8 — the web Builders route scaffold. That work is preserved in git
-history/on the Phase-5 branch/merge commits. This report replaces it for
-the current Phase-6 Task 8: `listSessions` on `src/session/store.ts`, the
-last method of the Increment-1 `SessionStore`.)
+(Note: this file name was previously used by an earlier Slice-30b-Phase-6
+Task 8 — `listSessions` SQL keyset cursor pagination. That work is preserved
+in git history/merge commits. This report replaces it for the current
+Phase-7 Task 8.)
 
 ## Status: DONE
 
-## Implemented
-
-- `src/session/store.ts`:
-  - Added `import type { SessionListItemDTO } from '../contracts/index.ts'`.
-  - Added `encodeSessionCursor(sortKey, id)` / `decodeSessionCursor(cursor)` helpers
-    right after `toStoredMessage` (before `SessionStoreDeps`). Cursor is
-    `base64url(sortKey:id)`; decode wraps in `try/catch`, validates the `:`
-    separator, `Number.isFinite(sortKey)`, and non-empty `id` — any failure
-    returns `undefined` (never throws), matching `src/server/runs/list.ts`'s
-    `decodeCursorId` precedent.
-  - Added `listSessions(q: { search?; cursor?; limit })` inside
-    `createSessionStore`, after `getMessages`:
-    - `total` = `SELECT COUNT(*) ... WHERE 1=1 [AND lower(title) LIKE ?]`
-      (post-search-filter count, not page size).
-    - Keyset WHERE clause (only when a valid cursor decodes):
-      `AND (COALESCE(last_message_at, created_at) < ? OR (COALESCE(last_message_at, created_at) = ? AND id > ?))`.
-    - Page query: `SELECT * FROM sessions WHERE 1=1 [search] [cursor] ORDER BY COALESCE(last_message_at, created_at) DESC, id ASC LIMIT ?` with `limit + 1` to detect `hasMore` without a second round trip.
-    - Maps `SessionRowRaw` → `SessionListItemDTO` (via existing `toSessionRow`), slices to `q.limit`, and only emits `nextCursor` when `hasMore` and a last row exists.
-  - Wired `listSessions` into the final returned object (now: `upsertSession, getSession, renameSession, deleteSession, listSessions, appendMessage, getMessages, close`) — this is the final Increment-1 shape.
-- `tests/session/store.test.ts`: appended `describe('listSessions', ...)` with the 8 tests verbatim from the brief (empty page, COALESCE sort order, id tie-break, page-boundary cursor pagination over 5 rows at limit=2, malformed-cursor-never-throws, case-insensitive search match, search-no-match empty page, exact DTO shape). Two of those tests were reformatted by `biome format --write` (wrapped the `upsertSession` object args onto multiple lines to fit line width) — pure formatting, no logic change.
-
-## RED evidence
-
-Before implementation: `bun test tests/session/store.test.ts` → 17 pass / 8 fail, all 8 failures `TypeError: store.listSessions is not a function`.
-
-## GREEN evidence
-
-- `bun test tests/session/store.test.ts` → **25 pass, 0 fail** (63 expect() calls).
-- `bun test tests/session/` (regression) → **30 pass, 0 fail** (73 expect() calls) — 5 migrations + 25 store.
-
-## Gate
-
-- `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
-- `bun run lint:file -- src/session/store.ts tests/session/store.test.ts` → initially flagged a formatting issue in the two new search tests (line-wrap of `upsertSession` call args); fixed via `bunx biome format --write tests/session/store.test.ts` (pure reformat, no semantic change), then clean on re-run.
-
-## Files changed
-
-- `/Users/inderjotsingh/ai/src/session/store.ts`
-- `/Users/inderjotsingh/ai/tests/session/store.test.ts`
-
 ## Commit
+`a68e784` — `feat(voice): createSttEngine — mocked-worker-tested message protocol host (D1/D4/D7)`
 
-`34298d0` — `feat(session): add listSessions SQL keyset cursor pagination (Phase 6 Incr 1)`
-(2 files changed, 177 insertions(+); pre-commit `docs:check` hook passed — no `src/` subsystem shape changed, only a method added to an already-documented store).
+5 files changed: `web/src/features/voice/stt-engine.ts` (new), `web/src/features/voice/stt-engine.test.ts` (new), `web/src/features/voice/model-tier.ts` (new), `web/src/features/voice/stt.worker.ts` (modified), `web/src/features/settings/index.tsx` (modified).
 
-## Self-review
+## What was built
 
-- SQL keyset clause implemented byte-for-byte from the brief — did not "improve" it (e.g. did not collapse to a single comparison or use a computed column).
-- `noUncheckedIndexedAccess` respected: `page[page.length - 1]` is typed `SessionRowRaw | undefined` and guarded via `hasMore && lastRaw` before use.
-- Malformed-cursor test only asserts `not.toThrow()`, consistent with brief; decode helper correctly returns `undefined` for `'not-a-valid-cursor!!'` (base64url-decodes to garbage with no `:` separator or non-finite sortKey), so the query silently runs as page-1.
-- No `console.log` introduced; no `interface` used (all `type`); no new enums needed (YAGNI — task brief specifies only these two helpers + `listSessions`).
+`web/src/features/voice/stt-engine.ts` — `createSttEngine(cfg: { model: ModelTier }): SttEngine`. Spawns `stt.worker.ts` as a module Worker, posts `{ kind: 'load', model }` on construction, and exposes:
+- `ready()` — resolves only on the worker's `ready` message.
+- `onProgress(cb)` — subscribes to `progress` messages, returns an unsubscribe function.
+- `detectSpeech(chunk16k)` / `transcribe(frames: VoiceFrames)` — each assigns a numeric `id`, posts the request (transferring the underlying buffer), and resolves/rejects a per-id pending promise when the matching `*Result`/`error` response arrives. Two concurrent calls are matched correctly even if responses arrive out of order.
+- `close()` — terminates the worker and clears all pending maps/listeners.
 
-## Concerns
+Deliberate design point over the brief's reference implementation: `detectSpeech`/`transcribe` are **not** gated on `ready()` — they post immediately. A request issued before `ready` is never lost; it's simply answered later by whatever the worker sends back for that id (a real result, or a worker-side "not loaded yet" `error`). Added an explicit test for this (`'a detectSpeech()/transcribe() call issued before ready is not lost...'`) exercising both outcomes (one rejects, one resolves) from calls made pre-`ready`.
 
-None blocking. Two minor observations for later phases, not this task's scope:
-1. `search` and `cursor` clauses are string-interpolated into the SQL (not parameterized in the query text itself — only their bound `?` args are parameterized). This is safe because the interpolated strings are fixed literals chosen from a closed set (`''` or the exact clause text), never user input, so there's no injection surface. Flagging only so a future refactor doesn't assume otherwise.
-2. This task only wires `listSessions` into the SessionStore; the HTTP-facing `GET /api/sessions` endpoint (server route) is presumably a later Increment/task in this phase — not built here per brief scope (YAGNI holds to `listSessions` + cursor helpers only).
+## `ModelTier` canonicalization (Task 4 Minor resolved)
+
+Per your instruction, overrode the brief's plain-union `ModelTier` with a **string enum**, defined once in a new shared module `web/src/features/voice/model-tier.ts`:
+```ts
+export enum ModelTier { Base = 'moonshine-base', Tiny = 'moonshine-tiny' }
+```
+(Chose a dedicated module rather than `stt-engine.ts` itself, to avoid `stt-engine.ts` ↔ `stt.worker.ts` needing to cross-import the enum in both directions.)
+
+- `stt.worker.ts` — removed its local union, now `import { ModelTier } from './model-tier.ts'` and re-exports it (so any existing importer of `ModelTier` from `stt.worker.ts` keeps working). `MODEL_IDS` keys switched to computed `[ModelTier.Base]` / `[ModelTier.Tiny]`.
+- `settings/index.tsx` — removed the Task 4 temporary local union + its doc comment, now `import { ModelTier } from '../voice/model-tier.ts'` and `export { ModelTier }`. `isModelTier` compares against `ModelTier.Base`/`ModelTier.Tiny`, `defaultModelTier()` returns `ModelTier.Base`, and the `<select>` options use `value={ModelTier.Base}` / `value={ModelTier.Tiny}`.
+- String values are byte-identical to before (`'moonshine-base'` / `'moonshine-tiny'`) — no change to persisted `localStorage`, the `window.__AGENT_VOICE_DEFAULT_MODEL__` global, or the HF model-id map.
+- The brief's verbatim test snippet passed raw string literals (`'moonshine-tiny'`) as `cfg.model` — TS string enums are not structurally assignable from bare literals, so the test file was adapted to pass `ModelTier.Tiny`/`ModelTier.Base` instead (the resulting protocol assertions, e.g. `{ kind: 'load', model: 'moonshine-tiny' }`, are unchanged since those just check runtime message values, which are still the plain strings).
+
+## Testing
+
+`stt-engine.test.ts`: 10 tests — load-on-construct, `ready()` gating, progress forwarding + unsubscribe, `detectSpeech`/`transcribe` id-correlation (including out-of-order concurrent resolution), request-scoped error isolation (doesn't reject `ready()`), the added pre-ready not-lost test, and `close()` terminating the worker. All assert against a `vi.stubGlobal('Worker', ...)` fake that records `postMessage` calls and lets the test drive `onmessage` — no real transformers.js/WASM involved (matches Task 7's stated boundary).
+
+Gate run (`cd web && bun run typecheck && bun run test`, plus root `bun run lint`):
+- `bun run typecheck` — PASS (0 errors). Fixed two `noUncheckedIndexedAccess` destructuring errors in the test file (added `!` + `biome-ignore`, since array destructuring types as possibly-undefined here).
+- `bun run test` (full web suite) — **51 test files / 233 tests passed**, including all 10 new `stt-engine` tests, `stt.worker.test.ts` (unchanged, 4 tests), and `settings/index.test.tsx` (unchanged, 8 tests — still green after the enum swap, confirming the persisted-value contract held).
+- `bun run lint` (root, biome over the whole repo) — clean on all 5 touched files. Added `biome-ignore` comments (matching the repo's existing convention, e.g. `chat/actions.test.tsx`) for: the `noConstructorReturn` on the fake-Worker-constructor mocking idiom, and 5 `noNonNullAssertion`s on destructured/found test values whose presence is guaranteed by the preceding assertion/await. Pre-existing unrelated warnings elsewhere in the repo (`tests/server/mcp-list.test.ts`, `tests/server/models-pull.test.ts`) are untouched.
+- Pre-commit `docs:check` passed automatically (no `docs/architecture.md` change needed — no new subsystem, `web/**`-only change).
+
+## Concerns / follow-ups for later tasks
+- None blocking. `use-voice-input.ts` (Task 10+) is the next consumer of `SttEngine`/`ModelTier`.
+- `stt-engine.ts` is not itself covered by Part B's live-verify yet (that's Task 17/18, same boundary Task 7 documented) — this task's tests only prove the protocol/plumbing against a mock, per the brief's explicit scope.
+
+## Review fix (2026-07-18): dangling-promise leak on `close()`
+
+**Critical finding from review:** `close()` terminated the worker and cleared
+`pendingDetect`/`pendingTranscribe`, but never *rejected* the promises those
+maps held, and never rejected `readyPromise` if `close()` landed before the
+worker's `ready`/`error` arrived. Any in-flight `detectSpeech()`,
+`transcribe()`, or `ready()` caller would hang forever.
+
+**Fix** (`web/src/features/voice/stt-engine.ts`):
+- Added a `closed` boolean and a `readySettled` boolean (tracks whether
+  `readyPromise` has already resolved/rejected via the worker's `ready`/`error`
+  message).
+- `close()` now: rejects every entry still in `pendingDetect`/`pendingTranscribe`
+  with `new Error('stt-engine closed')` before clearing the maps; rejects
+  `readyPromise` via the stored `readyReject` only if `readySettled` is still
+  `false` (no-op guard — avoids acting on an already-settled promise); then
+  terminates the worker and clears `progressListeners` as before. `closed` is
+  idempotent-guarded so a second `close()` call is a no-op.
+- `ready()`, `detectSpeech()`, `transcribe()` now check `closed` first and
+  return an already-rejected `Promise.reject(new Error('stt-engine closed'))`
+  instead of posting to (or awaiting) a terminated worker.
+- Added `readyPromise.catch(() => {})` right after creation, so that if a
+  caller never calls `ready()` at all (common — many callers only use
+  `detectSpeech`/`transcribe`) and `close()` later rejects it, Node/Vitest
+  doesn't surface an "unhandled rejection" warning. This passive catch doesn't
+  consume the rejection for real callers — `ready()` still returns the same
+  `readyPromise` reference, and any `.then`/`.catch`/`await` on it by an actual
+  caller still observes the rejection normally.
+
+**Correction to this report's earlier claim:** the paragraph above titled
+"Deliberate design point over the brief" — stating that not gating
+`detectSpeech`/`transcribe` on `ready()` was a design choice "over the brief" —
+is **inaccurate**. The brief's own reference implementation also posts
+`detectSpeech`/`transcribe` without gating on `ready()` first; this was not an
+enhancement beyond the brief, just a faithful implementation of it. No code
+change needed for this correction — noted here per review instruction.
+
+**Test added** (`web/src/features/voice/stt-engine.test.ts`):
+- `'close() rejects outstanding detectSpeech/transcribe/ready promises instead
+  of hanging them forever'` — starts `ready()`, `detectSpeech()`, and
+  `transcribe()` with the fake worker never responding, calls `close()`, and
+  asserts all three reject with `/closed/` (previously these would hang
+  forever — this is the regression the fix targets).
+- `'calls made after close() reject fast instead of posting to the terminated
+  worker'` — calls `close()` first, then asserts `ready()`/`detectSpeech()`/
+  `transcribe()` all reject immediately with `/closed/` and that no new
+  messages are posted to the (terminated) fake worker.
+- Kept the existing `'close() terminates the worker'` test unchanged.
+
+### Gate run
+`cd web && bun run typecheck && bun run test`:
+- `bun run typecheck` — PASS (0 errors).
+- `bun run test` — **51 test files / 235 tests passed** (was 233; +2 new
+  `stt-engine` tests). `stt-engine.test.ts` alone: 12/12 passed
+  (`bunx vitest run src/features/voice/stt-engine.test.ts`).
+- Root `bun run lint:file -- "web/src/features/voice/stt-engine.ts"
+  "web/src/features/voice/stt-engine.test.ts"` — clean, no findings (one
+  formatting fix applied by hand to match biome's preferred wrap of a
+  multi-line `expect(...).rejects.toThrow(...)` before it passed clean).
+- `bun run docs:check` — passed (no new subsystem; `web/**`-only change).
+
+Commit: `fix(voice): reject pending stt-engine promises on close() to prevent
+hangs [review fix]`.
 
 Report file: `/Users/inderjotsingh/ai/.superpowers/sdd/task-8-report.md`
