@@ -306,7 +306,11 @@ Mini.
 > stay linear this phase, reserved for Slice 41; there is no JSON export
 > (Markdown only); there is no server-push/global SSE event bus; there is no
 > session retention/GC; and the CLI gets the recall **READ** benefit only —
-> no CLI-side session persistence. Full suite: 1549 pass/36 skip/0 fail
+> no CLI-side session persistence; and long chat turns are classified
+> `kind=agent`, so a chat exceeding the notification duration threshold can
+> still fire a completion toast — the notification's Chat-kind exclusion
+> doesn't cover chat-originated agent runs (a documented limitation, to
+> refine in a follow-on). Full suite: 1549 pass/36 skip/0 fail
 > (root) + 204 pass, 48 files (web, Vitest/happy-dom). See
 > [`docs/architecture.md`](docs/architecture.md) §Contracts, §Server,
 > §"Persistence — Sessions + chat recall".
@@ -657,7 +661,11 @@ caveats, not silently dropped:** `parentMessageId` is written to the
 stay linear this phase, reserved for Slice 41; there is no JSON export
 (Markdown only); there is no server-push/global SSE event bus; there is no
 session retention/GC; and the CLI gets the recall **READ** benefit only —
-no CLI-side session persistence. Full suite: 1549 pass/36 skip/0 fail
+no CLI-side session persistence; and long chat turns are classified
+`kind=agent`, so a chat exceeding the notification duration threshold can
+still fire a completion toast — the notification's Chat-kind exclusion
+doesn't cover chat-originated agent runs (a documented limitation, to
+refine in a follow-on). Full suite: 1549 pass/36 skip/0 fail
 (root) + 204 pass, 48 files (web, Vitest/happy-dom). See
 [`docs/architecture.md`](docs/architecture.md) §"Persistence — Sessions +
 chat recall".
