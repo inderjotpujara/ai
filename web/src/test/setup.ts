@@ -1,5 +1,15 @@
 import '@testing-library/jest-dom/vitest';
-import { beforeEach, vi } from 'vitest';
+import { beforeEach, expect, vi } from 'vitest';
+import * as axeMatchers from 'vitest-axe/matchers';
+
+// vitest-axe's `toHaveNoViolations` matcher (D4) — registered once, globally,
+// alongside jest-dom's matchers, so every `.test.tsx` file in `web/` can call
+// `expect(await axe(container)).toHaveNoViolations()` without per-file setup.
+// (The TS-side `declare module 'vitest'` augmentation lives in
+// `./vitest-axe.d.ts` — vitest-axe@0.1.0 only ships the pre-v2
+// `declare global { namespace Vi }` form, which vitest 4's own `Assertion`
+// type no longer merges with; see that file for detail.)
+expect.extend(axeMatchers);
 
 // happy-dom does not implement matchMedia; ThemeProvider (Task 3) depends on it.
 beforeEach(() => {
