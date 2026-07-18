@@ -1,4 +1,6 @@
 import type { useNavigate } from '@tanstack/react-router';
+import { toggleVoiceInputEnabled } from '../features/settings/index.tsx';
+import { toggleThemeGlobal } from '../shared/design/theme.tsx';
 
 type NavigateFn = ReturnType<typeof useNavigate>;
 
@@ -111,5 +113,19 @@ export const commands: Command[] = [
     label: 'Search Sessions',
     kind: CommandKind.Nav,
     run: (n) => n({ to: '/sessions' }),
+  },
+  {
+    id: 'toggle-voice-input',
+    label: 'Toggle voice input',
+    kind: CommandKind.Action,
+    run: () => {
+      toggleVoiceInputEnabled();
+    },
+  },
+  {
+    id: 'toggle-theme',
+    label: 'Toggle theme (light/dark)',
+    kind: CommandKind.Action,
+    run: () => toggleThemeGlobal(),
   },
 ];

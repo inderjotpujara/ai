@@ -43,4 +43,16 @@ describe('runCommand (D8 — widened Command dispatch)', () => {
     runCommand({ id: 'b', label: 'B', kind: CommandKind.Nav, run }, nav);
     expect(run).toHaveBeenCalledWith(nav);
   });
+
+  it('includes a toggle-voice-input action command (D8)', () => {
+    const cmd = commands.find((c) => c.id === 'toggle-voice-input');
+    expect(cmd?.kind).toBe(CommandKind.Action);
+    expect(cmd?.label).toMatch(/voice/i);
+  });
+
+  it('includes a toggle-theme action command (D8)', () => {
+    const cmd = commands.find((c) => c.id === 'toggle-theme');
+    expect(cmd?.kind).toBe(CommandKind.Action);
+    expect(cmd?.label).toMatch(/theme/i);
+  });
 });

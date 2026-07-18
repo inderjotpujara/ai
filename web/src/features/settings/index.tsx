@@ -64,6 +64,20 @@ export function isVoiceInputEnabled(): boolean {
   return storedVoiceEnabled();
 }
 
+/** Flips + persists the voice-input setting from anywhere (the ⌘K
+ *  toggle-voice-input action command, D8) — does NOT require `<SettingsArea>`
+ *  to be mounted, unlike the component's own `voiceEnabled` React state.
+ *  Returns the new value. */
+export function toggleVoiceInputEnabled(): boolean {
+  const next = !storedVoiceEnabled();
+  try {
+    localStorage.setItem(VOICE_ENABLED_KEY, String(next));
+  } catch {
+    // ignore persistence failure — reflects the toggle for this call only
+  }
+  return next;
+}
+
 /** Read by `mic-button.tsx`/`use-voice-input.ts` (Part B) to pick which
  *  Moonshine checkpoint `stt-engine.ts` loads. */
 export function voiceModelTier(): ModelTier {

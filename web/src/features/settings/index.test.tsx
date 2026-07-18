@@ -4,6 +4,7 @@ import { renderAt } from '../../test/render.tsx';
 import {
   isOsNotifyEnabled,
   isVoiceInputEnabled,
+  toggleVoiceInputEnabled,
   voiceModelTier,
 } from './index.tsx';
 
@@ -130,5 +131,13 @@ describe('SettingsArea — voice input', () => {
     expect(btn).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(btn);
     expect(btn).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('toggleVoiceInputEnabled (D8 action command) flips + persists without mounting SettingsArea', () => {
+    expect(isVoiceInputEnabled()).toBe(false);
+    expect(toggleVoiceInputEnabled()).toBe(true);
+    expect(isVoiceInputEnabled()).toBe(true);
+    expect(toggleVoiceInputEnabled()).toBe(false);
+    expect(isVoiceInputEnabled()).toBe(false);
   });
 });
