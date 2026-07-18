@@ -14,6 +14,10 @@
 @theme {
   --color-accent: #4C8DFF;      /* blueprint-blue — live/interactive only */
   --color-signal: #35D0C0;      /* signal teal */
+  --color-focus-ring: #4C8DFF;  /* dedicated a11y token (D1) — same hue as
+                                    accent today by design, kept separate so a
+                                    future contrast-driven ring tweak never has
+                                    to touch the accent color path too */
 
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;
@@ -54,6 +58,30 @@ body {
   /* subtle blueprint dot-grid */
   background-image: radial-gradient(var(--color-border) 1px, transparent 1px);
   background-size: 24px 24px;
+}
+
+/* App-wide focus-visible ring (D1) — replaces ad-hoc per-component
+   focus:outline-none/focus:border overrides (see prompt-input.tsx). Only
+   fires for keyboard/programmatic focus (:focus-visible), never for a mouse
+   click, so it doesn't add a ring around every clicked button. */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Visually-hidden but screen-reader-accessible label text (D1) — the
+   standard clip-rect technique, NOT display:none/visibility:hidden (both of
+   which remove the element from the accessibility tree too). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

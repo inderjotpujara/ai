@@ -34,3 +34,16 @@ describe('design tokens', () => {
     expect(light).toContain('--color-danger');
   });
 });
+
+describe('a11y foundations (D1)', () => {
+  it('defines a dedicated --color-focus-ring token and a global :focus-visible rule using it', () => {
+    expect(css).toMatch(/--color-focus-ring:\s*#[0-9A-Fa-f]{6}/);
+    expect(css).toMatch(/:focus-visible\s*\{[^}]*outline:[^}]*var\(--color-focus-ring\)/);
+  });
+
+  it('ships a .sr-only utility for visually-hidden accessible label text', () => {
+    expect(css).toMatch(/\.sr-only\s*\{/);
+    // clip-based hiding, not display:none — must stay in the accessibility tree
+    expect(css).toMatch(/\.sr-only\s*\{[^}]*clip:\s*rect\(0,\s*0,\s*0,\s*0\)/);
+  });
+});
