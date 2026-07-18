@@ -27,7 +27,10 @@ export function LibraryArea() {
   const [tab, setTab] = useState<LibraryTab>('models');
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+  function onTabKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) {
     const next = nextTabIndex(event.key, index, TABS.length);
     if (next === undefined) return;
     event.preventDefault();

@@ -2,9 +2,9 @@ import type {
   CrewDetailDTO,
   CrewListItemDTO,
   CrewMemberDTO,
+  CrewProcess,
   CrewTaskDTO,
 } from '../contracts/index.ts';
-import { CrewProcess } from '../contracts/index.ts';
 import type { CrewDef, CrewMember, Task } from './types.ts';
 
 function mapMember(m: CrewMember): CrewMemberDTO {

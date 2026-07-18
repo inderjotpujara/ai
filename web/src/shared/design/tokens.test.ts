@@ -38,7 +38,9 @@ describe('design tokens', () => {
 describe('a11y foundations (D1)', () => {
   it('defines a dedicated --color-focus-ring token and a global :focus-visible rule using it', () => {
     expect(css).toMatch(/--color-focus-ring:\s*#[0-9A-Fa-f]{6}/);
-    expect(css).toMatch(/:focus-visible\s*\{[^}]*outline:[^}]*var\(--color-focus-ring\)/);
+    expect(css).toMatch(
+      /:focus-visible\s*\{[^}]*outline:[^}]*var\(--color-focus-ring\)/,
+    );
   });
 
   it('ships a .sr-only utility for visually-hidden accessible label text', () => {

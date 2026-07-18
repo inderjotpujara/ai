@@ -19,7 +19,10 @@ export function BuildersArea() {
   const [mode, setMode] = useState<Mode>('agent');
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+  function onTabKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) {
     const next = nextTabIndex(event.key, index, TABS.length);
     if (next === undefined) return;
     event.preventDefault();
