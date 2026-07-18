@@ -5,12 +5,10 @@
  *  `Transcriber` below can still reference it locally.) */
 import type { VoiceFrames } from '../contracts/voice.ts';
 
+/** Re-exported from contracts (Slice 30b Phase 7, D5) — see the VoiceFrames
+ *  re-export above for the rationale. */
+export { CaptureSource } from '../contracts/enums.ts';
 export type { VoiceFrames };
-
-export enum CaptureSource {
-  Mic = 'mic',
-  File = 'file',
-}
 
 export enum VoiceOutcome {
   Ok = 'ok',

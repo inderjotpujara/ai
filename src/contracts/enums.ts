@@ -195,3 +195,17 @@ export enum BuilderKind {
   Crew = 'crew',
   Workflow = 'workflow',
 }
+
+/** Wire mirror of `src/voice/types.ts` CaptureSource (isomorphic rule — no
+ *  `src/voice/` import; that module is Node-only, pulling Bun spawn/ffmpeg
+ *  glue). Lifted to be the SINGLE source of truth (Slice 30b Phase 7, D5) —
+ *  `src/voice/types.ts` re-exports this rather than redefining it, so this
+ *  parity test is a regression guard against future redefinition drift, not
+ *  a live divergence check. Needed as a `voice.transcribe` span attribute
+ *  value (`src/telemetry/spans.ts` `VOICE_CAPTURE_SOURCE`) from the browser
+ *  path. `tests/contracts/capture-source-parity.test.ts` guards value
+ *  parity. */
+export enum CaptureSource {
+  Mic = 'mic',
+  File = 'file',
+}
