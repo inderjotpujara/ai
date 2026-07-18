@@ -1298,3 +1298,4 @@ USER DIRECTIVE (2026-07-18): "find a way to automate test this" → chose **Vite
 - [x] Task 17: complete (commit f5b5629, review clean ✅ Approved, ZERO issues). go-agents→/builders (documented: no /agents route; features/agents=Chat live-rail only); dropped jump-to-crew/workflow/run + search-sessions; renamed jump-to-sessions→go-sessions. No dangling refs. web 339.
 - [x] Task 18: complete (commit d6bab2a, review clean ✅ Approved, ZERO issues). jump-to-recent-run deep-links /runs/$runId (real route), sources via apiFetch/RunListResponseSchema, graceful fallback (empty/error → /runs). web 342.
 === ✅ INCREMENT 3 (⌘K completeness, T15–18) COMPLETE — running boundary gate `bun run check`. ===
+=== ✅ INCREMENT 3 BOUNDARY GATE GREEN (`bun run check` exit 0). HEAD e669c7a. 18/29 tasks done. ===
