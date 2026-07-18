@@ -9,7 +9,10 @@ export type SttEngine = {
   ready(): Promise<void>;
   onProgress(cb: (p: LoadProgress) => void): () => void;
   detectSpeech(chunk16k: Float32Array): Promise<boolean>;
-  transcribe(frames: VoiceFrames): Promise<string>;
+  transcribe(
+    frames: VoiceFrames,
+    onInterim?: (text: string) => void,
+  ): Promise<string>;
   close(): void;
 };
 
@@ -52,6 +55,13 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
   let nextId = 1;
   const pendingDetect = new Map<number, Pending<boolean>>();
   const pendingTranscribe = new Map<number, Pending<string>>();
+  // D6: id-correlated interim-text forwarding — one entry per in-flight
+  // transcribe() call that supplied an onInterim callback, deleted the
+  // moment that id settles (transcribeResult/error) or on close(). NOT a
+  // Set-based multi-subscriber (unlike progressListeners): interim text is
+  // inherently per-request, and two concurrent transcribe() calls (e.g. a
+  // back-to-back gesture, spec §7.1 (d)) must never cross-deliver.
+  const interimListeners = new Map<number, (text: string) => void>();
 
   worker.onmessage = (event: MessageEvent<SttWorkerResponse>) => {
     const msg = event.data;
@@ -70,9 +80,14 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
       pendingDetect.delete(msg.id);
       return;
     }
+    if (msg.kind === 'transcribeInterim') {
+      interimListeners.get(msg.id)?.(msg.text);
+      return;
+    }
     if (msg.kind === 'transcribeResult') {
       pendingTranscribe.get(msg.id)?.resolve(msg.text);
       pendingTranscribe.delete(msg.id);
+      interimListeners.delete(msg.id);
       return;
     }
     if (msg.kind === 'error') {
@@ -81,6 +96,7 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
         pendingDetect.delete(msg.id);
         pendingTranscribe.get(msg.id)?.reject(new Error(msg.message));
         pendingTranscribe.delete(msg.id);
+        interimListeners.delete(msg.id);
       } else {
         readySettled = true;
         readyReject(new Error(msg.message));
@@ -121,9 +137,13 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
     });
   }
 
-  function transcribe(frames: VoiceFrames): Promise<string> {
+  function transcribe(
+    frames: VoiceFrames,
+    onInterim?: (text: string) => void,
+  ): Promise<string> {
     if (closed) return Promise.reject(new Error('stt-engine closed'));
     const id = nextId++;
+    if (onInterim) interimListeners.set(id, onInterim);
     return new Promise<string>((resolve, reject) => {
       pendingTranscribe.set(id, { resolve, reject });
       worker.postMessage(
@@ -145,6 +165,7 @@ export function createSttEngine(cfg: { model: ModelTier }): SttEngine {
     for (const pending of pendingTranscribe.values()) pending.reject(closeErr);
     pendingDetect.clear();
     pendingTranscribe.clear();
+    interimListeners.clear();
     if (!readySettled) {
       readySettled = true;
       readyReject(closeErr);
