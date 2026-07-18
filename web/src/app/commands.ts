@@ -1,5 +1,7 @@
+import { RunListResponseSchema } from '@contracts';
 import type { useNavigate } from '@tanstack/react-router';
 import { toggleVoiceInputEnabled } from '../features/settings/index.tsx';
+import { apiFetch } from '../shared/contract/client.ts';
 import { toggleThemeGlobal } from '../shared/design/theme.tsx';
 
 type NavigateFn = ReturnType<typeof useNavigate>;
@@ -106,6 +108,30 @@ export const commands: Command[] = [
     label: 'Go to Sessions',
     kind: CommandKind.Nav,
     run: (n) => n({ to: '/sessions' }),
+  },
+  {
+    // A genuinely new command (D8), not a rename of the old jump-to-run
+    // (which Task 17 dropped as a pure /runs-list duplicate) — this one
+    // deep-links to a SPECIFIC run id, fetched live.
+    id: 'jump-to-recent-run',
+    label: 'Jump to a recent run',
+    kind: CommandKind.Nav,
+    run: async (n) => {
+      try {
+        const page = await apiFetch('/runs?limit=1', {
+          schema: RunListResponseSchema,
+        });
+        const mostRecent = page.items[0];
+        if (mostRecent) {
+          n({ to: '/runs/$runId', params: { runId: mostRecent.id } });
+          return;
+        }
+      } catch {
+        // A failed lookup degrades to the bare list — never worse than the
+        // pre-Phase-8 jump-to-run behavior, and never throws on Enter.
+      }
+      n({ to: '/runs' });
+    },
   },
   {
     id: 'toggle-voice-input',
