@@ -7,10 +7,11 @@
 // unit-tested directly (no WASM/ONNX runtime under happy-dom/Vitest);
 // `stt-engine.ts` (Task 8) tests the main-thread side of this exact message
 // protocol against a fully mocked `Worker` global. The one piece of pure
-// logic worth isolating — WebGPU device detection — IS exported and unit
-// tested here (see stt.worker.test.ts); everything past that boundary
-// (actual model load/inference) is validated at Part B live-verify
-// (Task 18/T17), not by an automated test.
+// logic worth isolating — WebGPU device detection, and (Phase 8, D6) the
+// TextStreamer callback-accumulation logic — IS exported and unit tested
+// here (see stt.worker.test.ts); everything past that boundary (actual
+// model load/inference, including the real streamer wired to a real
+// generate() call) is validated at live-verify, not by an automated test.
 import {
   AutoModel,
   AutoProcessor,
@@ -20,6 +21,7 @@ import {
   type Processor,
   type ProgressInfo,
   Tensor,
+  TextStreamer,
 } from '@huggingface/transformers';
 import { ModelTier } from './model-tier.ts';
 
@@ -36,6 +38,7 @@ export type SttWorkerResponse =
   | { kind: 'progress'; loaded: number; total: number }
   | { kind: 'ready' }
   | { kind: 'detectSpeechResult'; id: number; isSpeech: boolean }
+  | { kind: 'transcribeInterim'; id: number; text: string }
   | { kind: 'transcribeResult'; id: number; text: string }
   | { kind: 'error'; id?: number; message: string };
 
@@ -159,14 +162,47 @@ async function detectSpeech(chunk: Float32Array): Promise<boolean> {
   return score > 0.5;
 }
 
-async function transcribe(samples: Float32Array): Promise<string> {
-  if (!asrModel || !asrProcessor) {
+/** Pure accumulation for `TextStreamer`'s incremental `callback_function`
+ * calls — each call hands back only the newly finalized DELTA substring
+ * since the last call (see `@huggingface/transformers`'s
+ * `TextStreamer.on_finalized_text`). Returning the FULL running text on
+ * every `push()` is what lets `use-voice-input.ts` treat every
+ * `transcribeInterim` message as a monotonic REPLACE of its displayed
+ * interim text (spec §7.1 (b)), never an append. Isolated and unit-tested
+ * the same way `detectWebGpuDevice` above is — everything downstream (a real
+ * streamer wired to a real `generate()` call) is live-verify-only. */
+export function createInterimAccumulator(): { push(chunk: string): string } {
+  let text = '';
+  return {
+    push(chunk: string): string {
+      text += chunk;
+      return text;
+    },
+  };
+}
+
+async function transcribe(samples: Float32Array, id: number): Promise<string> {
+  const tokenizer = asrProcessor?.tokenizer;
+  if (!asrModel || !asrProcessor || !tokenizer) {
     throw new Error('ASR model not loaded — call load() first');
   }
   const inputs = await asrProcessor(samples);
+  const accumulator = createInterimAccumulator();
+  // D6: emits `transcribeInterim` as Moonshine decodes the already-captured
+  // buffer — progressive reveal AFTER capture, never real-time-during-speech
+  // (spec D6/§9). `skip_prompt` drops the encoder-decoder's initial
+  // decoder-start token from the stream (it is not user-meaningful text).
+  const streamer = new TextStreamer(tokenizer, {
+    skip_prompt: true,
+    skip_special_tokens: true,
+    callback_function: (chunk: string) => {
+      post({ kind: 'transcribeInterim', id, text: accumulator.push(chunk) });
+    },
+  });
   const output = (await asrModel.generate({
     ...inputs,
     max_new_tokens: 256,
+    streamer,
   })) as Tensor;
   const [text] = asrProcessor.batch_decode(output, {
     skip_special_tokens: true,
@@ -200,7 +236,7 @@ self.onmessage = (event: MessageEvent<SttWorkerRequest>) => {
     return;
   }
   if (msg.kind === 'transcribe') {
-    transcribe(msg.samples)
+    transcribe(msg.samples, msg.id)
       .then((text) => post({ kind: 'transcribeResult', id: msg.id, text }))
       .catch((err: unknown) => {
         post({
