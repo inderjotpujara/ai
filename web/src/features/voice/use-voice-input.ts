@@ -1,4 +1,6 @@
+import type { TelemetryEvent } from '@contracts';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { sendTelemetry } from '../../shared/telemetry/beacon.ts';
 import { type AudioCapture, createAudioCapture } from './audio-capture.ts';
 import {
   createSttEngine,
@@ -40,11 +42,15 @@ export type UseVoiceInputOpts = {
 export type VoiceInputDeps = {
   createCapture: () => AudioCapture;
   createEngine: (cfg: { model: ModelTier }) => SttEngine;
+  /** Optional so pre-existing hook tests' deps objects still typecheck
+   *  (Slice 30b Phase 8, D10). Defaults to the real `sendTelemetry` beacon. */
+  emitTelemetry?: (event: TelemetryEvent) => void;
 };
 
 const DEFAULT_DEPS: VoiceInputDeps = {
   createCapture: createAudioCapture,
   createEngine: createSttEngine,
+  emitTelemetry: sendTelemetry,
 };
 
 /** Nominal VAD analysis window (Silero's own default) — used only as
@@ -191,6 +197,7 @@ export function useVoiceInput(
         // validity set / latest-segment token — both of which a subsequent
         // segment may already have reused.
         let finalized = false;
+        const startedAt = performance.now();
         engine
           .transcribe(frames, (text) => {
             // D6: real streamed interim text replaces the static '…'
@@ -214,7 +221,19 @@ export function useVoiceInput(
             // resolve never wipes a newer segment's live interim (Critical #2)
             // and never stomps a live gesture's state back to 'ready'.
             if (!validSegmentTokensRef.current.has(segToken)) return;
-            if (text) opts.onFinal(text);
+            if (text) {
+              opts.onFinal(text);
+              const durationMs = performance.now() - startedAt;
+              const audioMs = (frames.samples.length / 16000) * 1000;
+              deps.emitTelemetry?.({
+                kind: 'voice.transcribe.web',
+                durationMs,
+                wordCount: text.trim().split(/\s+/).filter(Boolean).length,
+                modelTier: opts.model,
+                realTimeFactor: audioMs > 0 ? durationMs / audioMs : 0,
+                engine: 'transformers.js',
+              });
+            }
             if (latestSegmentTokenRef.current === segToken) {
               setInterim('');
               setStatus(gestureRef.current ? 'listening' : 'ready');
@@ -318,7 +337,14 @@ export function useVoiceInput(
           );
         });
     },
-    [opts.silenceMs, opts.onFinal, endGesture, deps.createCapture],
+    [
+      opts.silenceMs,
+      opts.onFinal,
+      opts.model,
+      endGesture,
+      deps.createCapture,
+      deps.emitTelemetry,
+    ],
   );
 
   const startHold = useCallback(() => startGesture('hold'), [startGesture]);

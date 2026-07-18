@@ -898,6 +898,41 @@ describe('useVoiceInput', () => {
     expect(result.current.interim).toBe('B-partial'); // A never bleeds in
   });
 
+  it('a completed transcription emits a computed telemetry beacon via deps.emitTelemetry (D10)', async () => {
+    const { engine, readyGate, transcribeMock } = makeFakeEngine();
+    transcribeMock.mockResolvedValue('hello there world');
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const emitTelemetry = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        {
+          createCapture: () => capture,
+          createEngine: () => engine,
+          emitTelemetry,
+        },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() =>
+      expect(onFinal).toHaveBeenCalledWith('hello there world'),
+    );
+    await waitFor(() => expect(emitTelemetry).toHaveBeenCalledTimes(1));
+    // biome-ignore lint/style/noNonNullAssertion: emitTelemetry is guaranteed called — we just asserted it above
+    const event = emitTelemetry.mock.calls[0]![0];
+    expect(event.kind).toBe('voice.transcribe.web');
+    expect(event.modelTier).toBe(MODEL);
+    expect(event.wordCount).toBe(3);
+    expect(Number.isFinite(event.realTimeFactor)).toBe(true);
+    expect(event.realTimeFactor).toBeGreaterThanOrEqual(0);
+  });
+
   it('when enabled is false from the start, status is disabled and no engine/capture is ever created', () => {
     const createEngine = vi.fn();
     const createCapture = vi.fn();
