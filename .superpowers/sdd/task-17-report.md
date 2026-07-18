@@ -193,3 +193,78 @@ Two inaccuracies fixed: (1) `downsample-worklet.ts`'s table row claimed it posts
 ### Could NOT statically verify (needs the real browser — controller to re-drive)
 - That Silero VAD actually reaches `ready` and that `silero_vad({ input, sr, state })` returns `{ stateN, output }` at runtime with these exact ONNX I/O names (validated only against the reference + docs, not executed — no ONNX/WASM under happy-dom).
 - Real end-to-end transcription output from Moonshine `generate`/`batch_decode`.
+
+---
+
+## T17 live-verify fix #2 — AudioWorklet module fails to load in the build
+
+### The live defect (real Chrome)
+Enabling voice + starting capture threw **"Unable to load a worklet's module."**
+Root cause: `audio-capture.ts` built the worklet URL with the asset pattern
+`new URL('./downsample-worklet.ts', import.meta.url)` and passed it to
+`ctx.audioWorklet.addModule(...)`. Under **Vite 8 + Rolldown**, that pattern does
+NOT transpile/emit the worklet — `bun run build` produced **no worklet chunk** in
+`dist/assets/`, so `addModule` received a URL to a raw, unservable `.ts` file.
+happy-dom has no real AudioWorklet, so unit tests (which mock `addModule`) can't
+catch it — browser-build-only.
+
+### Confirmed-correct pattern (validated, not guessed)
+Use Vite's **`?worker&url`** import for the worklet module:
+`import WORKLET_MODULE_URL from './downsample-worklet.ts?worker&url';`
+
+- **Why this and not the alternatives:** Vite's official Assets/Features docs
+  (via context7 `/vitejs/vite`) confirm `?worker&url` produces a **separate,
+  transpiled, dependency-bundled chunk** and returns its served URL — whereas
+  the plain `?url` suffix does NOT bundle a module's dependencies and does NOT
+  transpile a `.ts` file (vitejs/vite issues #9952 and #15431), and the
+  `new URL('./x.ts', import.meta.url)` asset pattern isn't emitted by Rolldown
+  for this case. Sources: Vite docs "Web Workers"/"Static Asset Handling"
+  (context7 `/vitejs/vite`); vitejs/vite#9952, #15431.
+- A worklet global scope **cannot resolve runtime `import`s**, so the emitted
+  file must be a single self-contained chunk. This project already sets
+  `worker.format: 'es'` in `vite.config.ts`, so `?worker&url` emits a clean
+  single-file ES module (no `import` statements) — verified below. **No
+  `vite.config.ts` change was needed.**
+
+### Before / after
+- **Before:** `const WORKLET_MODULE_URL = new URL('./downsample-worklet.ts', import.meta.url);`
+- **After:** `import WORKLET_MODULE_URL from './downsample-worklet.ts?worker&url';`
+- Extracted the pure `createDownsampler` (+ `OUTPUT_RATE`) into a new
+  **zero-dependency** module `web/src/features/voice/downsampler.ts`;
+  `audio-capture.ts` now **re-exports** it (`export { createDownsampler } from
+  './downsampler.ts'`) so its external API and `audio-capture.test.ts`'s import
+  are unchanged, and `downsample-worklet.ts` imports `createDownsampler` from
+  `./downsampler.ts` instead of `./audio-capture.ts`. This is what makes the
+  `?worker&url` bundle clean: the worklet chunk pulls in ONLY the pure math, not
+  browser-only capture code, and avoids the circular worker reference that would
+  arise if the worklet bundled `audio-capture.ts` (which itself imports the
+  worklet URL). No math is duplicated — one source of truth, still unit-tested
+  via the re-export. `createAudioCapture`'s API + `WORKLET_PROCESSOR_NAME`
+  registration ('downsample-processor') unchanged.
+
+### PROOF the worklet chunk is now emitted
+`cd web && bun run build` →
+```
+dist/assets/downsample-worklet-_q4B9x1q.js   0.66 kB
+```
+- `grep -rl "registerProcessor\|DownsampleProcessor" dist/assets/` hits
+  `downsample-worklet-_q4B9x1q.js` (and the main chunk, which references its URL).
+- The emitted chunk is **fully self-contained**: the downsampler math is inlined,
+  the `DownsampleProcessor` class is present, it ends with
+  `registerProcessor("downsample-processor", …)`, and it contains **zero `import`
+  statements** (grep count 0) — exactly what `addModule` needs in a worklet scope.
+- The main bundle (`index-*.js`) references `assets/downsample-worklet-_q4B9x1q.js`
+  as the served URL handed to `addModule`.
+
+### Gate results
+- `bun run build` (web): success; worklet chunk emitted (above).
+- `bun run typecheck` (web): clean.
+- `bun run test` (web): 56 files, **284 passed** (voice tests mock capture/`addModule`; none asserted the old URL construction, so none needed changing).
+- `bun run lint:file` on the 3 touched files: clean.
+- `bun run docs:check`: pass (new file is within the already-documented voice subsystem).
+
+### Could NOT statically verify (needs the real browser — controller to re-drive)
+- That `addModule(WORKLET_MODULE_URL)` now succeeds end-to-end and the worklet
+  emits 16 kHz chunks in real Chrome (happy-dom has no AudioWorklet runtime). The
+  bundling defect itself is proven fixed (chunk emitted, self-contained, served
+  URL wired); the live re-drive confirms the round trip.

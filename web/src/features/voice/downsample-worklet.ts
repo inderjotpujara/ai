@@ -25,7 +25,7 @@ declare function registerProcessor(
   ) => AudioWorkletProcessor,
 ): void;
 
-import { createDownsampler } from './audio-capture.ts';
+import { createDownsampler } from './downsampler.ts';
 
 class DownsampleProcessor extends AudioWorkletProcessor {
   private readonly downsampler: ReturnType<typeof createDownsampler>;
