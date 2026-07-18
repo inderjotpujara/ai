@@ -160,14 +160,16 @@ export function useVoiceInput(
 
       const offSegment = segmenter.onSegment((frames) => {
         setStatus('transcribing');
-        // The busy indicator is genuinely just "…" — this pipeline has no
-        // streaming partial transcript (a documented limitation), so
-        // `interim` is a status flag consumed via the hook's own return
-        // value (`MicButton` renders it when `status === 'transcribing'`),
-        // not a caller-supplied callback.
         setInterim('…');
         engine
-          .transcribe(frames)
+          .transcribe(frames, (text) => {
+            // D6: real streamed interim text replaces the static '…'
+            // placeholder as Moonshine decodes. The three adversarial
+            // guards (dropped-for-invalidated-segmenter, back-to-back
+            // gesture isolation, final-wins-over-late-interim) land in
+            // Task 12 — deliberately absent here.
+            setInterim(text);
+          })
           .then((text) => {
             // Gate every side effect on PER-SESSION validity: a destructive
             // teardown (cancel/disable/unmount) cleared the set, so a late

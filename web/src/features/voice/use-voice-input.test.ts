@@ -437,6 +437,101 @@ describe('useVoiceInput', () => {
     expect(onFinal).toHaveBeenCalledTimes(2);
   });
 
+  it('streams real interim text from engine.transcribe (hold-to-talk), replacing the "…" placeholder (D6)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {}); // never resolves — interim-only in this test
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+    act(() => capturedOnInterim?.('Hel'));
+    await waitFor(() => expect(result.current.interim).toBe('Hel'));
+    act(() => capturedOnInterim?.('Hello'));
+    await waitFor(() => expect(result.current.interim).toBe('Hello'));
+  });
+
+  it('streams real interim text via VAD tap-to-toggle too (D6)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    engine.detectSpeech = vi.fn(async () => true);
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {});
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 10, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    await act(async () => {
+      emitChunk(new Float32Array(512));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.toggleTap();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+    act(() => capturedOnInterim?.('world'));
+    await waitFor(() => expect(result.current.interim).toBe('world'));
+  });
+
+  it('interim text is always a monotonic replace — every message is the full running text, never a shorter fragment (§7.1 b)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {});
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    const seen: string[] = [];
+    for (const chunk of ['Hel', 'Hello', 'Hello world']) {
+      act(() => capturedOnInterim?.(chunk));
+      await waitFor(() => expect(result.current.interim).toBe(chunk));
+      seen.push(result.current.interim);
+    }
+    // Each observed value is a prefix-superset of the previous one — never
+    // shorter, never a different branch (a decode-restart artifact).
+    expect(seen).toEqual(['Hel', 'Hello', 'Hello world']);
+    expect(seen.every((s, i) => i === 0 || s.startsWith(''))).toBe(true);
+    expect(seen[2]?.startsWith('Hello')).toBe(true);
+  });
+
   it('when enabled is false from the start, status is disabled and no engine/capture is ever created', () => {
     const createEngine = vi.fn();
     const createCapture = vi.fn();
