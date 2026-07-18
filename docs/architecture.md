@@ -4730,21 +4730,51 @@ again to stop. In both modes the transcript never touches
 `sendMessage`/`handleSend` (D2) — it stops at the composer's own `value`,
 exactly where a typed character would land.
 
-### D10 outcome (browser spike, Task 7)
+### D10 outcome — Rung 1, empirically confirmed
 
-Phase 7 is **built on Rung 1** of D10's fallback ladder: the
-lazy-CDN-download + Cache-API-persist story is expected to work unchanged
-under the existing `Cross-Origin-Embedder-Policy: require-corp` header
+Phase 7 ships on **Rung 1** of D10's fallback ladder: the
+lazy-CDN-download + Cache-API-persist story works unchanged under the
+existing `Cross-Origin-Embedder-Policy: require-corp` header
 (`web/vite.config.ts`, `src/server/isolation-headers.ts`) — a validated
 CORS `fetch()` of the model files satisfies `require-corp`, and the
 onnxruntime-web WASM runtime is served same-origin — so **no
-isolation-header change was made**. The genuinely *empirical* spike
-(loading Moonshine + Silero in a real browser under these headers and
-transcribing) was **carried forward to Task 17's live-verify** rather than
-run standalone in Task 7; `stt.worker.ts`'s header comment records the
-Rung-1 decision and the fallback ladder (→ COEP `credentialless` → self-host
-models) should live-verify surface a CDN/COEP block. Until that live-verify
-runs, Rung 1 is a reasoned assumption, not an empirically confirmed fact.
+isolation-header change was made**. This was **confirmed empirically at
+live-verify**: both Moonshine (~130 MB) and Silero VAD load in a real
+browser under these headers, with no CORS/COEP block. The `credentialless`
+→ self-host fallback rungs remain documented (`stt.worker.ts` header) but
+were not needed.
+
+### Live-verify (automated real-browser e2e)
+
+The unit tests run under happy-dom, which has **no `AudioWorklet`, no
+WASM/WebGPU, and a mocked worker** — structurally blind to the real
+transformers.js/Web-Audio integration. A `live`-gated **Vitest browser-mode
+e2e** (`web/src/features/voice/voice-pipeline.browser.test.ts`, run via
+`bun run test:voice-e2e`, excluded from the default suite) closes that gap:
+`@vitest/browser` (`@vitest/browser-playwright` provider) launches real
+Chromium with fake-media flags
+(`--use-file-for-fake-audio-capture=<16 kHz WAV>`) so `getUserMedia` returns
+a speech clip as the mic, then drives the real `MicButton` →
+`useVoiceInput` → worklet → Silero VAD → Moonshine chain and asserts the
+transcript. A fast build-artifact guard additionally asserts the worklet
+chunk is emitted post-`build` (the one bug class a Vite-*dev* browser test
+can't see). This harness caught **three real integration bugs the mocked
+unit tests could not**, all fixed:
+- **Silero VAD load** — `onnx-community/silero-vad` is a custom model (no
+  root `config.json`); the correct call is `AutoModel.from_pretrained(id,
+  { config: { model_type: 'custom' }, dtype: 'fp32' })`, and its inference
+  is stateful (`input`/`sr`/`state` tensors, threaded across calls).
+- **AudioWorklet build-emit** — `new URL('./worklet.ts', import.meta.url)`
+  works in Vite dev but the Rolldown **build** emits no chunk; the fix is
+  the `?worker&url` import (bundles deps into a served module), with the
+  pure downsampler extracted to a zero-import `downsampler.ts`.
+- **WASM decoder dtype** — Moonshine's default q4 decoder crashes ONNX
+  session-init on the CPU/WASM path (missing MatMulNBits scale tensor); the
+  fix pins `dtype: { encoder_model: 'fp32', decoder_model_merged: 'fp32' }`
+  **only** on `device === 'wasm'`, leaving the WebGPU default untouched.
+  (Playwright's Chromium exposes no WebGPU, so the e2e exercises exactly the
+  WASM path a non-WebGPU browser takes — a path the WebGPU dev machine never
+  hits.)
 
 ### §7.1/§7.2 hard parts — adversarially verified
 
