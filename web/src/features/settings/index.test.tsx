@@ -1,7 +1,11 @@
 import { fireEvent, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderAt } from '../../test/render.tsx';
-import { isOsNotifyEnabled } from './index.tsx';
+import {
+  isOsNotifyEnabled,
+  isVoiceInputEnabled,
+  voiceModelTier,
+} from './index.tsx';
 
 function stubNotification(
   permission: NotificationPermission,
@@ -62,5 +66,44 @@ describe('SettingsArea', () => {
     expect(
       await screen.findByText('Enable OS notifications'),
     ).toBeInTheDocument();
+  });
+});
+
+describe('SettingsArea — voice input', () => {
+  afterEach(() => {
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  it('renders the voice-input toggle, initially off, defaulting the model tier to moonshine-base', async () => {
+    renderAt('/settings');
+    expect(await screen.findByTestId('voice-input-toggle')).toHaveTextContent(
+      'Enable voice input',
+    );
+    expect(isVoiceInputEnabled()).toBe(false);
+    expect(voiceModelTier()).toBe('moonshine-base');
+  });
+
+  it('turns voice input on when clicked and persists the choice', async () => {
+    renderAt('/settings');
+    fireEvent.click(await screen.findByTestId('voice-input-toggle'));
+    expect(await screen.findByText('Voice input: on')).toBeInTheDocument();
+    expect(isVoiceInputEnabled()).toBe(true);
+  });
+
+  it('toggles voice input back off when clicked again while already on', async () => {
+    renderAt('/settings');
+    fireEvent.click(await screen.findByTestId('voice-input-toggle'));
+    expect(await screen.findByText('Voice input: on')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('voice-input-toggle'));
+    expect(await screen.findByText('Enable voice input')).toBeInTheDocument();
+    expect(isVoiceInputEnabled()).toBe(false);
+  });
+
+  it('changes and persists the model tier selection', async () => {
+    renderAt('/settings');
+    const select = await screen.findByTestId('voice-model-tier');
+    fireEvent.change(select, { target: { value: 'moonshine-tiny' } });
+    expect(voiceModelTier()).toBe('moonshine-tiny');
   });
 });
