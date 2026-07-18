@@ -138,11 +138,19 @@ describe('createSegmenter — tap-to-toggle (gated: true)', () => {
     segmenter.pushFrame(tone(512, 0), false); // 128ms >= 100ms — closes
     expect(onSegment).toHaveBeenCalledTimes(1);
     const frames = onSegment.mock.calls[0]?.[0] as VoiceFrames;
-    // only the one speech chunk survives trimming — no silent tail.
-    expect(frames.samples.length).toBe(512);
+    // only the one speech chunk survives trimming — no silent tail. Assert
+    // CONTENT, not just length: a speech (fill 0.5) and silence (fill 0)
+    // chunk are both 512 samples, so an off-by-one in the trim `cut` index
+    // that retained a silent chunk instead of the speech chunk would still
+    // emit 512 samples and pass a length-only check. Round-trip both sides
+    // through Float32Array (matches Task 10's convention) to sidestep
+    // float32-precision noise.
+    expect(Array.from(frames.samples as Float32Array)).toEqual(
+      Array.from(new Float32Array(512).fill(0.5)),
+    );
   });
 
-  it('does not double-transcribe on a jittery VAD flip that never sustains past silenceMs (§7.1 b)', () => {
+  it('does not double-transcribe on a jittery VAD flip that never sustains past silenceMs, but a genuine sustained silence run still closes (§7.1 b)', () => {
     const segmenter = createSegmenter({
       silenceMs: 100,
       gated: true,
@@ -150,12 +158,33 @@ describe('createSegmenter — tap-to-toggle (gated: true)', () => {
     });
     const onSegment = vi.fn();
     segmenter.onSegment(onSegment);
+    // Three silence runs of 2 chunks (64ms) each, separated by a speech
+    // frame that must reset the silence clock — no single run reaches
+    // silenceMs (100ms), but the SUM across all three runs (192ms) does.
+    // This discriminates a segmenter that forgot to reset
+    // `silentMsAccumulated` on speech resumption: without the reset, the
+    // accumulator would carry over across the speech frame and cross
+    // 100ms partway through the SECOND run (64ms carried + 64ms new =
+    // 128ms), wrongly closing the segment right there — well before this
+    // test's own sustained-silence check at the end. With the reset intact,
+    // no run individually reaches 100ms, so nothing closes here.
     segmenter.pushFrame(tone(512), true);
-    segmenter.pushFrame(tone(512, 0), false); // 32ms silent — jitter
-    segmenter.pushFrame(tone(512), true); // speech resumes — silence clock resets
-    segmenter.pushFrame(tone(512, 0), false);
-    segmenter.pushFrame(tone(512), true);
-    expect(onSegment).not.toHaveBeenCalled(); // never sustained 100ms of silence
+    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
+    segmenter.pushFrame(tone(512, 0), false); // 64ms silent (run 1, < 100ms)
+    segmenter.pushFrame(tone(512), true); // speech resumes — resets clock
+    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
+    segmenter.pushFrame(tone(512, 0), false); // 64ms silent (run 2, < 100ms —
+    // a no-reset bug would be at 64+64=128ms here and would have closed)
+    segmenter.pushFrame(tone(512), true); // speech resumes — resets clock again
+    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
+    segmenter.pushFrame(tone(512, 0), false); // 64ms silent (run 3, < 100ms)
+    expect(onSegment).not.toHaveBeenCalled(); // no single run ever sustained 100ms
+
+    // Pin the other direction too: a genuine sustained run crossing
+    // silenceMs from here still closes correctly.
+    segmenter.pushFrame(tone(512, 0), false); // 96ms
+    segmenter.pushFrame(tone(512, 0), false); // 128ms >= 100ms — closes
+    expect(onSegment).toHaveBeenCalledTimes(1);
   });
 
   it('a very short utterance (a single speech chunk) still emits once sustained silence follows (§7.1 b — no missed segment)', () => {
@@ -171,7 +200,35 @@ describe('createSegmenter — tap-to-toggle (gated: true)', () => {
     segmenter.pushFrame(tone(512, 0), false); // 64ms — closes
     expect(onSegment).toHaveBeenCalledTimes(1);
     const frames = onSegment.mock.calls[0]?.[0] as VoiceFrames;
-    expect(frames.samples.length).toBe(512);
+    // CONTENT assertion (see the sustained-silence-close test above for
+    // why length alone doesn't lock the trim boundary).
+    expect(Array.from(frames.samples as Float32Array)).toEqual(
+      Array.from(new Float32Array(512).fill(0.5)),
+    );
+  });
+
+  it('an utterance with multiple leading speech chunks retains and concatenates all of them, trimmed of only the closing silence', () => {
+    const segmenter = createSegmenter({
+      silenceMs: 64,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(512, 0.6), true); // speech chunk 1
+    segmenter.pushFrame(tone(512, 0.7), true); // speech chunk 2
+    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
+    segmenter.pushFrame(tone(512, 0), false); // 64ms — closes
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    const frames = onSegment.mock.calls[0]?.[0] as VoiceFrames;
+    expect(Array.from(frames.samples as Float32Array)).toEqual(
+      Array.from(
+        new Float32Array([
+          ...new Float32Array(512).fill(0.6),
+          ...new Float32Array(512).fill(0.7),
+        ]),
+      ),
+    );
   });
 
   it('a tap-to-toggle session spans multiple speech/silence cycles, each closing its own segment independently', () => {
