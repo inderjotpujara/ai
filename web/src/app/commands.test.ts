@@ -1,30 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CommandKind, commands, runCommand } from './commands.ts';
 
-describe('navCommands', () => {
-  it('includes a jump-to-run command targeting /runs', () => {
-    const cmd = commands.find((c) => c.id === 'jump-to-run');
-    expect(cmd?.label).toMatch(/run/i);
+describe('commands — deduped nav set + go-agents (D8, Task 17)', () => {
+  it('go-agents navigates to /builders — the closest existing "Agents" surface today (see Task 17\'s surprise note)', () => {
+    const cmd = commands.find((c) => c.id === 'go-agents');
+    expect(cmd?.label).toMatch(/agent/i);
   });
 
-  it('includes a jump-to-crew command targeting /crews', () => {
-    const cmd = commands.find((c) => c.id === 'jump-to-crew');
-    expect(cmd?.label).toMatch(/crew/i);
+  it('go-sessions replaces jump-to-sessions, filling the previously-missing plain "Go to Sessions" command', () => {
+    expect(commands.find((c) => c.id === 'go-sessions')?.label).toMatch(
+      /session/i,
+    );
+    expect(commands.find((c) => c.id === 'jump-to-sessions')).toBeUndefined();
   });
 
-  it('includes a jump-to-workflow command targeting /workflows', () => {
-    const cmd = commands.find((c) => c.id === 'jump-to-workflow');
-    expect(cmd?.label).toMatch(/workflow/i);
-  });
-
-  it('includes a jump-to-sessions command targeting /sessions', () => {
-    const cmd = commands.find((c) => c.id === 'jump-to-sessions');
-    expect(cmd?.label).toMatch(/session/i);
-  });
-
-  it('includes a search-sessions command also targeting /sessions', () => {
-    const cmd = commands.find((c) => c.id === 'search-sessions');
-    expect(cmd?.label).toMatch(/session/i);
+  it('drops the degenerate bare-list duplicates: jump-to-crew, jump-to-workflow, jump-to-run, search-sessions', () => {
+    expect(commands.find((c) => c.id === 'jump-to-crew')).toBeUndefined();
+    expect(commands.find((c) => c.id === 'jump-to-workflow')).toBeUndefined();
+    expect(commands.find((c) => c.id === 'jump-to-run')).toBeUndefined();
+    expect(commands.find((c) => c.id === 'search-sessions')).toBeUndefined();
   });
 });
 

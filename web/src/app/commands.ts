@@ -67,6 +67,18 @@ export const commands: Command[] = [
     run: (n) => n({ to: '/builders' }),
   },
   {
+    // No standalone /agents route or AgentsArea page exists in this repo
+    // (verified by grep — `features/agents/` is only Chat's embedded
+    // live-status rail). Mapped to /builders, which already defaults to its
+    // Agent-wizard mode, rather than fabricating a new empty page outside
+    // this task's ⌘K-completeness scope. Flagged for spec-owner sign-off
+    // (Task 17's surprise note) — revisit if a real Agents page ships later.
+    id: 'go-agents',
+    label: 'Go to Agents',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/builders' }),
+  },
+  {
     id: 'go-runs',
     label: 'Go to Runs',
     kind: CommandKind.Nav,
@@ -85,32 +97,13 @@ export const commands: Command[] = [
     run: (n) => n({ to: '/settings' }),
   },
   {
-    id: 'jump-to-run',
-    label: 'Jump to Runs',
-    kind: CommandKind.Nav,
-    run: (n) => n({ to: '/runs' }),
-  },
-  {
-    id: 'jump-to-crew',
-    label: 'Jump to Crews',
-    kind: CommandKind.Nav,
-    run: (n) => n({ to: '/crews' }),
-  },
-  {
-    id: 'jump-to-workflow',
-    label: 'Jump to Workflows',
-    kind: CommandKind.Nav,
-    run: (n) => n({ to: '/workflows' }),
-  },
-  {
-    id: 'jump-to-sessions',
-    label: 'Jump to Sessions',
-    kind: CommandKind.Nav,
-    run: (n) => n({ to: '/sessions' }),
-  },
-  {
-    id: 'search-sessions',
-    label: 'Search Sessions',
+    // Renamed from jump-to-sessions (Task 17 dedupe) — this was NEVER
+    // actually a duplicate (no go-sessions existed before), so the rename
+    // both normalizes naming with the other go-* entries and fills a real
+    // gap. search-sessions (a pure duplicate of the old jump-to-sessions)
+    // is dropped entirely, not renamed.
+    id: 'go-sessions',
+    label: 'Go to Sessions',
     kind: CommandKind.Nav,
     run: (n) => n({ to: '/sessions' }),
   },
