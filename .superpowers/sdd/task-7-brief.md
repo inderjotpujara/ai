@@ -1,261 +1,184 @@
-## Task 7: `appendMessage` / `getMessages` (idempotent append, ordered read) + the deferred cascade-delete test
+### Task 7: D10 browser spike (manual) + `stt.worker.ts` scaffold (message protocol + transformers.js wiring)
+
+**This task OPENS with the spec's mandated D10 spike — a real-browser check that must happen BEFORE any of this task's code is considered final.** The spec's own words (§3, D10): "Increment 3 therefore OPENS with a ≤1-hour spike: in a real Chrome tab served with the app's actual headers, load `moonshine-tiny` + `silero-vad` through transformers.js and transcribe a buffer... The spike picks the lowest rung that works; the plan records which." This is a manual verification step, not an automated test — the worker code below is written to the best-known shape of the transformers.js v4.2.0 API and is the artifact the spike proves (or requires correcting).
 
 **Files:**
-- Modify: `src/session/store.ts` (add `StoredMessage` type + two methods)
-- Modify: `tests/session/store.test.ts` (append a `describe` block; replace Task 6's deferred-cascade `NOTE` comment with a real test)
+- Create: `web/src/features/voice/stt.worker.ts`
+- No automated test this task (see the manual spike checklist in Step 1 — this file runs inside a Web Worker with a real ONNX/WASM runtime, which cannot execute under happy-dom/Vitest; `stt-engine.ts`'s message-protocol handling, the part that IS unit-testable, is Task 8).
 
 **Interfaces:**
-- Consumes: nothing new.
-- Produces:
-  - `export type StoredMessage = { id: string; sessionId: string; parentMessageId: string | undefined; role: string; parts: unknown; createdAt: number; degraded: boolean | undefined }` — the RAW stored shape (`parts` un-decoded to whatever JSON the caller originally passed), distinct from the wire `ChatMessageDTO` (which flattens to a `text` string) — that projection is a later increment's job (server layer).
-  - `appendMessage(sessionId: string, msg: { id: string; role: string; parts: unknown; parentMessageId?: string; degraded?: boolean }, at: number): void` — `INSERT OR IGNORE` on `msg.id` (a retried/duplicate POST for the same message id is a safe no-op, spec D4/§7.1(d)); also touches `sessions.updated_at`/`last_message_at` to `at` so `listSessions`'s sort key (Task 8) advances.
-  - `getMessages(sessionId: string): StoredMessage[]` — ordered by `created_at ASC` (oldest first, matching transcript reading order).
+- Consumes: `ModelTier` (defined here, Task 7, as the canonical home — Task 8 imports it from here; Task 4's Settings temporary local `ModelTier` gets superseded in Task 8, not this task).
+- Produces: `SttWorkerRequest` / `SttWorkerResponse` message-protocol types (`{kind:'load'|'detectSpeech'|'transcribe', ...}` / `{kind:'progress'|'ready'|'detectSpeechResult'|'transcribeResult'|'error', ...}`), consumed by `stt-engine.ts` (Task 8) on the main-thread side of the same `postMessage` contract.
 
-**Design note on `run_id` (flag for the Increment-2 controller):** Spec §4.3 says `appendMessage` "touches `sessions.updated_at`/`last_message_at`/`run_id`", but the exact signature this plan implements (locked by the increment-1 task brief) carries no `runId` field on `msg`. This task's `appendMessage` therefore updates `updated_at`/`last_message_at` only and leaves `run_id` untouched (it stays whatever `upsertSession` left it — always `NULL` in Increment 1, since `upsertSession` never sets it either). Increment 2 (chat wiring) will need to decide how `sessions.run_id` actually gets populated — e.g. extend `appendMessage`'s `msg` type with an optional `runId`, or add a small dedicated `setRunId(id, runId)` method — since nothing in this increment's locked signature carries that data. This is called out again in the final report to the controller.
+- [ ] **Step 1: Run the D10 spike (manual verification — do this FIRST, before trusting the code below)**
 
-- [ ] **Step 1: Write the failing tests**
+1. Build and serve the app with its real production-shaped headers:
+   ```bash
+   cd web && bun run build && bun run preview
+   ```
+   (`bun run preview` serves the built app with `web/vite.config.ts`'s `preview.headers` — the same `Cross-Origin-Opener-Policy: same-origin` / `Cross-Origin-Embedder-Policy: require-corp` pair the production server (`src/server/isolation-headers.ts`) uses.)
+2. Open the served URL (printed by `bun run preview`, typically `http://localhost:4173`) in a **real Chrome tab** using the native `/chrome` integration (per this repo's CLAUDE.md: prefer native Chrome over Playwright for anything needing a real browser).
+3. Open DevTools → Console, and paste in a scratch script that mirrors exactly what `stt.worker.ts` (Step 3 below) does:
+   ```js
+   const { AutoModel, AutoProcessor, env } = await import('@huggingface/transformers');
+   env.useBrowserCache = true;
+   console.log('crossOriginIsolated:', window.crossOriginIsolated);
+   const model = await AutoModel.from_pretrained('onnx-community/moonshine-tiny-ONNX', { device: 'wasm' });
+   const vad = await AutoModel.from_pretrained('onnx-community/silero-vad', { device: 'wasm' });
+   console.log('loaded ok', model, vad);
+   ```
+4. **Decide the outcome** against D10's fallback ladder:
+   - **Rung 1 (expected default):** the script above completes with no CORS/CORP console errors and `loaded ok` prints → the model CDN fetch works unchanged under `require-corp`. **No header changes needed.** Proceed to Step 3 below as written.
+   - **Rung 2:** if Rung 1 fails with a CORP-related network error, change `Cross-Origin-Embedder-Policy` from `require-corp` to `credentialless` in BOTH `web/vite.config.ts`'s `isolation` object and `src/server/isolation-headers.ts`'s `ISOLATION_HEADERS`, rebuild/re-preview, and re-run the script.
+   - **Rung 3:** if Rung 2 also fails (browser lacks `credentialless` support), self-hosting the model files (a `bun run setup:voice-web` provisioning script, mirroring the CLI's `scripts/setup-voice.ts`) is required — this is a larger follow-up NOT built in this task; flag it to the controller for a dedicated task insertion before Part B's live-verify (Task 18).
+5. **Record the outcome** as a one-line code comment at the top of `stt.worker.ts` (Step 3 below already includes a placeholder line for this — fill in the actual rung reached) — this is the plan's/ledger's record per the spec's "the plan records which."
 
-First, replace the trailing `NOTE` comment inside the `describe('renameSession / deleteSession', ...)` block (added in Task 6) —
-```typescript
-  // NOTE: the full cascade assertion (messages also gone) is added for real
-  // in Task 7 Step 3, once appendMessage/getMessages exist — this task only
-  // proves the session-row half of the delete.
-```
-— with a real test:
-```typescript
-  test('deleteSession cascades — messages are gone too', () => {
-    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
-    store.appendMessage(
-      's1',
-      { id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] },
-      1_000,
-    );
-    expect(store.getMessages('s1')).toHaveLength(1);
+- [ ] **Step 2: (No failing-test step for this task — see the Files note above.)**
 
-    store.deleteSession('s1');
+- [ ] **Step 3: Write the worker implementation**
 
-    expect(store.getSession('s1')).toBeUndefined();
-    expect(store.getMessages('s1')).toHaveLength(0);
-  });
-```
+Create `web/src/features/voice/stt.worker.ts`:
 
-Then append a new `describe` block after `describe('renameSession / deleteSession', ...)`:
-```typescript
-describe('appendMessage / getMessages', () => {
-  beforeEach(() => {
-    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
-  });
+```ts
+// D10 SPIKE OUTCOME (Task 7, filled in at execution time — see Step 1 above):
+// Rung reached: ___ (1 = unchanged require-corp; 2 = credentialless; 3 =
+// self-hosted models). Fill this in before this task's commit.
+//
+// Runs inside a dedicated Web Worker (D4) — transformers.js's heavier
+// VAD+ASR inference stays off the main UI thread. This file is NOT
+// unit-tested directly (no WASM/ONNX runtime under happy-dom/Vitest);
+// `stt-engine.ts` (Task 8) tests the main-thread side of this exact message
+// protocol against a fully mocked `Worker` global. The transformers.js API
+// call shapes below reflect the D10 spike's proven-working invocation —
+// adjust them to match whatever the spike actually found, if it differs.
+import {
+  AutoModel,
+  AutoProcessor,
+  env,
+  type PreTrainedModel,
+  type Processor,
+} from '@huggingface/transformers';
 
-  test('appendMessage stores a message and touches session activity timestamps', () => {
-    store.appendMessage(
-      's1',
-      { id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] },
-      1_500,
-    );
-    const session = store.getSession('s1');
-    expect(session?.updatedAt).toBe(1_500);
-    expect(session?.lastMessageAt).toBe(1_500);
+export type ModelTier = 'moonshine-base' | 'moonshine-tiny';
 
-    const messages = store.getMessages('s1');
-    expect(messages).toHaveLength(1);
-    expect(messages[0]?.id).toBe('m1');
-    expect(messages[0]?.sessionId).toBe('s1');
-    expect(messages[0]?.role).toBe('user');
-    expect(messages[0]?.parts).toEqual([{ type: 'text', text: 'hi' }]);
-    expect(messages[0]?.parentMessageId).toBeUndefined();
-    expect(messages[0]?.degraded).toBeUndefined();
-  });
+export type SttWorkerRequest =
+  | { kind: 'load'; model: ModelTier }
+  | { kind: 'detectSpeech'; id: number; chunk: Float32Array }
+  | { kind: 'transcribe'; id: number; samples: Float32Array };
 
-  test('appendMessage is idempotent — the same message id posted twice yields one row', () => {
-    store.appendMessage(
-      's1',
-      { id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] },
-      1_500,
-    );
-    store.appendMessage(
-      's1',
-      { id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi (retry)' }] },
-      1_600,
-    );
+export type SttWorkerResponse =
+  | { kind: 'progress'; loaded: number; total: number }
+  | { kind: 'ready' }
+  | { kind: 'detectSpeechResult'; id: number; isSpeech: boolean }
+  | { kind: 'transcribeResult'; id: number; text: string }
+  | { kind: 'error'; id?: number; message: string };
 
-    const messages = store.getMessages('s1');
-    expect(messages).toHaveLength(1);
-    expect(messages[0]?.parts).toEqual([{ type: 'text', text: 'hi' }]); // first write wins
-  });
-
-  test('appendMessage records parentMessageId and degraded when provided', () => {
-    store.appendMessage(
-      's1',
-      {
-        id: 'm1',
-        role: 'assistant',
-        parts: [{ type: 'text', text: 'a' }],
-        parentMessageId: 'm0',
-        degraded: true,
-      },
-      1_000,
-    );
-    const messages = store.getMessages('s1');
-    expect(messages[0]?.parentMessageId).toBe('m0');
-    expect(messages[0]?.degraded).toBe(true);
-  });
-
-  test('appendMessage with degraded explicitly false round-trips false, not undefined', () => {
-    store.appendMessage(
-      's1',
-      { id: 'm1', role: 'assistant', parts: [], degraded: false },
-      1_000,
-    );
-    expect(store.getMessages('s1')[0]?.degraded).toBe(false);
-  });
-
-  test('getMessages orders by created_at ascending regardless of insert order', () => {
-    store.appendMessage(
-      's1',
-      { id: 'm2', role: 'assistant', parts: [{ type: 'text', text: 'second' }] },
-      2_000,
-    );
-    store.appendMessage(
-      's1',
-      { id: 'm1', role: 'user', parts: [{ type: 'text', text: 'first' }] },
-      1_000,
-    );
-    const messages = store.getMessages('s1');
-    expect(messages.map((m) => m.id)).toEqual(['m1', 'm2']);
-  });
-
-  test('getMessages on a session with no messages returns an empty array', () => {
-    expect(store.getMessages('s1')).toEqual([]);
-  });
-
-  test('getMessages is session-scoped — a second session\'s messages never leak in', () => {
-    store.upsertSession('s2', { defaultTitle: 'Other chat', at: 1_000 });
-    store.appendMessage('s1', { id: 'm1', role: 'user', parts: [] }, 1_000);
-    store.appendMessage('s2', { id: 'm2', role: 'user', parts: [] }, 1_000);
-    expect(store.getMessages('s1').map((m) => m.id)).toEqual(['m1']);
-    expect(store.getMessages('s2').map((m) => m.id)).toEqual(['m2']);
-  });
-});
-```
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `bun test tests/session/store.test.ts`
-Expected: FAIL — `store.appendMessage`/`store.getMessages` are not functions yet; the new cascade-delete test also fails for the same reason (all other, previously-passing tests still PASS).
-
-- [ ] **Step 3: Add `StoredMessage` + `appendMessage`/`getMessages` to `src/session/store.ts`**
-
-Add the `StoredMessage` type and its raw/decode helper near the top of the file, right after the existing `SessionRowRaw`/`toSessionRow` block:
-```typescript
-/** A stored chat message, RAW (`parts` un-decoded to whatever JSON the
- *  caller passed) — distinct from the wire `ChatMessageDTO` (which flattens
- *  to a `text` string); that projection is the server layer's job, not
- *  this store's. */
-export type StoredMessage = {
-  id: string;
-  sessionId: string;
-  parentMessageId: string | undefined;
-  role: string;
-  parts: unknown;
-  createdAt: number;
-  degraded: boolean | undefined;
+const MODEL_IDS: Record<ModelTier, string> = {
+  'moonshine-base': 'onnx-community/moonshine-base-ONNX',
+  'moonshine-tiny': 'onnx-community/moonshine-tiny-ONNX',
 };
+const VAD_MODEL_ID = 'onnx-community/silero-vad';
 
-type MessageRowRaw = {
-  id: string;
-  session_id: string;
-  parent_message_id: string | null;
-  role: string;
-  parts: string;
-  created_at: number;
-  degraded: number | null;
-};
+env.useBrowserCache = true; // D1/D7: Cache-API persistence, skip re-download on reload
 
-function toStoredMessage(r: MessageRowRaw): StoredMessage {
-  return {
-    id: r.id,
-    sessionId: r.session_id,
-    parentMessageId: r.parent_message_id ?? undefined,
-    role: r.role,
-    parts: JSON.parse(r.parts) as unknown,
-    createdAt: r.created_at,
-    degraded: r.degraded === null ? undefined : r.degraded === 1,
-  };
+let asrModel: PreTrainedModel | undefined;
+let asrProcessor: Processor | undefined;
+let vadModel: PreTrainedModel | undefined;
+
+function post(msg: SttWorkerResponse, transfer: Transferable[] = []): void {
+  (self as unknown as Worker).postMessage(msg, transfer);
 }
-```
 
-Then add the two functions after `deleteSession` (before the `return { ... }` block):
-```typescript
-  function appendMessage(
-    sessionId: string,
-    msg: {
-      id: string;
-      role: string;
-      parts: unknown;
-      parentMessageId?: string;
-      degraded?: boolean;
-    },
-    at: number,
-  ): void {
-    // INSERT OR IGNORE on the message id: a retried/duplicate POST for the
-    // SAME message id is a safe no-op (spec D4/D6/§7.1(d)).
-    db.run(
-      `INSERT OR IGNORE INTO messages
-       (id, session_id, parent_message_id, role, parts, created_at, degraded)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        msg.id,
-        sessionId,
-        msg.parentMessageId ?? null,
-        msg.role,
-        JSON.stringify(msg.parts),
-        at,
-        msg.degraded === undefined ? null : msg.degraded ? 1 : 0,
-      ],
-    );
-    // Touch activity timestamps so listSessions's sort key advances.
-    // run_id is deliberately NOT touched here — this signature carries no
-    // runId; see this task's design note.
-    db.run(
-      'UPDATE sessions SET updated_at = ?, last_message_at = ? WHERE id = ?',
-      [at, at, sessionId],
-    );
+async function detectWebGpuDevice(): Promise<'webgpu' | 'wasm'> {
+  const gpu = (navigator as unknown as { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
+  if (!gpu) return 'wasm';
+  try {
+    const adapter = await gpu.requestAdapter();
+    return adapter !== null ? 'webgpu' : 'wasm';
+  } catch {
+    return 'wasm'; // D9: never crash on a capability-detection failure
   }
+}
 
-  function getMessages(sessionId: string): StoredMessage[] {
-    const rows = db
-      .query(
-        'SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC',
-      )
-      .all(sessionId) as MessageRowRaw[];
-    return rows.map(toStoredMessage);
-  }
-```
-Update the returned object to:
-```typescript
-  return {
-    upsertSession,
-    getSession,
-    renameSession,
-    deleteSession,
-    appendMessage,
-    getMessages,
-    close: (): void => db.close(),
+async function load(model: ModelTier): Promise<void> {
+  const device = await detectWebGpuDevice();
+  const modelId = MODEL_IDS[model];
+  const progress = (info: { loaded: number; total: number }) => {
+    post({ kind: 'progress', loaded: info.loaded, total: info.total });
   };
+  asrModel = (await AutoModel.from_pretrained(modelId, {
+    device,
+    progress_callback: progress,
+  })) as PreTrainedModel;
+  asrProcessor = (await AutoProcessor.from_pretrained(modelId, {})) as Processor;
+  vadModel = (await AutoModel.from_pretrained(VAD_MODEL_ID, { device })) as PreTrainedModel;
+  post({ kind: 'ready' });
+}
+
+async function detectSpeech(chunk: Float32Array): Promise<boolean> {
+  if (!vadModel) throw new Error('VAD model not loaded — call load() first');
+  const result = (await vadModel({ input: chunk })) as {
+    output?: { data?: ArrayLike<number> };
+  };
+  const score = Number(result.output?.data?.[0] ?? 0);
+  return score > 0.5;
+}
+
+async function transcribe(samples: Float32Array): Promise<string> {
+  if (!asrModel || !asrProcessor) {
+    throw new Error('ASR model not loaded — call load() first');
+  }
+  const inputs = await asrProcessor(samples);
+  const output = await asrModel.generate({ ...inputs, max_new_tokens: 256 });
+  const [text] = asrProcessor.batch_decode(output, { skip_special_tokens: true });
+  return text ?? '';
+}
+
+self.onmessage = (event: MessageEvent<SttWorkerRequest>) => {
+  const msg = event.data;
+  if (msg.kind === 'load') {
+    load(msg.model).catch((err: unknown) => {
+      post({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+    });
+    return;
+  }
+  if (msg.kind === 'detectSpeech') {
+    detectSpeech(msg.chunk)
+      .then((isSpeech) => post({ kind: 'detectSpeechResult', id: msg.id, isSpeech }))
+      .catch((err: unknown) => {
+        post({
+          kind: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    return;
+  }
+  if (msg.kind === 'transcribe') {
+    transcribe(msg.samples)
+      .then((text) => post({ kind: 'transcribeResult', id: msg.id, text }))
+      .catch((err: unknown) => {
+        post({
+          kind: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }
+};
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+Note: the worker message protocol deliberately carries a bare `samples: Float32Array`, not the full `VoiceFrames` shape — `sampleRate` is always the fixed `16000` (`VoiceFrames`'s literal type), so `stt-engine.ts` (Task 8) unpacks `frames.samples` before posting, and this file never needs to import `VoiceFrames` itself.
 
-Run: `bun test tests/session/store.test.ts`
-Expected: PASS (all 17 tests — 5 from Task 5 + 5 from Task 6 + 7 new in this task).
+- [ ] **Step 4: Verify it compiles (no automated behavioral test — see Files note)**
 
-- [ ] **Step 5: Gate + commit**
+Run: `cd web && bun run typecheck`
+Expected: PASS. This confirms the transformers.js import shapes and message-protocol types are internally consistent; it does NOT prove the model actually loads in a browser — that's what Step 1's spike already proved (or corrected) before this step.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-bun run typecheck && bun run lint:file -- src/session/store.ts tests/session/store.test.ts
-git add src/session/store.ts tests/session/store.test.ts
-git commit -m "feat(session): add appendMessage/getMessages with idempotent insert (Phase 6 Incr 1)"
+git add web/src/features/voice/stt.worker.ts
+git commit -m "feat(voice): stt.worker.ts — transformers.js Moonshine+Silero worker, D10 spike outcome recorded"
 ```
-
----
 

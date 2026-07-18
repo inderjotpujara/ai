@@ -1,85 +1,154 @@
-# Task 11 report — `POST /api/builders/build` SSE route (Slice 30b Phase 5, §7.1) [HARD]
+# Task 11 Report — vad.ts tap-to-toggle (gated) mode (Slice 30b Phase 7, voice)
 
-**Status:** DONE (with one deliberate, documented deviation from the brief's SAMPLE impl — see "Wire-frame decision"). Ready for the ultracode adversarial-verify pass.
-**Commit:** `55e56b9` — `feat(server): POST /api/builders/build — streaming guided-build + mid-flow consent (Phase 5, §7.1)`
-**Branch:** `slice-30b-phase5-builders-library`
+## Status: DONE
 
-## What I implemented
+## Summary
+Task 10 had already implemented the `gated: true` branch of `createSegmenter`
+structurally but left it untested. This task added the 6 tap-to-toggle tests
+from the brief (verbatim, minus the unused `CHUNK_MS_32` local per the
+brief's Step-1 note) to `web/src/features/voice/vad.test.ts`.
 
-- **`src/server/builders/config.ts`** — `confirmWaitMs()`: env-overridable (`AGENT_BUILDER_CONFIRM_WAIT_MS`) wall-clock budget, default 15 min, for the human decision window around a mid-flow confirm. Verbatim from brief Step 3.
-- **`src/server/builders/build.ts`** — `handleBuilderBuild(req, deps)` + the `RunBuilderTurn` / `BuilderBuildDeps` types. Parses `BuilderBuildRequestSchema` (400 before any stream opens on malformed body), mints `newRunId()`, opens an AI-SDK `createUIMessageStream` whose `execute` bridges `confirm`/`confirmReuse` (via T9 `confirmViaPort`/`confirmReuseViaPort` → the consent-registry port, each wrapped in `withConfirmTimeout`) and `log` (via T9 `logToTextDelta`) onto the SAME writer, emits `data-run-start`, awaits `deps.runBuilderTurn`, writes the terminal `BuildResultDTO` exactly once, then `data-run-end`. Returns `createUIMessageStreamResponse` with COOP/COEP + `cache-control: no-store`.
-- **`tests/server/builders-build.test.ts`** — the brief's seven tests covering the four §7.1 requirement groups.
+Per the brief's Step 2, this was a **verification, not a red step**: all 6
+new tests passed on the first run against the existing implementation — no
+bug found in `closeSustainedSilence`'s trim-walk or the `pushFrame` gating
+logic. Traced through each test by hand to confirm:
 
-## TDD evidence
+- **Sustained-silence close + trim**: `closeSustainedSilence` walks backward
+  from the end of the buffer, summing each chunk's duration, cutting at the
+  index where accumulated trim first reaches `silentMsAccumulated` — this
+  correctly isolates exactly the speech-bearing prefix in all four
+  silence-close tests (single speech chunk + N silence chunks → emitted
+  segment is exactly the speech chunk(s), tail dropped).
+- **Jitter tolerance (§7.1 b)**: a resumed speech frame resets
+  `silentMsAccumulated = 0` before the silence clock can reach `silenceMs`,
+  so a single-frame silence blip inside speech never closes prematurely —
+  confirmed via the jitter test (3 speech/silence alternations, never
+  called).
+- **Short-utterance (§7.1 b)**: a single speech chunk followed by sustained
+  silence still closes and emits (`inSegment` is true after the one speech
+  push, so the following silence pushes are buffered and counted) — not
+  dropped.
+- **Multi-segment**: after `emit()` resets `inSegment = false` and
+  `silentMsAccumulated = 0`, the next speech push re-arms the cycle
+  automatically with no explicit re-arm call — verified 2 independent
+  cycles → 2 segments, correct content per cycle (`0.1` then `0.2`).
+- **Leading silence**: `pushFrame`'s silence branch returns early when
+  `!inSegment`, so pre-speech silence is never buffered and never closes an
+  empty segment.
+- **flush() mid-segment**: `flush()` calls `emit()` directly regardless of
+  gated mode, closing whatever is buffered immediately — verified with
+  `silenceMs: 1000` (silence-close would never fire) and a single speech
+  push before `flush()`.
 
-**RED** (`bun test tests/server/builders-build.test.ts`, tests only):
-```
-error: Cannot find module '../../src/server/builders/build.ts'
- 0 pass / 1 fail / 1 error
-```
+## Code change (cleanup, not behavior)
+Removed a dead `inSegment = true` write in the **non-gated** branch of
+`pushFrame` (`web/src/features/voice/vad.ts`): `inSegment` is only ever
+*read* in the gated branch's `if (!inSegment) return` silence-gate check,
+which is unreachable when `gated` is false (that branch returns early
+before reaching it). Since a segmenter's `gated` mode is fixed at
+construction, the write was never observably read for any non-gated
+instance. Replaced with a comment explaining why hold-to-talk mode doesn't
+need it. No test depended on this write; all 7 non-gated (Task 10) tests
+still pass unchanged.
 
-**RED→partial** after adding both impl files verbatim from the brief: `3 pass / 3 fail`. The three failures (`happy path`, `throwing turn`, `requirement (a)`) all failed the terminal-result assertion `body.match(/"kind":"written"/g)` / `/"kind":"failed-verification"/g` returning `null`.
+## Test fixes needed to satisfy the gate (not logic changes)
+The brief's literal test snippets used `onSegment.mock.calls[0][0]`
+(un-narrowed array index), which fails `tsc --noEmit` under this repo's
+strict indexed-access checking (`TS2532: Object is possibly 'undefined'`).
+Adjusted to the same pattern Task 10 already used elsewhere in the file:
+`onSegment.mock.calls[0]?.[0] as VoiceFrames`, then indexed into
+`.samples as Float32Array` where a specific sample value was asserted. This
+is purely a TS-narrowing fix — assertion strictness/content is unchanged.
+Ran `bunx biome check --write` to reformat the newly added `describe` block
+to the repo's line-wrap conventions (biome flagged wrapping only, no logic
+diff).
 
-Root cause (verified by dumping the raw SSE): the brief's sample impl wrote the terminal DTO as a `text-delta` whose delta was `JSON.stringify(result)`. On the AI-SDK SSE wire that delta string is itself JSON-string-escaped, so the frame reads `...\"kind\":\"written\"...` — the tests grep for the UNescaped `"kind":"written"`, which cannot match escaped text. The brief's sample implementation and the brief's verbatim tests are mutually contradictory as written.
+## Gate results
+- `cd web && bun run typecheck` — clean.
+- `cd web && bun run test -- vad.test.ts` — **13/13 pass** (7 non-gated from
+  Task 10, unchanged and still green; 6 new gated tests from this task).
+- `bun run lint:file -- "web/src/features/voice/vad.ts" "web/src/features/voice/vad.test.ts"`
+  (root-level biome; `web/` has no local `lint` script) — clean after the
+  biome `--write` reformat.
 
-**Resolution (see decision below):** emit the DTO as a structured `data-build-result` data part instead of a stringified text part. **GREEN:**
-```
-bun test tests/server/builders-build.test.ts  →  6 pass / 0 fail
-bun test tests/server/                          →  114 pass / 0 fail  (no regressions)
-```
+## Commits
+- `1bdb50a` — `test(voice): cover tap-to-toggle segmentation (multi-cycle, jitter, short-utterance)`
 
-## Per-task gate (all three, clean)
+## Concerns for Task 13 (adversarial re-attack target, §7.1)
+- The trim-walk in `closeSustainedSilence` assumes every chunk counted
+  toward `silentMsAccumulated` is still present, unmodified, at the tail of
+  `buffer` — true today since nothing else mutates `buffer` between the
+  silence-accumulate push and the close, but worth Task 13 poking at
+  chunk-size irregularity (variable-length real AudioWorklet chunks, not
+  the fixed 512-sample frames used here) to confirm the ms-based trim
+  boundary still lands exactly at a chunk boundary rather than needing
+  sub-chunk trimming.
+- All tests use uniform 512-sample (32ms) chunks; real Silero-worker output
+  cadence (Task 12) may not be perfectly uniform — the duration-based (not
+  count-based) accumulation should tolerate that, but it is untested here
+  with irregular chunk sizes.
 
-- `bun run typecheck` → clean (`tsc --noEmit`, no output).
-- `bun run lint:file -- src/server/builders/config.ts src/server/builders/build.ts tests/server/builders-build.test.ts` → `Checked 3 files. No fixes applied.` exit 0, 0 findings. (Applied `biome check --write` for import sort/`useImportType`; manually removed two dead-code items the brief's verbatim test carried — an unused `StatusEventType` import and an unused `res` assignment in the requirement-(b) test — neither changes test behavior.)
-- `bun test tests/server/builders-build.test.ts` → 6 pass / 0 fail.
+## Review fix — test-adequacy hardening (§7.1, `vad.ts` unchanged)
 
-## Wire-frame decision (deviation from the brief's SAMPLE code — NOT from the brief's tests or the design)
+A review flagged that two of the original 6 gated tests **passed but did not
+discriminate** a subtly-wrong segmenter — they'd pass identically against a
+buggy implementation. `vad.ts` itself was confirmed correct throughout; only
+`vad.test.ts` was touched.
 
-The terminal `BuildResultDTO` is emitted as **one `data-build-result` data part**:
-```ts
-writer.write({ type: 'data-build-result', data: result });
-```
-rather than the sample's `text-start`/`text-delta(JSON.stringify)`/`text-end` triple. Justification:
-1. **The brief's verbatim tests require it.** They grep the raw SSE for unescaped `"kind":"..."` exactly once; only a structured data part (whose `data` object is serialized once, not double-escaped) satisfies that. The tests are the acceptance criteria and the reviewer's checklist, so they are authoritative over the sample impl.
-2. **The design explicitly permits it.** Spec §4.2.1 (line 75) says the terminal DTO is written "as a one-shot **data/text part**" — a data part is in-scope by the design's own wording. §7.1 requirement (c) only demands "exactly once … one-shot discipline," which is preserved.
-3. **It is the better contract for T13.** The web fold hook reads the DTO straight off `part.data` (structured, typed) instead of `JSON.parse`-ing it back out of concatenated escaped text deltas.
-4. It does **not** touch the T9 adapter frames (confirm/log/narration) — those stay byte-for-byte the shared contract the brief warned against diverging. Only the terminal frame, which this task owns, changed shape.
+**Fix 1 — jitter test didn't lock the accumulator reset.** The original
+jitter test accumulated at most 32ms of silence per run against
+`silenceMs: 100`, so a segmenter that forgot to reset
+`silentMsAccumulated` on speech resumption would still stay under 100ms and
+pass identically. Rewrote it (`vad.test.ts`, "does not double-transcribe...")
+with 3 silence runs of 2 chunks (64ms) each, separated by a speech frame that
+must reset the clock — no single run reaches `silenceMs` (100ms), but the sum
+across all three (192ms) does. A no-reset bug would carry 64ms over the
+speech frame and cross 100ms mid-way through the *second* run (64+64=128ms),
+closing early. Also pinned the other direction in the same test: a genuine
+sustained run from that point still closes correctly.
 
-I did **not** add `data-build-result` to `StatusEventType` — it is an AI-SDK UI data part, not a `StatusEvent`, and the spec's §5 "net-new wire events: zero" refers to the `StatusEvent` union. **Cross-task flag for T13 + the reviewer:** the terminal frame is `{"type":"data-build-result","data": <BuildResultDTO>}` (non-transient), not a text part.
+**Fix 2 — trim tests asserted length, not content.** Both silence-close
+tests (`:125` sustained-silence-close, `:161` short-utterance) only checked
+`frames.samples.length === 512`. Since a speech (fill 0.5) and silence (fill
+0) chunk are the same length, an off-by-one in `closeSustainedSilence`'s trim
+`cut` index that retained a *silent* chunk instead of the *speech* chunk
+would still emit 512 samples and pass. Converted both to content assertions
+(`Array.from(frames.samples as Float32Array)).toEqual(Array.from(new
+Float32Array(512).fill(0.5)))`), following Task 10's Float32-round-trip
+convention to avoid float32-precision false failures.
 
-## Exact wire frames emitted (verified from a live dump)
+**Minor (done) — multi-chunk-speech coverage.** Added one new gated test
+with 2 leading speech chunks (fill 0.6, 0.7) before the closing silence,
+asserting the emitted content is the exact concatenation of both chunks in
+order, trimmed of only the silent tail. This was previously untested (every
+existing gated test had exactly one speech chunk). No impl bug surfaced —
+`concat()`'s straightforward append-in-order already handles it correctly.
 
-```
-data: {"type":"data-run-start","data":{"type":"data-run-start","runId":"run-…","task":"<need>"},"transient":true}
-data: {"type":"text-start","id":"narration-0"}
-data: {"type":"text-delta","id":"narration-0","delta":"<log line>"}
-data: {"type":"text-end","id":"narration-0"}
-data: {"type":"data-confirm","data":{"type":"data-confirm","promptId":"<64hex>","kind":"build","question":"…"},"transient":true}   ← only when the build asks
-data: {"type":"data-build-result","data":{"kind":"written",…}}          ← terminal, EXACTLY once
-data: {"type":"data-run-end","data":{"type":"data-run-end","runId":"run-…","outcome":"written"},"transient":true}
-data: [DONE]
-```
-(Reuse asks emit `data-confirm` with `kind` = the `ReuseKind` value passed per-call, via `confirmReuseViaPort`.)
+### Gate results (this fix)
+- `cd web && bun run typecheck` — clean.
+- `cd web && bun run test -- vad.test.ts` — **14/14 pass** (13 previous + 1
+  new minor test).
+- `cd web && bun run test` (full web suite) — **249/249 pass, 52/52 files**
+  (unrelated `ECONNREFUSED` stderr noise from other tests exercising
+  network-failure paths, pre-existing, not from this change).
+- `bun run lint:file -- "web/src/features/voice/vad.test.ts"` (root-level
+  biome) — clean, no fixes needed.
 
-## Concurrency contract — self-review against §7.1 (a)–(d)
+### Mutation checks (performed, then reverted — `vad.ts` restored to
+identical content, confirmed via empty `git diff`)
+1. Commented out `silentMsAccumulated = 0;` in the `isSpeech` branch of
+   `pushFrame` → re-ran `vad.test.ts` → the hardened jitter test went **red**
+   (`expected onSegment to not be called, but actually been called 1 times`)
+   while all 13 other tests stayed green. Restored the reset line.
+2. Changed `buffer.slice(0, cut)` to `buffer.slice(0, cut + 1)` in
+   `closeSustainedSilence` (off-by-one, retains one extra trailing silent
+   chunk) → re-ran `vad.test.ts` → all **3** content-assertion tests went
+   **red** (both original trim tests + the new multi-chunk-speech test),
+   11/14 passed. Restored the correct `cut` slice.
 
-**(a) confirm genuinely suspends `execute` without blocking the loop or timing out the HTTP response.** `confirm(q)` → `withConfirmTimeout(() => confirmRaw(q))` → `withWallClock(confirmWaitMs(), ask)`, where `ask` = `Boolean(await port({kind:'build',question}, events))`. `port` (registry) returns a Promise that settles ONLY when `resolve(promptId, …)` fires from the second HTTP request (`/api/runs/:id/respond`). `await deps.runBuilderTurn(...)` therefore parks on a real Promise — event loop free, HTTP Response already returned (the handler builds+returns the stream in one tick; `execute` runs concurrently and writes to the held-open connection). Verified by the progressive-read test: nothing past the ask (`after-confirm`) appears until `registry.resolve` is called; then `after-confirm:true` + the terminal `written` arrive.
+Both mutations confirm the hardened tests actually lock the behavior they
+claim to; no real `vad.ts` bug was found — the implementation was correct
+both before and after this fix, only the tests were strengthened.
 
-**(b) client abort during a pending confirm does not crash and never cross-resolves.** `req.signal` is deliberately NOT passed into `withWallClock`'s `external` param, so an abort does not reject the confirm wait — the registry entry stays pending (test asserts `pending().length === 1`). A late/stale `resolve(promptId, …)` is a no-op-safe call (`registry.resolve` returns false for unknown/already-settled and never throws; test asserts `.not.toThrow()`). Cross-talk is impossible because `promptId` is 32 random bytes. The leaked pending entry is NOT proactively evicted (documented in `withConfirmTimeout`'s comment) — the 15-min `confirmWaitMs()` cap is the backstop: on timeout `withWallClock` rejects `Error('timeout')`, `.catch(() => false)` converts it to a **decline** (fail-closed, never auto-approve), `execute` resumes, writes the terminal result and `data-run-end`, so the build cannot suspend forever. A registry-level expiry that also deletes the map entry is a noted future hardening item.
-
-**(c) terminal result written exactly once on every path.** A single `try/catch` sets `result` (success → DTO from the turn; throw → `{kind:'failed-verification', stage:'error', detail}`), followed by exactly one `writer.write({type:'data-build-result', data: result})`. No path writes it twice; no path skips it. The throwing-turn test asserts `failed-verification` appears exactly once with `"detail":"boom"`; the happy-path and requirement-(a) tests assert `written` exactly once.
-
-**(d) build is not cancelled by the connection.** `req.signal` is never threaded into `runBuilderTurn` nor used to abort anything; `execute` is not detached fire-and-watch. Test: after `controller.abort()`, `await res.text()` and the turn's `completed` flag is `true` — the build ran to completion server-side. **The span-closes-on-disconnect half of (d) is only fully exercisable once Task 12 wires the real `withRunTelemetry`-backed turn** (T11's injected `runBuilderTurn` is a plain fake with no span). Flagged per the brief's controller note as a cross-task item for T12's reviewer to re-verify end-to-end.
-
-## Notes / concerns for the reviewer
-
-1. **Terminal frame shape** — the `text-part → data-part` deviation above. This is the one substantive judgement call; it is forced by the brief's own tests and sanctioned by §4.2.1's "data/text part" wording, but it is a wire-contract decision T13 must consume accordingly.
-2. **`deps.runsRoot` is unused by the handler in T11.** The `BuilderBuildDeps.runsRoot` field is per the brief's Interfaces spec, but `handleBuilderBuild` never reads it — telemetry/`createRun` happen inside T12's injected `createRealRunBuilderTurn` (which closes over its own `runsRoot`) keyed by the `runId` the handler mints and passes through. So the field is currently redundant with T12's closure. Harmless and per-spec; flagging in case T12 intends the handler to pre-create the run dir (as the fire-and-watch pull route does) rather than rely on `withRunTelemetry`'s idempotent `createRun`.
-3. **`logToTextDelta(writer.write)` passes `writer.write` unbound** — empirically fine (narration frames appear in the passing tests), consistent with T9's `TextPartWriter` design and the chat handler's usage.
-4. **No `withUiStreamSpan` wrap** (unlike `handleChat`) — intentional: builder telemetry is the `agent.build`/`crew.build` root span opened by T12's `withRunTelemetry` inside the turn, not a `ui.stream` span here.
-
-## Files changed
-- `src/server/builders/config.ts` (new)
-- `src/server/builders/build.ts` (new)
-- `tests/server/builders-build.test.ts` (new)
+### Commit
+- `560f076` — `test(voice): harden gated-segmenter tests (jitter-reset discrimination + trim content assertions) [review fix]`

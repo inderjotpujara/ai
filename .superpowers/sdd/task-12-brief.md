@@ -1,234 +1,559 @@
-## Task 12: Builder registry lists + `runBuilderTurn` wiring (`ServerDeps`, `app.ts`, `main.ts`)
+### Task 12: `use-voice-input.ts` — orchestrator hook (worker lifecycle, both gestures, concurrent-gesture guard, teardown)
 
 **Files:**
-- Create: `src/server/builders/list.ts`
-- Modify: `src/server/launch-turns.ts` (add `createRealRunBuilderTurn`)
-- Modify: `src/server/app.ts` (extend `ServerDeps` with `runBuilderTurn`; wire three routes: `GET /api/builders/agents`, `GET /api/builders/crews`, `POST /api/builders/build`)
-- Modify: `src/server/main.ts` (build the real turn; add to the `deps` object)
-- Modify (fixture ripple — `ServerDeps` gained a required field): `tests/server/app.test.ts` (four `ServerDeps` literals, lines ~32/99/140/235), `tests/server/runs-routes.test.ts` (one literal), `tests/server/phase4-routes.test.ts` (the shared `deps()` helper)
-- Test: `tests/server/builders-list.test.ts` (create), `tests/server/builders-turn.test.ts` (create — the requirement-(d) span-closes-on-disconnect proof deferred out of Task 11)
+- Create: `web/src/features/voice/use-voice-input.ts`
+- Test: `web/src/features/voice/use-voice-input.test.ts`
 
 **Interfaces:**
-- Consumes: `RunBuilderTurn` (Task 11), `agentNames` (`agents/index.ts`), `CREWS` (`crews/index.ts`), `WORKFLOWS` (`workflows/index.ts`), `BuilderRegistryListResponseSchema` (Task 6), `makeRealBuilderDeps` (`src/agent-builder/deps.ts`), `makeRealCrewBuilderDeps` (`src/crew-builder/deps.ts`), `withRunTelemetry` (`src/cli/with-run.ts`), `toBuildResultDto`/`toCrewBuildResultDto` (Task 10), `buildAgent`/`buildCrewOrWorkflow`.
-- Produces: `handleBuilderAgentList(): Response`, `handleBuilderCrewList(): Response`, `createRealRunBuilderTurn(runsRoot: string): RunBuilderTurn`, `ServerDeps.runBuilderTurn: RunBuilderTurn`.
+- Consumes:
+  - `AudioCapture`, `createAudioCapture` from `web/src/features/voice/audio-capture.ts` (Part A Task ~5/6).
+  - `SttEngine`, `ModelTier`, `createSttEngine` from `web/src/features/voice/stt-engine.ts` (Part A Task ~8/9).
+  - `createSegmenter` from `./vad.ts` (Task 10/11, this file's own directory).
+- Produces (locked, verbatim — consumed by Task 14's `mic-button.tsx`):
+  ```ts
+  export type VoiceStatus = 'disabled' | 'loading' | 'ready' | 'listening' | 'transcribing' | 'error';
+  export type UseVoiceInput = {
+    status: VoiceStatus;
+    ready: boolean;
+    level: number;
+    interim: string;
+    error?: string;
+    startHold(): void;
+    stopHold(): void;
+    toggleTap(): void;
+    cancel(): void;
+  };
+  export type UseVoiceInputOpts = {
+    enabled: boolean;
+    model: ModelTier;
+    silenceMs: number;
+    onFinal: (text: string) => void;
+    onInterim?: (text: string) => void;
+  };
+  export type VoiceInputDeps = {
+    createCapture: () => AudioCapture;
+    createEngine: (cfg: { model: ModelTier }) => SttEngine;
+  };
+  export function useVoiceInput(opts: UseVoiceInputOpts, deps?: VoiceInputDeps): UseVoiceInput;
+  ```
+  The `deps` second parameter (defaulting to the real `createAudioCapture`/`createSttEngine`) is the test seam — no test in this task ever touches a real `getUserMedia`/`Worker`/`AudioContext`.
 
-- [ ] **Step 1: Write the failing list-handler test**
+- [ ] **Step 1: Write the failing tests**
 
-`tests/server/builders-list.test.ts`:
-```typescript
-import { expect, test } from 'bun:test';
-import type { BuilderRegistryListResponse } from '../../src/contracts/index.ts';
-import { handleBuilderAgentList, handleBuilderCrewList } from '../../src/server/builders/list.ts';
+Create `web/src/features/voice/use-voice-input.test.ts`:
 
-test('GET /api/builders/agents lists the agent registry', async () => {
-  const res = handleBuilderAgentList();
-  expect(res.status).toBe(200);
-  const body = (await res.json()) as BuilderRegistryListResponse;
-  expect(body.items.some((n) => n === 'file_qa')).toBe(true);
-});
+```ts
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import type { AudioCapture } from './audio-capture.ts';
+import type { ModelTier, SttEngine } from './stt-engine.ts';
+import { useVoiceInput } from './use-voice-input.ts';
 
-test('GET /api/builders/crews lists BOTH the crew and workflow registries', async () => {
-  const res = handleBuilderCrewList();
-  const body = (await res.json()) as BuilderRegistryListResponse;
-  expect(body.items).toContain('research-crew');
-  expect(body.items).toContain('fetch-then-summarize');
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test tests/server/builders-list.test.ts`
-Expected: FAIL — module not found. (If `file_qa`/`research-crew`/`fetch-then-summarize` are not the real registry names in this checkout, read `agents/index.ts`/`crews/index.ts`/`workflows/index.ts` first and substitute the actual ones — this mirrors Phase 4's Task 8/9 fixtures, which already assert against these same names.)
-
-- [ ] **Step 3: Create `src/server/builders/list.ts`**
-
-```typescript
-import { agentNames } from '../../../agents/index.ts';
-import { CREWS } from '../../../crews/index.ts';
-import { WORKFLOWS } from '../../../workflows/index.ts';
-import { BuilderRegistryListResponseSchema } from '../../contracts/index.ts';
-import { ISOLATION_HEADERS } from '../isolation-headers.ts';
-
-function json(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      ...ISOLATION_HEADERS,
-    },
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
+  return { promise, resolve, reject };
 }
 
-/** `GET /api/builders/agents` — existing agent names, for the wizard's
- *  reuse/name-collision awareness (spec §4.2 item 2). */
-export function handleBuilderAgentList(): Response {
-  return json(
-    BuilderRegistryListResponseSchema.parse({ items: agentNames() }),
-    200,
-  );
+function makeFakeCapture() {
+  const chunkListeners = new Set<(chunk: Float32Array) => void>();
+  const levelListeners = new Set<(rms: number) => void>();
+  const startMock = vi.fn(async () => {});
+  const stopMock = vi.fn(async () => {});
+  const capture: AudioCapture = {
+    start: startMock,
+    stop: stopMock,
+    onChunk: (cb) => {
+      chunkListeners.add(cb);
+      return () => chunkListeners.delete(cb);
+    },
+    onLevel: (cb) => {
+      levelListeners.add(cb);
+      return () => levelListeners.delete(cb);
+    },
+    active: true,
+  };
+  return {
+    capture,
+    startMock,
+    stopMock,
+    emitChunk: (chunk: Float32Array) => {
+      for (const cb of chunkListeners) cb(chunk);
+    },
+    chunkListenerCount: () => chunkListeners.size,
+  };
 }
 
-/** `GET /api/builders/crews` — existing crew AND workflow names (the
- *  crew-builder classifies a need into either shape, so the wizard needs
- *  awareness of both registries from one call). */
-export function handleBuilderCrewList(): Response {
-  const items = [...Object.keys(CREWS), ...Object.keys(WORKFLOWS)];
-  return json(BuilderRegistryListResponseSchema.parse({ items }), 200);
+function makeFakeEngine() {
+  const readyGate = deferred<void>();
+  const transcribeMock = vi.fn(async () => 'hello world');
+  const detectSpeechMock = vi.fn(async () => false);
+  const closeMock = vi.fn();
+  const engine: SttEngine = {
+    ready: () => readyGate.promise,
+    onProgress: () => () => {},
+    detectSpeech: detectSpeechMock,
+    transcribe: transcribeMock,
+    close: closeMock,
+  };
+  return { engine, readyGate, transcribeMock, detectSpeechMock, closeMock };
 }
-```
 
-- [ ] **Step 4: Run test to verify it passes**
+const MODEL: ModelTier = 'moonshine-base';
 
-Run: `bun test tests/server/builders-list.test.ts`
-Expected: PASS.
+describe('useVoiceInput', () => {
+  it('a mic press before the engine reports ready is a no-op (§7.2 a)', () => {
+    const { engine } = makeFakeEngine();
+    const { capture, startMock } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    expect(result.current.status).toBe('loading');
+    act(() => result.current.startHold());
+    expect(startMock).not.toHaveBeenCalled();
+  });
 
-- [ ] **Step 5: Write the failing real-turn + span-lifecycle test**
+  it('engine.ready() resolving flips status to ready; a hold press then begins real capture', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    const { capture, startMock } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.ready).toBe(true);
+    act(() => result.current.startHold());
+    await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+  });
 
-`tests/server/builders-turn.test.ts` — this is requirement (d) from spec §7.1, deferred out of Task 11: proves that a build's `agent.build` span (opened by `buildAgent` via `withAgentBuildSpan`, nested inside `withRunTelemetry`) closes normally even though the route that will eventually call this turn is stream-based and the client may disconnect — `createRealRunBuilderTurn` itself has no dependency on the HTTP request/response lifecycle at all, which IS the fix (the build is never given `req.signal`, so nothing about the connection can tear it down mid-stage):
-```typescript
-import { expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { BuilderKind } from '../../src/contracts/enums.ts';
-import { createRealRunBuilderTurn } from '../../src/server/launch-turns.ts';
+  it('rejects an overlapping gesture: a hold press while a tap-toggle session is already listening starts no second capture (§7.2 b)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    const { capture, startMock } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => result.current.startHold());
+    expect(startMock).toHaveBeenCalledTimes(1); // second gesture ignored, not a second capture
+  });
 
-test('createRealRunBuilderTurn runs a real agent build to completion and its agent.build span closes (spans.jsonl is non-empty after settling)', async () => {
-  const runsRoot = await mkdtemp(join(tmpdir(), 'builder-turn-'));
-  try {
-    const turn = createRealRunBuilderTurn(runsRoot);
-    const result = await turn({
-      kind: BuilderKind.Agent,
-      need: 'a trivial capability the builder will decline',
-      runId: 'run-test-decline',
-      confirm: async () => false, // decline immediately — no live model call needed to prove span closure
-      confirmReuse: async () => false,
-      log: () => {},
-    });
-    expect(result.kind).toBe('declined');
-    const spansPath = join(runsRoot, 'run-test-decline', 'spans.jsonl');
-    const raw = await readFile(spansPath, 'utf8');
-    expect(raw).toContain('"name":"agent.build"');
-  } finally {
-    await rm(runsRoot, { recursive: true, force: true });
-  }
+  it('a second toggleTap() while already listening (tap mode) stops the session instead of starting another', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    const { capture, startMock, stopMock } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(stopMock).toHaveBeenCalledTimes(1));
+    expect(startMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('stopHold flushes the segmenter and hands the transcribed final text to onFinal', async () => {
+    const { engine, readyGate, transcribeMock } = makeFakeEngine();
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(transcribeMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onFinal).toHaveBeenCalledWith('hello world'));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+  });
+
+  it('cancel() discards buffered audio without ever calling transcribe', async () => {
+    const { engine, readyGate, transcribeMock } = makeFakeEngine();
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.cancel());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(transcribeMock).not.toHaveBeenCalled();
+    expect(onFinal).not.toHaveBeenCalled();
+  });
+
+  it('disabling voice tears the session down: capture.stop() + engine.close() both fire, and a stray post-teardown chunk never reaches onFinal (§7.2 c)', async () => {
+    const { engine, readyGate, closeMock } = makeFakeEngine();
+    const { capture, stopMock, emitChunk, chunkListenerCount } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) =>
+        useVoiceInput(
+          { enabled, model: MODEL, silenceMs: 500, onFinal },
+          { createCapture: () => capture, createEngine: () => engine },
+        ),
+      { initialProps: { enabled: true } },
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    rerender({ enabled: false });
+    expect(stopMock).toHaveBeenCalledTimes(1);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+    expect(chunkListenerCount()).toBe(0);
+    act(() => emitChunk(new Float32Array(512)));
+    expect(onFinal).not.toHaveBeenCalled();
+  });
+
+  it('unmounting mid-session also tears capture + engine down (same teardown path as disable)', async () => {
+    const { engine, readyGate, closeMock } = makeFakeEngine();
+    const { capture, stopMock } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    unmount();
+    expect(stopMock).toHaveBeenCalledTimes(1);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a model-load failure degrades to an error status with a message, never a stuck loading state (§7.2 d)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    const { capture } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.reject(new Error('WebGPU unsupported')));
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    expect(result.current.error).toBe('WebGPU unsupported');
+  });
+
+  it('a capture.start() rejection (mic permission denied) degrades to an error status, not a crash', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    const { capture, startMock } = makeFakeCapture();
+    startMock.mockRejectedValueOnce(new Error('Permission denied'));
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    expect(result.current.error).toBe('Permission denied');
+  });
+
+  it('when enabled is false from the start, status is disabled and no engine/capture is ever created', () => {
+    const createEngine = vi.fn();
+    const createCapture = vi.fn();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: false, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture, createEngine },
+      ),
+    );
+    expect(result.current.status).toBe('disabled');
+    expect(createEngine).not.toHaveBeenCalled();
+    expect(createCapture).not.toHaveBeenCalled();
+  });
 });
 ```
-**Note for the implementer:** this test still resolves a real `LanguageModel` via `makeRealBuilderDeps` (model manager + registry), so it needs a reachable Ollama daemon — same live-dependency class as the CLI's own `agent-builder.ts` `main()`. If no local model is reachable in CI, mark this test `test.skip` behind an env guard (e.g. `process.env.OLLAMA_HOST ? test : test.skip`) mirroring how other live-model tests in this repo degrade, and rely on the live-verify pass (Increment 6) to exercise it for real. Do not delete the test — skip it explicitly and note why.
 
-- [ ] **Step 6: Run test to verify it fails**
+- [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `bun test tests/server/builders-turn.test.ts`
-Expected: FAIL — `createRealRunBuilderTurn` not exported from `launch-turns.ts`.
+Run: `cd web && bun run test -- use-voice-input.test.ts`
+Expected: FAIL — `Cannot find module './use-voice-input.ts'`.
 
-- [ ] **Step 7: Add `createRealRunBuilderTurn` to `src/server/launch-turns.ts`**
+- [ ] **Step 3: Write the implementation**
 
-Read the file first (it currently exports `createRealRunCrewTurn`/`createRealRunWorkflowTurn`). Add:
-```typescript
-import type { BuilderDeps } from '../agent-builder/types.ts';
-import { buildAgent } from '../agent-builder/builder.ts';
-import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
-import { withRunTelemetry } from '../cli/with-run.ts';
-import { BuilderKind } from '../contracts/enums.ts';
-import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
-import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
-import type { CrewBuilderDeps } from '../crew-builder/types.ts';
-import type { RunBuilderTurn } from './builders/build.ts';
-import { toBuildResultDto, toCrewBuildResultDto } from './builders/map-result.ts';
+Create `web/src/features/voice/use-voice-input.ts`:
 
-/**
- * Real, non-test `RunBuilderTurn`: reuses `withRunTelemetry` (NOT
- * `withMcpRun` — neither `buildAgent` nor `buildCrewOrWorkflow` mounts MCP
- * tools at dry-run time, D4/§4.2 item 1) so the run's spans (including
- * `agent.build`/`crew.build`, opened by `buildAgent`/`buildCrewOrWorkflow`
- * themselves) land in `runs/<id>/spans.jsonl`. Reuses the EXACT same
- * `makeRealBuilderDeps`/`makeRealCrewBuilderDeps` factories the CLI uses
- * (`src/cli/agent-builder.ts`/`crew-builder.ts`), only overriding
- * `confirm`/`log`/`verify.confirmReuse` with the SSE-bridged versions the
- * route built (Task 9/11) — everything else (model resolution, embedder,
- * judge wiring, fs paths) is identical to the CLI path.
- */
-export function createRealRunBuilderTurn(runsRoot: string): RunBuilderTurn {
-  return ({ kind, need, autoYes, force, runId, confirm, confirmReuse, log }) =>
-    withRunTelemetry({ runsRoot, runId }, async () => {
-      if (kind === BuilderKind.Agent) {
-        const { deps, cleanup } = await makeRealBuilderDeps({ autoYes, force });
-        try {
-          const overridden: BuilderDeps = {
-            ...deps,
-            confirm,
-            log,
-            verify: deps.verify && { ...deps.verify, confirmReuse },
-          };
-          return toBuildResultDto(await buildAgent(need, overridden));
-        } finally {
-          await cleanup();
-        }
-      }
-      const { deps, cleanup } = await makeRealCrewBuilderDeps({ autoYes, force });
-      try {
-        const overridden: CrewBuilderDeps = {
-          ...deps,
-          confirm,
-          log,
-          verify: deps.verify && { ...deps.verify, confirmReuse },
-        };
-        return toCrewBuildResultDto(await buildCrewOrWorkflow(need, overridden));
-      } finally {
-        await cleanup();
-      }
-    });
+```tsx
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createAudioCapture, type AudioCapture } from './audio-capture.ts';
+import { createSttEngine, type ModelTier, type SttEngine } from './stt-engine.ts';
+import { createSegmenter, type Segmenter } from './vad.ts';
+
+export type VoiceStatus =
+  | 'disabled'
+  | 'loading'
+  | 'ready'
+  | 'listening'
+  | 'transcribing'
+  | 'error';
+
+export type UseVoiceInput = {
+  status: VoiceStatus;
+  ready: boolean;
+  level: number;
+  interim: string;
+  error?: string;
+  startHold(): void;
+  stopHold(): void;
+  toggleTap(): void;
+  cancel(): void;
+};
+
+export type UseVoiceInputOpts = {
+  enabled: boolean;
+  model: ModelTier;
+  silenceMs: number;
+  onFinal: (text: string) => void;
+  onInterim?: (text: string) => void;
+};
+
+/** Injected factories — the test seam. Real callers get the module
+ *  defaults; tests substitute fakes so no test ever touches a real
+ *  `getUserMedia`/`Worker`/`AudioContext`. */
+export type VoiceInputDeps = {
+  createCapture: () => AudioCapture;
+  createEngine: (cfg: { model: ModelTier }) => SttEngine;
+};
+
+const DEFAULT_DEPS: VoiceInputDeps = {
+  createCapture: createAudioCapture,
+  createEngine: createSttEngine,
+};
+
+/** Nominal VAD analysis window (Silero's own default) — used only as
+ *  `vad.ts`'s zero-length-chunk fallback duration, never as a hardcoded
+ *  silence threshold (that's `opts.silenceMs`, config-sourced). */
+const FRAME_MS = 32;
+
+export function useVoiceInput(
+  opts: UseVoiceInputOpts,
+  deps: VoiceInputDeps = DEFAULT_DEPS,
+): UseVoiceInput {
+  const [status, setStatus] = useState<VoiceStatus>(
+    opts.enabled ? 'loading' : 'disabled',
+  );
+  const [level, setLevel] = useState(0);
+  const [interim, setInterim] = useState('');
+  const [error, setError] = useState<string | undefined>(undefined);
+
+  const engineRef = useRef<SttEngine | null>(null);
+  const captureRef = useRef<AudioCapture | null>(null);
+  const segmenterRef = useRef<Segmenter | null>(null);
+  const gestureRef = useRef<'hold' | 'tap' | null>(null);
+  const readyRef = useRef(false);
+  const unsubRef = useRef<() => void>(() => {});
+
+  // Worker lifecycle (§7.2): spawn once per enable, terminate on
+  // disable/unmount. Re-running only on `opts.enabled` is deliberate —
+  // changing the model tier while enabled requires a disable/enable
+  // round-trip (Settings, Task 15), not a live in-place model swap in v1.
+  useEffect(() => {
+    if (!opts.enabled) {
+      setStatus('disabled');
+      readyRef.current = false;
+      return;
+    }
+    let cancelled = false;
+    setStatus('loading');
+    setError(undefined);
+    readyRef.current = false;
+    const engine = deps.createEngine({ model: opts.model });
+    engineRef.current = engine;
+    engine
+      .ready()
+      .then(() => {
+        if (cancelled) return;
+        readyRef.current = true;
+        setStatus('ready');
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setStatus('error');
+        setError(
+          err instanceof Error ? err.message : 'voice model failed to load',
+        );
+      });
+    return () => {
+      cancelled = true;
+      readyRef.current = false;
+      unsubRef.current();
+      unsubRef.current = () => {};
+      if (captureRef.current) void captureRef.current.stop();
+      captureRef.current = null;
+      segmenterRef.current = null;
+      gestureRef.current = null;
+      engine.close();
+      engineRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opts.enabled]);
+
+  const endGesture = useCallback((nextStatus: VoiceStatus) => {
+    unsubRef.current();
+    unsubRef.current = () => {};
+    if (captureRef.current) void captureRef.current.stop();
+    captureRef.current = null;
+    segmenterRef.current = null;
+    gestureRef.current = null;
+    setLevel(0);
+    setStatus(nextStatus);
+  }, []);
+
+  const startGesture = useCallback(
+    (kind: 'hold' | 'tap') => {
+      if (!readyRef.current || gestureRef.current) return; // §7.2 (a) + (b)
+      const engine = engineRef.current;
+      if (!engine) return;
+      gestureRef.current = kind;
+
+      const segmenter = createSegmenter({
+        silenceMs: opts.silenceMs,
+        gated: kind === 'tap',
+        frameMs: FRAME_MS,
+      });
+      segmenterRef.current = segmenter;
+
+      const offSegment = segmenter.onSegment((frames) => {
+        setStatus('transcribing');
+        setInterim('…');
+        opts.onInterim?.('…');
+        engine
+          .transcribe(frames)
+          .then((text) => {
+            if (text) opts.onFinal(text);
+          })
+          .catch(() => setError('transcription failed'))
+          .finally(() => {
+            setInterim('');
+            setStatus(gestureRef.current ? 'listening' : 'ready');
+          });
+      });
+
+      const capture = deps.createCapture();
+      captureRef.current = capture;
+      const offChunk = capture.onChunk((chunk) => {
+        engine
+          .detectSpeech(chunk)
+          .then((isSpeech) => segmenter.pushFrame(chunk, isSpeech))
+          .catch(() => segmenter.pushFrame(chunk, false));
+      });
+      const offLevel = capture.onLevel((rms) => setLevel(rms));
+      unsubRef.current = () => {
+        offSegment();
+        offChunk();
+        offLevel();
+      };
+
+      capture
+        .start()
+        .then(() => setStatus('listening'))
+        .catch((err: unknown) => {
+          endGesture(readyRef.current ? 'ready' : 'error');
+          setError(
+            err instanceof Error ? err.message : 'microphone unavailable',
+          );
+        });
+    },
+    [opts.silenceMs, opts.onFinal, opts.onInterim, endGesture],
+  );
+
+  const startHold = useCallback(() => startGesture('hold'), [startGesture]);
+
+  const stopHold = useCallback(() => {
+    if (gestureRef.current !== 'hold') return;
+    segmenterRef.current?.flush(); // §7.1 (c): never drop the release-boundary residual
+    endGesture('ready');
+  }, [endGesture]);
+
+  const toggleTap = useCallback(() => {
+    if (gestureRef.current === 'tap') {
+      segmenterRef.current?.flush();
+      endGesture('ready');
+      return;
+    }
+    if (gestureRef.current === null) startGesture('tap');
+    // gestureRef.current === 'hold': ignored — concurrent-gesture guard.
+  }, [endGesture, startGesture]);
+
+  const cancel = useCallback(() => {
+    if (gestureRef.current === null) return;
+    segmenterRef.current?.reset(); // discard buffered audio — never transcribe
+    endGesture('ready');
+  }, [endGesture]);
+
+  return {
+    status,
+    ready: readyRef.current,
+    level,
+    interim,
+    error,
+    startHold,
+    stopHold,
+    toggleTap,
+    cancel,
+  };
 }
 ```
 
-- [ ] **Step 8: Wire the three routes + `ServerDeps.runBuilderTurn` in `src/server/app.ts`**
+- [ ] **Step 4: Run the tests to verify they pass**
 
-Add imports: `import { handleBuilderAgentList, handleBuilderCrewList } from './builders/list.ts';`, `import { handleBuilderBuild } from './builders/build.ts';`, `import type { RunBuilderTurn } from './builders/build.ts';`. Add to `ServerDeps`:
-```typescript
-  /** Launches the agent/crew/workflow guided-build flow (Phase 5, Task 11/12). */
-  runBuilderTurn: RunBuilderTurn;
-```
-Add three routes in `handleApi`, near the existing `/api/crews`/`/api/workflows` GETs (order doesn't matter against them — none of these three paths collide with any existing regex):
-```typescript
-        if (req.method === 'GET' && url.pathname === '/api/builders/agents') {
-          rec.status(200);
-          return handleBuilderAgentList();
-        }
-        if (req.method === 'GET' && url.pathname === '/api/builders/crews') {
-          rec.status(200);
-          return handleBuilderCrewList();
-        }
-        if (req.method === 'POST' && url.pathname === '/api/builders/build') {
-          rec.status(200);
-          return handleBuilderBuild(req, deps);
-        }
-```
+Run: `cd web && bun run test -- use-voice-input.test.ts`
+Expected: PASS — 12/12.
 
-- [ ] **Step 9: Wire the real turn in `src/server/main.ts`**
+- [ ] **Step 5: Gate + commit**
 
-Add `import { createRealRunBuilderTurn, ... } from './launch-turns.ts';` (extend the existing import), `const runBuilderTurn = createRealRunBuilderTurn(runsRoot);` alongside the existing `runCrewTurn`/`runWorkflowTurn` lines, and add `runBuilderTurn` to the `deps` object literal.
-
-- [ ] **Step 10: Fix the `ServerDeps`-literal fixture ripple**
-
-Add `runBuilderTurn: async () => ({ kind: 'declined' })` (or a test-appropriate stub) to every existing `ServerDeps` object literal that now fails to typecheck:
-- `tests/server/app.test.ts` — four literals (`deps`, `throwingDeps`, `confinedDeps`, `symlinkDeps`).
-- `tests/server/runs-routes.test.ts` — one literal.
-- `tests/server/phase4-routes.test.ts` — the shared `deps()` helper (also used by Task 11's own tests if they were dispatched against a shared fixture; here it's just the ripple fix).
-
-- [ ] **Step 11: Run tests to verify they pass**
-
-Run: `bun test tests/server/builders-list.test.ts tests/server/builders-turn.test.ts tests/server/app.test.ts tests/server/runs-routes.test.ts tests/server/phase4-routes.test.ts`
-Expected: all PASS (`builders-turn.test.ts` may be `test.skip`-guarded per Step 5's note if no live model is reachable).
-
-- [ ] **Step 12: SERVER-GROUP GATE — full suite**
-
-Run: `bun run check` (docs:check · typecheck · lint · full `bun test`). This is the first full-suite checkpoint since `ServerDeps` gained a new required field — fix any further drift it surfaces.
-
-- [ ] **Step 13: Gate + commit**
+Run: `cd web && bun run typecheck && cd web && bun run lint`
 
 ```bash
-git add src/server/builders/list.ts src/server/launch-turns.ts src/server/app.ts src/server/main.ts tests/server/builders-list.test.ts tests/server/builders-turn.test.ts tests/server/app.test.ts tests/server/runs-routes.test.ts tests/server/phase4-routes.test.ts
-git commit -m "feat(server): wire builder registry lists + POST /api/builders/build + createRealRunBuilderTurn (Phase 5)"
+git add web/src/features/voice/use-voice-input.ts web/src/features/voice/use-voice-input.test.ts
+git commit -m "feat(voice): add useVoiceInput orchestrator hook (both gestures, ready-gating, teardown)"
 ```
 
 ---

@@ -1,85 +1,46 @@
-# Task 3 Report: Config — `AGENT_SESSIONS_PATH` (Phase 6)
+# Task 3 Report: `AGENT_WEB_VOICE_*` config entries + `renderIndexHtml` window globals (Phase 7)
 
 ## Status: DONE
 
-## What was implemented
+## Reconciliation
+The brief's exact file locations, line numbers, signatures, and call site all matched the real code — no deviations were needed. Implemented verbatim per the brief.
 
-- `src/config/schema.ts`: appended a new "Session persistence" `CONFIG_SPEC` group
-  immediately after the existing "Memory / RAG" group (right before the
-  "Verification / anti-hallucination" comment), containing one entry:
-  ```typescript
-  // --- Session persistence (src/session/*, Slice 30b Phase 6) ---
-  {
-    env: 'AGENT_SESSIONS_PATH',
-    kind: 'string',
-    def: 'sessions',
-    doc: 'Directory for the session/chat-history SQLite store (session/store.ts createSessionStore), mirroring AGENT_MEMORY_PATH.',
-  },
-  ```
-  This is picked up automatically by the existing generic `loadConfig()` loop — no new
-  code path was added.
-- `tests/config/schema.test.ts`: appended 2 new test cases after the 4 pre-existing ones
-  (all 4 preserved unchanged, verified by reading the file before editing):
-  - `'AGENT_SESSIONS_PATH defaults to "sessions" (Slice 30b Phase 6)'`
-  - `'AGENT_SESSIONS_PATH honors an env override (Slice 30b Phase 6)'`
-  One deviation from the brief's literal snippet: the env-override test's `loadConfig({ AGENT_SESSIONS_PATH: '/tmp/custom-sessions' })` call was wrapped onto 3 lines instead of 1, to satisfy Biome's line-length formatting rule. Purely cosmetic — same call, same assertions.
+## What was implemented
+- `src/config/schema.ts`: appended two `CONFIG_SPEC` entries immediately after `AGENT_WEB_NOTIFY_MIN_DURATION_MS` (same zod-style/doc-comment convention):
+  - `AGENT_WEB_VOICE_DEFAULT_MODEL` (string, default `'moonshine-base'`)
+  - `AGENT_WEB_VOICE_VAD_SILENCE_MS` (number, default `800`)
+- `src/server/main.ts`:
+  - Added `VoiceWindowConfig` type + `DEFAULT_VOICE_CONFIG` next to `NotifyConfig`/`DEFAULT_NOTIFY_CONFIG`.
+  - `renderIndexHtml` gained a 4th param `voice: VoiceWindowConfig = DEFAULT_VOICE_CONFIG`; `tokenScript` now also injects `window.__AGENT_VOICE_DEFAULT_MODEL__` and `window.__AGENT_VOICE_VAD_SILENCE_MS__`, using the same `JSON.stringify` + `<`→`<` escaping already applied to the token.
+  - `startWebServer`'s `renderIndexHtml(...)` call site threads `cfg.AGENT_WEB_VOICE_DEFAULT_MODEL` / `cfg.AGENT_WEB_VOICE_VAD_SILENCE_MS` through as the 4th arg.
+- `tests/config/schema.test.ts`: appended the 2 tests from the brief verbatim.
+- `tests/server/main.test.ts`: appended the 2 tests from the brief verbatim (Biome auto-reformatted one `toContain(...)` call's line-wrap for length; no behavior change).
 
 ## TDD evidence
+**RED** (`bun test tests/config/schema.test.ts tests/server/main.test.ts`, before implementation): 4 new tests failed — `values.AGENT_WEB_VOICE_DEFAULT_MODEL`/`AGENT_WEB_VOICE_VAD_SILENCE_MS` were `undefined`; the two `renderIndexHtml` voice-injection assertions failed (globals absent from rendered HTML). 15 pass / 4 fail overall.
 
-**RED** (`bun test tests/config/schema.test.ts`, before the schema change):
-```
-4 pass
-2 fail
-142 expect() calls
-```
-Both new `AGENT_SESSIONS_PATH` cases failed with `values.AGENT_SESSIONS_PATH` = `undefined` (no such `CONFIG_SPEC` entry yet); all 4 pre-existing tests passed.
-
-**GREEN** (same command, after adding the `CONFIG_SPEC` entry):
-```
-6 pass
-0 fail
-146 expect() calls
-```
-
-**Regression** (`bun test tests/config/` — full config suite):
-```
-9 pass
-0 fail
-156 expect() calls
-Ran 9 tests across 2 files.
-```
-No other `CONFIG_SPEC` entry's coercion was affected.
+**GREEN** (same command, after implementation): 19 pass / 0 fail, 190 expect() calls — includes all pre-existing notify-config tests, unaffected.
 
 ## Gate (all three, before commit)
-
-- `bun run typecheck` — clean (`tsc --noEmit`, no errors).
-- `bun run lint:file -- src/config/schema.ts tests/config/schema.test.ts` — initially flagged one formatting issue (the env-override test line exceeded Biome's line-length limit); fixed by wrapping the `loadConfig({...})` call onto 3 lines. Re-ran: clean, 0 errors.
-- Focused test: `bun test tests/config/schema.test.ts` — 6 pass, 0 fail (see GREEN above).
-- Full config suite regression: `bun test tests/config/` — 9 pass, 0 fail (see above).
+- `bun run typecheck` — clean.
+- `bun run lint:file -- src/config/schema.ts src/server/main.ts tests/config/schema.test.ts tests/server/main.test.ts` — one auto-fix applied (`--write`) to a test line-wrap in `tests/server/main.test.ts`; re-ran, clean.
+- Focused tests: `bun test tests/config/schema.test.ts tests/server/main.test.ts` — 19 pass, 0 fail (190 expect calls).
 
 ## Files changed
-
-- `src/config/schema.ts` (modified — appended new group + 1 `CONFIG_SPEC` entry, 7 lines)
-- `tests/config/schema.test.ts` (modified — appended 2 new test cases, net +9 lines after formatting fix)
+- `src/config/schema.ts` (+2 `CONFIG_SPEC` entries)
+- `src/server/main.ts` (`VoiceWindowConfig`/`DEFAULT_VOICE_CONFIG`, `renderIndexHtml` 4th param + injection, `startWebServer` call site)
+- `tests/config/schema.test.ts` (+2 tests)
+- `tests/server/main.test.ts` (+2 tests)
 
 ## Commit
+`d891e93 feat(voice): add AGENT_WEB_VOICE_* config + renderIndexHtml window globals (D7)` — 4 files changed, 64 insertions(+), 5 deletions(-).
 
-`9a1679a feat(config): add AGENT_SESSIONS_PATH knob (Phase 6 Incr 1)`
-
-Pre-commit hook (`docs-check`) passed: "living docs present + linked; every src subsystem documented." Only the two intended files were staged/committed (verified via `git status --short` before commit — numerous other unstaged repo changes from prior/parallel task work were left untouched).
+Pre-commit hook (`docs-check`) passed: "living docs present + linked; every src subsystem documented." This is an in-progress slice commit (not a landing), so `docs/architecture.md` was intentionally not touched — no push was performed. Only the four intended files were staged/committed (verified via `git status --short` before commit).
 
 ## Self-review
-
-- Entry shape mirrors the existing `AGENT_MEMORY_PATH` entry exactly (`kind: 'string'`, `def` a bare relative directory name, no hardcoded absolute path) — honors the repo's "never hardcode limits, env-fallback-only" rule and the "Memory / RAG" precedent it's explicitly modeled on.
-- No new code path introduced: relies entirely on the existing generic `loadConfig()` loop, plus the pre-existing `'every entry has a doc string and a default'` test which already covers this new entry (non-empty `doc`, defined `def`) without any test change needed for it.
-- The `doc` string forward-references `session/store.ts createSessionStore` (Tasks 4–8 of this phase, not yet built) — intentional per the brief; the config knob is designed to land ahead of its consumer.
-- Anchor was verified by reading the live file rather than trusting brief line numbers — the "Memory / RAG" group's last entry (`AGENT_MEMORY_RERANK`) and the following "Verification / anti-hallucination" comment were confirmed present and adjacent before inserting between them.
-- Verified the existing test file contained exactly the 4 tests the brief described (no extra pre-existing tests were at risk of being dropped by treating the brief's snippet as "full file content").
+- New config entries mirror the `AGENT_WEB_NOTIFY_*` precedent exactly in shape and doc-comment style, including forward-references to the not-yet-built consumers (`web/src/features/voice/stt-engine.ts`, `web/src/features/voice/vad.ts`) — consistent with how the notify entries referenced `use-run-notifications.ts` ahead of that consumer landing.
+- `renderIndexHtml`'s new 4th parameter is additive and defaulted, so all existing call sites and tests (including the 2-arg and 3-arg forms) continue to work unchanged — verified by the full focused-test run showing pre-existing notify tests still green.
+- Token/global escaping mechanism was reused verbatim (`JSON.stringify(...)`) rather than re-implemented, keeping the hostile-token XSS-escaping test's coverage intact for the new globals' code path (same `tokenScript` string-builder, same escape applied only to `token` — appropriate since the two new values are server-controlled config, not user input).
 
 ## Concerns
-
-None. Scope was a single, isolated `CONFIG_SPEC` entry (YAGNI honored, one entry only) with no downstream code yet depending on it.
-
-## Note
-
-This file previously held a report for an earlier Phase 5 Task 3 (Proposal + BuildResult DTOs, commit `eac5290`), which itself had overwritten a still-earlier Task 3 (Workflow DTOs, commit `c650c17`) and an even earlier one (RunListQuery/RunListResponse, commits `70ced40` + `0956bc4`). Per the established pattern, this report fully overwrites that prior content for the current Phase 6 Task 3 — the earlier work already landed under its own commits and is unaffected by this document overwrite.
+None. Scope was exactly the two config knobs + the one `renderIndexHtml` extension point specified in the brief; no scope creep.

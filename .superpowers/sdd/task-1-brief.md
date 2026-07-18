@@ -1,146 +1,105 @@
-## Task 1: Session DTOs — `SessionListItemDtoSchema` + `SessionDtoSchema`
+### Task 1: Lift `VoiceFrames` into `src/contracts/voice.ts` (plain type, non-zod)
 
 **Files:**
-- Modify: `src/contracts/dto.ts` (append after the existing `ChatMessageDtoSchema` block, currently lines 124-131)
-- Test: `tests/contracts/session-dto.test.ts` (create)
+- Create: `src/contracts/voice.ts`
+- Modify: `src/contracts/index.ts`
+- Modify: `src/voice/types.ts:1-5`
+- Test: `tests/contracts/voice.test.ts`
 
 **Interfaces:**
-- Consumes: `ChatMessageDtoSchema`/`ChatMessageDTO` (`src/contracts/dto.ts:124-131`, unchanged); `ChatRole` (`src/contracts/enums.ts:59-63`, unchanged) — test-only import.
-- Produces: `SessionListItemDtoSchema` / `SessionListItemDTO` = `{ id: string; title: string; owner: string; createdAt: number; updatedAt: number; lastMessageAt?: number; runId?: string }`. `SessionDtoSchema` / `SessionDTO` = the same fields plus `{ messages: ChatMessageDTO[] }`. Both re-exported via `src/contracts/index.ts`'s existing `export * from './dto.ts'` wildcard — no barrel edit needed (this task's test imports from `index.ts` to prove it).
+- Consumes: nothing (this is the first task; `Float32Array` is a built-in).
+- Produces: `VoiceFrames` type (`{ samples: Float32Array; sampleRate: 16000 }`), importable from `src/contracts/voice.ts`, `src/contracts/index.ts` (via `@contracts` in `web/`), and re-exported (not redefined) from `src/voice/types.ts` for every existing CLI import site (`src/voice/capture.ts`, `src/voice/transcribe.ts`, `src/telemetry/spans.ts`, and their tests).
 
 - [ ] **Step 1: Write the failing test**
 
-`tests/contracts/session-dto.test.ts`:
-```typescript
+Create `tests/contracts/voice.test.ts`:
+
+```ts
 import { expect, test } from 'bun:test';
-import { ChatRole } from '../../src/contracts/enums.ts';
-import {
-  SessionDtoSchema,
-  SessionListItemDtoSchema,
-} from '../../src/contracts/index.ts';
+import type { VoiceFrames } from '../../src/contracts/voice.ts';
 
-test('SessionListItemDtoSchema round-trips a minimal session summary (no optional fields)', () => {
-  const parsed = SessionListItemDtoSchema.parse({
-    id: 'sess-1',
-    title: 'New chat',
-    owner: 'local',
-    createdAt: 1_000,
-    updatedAt: 1_000,
-  });
-  expect(parsed).toEqual({
-    id: 'sess-1',
-    title: 'New chat',
-    owner: 'local',
-    createdAt: 1_000,
-    updatedAt: 1_000,
-  });
-  expect(parsed.lastMessageAt).toBeUndefined();
-  expect(parsed.runId).toBeUndefined();
-});
-
-test('SessionListItemDtoSchema accepts lastMessageAt/runId when present', () => {
-  const parsed = SessionListItemDtoSchema.parse({
-    id: 'sess-1',
-    title: 'New chat',
-    owner: 'local',
-    createdAt: 1_000,
-    updatedAt: 2_000,
-    lastMessageAt: 2_000,
-    runId: 'run-abc',
-  });
-  expect(parsed.lastMessageAt).toBe(2_000);
-  expect(parsed.runId).toBe('run-abc');
-});
-
-test('SessionListItemDtoSchema rejects a payload missing a required field', () => {
-  expect(() =>
-    SessionListItemDtoSchema.parse({ title: 'New chat' }),
-  ).toThrow();
-});
-
-test('SessionDtoSchema embeds ChatMessageDTO[] verbatim (spec D8)', () => {
-  const parsed = SessionDtoSchema.parse({
-    id: 'sess-1',
-    title: 'New chat',
-    owner: 'local',
-    createdAt: 1_000,
-    updatedAt: 1_000,
-    messages: [
-      { id: 'm1', role: ChatRole.User, text: 'hello' },
-      { id: 'm2', role: ChatRole.Assistant, text: 'hi there', degraded: true },
-    ],
-  });
-  expect(parsed.messages).toHaveLength(2);
-  expect(parsed.messages[0]?.role).toBe(ChatRole.User);
-  expect(parsed.messages[1]?.degraded).toBe(true);
-});
-
-test('SessionDtoSchema accepts an empty transcript (a brand-new session)', () => {
-  const parsed = SessionDtoSchema.parse({
-    id: 'sess-1',
-    title: 'New chat',
-    owner: 'local',
-    createdAt: 1_000,
-    updatedAt: 1_000,
-    messages: [],
-  });
-  expect(parsed.messages).toEqual([]);
+test('VoiceFrames is a plain {samples,sampleRate:16000} shape (contracts, no zod — D5 exception)', () => {
+  const frames: VoiceFrames = {
+    samples: new Float32Array([0.1, -0.2, 0.3]),
+    sampleRate: 16000,
+  };
+  expect(frames.sampleRate).toBe(16000);
+  expect(frames.samples).toBeInstanceOf(Float32Array);
+  expect(frames.samples.length).toBe(3);
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test tests/contracts/session-dto.test.ts`
-Expected: FAIL — `SessionListItemDtoSchema`/`SessionDtoSchema` are not exported from `src/contracts/index.ts` (module has no such export).
+Run: `bun test tests/contracts/voice.test.ts`
+Expected: FAIL — `error: Cannot find module '../../src/contracts/voice.ts'` (the file doesn't exist yet).
 
-- [ ] **Step 3: Append the schemas to `src/contracts/dto.ts`**
+- [ ] **Step 3: Write minimal implementation**
 
-Read the file first (already read; `ChatMessageDtoSchema` is at lines 124-131, `CrewMemberDtoSchema` starts at 137). Insert the following block immediately after `export type ChatMessageDTO = z.infer<typeof ChatMessageDtoSchema>;` (line 131) and before the `CrewMemberDtoSchema` comment (line 133):
-```typescript
-/** A session's list-row projection — enough for `/sessions`'s list/search
- *  view. `owner` is reserved (constant `'local'` today; Slices 24/33 backfill
- *  real ownership — same precedent as `RunDtoSchema.owner`). `lastMessageAt`
- *  is absent for a brand-new session with no messages yet (the store falls
- *  back to `createdAt` for sorting — spec D10). Slice 30b Phase 6 (spec §4.1). */
-export const SessionListItemDtoSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  owner: z.string(),
-  createdAt: z.number(),
-  updatedAt: z.number(),
-  lastMessageAt: z.number().optional(),
-  runId: z.string().optional(),
-});
-export type SessionListItemDTO = z.infer<typeof SessionListItemDtoSchema>;
+Create `src/contracts/voice.ts`:
 
-/** A session's full detail projection — the list-item fields plus its
- *  complete transcript, reusing `ChatMessageDtoSchema` verbatim (spec D8) —
- *  no new message DTO. Slice 30b Phase 6 (spec §4.1). */
-export const SessionDtoSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  owner: z.string(),
-  createdAt: z.number(),
-  updatedAt: z.number(),
-  lastMessageAt: z.number().optional(),
-  runId: z.string().optional(),
-  messages: z.array(ChatMessageDtoSchema),
-});
-export type SessionDTO = z.infer<typeof SessionDtoSchema>;
+```ts
+/**
+ * Raw audio ready for the STT engine: mono Float32 in [-1,1] at 16 kHz.
+ * Lifted from `src/voice/types.ts` (Slice 30b Phase 7, D5) so the browser
+ * voice code (`web/src/features/voice/`) and the CLI (`src/voice/`) share
+ * ONE definition — `src/voice/types.ts` re-exports this rather than
+ * redefining it.
+ *
+ * Deliberate exception to the "every contract is a zod schema" convention
+ * every other file in this directory follows: `VoiceFrames` never crosses
+ * an HTTP wire in this phase (audio never leaves the browser tab — there is
+ * no server-side voice route), so there is no round-trip to validate and a
+ * zod schema for a `Float32Array` field would add ceremony with nothing to
+ * protect.
+ */
+export type VoiceFrames = {
+  samples: Float32Array;
+  sampleRate: 16000;
+};
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+Modify `src/contracts/index.ts` (add the new re-export, alphabetically before `./enums.ts` would read oddly — keep the existing four lines and simply append):
 
-Run: `bun test tests/contracts/session-dto.test.ts`
-Expected: PASS (all 5 tests).
+```ts
+export * from './dto.ts';
+export * from './enums.ts';
+export * from './events.ts';
+export * from './requests.ts';
+export * from './voice.ts';
+```
 
-- [ ] **Step 5: Gate + commit**
+Modify `src/voice/types.ts` — replace the local `VoiceFrames` definition (lines 1-5) with a re-export:
+
+```ts
+/** Re-exported from contracts (Slice 30b Phase 7, D5) — the browser voice
+ *  code needs the IDENTICAL shape and `src/voice/` is Node-only, so
+ *  `src/contracts/voice.ts` is now the single source of truth; this file
+ *  re-exports rather than redefines. */
+export type { VoiceFrames } from '../contracts/voice.ts';
+```
+
+(Leave the rest of `src/voice/types.ts` — `CaptureSource`, `VoiceOutcome`, `VoiceError`, `VoiceConfig`, `Transcriber` — untouched for this task; `CaptureSource` moves in Task 2.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bun test tests/contracts/voice.test.ts`
+Expected: PASS (1 test).
+
+Then confirm the CLI voice code still compiles against the re-export:
+
+Run: `bun run typecheck`
+Expected: PASS, no errors in `src/voice/**`, `src/telemetry/spans.ts`, or their tests.
+
+Also run the full existing voice test suite to confirm nothing broke:
+
+Run: `bun test tests/voice/`
+Expected: PASS (all pre-existing voice tests, unchanged).
+
+- [ ] **Step 5: Commit**
 
 ```bash
-bun run typecheck && bun run lint:file -- src/contracts/dto.ts tests/contracts/session-dto.test.ts
-git add src/contracts/dto.ts tests/contracts/session-dto.test.ts
-git commit -m "feat(contracts): add SessionListItemDtoSchema/SessionDtoSchema (Phase 6 Incr 1)"
+git add src/contracts/voice.ts src/contracts/index.ts src/voice/types.ts tests/contracts/voice.test.ts
+git commit -m "feat(voice): lift VoiceFrames into src/contracts as a plain non-zod type (D5)"
 ```
-
----
 
