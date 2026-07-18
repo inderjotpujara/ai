@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { createDownsampler } from './audio-capture.ts';
+import {
+  getLastAudioContext,
+  getLastAudioWorkletNode,
+  getLastGetUserMediaConstraints,
+  getLastMediaStream,
+} from '../../test/setup.ts';
+import { createAudioCapture, createDownsampler } from './audio-capture.ts';
 
 /** Small independent reference resampler: recomputes each output sample
  *  directly from `p_k = k * ratio` against the full signal with fresh state
@@ -141,5 +147,64 @@ describe('createDownsampler', () => {
     expect(
       Array.from(downsampler.process(new Float32Array([0, 3, 6, 9, 12, 15]))),
     ).toEqual([0, 9]);
+  });
+});
+
+describe('createAudioCapture', () => {
+  it('start() requests AEC/noise-suppression/AGC getUserMedia, opens an AudioContext + worklet, and flips active', async () => {
+    const capture = createAudioCapture();
+    expect(capture.active).toBe(false);
+    await capture.start();
+    expect(capture.active).toBe(true);
+    expect(getLastGetUserMediaConstraints()).toEqual({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    expect(getLastAudioWorkletNode()).toBeDefined();
+  });
+
+  it('forwards worklet chunks to onChunk subscribers and a computed RMS level to onLevel subscribers', async () => {
+    const capture = createAudioCapture();
+    await capture.start();
+    const chunks: Float32Array[] = [];
+    const levels: number[] = [];
+    capture.onChunk((c) => chunks.push(c));
+    capture.onLevel((l) => levels.push(l));
+
+    const node = getLastAudioWorkletNode();
+    const chunk = new Float32Array([1, -1, 1, -1]); // RMS = 1
+    node?.port.onmessage?.({ data: chunk } as MessageEvent);
+
+    expect(chunks).toEqual([chunk]);
+    expect(levels).toEqual([1]);
+  });
+
+  it('onChunk/onLevel unsubscribe stops further callbacks', async () => {
+    const capture = createAudioCapture();
+    await capture.start();
+    const chunks: Float32Array[] = [];
+    const unsubscribe = capture.onChunk((c) => chunks.push(c));
+    unsubscribe();
+
+    const node = getLastAudioWorkletNode();
+    node?.port.onmessage?.({ data: new Float32Array([0.5]) } as MessageEvent);
+
+    expect(chunks).toEqual([]);
+  });
+
+  it('stop() stops every MediaStream track, closes the AudioContext, and flips active off', async () => {
+    const capture = createAudioCapture();
+    await capture.start();
+    const stream = getLastMediaStream();
+    const ctx = getLastAudioContext();
+    await capture.stop();
+    expect(capture.active).toBe(false);
+    for (const track of stream?.getTracks() ?? []) {
+      expect(track.readyState).toBe('ended');
+    }
+    expect(ctx?.close).toHaveBeenCalledTimes(1);
   });
 });
