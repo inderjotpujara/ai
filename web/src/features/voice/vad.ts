@@ -91,8 +91,9 @@ export function createSegmenter(opts: SegmenterOpts): Segmenter {
 
   function pushFrame(chunk: Float32Array, isSpeech: boolean): void {
     if (!gated) {
+      // Non-gated (hold-to-talk) mode never reads `inSegment` — the
+      // gesture itself is the segment boundary — so it's not written here.
       buffer.push(chunk);
-      inSegment = true;
       return;
     }
     if (isSpeech) {

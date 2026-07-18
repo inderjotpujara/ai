@@ -120,3 +120,109 @@ describe('createSegmenter — hold-to-talk (gated: false)', () => {
     expect(onSegment).not.toHaveBeenCalled();
   });
 });
+
+describe('createSegmenter — tap-to-toggle (gated: true)', () => {
+  it('closes a segment after sustained silence >= silenceMs, trimming the trailing silence off the emitted audio', () => {
+    const segmenter = createSegmenter({
+      silenceMs: 100,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(512, 0.5), true); // 32ms speech
+    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
+    segmenter.pushFrame(tone(512, 0), false); // 64ms
+    segmenter.pushFrame(tone(512, 0), false); // 96ms
+    expect(onSegment).not.toHaveBeenCalled(); // not yet sustained
+    segmenter.pushFrame(tone(512, 0), false); // 128ms >= 100ms — closes
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    const frames = onSegment.mock.calls[0]?.[0] as VoiceFrames;
+    // only the one speech chunk survives trimming — no silent tail.
+    expect(frames.samples.length).toBe(512);
+  });
+
+  it('does not double-transcribe on a jittery VAD flip that never sustains past silenceMs (§7.1 b)', () => {
+    const segmenter = createSegmenter({
+      silenceMs: 100,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(512), true);
+    segmenter.pushFrame(tone(512, 0), false); // 32ms silent — jitter
+    segmenter.pushFrame(tone(512), true); // speech resumes — silence clock resets
+    segmenter.pushFrame(tone(512, 0), false);
+    segmenter.pushFrame(tone(512), true);
+    expect(onSegment).not.toHaveBeenCalled(); // never sustained 100ms of silence
+  });
+
+  it('a very short utterance (a single speech chunk) still emits once sustained silence follows (§7.1 b — no missed segment)', () => {
+    const segmenter = createSegmenter({
+      silenceMs: 64,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(512), true); // one 32ms speech chunk
+    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
+    segmenter.pushFrame(tone(512, 0), false); // 64ms — closes
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    const frames = onSegment.mock.calls[0]?.[0] as VoiceFrames;
+    expect(frames.samples.length).toBe(512);
+  });
+
+  it('a tap-to-toggle session spans multiple speech/silence cycles, each closing its own segment independently', () => {
+    const segmenter = createSegmenter({
+      silenceMs: 64,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    // cycle 1
+    segmenter.pushFrame(tone(512, 0.1), true);
+    segmenter.pushFrame(tone(512, 0), false);
+    segmenter.pushFrame(tone(512, 0), false); // closes cycle 1
+    // cycle 2 (re-armed automatically — no explicit re-arm call needed)
+    segmenter.pushFrame(tone(512, 0.2), true);
+    segmenter.pushFrame(tone(512, 0), false);
+    segmenter.pushFrame(tone(512, 0), false); // closes cycle 2
+    expect(onSegment).toHaveBeenCalledTimes(2);
+    const frames1 = onSegment.mock.calls[0]?.[0] as VoiceFrames;
+    const frames2 = onSegment.mock.calls[1]?.[0] as VoiceFrames;
+    expect((frames1.samples as Float32Array)[0]).toBeCloseTo(0.1);
+    expect((frames2.samples as Float32Array)[0]).toBeCloseTo(0.2);
+  });
+
+  it('leading silence before any speech is ignored (never buffered, never closes an empty segment)', () => {
+    const segmenter = createSegmenter({
+      silenceMs: 64,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(512, 0), false);
+    segmenter.pushFrame(tone(512, 0), false);
+    segmenter.pushFrame(tone(512, 0), false);
+    expect(onSegment).not.toHaveBeenCalled();
+  });
+
+  it('flush() during an open (not-yet-silence-closed) tap-toggle segment closes it immediately with whatever is buffered', () => {
+    const segmenter = createSegmenter({
+      silenceMs: 1000,
+      gated: true,
+      frameMs: 32,
+    });
+    const onSegment = vi.fn();
+    segmenter.onSegment(onSegment);
+    segmenter.pushFrame(tone(512, 0.4), true);
+    segmenter.flush(); // manual stop before silence would ever have closed it
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    const frames = onSegment.mock.calls[0]?.[0] as VoiceFrames;
+    expect((frames.samples as Float32Array)[0]).toBeCloseTo(0.4);
+  });
+});
