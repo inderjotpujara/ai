@@ -1,6 +1,7 @@
 import type { ClipboardEvent, DragEvent } from 'react';
 import { useState } from 'react';
 import { PromptInput } from '../../shared/ai-elements/prompt-input.tsx';
+import { MicButton } from '../voice/mic-button.tsx';
 import { uploadImage } from './attachments.ts';
 
 /** The ONLY image types the composer will attempt to upload (mirrors the
@@ -86,6 +87,10 @@ export function Composer({
     setAttachments([]);
   }
 
+  function handleVoiceFinal(text: string) {
+    setValue((v) => (v ? `${v} ${text}` : text));
+  }
+
   return (
     <section
       data-testid="composer-dropzone"
@@ -114,6 +119,9 @@ export function Composer({
           ))}
         </ul>
       )}
+      <div className="flex items-center gap-2 px-3 pt-2">
+        <MicButton onFinal={handleVoiceFinal} />
+      </div>
       <PromptInput
         value={value}
         onChange={setValue}
