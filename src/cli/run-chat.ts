@@ -4,7 +4,7 @@ import type { OrchestratorResult } from '../core/orchestrator.ts';
 import { runOrchestrator } from '../core/orchestrator.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
 import { type RunHandle, writeArtifact } from '../run/run-store.ts';
-import { setRunOutcome, withRunSpan } from '../telemetry/spans.ts';
+import { setRunOutcome, withChatRunSpan } from '../telemetry/spans.ts';
 
 export type ChatDeps = {
   orchestrator: Agent;
@@ -18,7 +18,7 @@ export type ChatDeps = {
 
 export async function runChat(deps: ChatDeps): Promise<OrchestratorResult> {
   const { run } = deps;
-  return await withRunSpan(run.id, deps.task, async () => {
+  return await withChatRunSpan(run.id, deps.task, async () => {
     const result = await runOrchestrator(
       deps.orchestrator,
       deps.task,

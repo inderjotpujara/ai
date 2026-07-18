@@ -150,7 +150,7 @@ test('runChat writes spans.jsonl with a root run span carrying the outcome', asy
   }
   expect(result.kind).toBe('gap');
   const { spans } = await readSpans(join(root, 'run-span'));
-  const runSpan = spans.find((s) => s.name === 'agent.run');
+  const runSpan = spans.find((s) => s.name === 'chat.run');
   expect(runSpan).toBeDefined();
   expect(runSpan?.attributes['agent.outcome']).toBe('gap');
 });

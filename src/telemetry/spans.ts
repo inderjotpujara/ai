@@ -242,6 +242,30 @@ export function withRunSpan<T>(
 }
 
 /**
+ * Root span for one CHAT turn (Slice 30b Phase 8, D9). A `chat.run`-naming
+ * sibling of `withRunSpan` with an identical body — chat turns stop borrowing
+ * the generic `agent.run` name so `deriveRunKind` classifies them as
+ * `RunKind.Chat` (and the web notifier never toasts a long chat turn). Kept
+ * separate rather than reusing `withRunSpan` so a future standalone-agent-run
+ * feature still owns the `agent.run` name.
+ */
+export function withChatRunSpan<T>(
+  runId: string,
+  task: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('chat.run', async (span) => {
+    span.setAttribute(ATTR.RUN_ID, runId);
+    span.setAttribute(
+      ATTR.CONTENT_POLICY,
+      contentPolicyLabel(uncensoredEnabled()),
+    );
+    if (recordIoEnabled()) span.setAttribute(ATTR.TASK, task);
+    return fn();
+  });
+}
+
+/**
  * Span for one HTTP request handled by the web BFF (Slice 30b). Follows the
  * recorder-callback pattern (`withRuntimeSpan`): opens a `server.request` span,
  * sets route/method + the reserved principal, runs `fn` (which reports the final
