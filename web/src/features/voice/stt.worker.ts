@@ -20,10 +20,11 @@ import {
   type ProgressInfo,
   type Tensor,
 } from '@huggingface/transformers';
+import { ModelTier } from './model-tier.ts';
 
-/** Canonical home of `ModelTier` (Task 7) — Task 8 imports it from here and
- * supersedes Task 4's temporary local definition in the Settings feature. */
-export type ModelTier = 'moonshine-base' | 'moonshine-tiny';
+/** Canonical `ModelTier` now lives in `./model-tier.ts` (Task 8) — re-export
+ * so existing importers of it from this module keep working. */
+export { ModelTier };
 
 export type SttWorkerRequest =
   | { kind: 'load'; model: ModelTier }
@@ -38,8 +39,8 @@ export type SttWorkerResponse =
   | { kind: 'error'; id?: number; message: string };
 
 const MODEL_IDS: Record<ModelTier, string> = {
-  'moonshine-base': 'onnx-community/moonshine-base-ONNX',
-  'moonshine-tiny': 'onnx-community/moonshine-tiny-ONNX',
+  [ModelTier.Base]: 'onnx-community/moonshine-base-ONNX',
+  [ModelTier.Tiny]: 'onnx-community/moonshine-tiny-ONNX',
 };
 const VAD_MODEL_ID = 'onnx-community/silero-vad';
 

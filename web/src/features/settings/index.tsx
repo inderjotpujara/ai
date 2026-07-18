@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
+import { ModelTier } from '../voice/model-tier.ts';
 
 const STORAGE_KEY = 'agent.notifyOsEnabled';
 const VOICE_ENABLED_KEY = 'agent.voiceInputEnabled';
 const VOICE_MODEL_TIER_KEY = 'agent.voiceModelTier';
 
-/** Temporary home for `ModelTier` (Slice 30b Phase 7 Task 4) — Task 8 makes
- *  `web/src/features/voice/stt-engine.ts` the canonical definition and this
- *  file switches to importing it from there instead of redefining it. */
-export type ModelTier = 'moonshine-base' | 'moonshine-tiny';
+/** Canonical `ModelTier` now lives in `web/src/features/voice/model-tier.ts`
+ *  (Task 8, superseding Task 4's temporary local union here) — re-exported
+ *  so existing/future importers of it from this module keep working. */
+export { ModelTier };
 
 function storedPreference(): boolean {
   try {
@@ -26,7 +27,7 @@ export function isOsNotifyEnabled(): boolean {
 }
 
 function isModelTier(value: string | null): value is ModelTier {
-  return value === 'moonshine-base' || value === 'moonshine-tiny';
+  return value === ModelTier.Base || value === ModelTier.Tiny;
 }
 
 /** Falls back to the server-injected default (Task 3's
@@ -37,7 +38,7 @@ function defaultModelTier(): ModelTier {
     .__AGENT_VOICE_DEFAULT_MODEL__;
   return isModelTier(fromWindow ?? null)
     ? (fromWindow as ModelTier)
-    : 'moonshine-base';
+    : ModelTier.Base;
 }
 
 function storedVoiceEnabled(): boolean {
@@ -165,10 +166,10 @@ export function SettingsArea() {
           onChange={(e) => setModelTier(e.target.value as ModelTier)}
           className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 font-mono text-sm text-[var(--color-fg)]"
         >
-          <option value="moonshine-base">
+          <option value={ModelTier.Base}>
             Moonshine base (accurate, ~130MB)
           </option>
-          <option value="moonshine-tiny">Moonshine tiny (fast, ~76MB)</option>
+          <option value={ModelTier.Tiny}>Moonshine tiny (fast, ~76MB)</option>
         </select>
       </div>
       <p className="mt-2 text-sm text-[var(--color-muted)]">
