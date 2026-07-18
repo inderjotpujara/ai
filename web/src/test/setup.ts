@@ -58,3 +58,13 @@ beforeEach(() => {
     },
   );
 });
+
+// happy-dom does not implement window.confirm at all (the property is
+// `undefined`, not a stub that throws like jsdom's) — SessionDetail's delete
+// button (Slice 30b Phase 6 T54) gates on it, and `vi.spyOn(window, 'confirm')`
+// requires the property to already be a function to wrap. `window` is the
+// same object as `globalThis` under vitest's happy-dom pool, so stubbing the
+// global also satisfies `window.confirm`.
+beforeEach(() => {
+  vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+});

@@ -1,63 +1,98 @@
-# Task 2 report — RunListItemDTO — list-cheap run summary DTO
+# Task 2 report: Session request/response contracts
 
-## Status: DONE — GREEN, committed
+## Status: DONE
 
-## TDD Cycle
+## What was implemented
 
-**RED** — Added two failing tests to `tests/contracts/dto.test.ts`:
-1. `RunListItemDTO parses a minimal summary (tokens optional, no spans/artifacts)` — verifies parsing without optional fields and confirms no `spans`/`artifacts` properties exist
-2. `RunListItemDTO round-trips with a token roll-up present` — confirms optional token object round-trips correctly
+- `src/contracts/requests.ts`:
+  - Added `SessionListItemDtoSchema` to the existing `./dto.ts` import block, in
+    alphabetical order, preserving all 5 existing names
+    (`CrewListItemDtoSchema`, `McpServerDtoSchema`, `ModelInventoryDtoSchema`,
+    `RunListItemDtoSchema`, `WorkflowListItemDtoSchema`). Verified against the
+    live file before editing — the brief's cited import list matched the
+    actual file exactly (no drift from the "lines 2-8" snapshot note), so the
+    prescribed full-block replacement was safe to apply as given.
+  - Appended, after the existing `BuilderRegistryListResponseSchema` block:
+    - `SessionListQuerySchema` / `SessionListQuery` — `search?`, `limit`
+      (coerced int, 1-200, default 25), `cursor?`.
+    - `SessionListResponseSchema` / `SessionListResponse` — `items:
+      SessionListItemDTO[]`, `nextCursor?`, `total: number`.
+    - `SessionRenameRequestSchema` / `SessionRenameRequest` — `title` (1-200
+      chars).
+  - No `.strict()`, zod-only + sibling `./dto.ts` import (isomorphic), each
+    schema paired with an inferred `type`.
+- `tests/contracts/session-requests.test.ts` (new): 10 tests (brief's Step 4
+  text said "9 tests" but the brief's own verbatim test code contains 10
+  `test()` blocks — implemented verbatim, all pass; flagging the count as a
+  minor brief typo, not a deviation).
+- Did **not** touch `src/contracts/index.ts` — the wildcard re-export covers
+  the new exports (confirmed by the test file importing successfully from
+  `../../src/contracts/index.ts`).
 
-Ran focused test:
+## TDD evidence
+
+**RED** — `bun test tests/contracts/session-requests.test.ts` before Step 3:
 ```
-bun test tests/contracts/dto.test.ts
+SyntaxError: Export named 'SessionListResponseSchema' not found in module
+'/Users/inderjotsingh/ai/src/contracts/index.ts'.
+0 pass / 1 fail / 1 error
 ```
-Failed as expected: `RunListItemDtoSchema` not yet exported (import error in test file).
 
-**Implementation** — Exactly per brief (`/.superpowers/sdd/task-2-brief.md`):
-- `src/contracts/dto.ts`: Appended `RunListItemDtoSchema` and `RunListItemDTO` type alias after `RunDtoSchema`. Schema defines 9 required fields (`id`, `startMs`, `durationMs`, `outcome`, `lifecycle`, `origin`, `models`, `degraded`, `spanCount`) and 1 optional field (`tokens`), reusing the module-local `TokensSchema` already declared at file top. No `spans`, `artifacts`, or `degrades` fields (the core optimization for list cache). Used `.enum(RunLifecycle)` and `.enum(RunOrigin)` to reference the existing enums from `enums.ts`.
-- `tests/contracts/dto.test.ts`: Imported `RunListItemDtoSchema` from dto, appended the two test cases verbatim.
-- `src/contracts/index.ts`: No changes needed — barrel already exports `* from './dto.ts'`.
+**GREEN** — after Step 3 edit, same command:
+```
+10 pass
+0 fail
+14 expect() calls
+Ran 10 tests across 1 file. [26.00ms]
+```
 
-**GREEN**:
+**Regression (brief Step 5)** — `bun test tests/contracts/`:
 ```
-bun test tests/contracts/dto.test.ts
- 10 pass / 0 fail / 19 expect() calls
+98 pass
+0 fail
+153 expect() calls
+Ran 98 tests across 23 files. [60.00ms]
 ```
-All 10 tests pass (8 pre-existing + 2 new for RunListItemDTO).
+Confirms the shared `./dto.ts` import edit (adding one name) didn't disturb
+any other schema in `requests.ts`.
 
 ## Gate
 
-- `bun run typecheck` → clean (no output from `tsc --noEmit`).
-- `bun run lint:file -- "src/contracts/dto.ts" "tests/contracts/dto.test.ts"` → `Checked 2 files in 3ms. No fixes applied.`
-- Pre-commit hook ran automatically on `git commit` → `✔ docs-check: living docs present + linked; every src subsystem documented.`
+- `bun run typecheck` → clean (`tsc --noEmit`, no output).
+- `bun run lint:file -- src/contracts/requests.ts tests/contracts/session-requests.test.ts`
+  → 1 formatting error on the first run (biome wanted the
+  `SessionRenameRequestSchema accepts a normal title` test's `expect(...)`
+  call reflowed differently than the brief's verbatim snippet). Applied
+  biome's suggested reflow (semantically identical, same assertion) and
+  re-ran: **0 errors**. Re-ran the focused test after the formatting edit —
+  still 10/10 pass.
 
 ## Commit
 
-```
-db4425a feat(contracts): RunListItemDTO — list-cheap run summary (no spans/artifacts)
-```
+`df304f9` — `feat(contracts): add SessionListQuery/SessionListResponse/SessionRenameRequest schemas (Phase 6 Incr 1)`
+2 files changed, 106 insertions(+): `src/contracts/requests.ts`,
+`tests/contracts/session-requests.test.ts`. Pre-commit `docs-check` passed
+automatically ("✔ docs-check: living docs present + linked; every src
+subsystem documented.") — no `architecture.md` update required (pure
+addition inside the already-documented `src/contracts` subsystem).
 
-Commit message body:
-```
-Add RunListItemDtoSchema and RunListItemDTO type to provide a lightweight
-summary projection for run history lists. The DTO excludes spans, artifacts,
-and degrades to optimize for list performance. Includes minimal fields: id,
-timing, outcome, lifecycle, origin, models, degradation flag, and optional
-token roll-up. Tested with minimal and full-tokens variants.
-```
+## Self-review
 
-## Files Changed
-- `src/contracts/dto.ts` — added `RunListItemDtoSchema` (z.object) + `RunListItemDTO` type infer (45 lines total, 16 new).
-- `tests/contracts/dto.test.ts` — imported `RunListItemDtoSchema`, appended 2 new test cases (35 new lines).
-
-## Self-Review
-- **Schema completeness**: All 9 fields match the brief exactly. `RunLifecycle` and `RunOrigin` enum references use `.enum(...)` matching the existing `RunDtoSchema` pattern (not hardcoded strings).
-- **Optional field handling**: `tokens: TokensSchema` correctly makes tokens optional since `TokensSchema` is already `.optional()` at declaration.
-- **No heavy arrays**: Confirmed test assertions that `'spans' in parsed` and `'artifacts' in parsed` both return false — the schema has no such properties.
-- **Export barrel**: No changes needed; auto-exported via existing `export * from './dto.ts'` in `src/contracts/index.ts`.
-- **Forward-compat**: Tests verify both the absent-tokens case and the present-tokens case, matching the forward-compat pattern used in `SpanDtoSchema` and `RunDtoSchema`.
-- **Code style consistency**: Schema uses same formatting, optional placement, and enum reference pattern as existing `RunDtoSchema` in the same file. Type alias follows the same `type X = z.infer<typeof XSchema>` pattern.
+- Import list verified against the live file first, per the task
+  instructions' explicit anti-drift check — matched the brief exactly, so no
+  alphabetical-splice fallback was needed.
+- Schemas are structurally identical in shape/bounds to their `Run*`
+  counterparts already in the file (`RunListQuerySchema`/
+  `RunListResponseSchema`), consistent with the file's existing idiom and the
+  brief's own comments citing that mirroring.
+- No barrel edit; confirmed the wildcard re-export in `src/contracts/index.ts`
+  already covers `requests.ts` (test imports resolved without touching it).
+- YAGNI honored — only the 3 schema/type pairs the brief specifies, nothing
+  extra.
 
 ## Concerns
-None. Scope was straightforward; implementation follows the brief exactly (schema + tests + export). No ambiguity; no deviations from the specified code.
+
+- None blocking. Only note: the brief's Step 2/4 prose says "9 tests" while
+  its own embedded test code has 10 — cosmetic mismatch in the brief text
+  itself, doesn't affect correctness since the code was taken verbatim and all
+  10 pass.

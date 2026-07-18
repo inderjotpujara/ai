@@ -10,6 +10,7 @@ import type { ModelDeclaration } from '../../core/types.ts';
 import { buildRegistry } from '../../discovery/build-registry.ts';
 import type { IngestFlags } from '../../media/ingest.ts';
 import { createMediaStore } from '../../media/store.ts';
+import type { MemoryStore } from '../../memory/store.ts';
 import { createModelManager } from '../../resource/model-manager.ts';
 import { listLoadedModels } from '../../resource/ollama-control.ts';
 import { newRunId } from '../../run/run-id.ts';
@@ -83,7 +84,10 @@ export function createLazyEngine(runsRoot: string): LazyEngine {
  *  (the exact same path the CLI uses). Kept thin and correct — this seam is
  *  covered by live-verify, not unit tests (it composes real MCP mount +
  *  engine wiring, which unit tests would only mock away). */
-export function createRealRunChatTurn(engine: LazyEngine): RunChatTurn {
+export function createRealRunChatTurn(
+  engine: LazyEngine,
+  memoryStore?: MemoryStore,
+): RunChatTurn {
   return async ({ task, media, events, stream, signal }) => {
     const registry = await engine.registry();
     return withMcpRun(
@@ -120,6 +124,7 @@ export function createRealRunChatTurn(engine: LazyEngine): RunChatTurn {
             ledger,
             routerNumCtx: engine.routerNumCtx(),
             mediaStore: store,
+            memoryStore,
           },
         });
         return result;

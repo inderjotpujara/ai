@@ -1,364 +1,200 @@
-### Task 5: `mapRunToDto` — flatten spans + degrades + artifacts into a full `RunDTO`
+## Task 5: `src/session/store.ts` — factory scaffold + `upsertSession`/`getSession`/`close`
 
 **Files:**
-- Create: `src/run/run-dto.ts`
-- Test: `tests/run/run-dto.test.ts`
+- Create: `src/session/store.ts`
+- Test: `tests/session/store.test.ts` (create)
 
 **Interfaces:**
-- Consumes: `readSpans`, `buildTree`, `type TraceNode` from `./run-trace.ts`; `type SpanRecord` from `../telemetry/jsonl-exporter.ts`; `ATTR` from `../telemetry/spans.ts`; `readRunArtifacts` (Task 4); `type DegradeEvent` from `../reliability/ledger.ts`; contract types + `RunDtoSchema`, `RunLifecycle`, `RunOrigin`, `SpanStatus`, `DegradeKind` from `../contracts/index.ts`.
-- Produces: `mapRunToDto(runsRoot: string, id: string): Promise<RunDTO | undefined>` — `undefined` when the run has no spans (mirrors `summarizeRun`). Output is validated through `RunDtoSchema` before returning (mapper contract).
+- Consumes: `migrate` (`src/db/migrate.ts`), `SESSION_MIGRATIONS` (Task 4, `src/session/migrations.ts`).
+- Produces (this task's slice of the final surface — Tasks 6-8 add the rest to the SAME file/return object):
+  - `export type SessionRow = { id: string; title: string; owner: string; createdAt: number; updatedAt: number; lastMessageAt: number | undefined; runId: string | undefined }`
+  - `export type SessionStoreDeps = Record<string, never>`
+  - `export function createSessionStore(config: { path?: string }, deps: SessionStoreDeps)` — opens `<config.path ?? 'sessions'>/sessions.db` with the WAL/busy_timeout/foreign_keys pragma trio + `migrate(db, SESSION_MIGRATIONS)`.
+  - Returned closure (this task): `upsertSession(id: string, opts: { defaultTitle: string; at: number }): void`, `getSession(id: string): SessionRow | undefined`, `close(): void`.
 
-Per-span projection (from spec Layer ②):
-- Walk `buildTree(spans)` assigning `depth` (root 0, child parent+1); flatten in tree/offset order.
-- `rootStartUnixNano` = earliest root's `startUnixNano` (`buildTree` returns roots sorted asc, so `roots[0].span.startUnixNano`).
-- `offsetMs = (span.startUnixNano - rootStartUnixNano) / 1e6`; `durationMs = span.durationMs` (already ms).
-- `status = span.status.code === 2 ? SpanStatus.Error : SpanStatus.Ok`; `statusMessage = span.status.message`.
-- `agent` = `attrs[ATTR.DELEGATION_TARGET]` (string) when present.
-- `delegation` = `{ target, depth: attrs[ATTR.DELEGATION_DEPTH], ancestors: String(attrs[ATTR.DELEGATION_ANCESTORS]).split(' → ') }` when `DELEGATION_TARGET` present.
-- `model` = `{ id, provider?, numCtx?, footprintBytes?, runtimeDegraded? }` from `MODEL_ID`/`MODEL_PROVIDER`/`MODEL_NUM_CTX`/`MODEL_FOOTPRINT_BYTES`/`MODEL_RUNTIME_DEGRADED` when `MODEL_ID` present.
-- `tokens` = `{ input?, output? }` from `USAGE_INPUT_TOKENS`/`USAGE_OUTPUT_TOKENS` when either present.
-- `degraded` = `span.events.some((e) => e.name === 'reliability.degrade')`.
-- `events` → `{ name, offsetMs: (e.timeUnixNano - rootStartUnixNano) / 1e6, attributes? }`.
-- `node` omitted (reserved).
+**Design note:** `upsertSession` uses `INSERT OR IGNORE` — a repeat call for the same `id` is a genuine no-op (never a constraint-violation throw, spec §7.1(c)) and, critically, never overwrites an already-stored title (spec D2/D4 "title never overwritten by later upsert").
 
-Run-level:
-- `roots` = tree roots' span ids; `startMs = Math.round(rootStartUnixNano / 1e6)`.
-- `root` = span named `agent.run` (else `undefined`); `durationMs = root?.durationMs ?? 0`.
-- `outcome` = `attrs[ATTR.OUTCOME]` off `root` else `'unknown'`; `contentPolicy` = `attrs[ATTR.CONTENT_POLICY]` off `root` when present.
-- `models` = distinct `MODEL_ID` across spans.
-- `tokens` (run) = sum of per-span input/output (each `undefined` when no span carried it).
-- `origin = RunOrigin.Manual`; `owner = 'local'`.
-- **lifecycle:** `Running` when there is no `agent.run` span yet (BatchSpanProcessor exports a span only on end, so an in-flight run's root is simply absent — same signal the CLI `--follow` uses); else `Failed` when root `status.code === 2` OR `outcome === 'resource'`; else `Done`.
-- `degrades` from `degradation.jsonl` (Task-6 helper `readDegrades` shared); `RunDTO.degraded = degrades.length > 0`.
-- `malformedSpans` = `readSpans` malformed count; `spanCount = spans.length`.
+- [ ] **Step 1: Write the failing tests**
 
-- [ ] **Step 1: Write the failing test** — `tests/run/run-dto.test.ts` (fixture spans written to a tmp dir; mirror `run-trace.test.ts`'s `span()` builder):
-
-```ts
-import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+`tests/session/store.test.ts`:
+```typescript
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RunDtoSchema } from '../../src/contracts/dto.ts';
-import { RunLifecycle, SpanStatus } from '../../src/contracts/enums.ts';
-import { mapRunToDto } from '../../src/run/run-dto.ts';
-import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
+import { createSessionStore, type SessionStore } from '../../src/session/store.ts';
 
-function span(
-  p: Partial<SpanRecord> & { name: string; spanId: string },
-): SpanRecord {
-  return {
-    kind: 0,
-    traceId: 't1',
-    parentSpanId: null,
-    startUnixNano: 0,
-    endUnixNano: 1_000_000,
-    durationMs: 1,
-    status: { code: 0 },
-    attributes: {},
-    events: [],
-    ...p,
-  };
-}
+let dir: string;
+let store: SessionStore;
 
-let root: string;
-beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'rd-'));
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'session-store-'));
+  store = createSessionStore({ path: dir }, {});
 });
-afterEach(async () => {
-  await rm(root, { recursive: true, force: true });
+afterEach(() => {
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
 });
 
-async function writeRun(id: string, spans: SpanRecord[], extra?: { degradation?: string }) {
-  const dir = join(root, id);
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, 'spans.jsonl'), `${spans.map((s) => JSON.stringify(s)).join('\n')}\n`);
-  if (extra?.degradation) await writeFile(join(dir, 'degradation.jsonl'), extra.degradation);
-  return dir;
-}
+describe('upsertSession / getSession', () => {
+  test('upsertSession creates a session on first call', () => {
+    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
+    const row = store.getSession('s1');
+    expect(row).toBeDefined();
+    expect(row?.id).toBe('s1');
+    expect(row?.title).toBe('New chat');
+    expect(row?.owner).toBe('local');
+    expect(row?.createdAt).toBe(1_000);
+    expect(row?.updatedAt).toBe(1_000);
+    expect(row?.lastMessageAt).toBeUndefined();
+    expect(row?.runId).toBeUndefined();
+  });
 
-test('maps a clean run: offsets, depth, tokens sum, Done lifecycle; validates through RunDtoSchema', async () => {
-  await writeRun('run-1', [
-    span({
-      name: 'agent.run',
-      spanId: 'a',
-      startUnixNano: 1_000_000_000,
-      durationMs: 50,
-      attributes: { 'agent.outcome': 'answer', 'content.policy': 'standard' },
-    }),
-    span({
-      name: 'ai.generateText',
-      spanId: 'b',
-      parentSpanId: 'a',
-      startUnixNano: 1_010_000_000, // +10ms
-      durationMs: 30,
-      attributes: {
-        'gen_ai.request.model': 'qwen3.5:9b',
-        'gen_ai.usage.input_tokens': 12,
-        'gen_ai.usage.output_tokens': 8,
-      },
-    }),
-  ]);
-  const dto = await mapRunToDto(root, 'run-1');
-  expect(dto).toBeDefined();
-  const parsed = RunDtoSchema.parse(dto); // throws if the mapper produced a bad shape
-  expect(parsed.lifecycle).toBe(RunLifecycle.Done);
-  expect(parsed.outcome).toBe('answer');
-  expect(parsed.contentPolicy).toBe('standard');
-  expect(parsed.models).toEqual(['qwen3.5:9b']);
-  expect(parsed.tokens).toEqual({ input: 12, output: 8 });
-  const child = parsed.spans.find((s) => s.spanId === 'b');
-  expect(child?.depth).toBe(1);
-  expect(child?.offsetMs).toBe(10);
-  expect(child?.tokens).toEqual({ input: 12, output: 8 });
-  expect(child?.model?.id).toBe('qwen3.5:9b');
-});
+  test('getSession returns undefined for an absent id', () => {
+    expect(store.getSession('nope')).toBeUndefined();
+  });
 
-test('error root → Failed lifecycle + span status Error (code 2)', async () => {
-  await writeRun('run-2', [
-    span({ name: 'agent.run', spanId: 'a', status: { code: 2, message: 'boom' }, attributes: { 'agent.outcome': 'resource' } }),
-  ]);
-  const dto = await mapRunToDto(root, 'run-2');
-  expect(dto?.lifecycle).toBe(RunLifecycle.Failed);
-  expect(dto?.spans[0]?.status).toBe(SpanStatus.Error);
-  expect(dto?.spans[0]?.statusMessage).toBe('boom');
-});
+  test('upsertSession is idempotent create-if-absent — a repeat call never overwrites the title', () => {
+    store.upsertSession('s1', { defaultTitle: 'First title', at: 1_000 });
+    store.upsertSession('s1', { defaultTitle: 'Second title', at: 2_000 });
+    const row = store.getSession('s1');
+    expect(row?.title).toBe('First title');
+    expect(row?.createdAt).toBe(1_000);
+    expect(row?.updatedAt).toBe(1_000); // untouched — the second upsert was fully ignored
+  });
 
-test('in-flight run (no agent.run span yet) → Running lifecycle', async () => {
-  await writeRun('run-3', [
-    span({ name: 'agent.delegation', spanId: 'd', attributes: { 'agent.delegation.target': 'researcher' } }),
-  ]);
-  const dto = await mapRunToDto(root, 'run-3');
-  expect(dto?.lifecycle).toBe(RunLifecycle.Running);
-  expect(dto?.spans[0]?.agent).toBe('researcher');
-});
+  test('upsertSession never throws on a repeat id (INSERT OR IGNORE, not a constraint violation)', () => {
+    store.upsertSession('s1', { defaultTitle: 'A', at: 1 });
+    expect(() =>
+      store.upsertSession('s1', { defaultTitle: 'B', at: 2 }),
+    ).not.toThrow();
+  });
 
-test('degrades come from degradation.jsonl and set degraded=true', async () => {
-  await writeRun(
-    'run-4',
-    [span({ name: 'agent.run', spanId: 'a' })],
-    { degradation: `${JSON.stringify({ kind: 'tool_skipped', subject: 'voice', reason: 'no audio' })}\n` },
-  );
-  const dto = await mapRunToDto(root, 'run-4');
-  expect(dto?.degraded).toBe(true);
-  expect(dto?.degrades[0]).toMatchObject({ kind: 'tool_skipped', subject: 'voice', label: expect.any(String) });
-});
-
-test('undefined for a run with no spans; malformed lines are counted', async () => {
-  expect(await mapRunToDto(root, 'missing')).toBeUndefined();
-  const dir = join(root, 'run-5');
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, 'spans.jsonl'), `${JSON.stringify(span({ name: 'agent.run', spanId: 'a' }))}\nNOT JSON\n`);
-  const dto = await mapRunToDto(root, 'run-5');
-  expect(dto?.malformedSpans).toBe(1);
-  expect(dto?.spanCount).toBe(1);
+  test('two distinct sessions coexist independently', () => {
+    store.upsertSession('s1', { defaultTitle: 'One', at: 1 });
+    store.upsertSession('s2', { defaultTitle: 'Two', at: 2 });
+    expect(store.getSession('s1')?.title).toBe('One');
+    expect(store.getSession('s2')?.title).toBe('Two');
+  });
 });
 ```
 
-- [ ] **Step 2: Run to fail** — `bun test --path-ignore-patterns 'web/**' tests/run/run-dto.test.ts` → FAIL (module missing).
+- [ ] **Step 2: Run the tests to verify they fail**
 
-- [ ] **Step 3: Minimal impl** — `src/run/run-dto.ts` (the `readDegrades` + summary/cache parts land in Task 6; this task ships `mapRunToDto` + shared helpers):
+Run: `bun test tests/session/store.test.ts`
+Expected: FAIL — `src/session/store.ts` does not exist yet.
 
-```ts
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import {
-  type DegradeDTO,
-  DegradeKind,
-  type RunDTO,
-  RunDtoSchema,
-  RunLifecycle,
-  RunOrigin,
-  type SpanDTO,
-  SpanStatus,
-} from '../contracts/index.ts';
-import type { DegradeEvent } from '../reliability/ledger.ts';
-import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
-import { ATTR } from '../telemetry/spans.ts';
-import { readRunArtifacts } from './artifacts.ts';
-import { buildTree, readSpans, type TraceNode } from './run-trace.ts';
+- [ ] **Step 3: Create `src/session/store.ts`**
 
-const NANOS_PER_MS = 1e6;
-const OTEL_STATUS_ERROR = 2;
+```typescript
+import { Database } from 'bun:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { migrate } from '../db/migrate.ts';
+import { SESSION_MIGRATIONS } from './migrations.ts';
 
-/** Human label per DegradeKind (mapper-side; the ledger's LABEL map is not exported). */
-const DEGRADE_LABEL: Record<DegradeKind, string> = {
-  [DegradeKind.ModelDegraded]: 'degraded model',
-  [DegradeKind.AgentDropped]: 'dropped agent',
-  [DegradeKind.ToolSkipped]: 'skipped tool',
-  [DegradeKind.Retried]: 'retried',
-  [DegradeKind.CircuitOpen]: 'circuit open',
+/** A session row, camelCase on the TS side (columns stay snake_case in SQL —
+ *  see `toSessionRow`). Field names match `SessionListItemDTO` 1:1 so a later
+ *  server-side projection is a straight passthrough. */
+export type SessionRow = {
+  id: string;
+  title: string;
+  owner: string;
+  createdAt: number;
+  updatedAt: number;
+  lastMessageAt: number | undefined;
+  runId: string | undefined;
 };
 
-function str(v: unknown): string | undefined {
-  return typeof v === 'string' ? v : undefined;
-}
-function num(v: unknown): number | undefined {
-  return typeof v === 'number' ? v : undefined;
-}
+type SessionRowRaw = {
+  id: string;
+  title: string;
+  owner: string;
+  created_at: number;
+  updated_at: number;
+  last_message_at: number | null;
+  run_id: string | null;
+};
 
-function tokensOf(attrs: Record<string, unknown>): SpanDTO['tokens'] {
-  const input = num(attrs[ATTR.USAGE_INPUT_TOKENS]);
-  const output = num(attrs[ATTR.USAGE_OUTPUT_TOKENS]);
-  if (input === undefined && output === undefined) return undefined;
-  return { input, output };
-}
-
-/** Read degradation.jsonl (one DegradeEvent per line) → DegradeDTO[]. Missing → []. */
-export async function readDegrades(runDir: string): Promise<DegradeDTO[]> {
-  let raw: string;
-  try {
-    raw = await readFile(join(runDir, 'degradation.jsonl'), 'utf8');
-  } catch {
-    return [];
-  }
-  const out: DegradeDTO[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.length === 0) continue;
-    try {
-      const e = JSON.parse(line) as DegradeEvent;
-      out.push({
-        kind: e.kind,
-        label: DEGRADE_LABEL[e.kind] ?? e.kind,
-        subject: e.subject,
-        reason: e.reason,
-        from: e.from,
-        to: e.to,
-        attempts: e.attempts,
-        lane: e.lane,
-      });
-    } catch {
-      // tolerate a torn line; degradation is best-effort telemetry
-    }
-  }
-  return out;
-}
-
-function projectSpan(
-  span: SpanRecord,
-  depth: number,
-  rootStartUnixNano: number,
-): SpanDTO {
-  const a = span.attributes;
-  const target = str(a[ATTR.DELEGATION_TARGET]);
-  const modelId = str(a[ATTR.MODEL_ID]);
+function toSessionRow(r: SessionRowRaw): SessionRow {
   return {
-    spanId: span.spanId,
-    parentSpanId: span.parentSpanId,
-    name: span.name,
-    offsetMs: (span.startUnixNano - rootStartUnixNano) / NANOS_PER_MS,
-    durationMs: span.durationMs,
-    depth,
-    status:
-      span.status.code === OTEL_STATUS_ERROR ? SpanStatus.Error : SpanStatus.Ok,
-    statusMessage: span.status.message,
-    agent: target,
-    delegation: target
-      ? {
-          target,
-          depth: num(a[ATTR.DELEGATION_DEPTH]) ?? depth,
-          ancestors: str(a[ATTR.DELEGATION_ANCESTORS])?.split(' → ') ?? [],
-        }
-      : undefined,
-    model: modelId
-      ? {
-          id: modelId,
-          provider: str(a[ATTR.MODEL_PROVIDER]),
-          numCtx: num(a[ATTR.MODEL_NUM_CTX]),
-          footprintBytes: num(a[ATTR.MODEL_FOOTPRINT_BYTES]),
-          runtimeDegraded:
-            typeof a[ATTR.MODEL_RUNTIME_DEGRADED] === 'boolean'
-              ? (a[ATTR.MODEL_RUNTIME_DEGRADED] as boolean)
-              : undefined,
-        }
-      : undefined,
-    tokens: tokensOf(a),
-    degraded: span.events.some((e) => e.name === 'reliability.degrade'),
-    attributes: a,
-    events: span.events.map((e) => ({
-      name: e.name,
-      offsetMs: (e.timeUnixNano - rootStartUnixNano) / NANOS_PER_MS,
-      attributes: e.attributes,
-    })),
+    id: r.id,
+    title: r.title,
+    owner: r.owner,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    lastMessageAt: r.last_message_at ?? undefined,
+    runId: r.run_id ?? undefined,
   };
 }
 
-/** Depth-first flatten (tree/offset order), assigning depth. */
-function flatten(nodes: TraceNode[], depth: number, rootStart: number, out: SpanDTO[]): void {
-  for (const node of nodes) {
-    out.push(projectSpan(node.span, depth, rootStart));
-    flatten(node.children, depth + 1, rootStart, out);
+/** Reserved second constructor arg — kept only for signature parity with
+ *  `createMemoryStore(config, deps)` (`src/memory/store.ts:29`) and as a
+ *  future test seam (e.g. a clock override). Empty today (spec D1). */
+export type SessionStoreDeps = Record<string, never>;
+
+/**
+ * `createSessionStore` mirrors `createMemoryStore`'s factory-returns-closure
+ * shape and reuses two existing primitives verbatim: the WAL/busy_timeout/
+ * foreign_keys pragma trio (`SqliteStore`'s constructor,
+ * `src/memory/sqlite-store.ts:38-41`) and the `migrate(db, migrations)`
+ * runner (`src/db/migrate.ts`). Spec D1.
+ */
+export function createSessionStore(
+  config: { path?: string },
+  _deps: SessionStoreDeps,
+) {
+  const dbPath = join(config.path ?? 'sessions', 'sessions.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.run('PRAGMA journal_mode = WAL');
+  db.run('PRAGMA busy_timeout = 5000');
+  db.run('PRAGMA foreign_keys = ON');
+  migrate(db, SESSION_MIGRATIONS);
+
+  function upsertSession(
+    id: string,
+    opts: { defaultTitle: string; at: number },
+  ): void {
+    // Create-if-absent, idempotent: a repeat id is a safe no-op — never a
+    // constraint-violation throw (spec §7.1(c)) — and never overwrites an
+    // already-stored title (spec D2/D4).
+    db.run(
+      `INSERT OR IGNORE INTO sessions
+       (id, title, owner, created_at, updated_at, last_message_at, run_id)
+       VALUES (?, ?, 'local', ?, ?, NULL, NULL)`,
+      [id, opts.defaultTitle, opts.at, opts.at],
+    );
   }
-}
 
-export async function mapRunToDto(
-  runsRoot: string,
-  id: string,
-): Promise<RunDTO | undefined> {
-  const runDir = join(runsRoot, id);
-  const { spans, malformed } = await readSpans(runDir);
-  if (spans.length === 0) return undefined;
-
-  const tree = buildTree(spans);
-  const rootStartUnixNano = tree[0]?.span.startUnixNano ?? 0;
-  const flat: SpanDTO[] = [];
-  flatten(tree, 0, rootStartUnixNano, flat);
-
-  const runRoot = spans.find((s) => s.name === 'agent.run');
-  const models = new Set<string>();
-  let tokIn: number | undefined;
-  let tokOut: number | undefined;
-  for (const s of flat) {
-    if (s.model?.id) models.add(s.model.id);
-    if (s.tokens?.input !== undefined) tokIn = (tokIn ?? 0) + s.tokens.input;
-    if (s.tokens?.output !== undefined) tokOut = (tokOut ?? 0) + s.tokens.output;
+  function getSession(id: string): SessionRow | undefined {
+    const r = db.query('SELECT * FROM sessions WHERE id = ?').get(id) as
+      | SessionRowRaw
+      | undefined;
+    return r ? toSessionRow(r) : undefined;
   }
-  const runTokens =
-    tokIn === undefined && tokOut === undefined
-      ? undefined
-      : { input: tokIn, output: tokOut };
 
-  const outcome = str(runRoot?.attributes[ATTR.OUTCOME]) ?? 'unknown';
-  const lifecycle = !runRoot
-    ? RunLifecycle.Running
-    : runRoot.status.code === OTEL_STATUS_ERROR || outcome === 'resource'
-      ? RunLifecycle.Failed
-      : RunLifecycle.Done;
-
-  const degrades = await readDegrades(runDir);
-  const artifacts = await readRunArtifacts(runDir);
-
-  const dto: RunDTO = {
-    id,
-    owner: 'local',
-    origin: RunOrigin.Manual,
-    lifecycle,
-    startMs: Math.round(rootStartUnixNano / NANOS_PER_MS),
-    durationMs: runRoot?.durationMs ?? 0,
-    outcome,
-    models: [...models],
-    contentPolicy: str(runRoot?.attributes[ATTR.CONTENT_POLICY]),
-    tokens: runTokens,
-    degraded: degrades.length > 0,
-    degrades,
-    malformedSpans: malformed,
-    spanCount: spans.length,
-    roots: tree.map((n) => n.span.spanId),
-    spans: flat,
-    artifacts,
+  return {
+    upsertSession,
+    getSession,
+    close: (): void => db.close(),
   };
-  return RunDtoSchema.parse(dto);
 }
+
+export type SessionStore = ReturnType<typeof createSessionStore>;
 ```
 
-- [ ] **Step 4: Run to pass** — `bun test --path-ignore-patterns 'web/**' tests/run/run-dto.test.ts` → PASS.
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `bun test tests/session/store.test.ts`
+Expected: PASS (all 5 tests).
 
 - [ ] **Step 5: Gate + commit**
 
 ```bash
-bun run typecheck && bun run lint:file -- "src/run/run-dto.ts" "tests/run/run-dto.test.ts"
-git add src/run/run-dto.ts tests/run/run-dto.test.ts
-git commit -m "feat(run): mapRunToDto — flatten spans/degrades/artifacts into a validated RunDTO"
+bun run typecheck && bun run lint:file -- src/session/store.ts tests/session/store.test.ts
+git add src/session/store.ts tests/session/store.test.ts
+git commit -m "feat(session): add createSessionStore scaffold with upsertSession/getSession (Phase 6 Incr 1)"
 ```
 
 ---

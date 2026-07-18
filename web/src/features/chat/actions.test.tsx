@@ -39,18 +39,31 @@ describe('ChatArea conversation actions', () => {
     setMessages.mockClear();
     mockStatus = 'ready';
     mockMessages = [];
+    localStorage.clear();
 
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText: vi.fn() },
       configurable: true,
     });
+    // Task T55: `SessionsSidebar` now mounts alongside ChatArea (AppShell)
+    // and independently fetches `/api/sessions?limit=10` on mount. A single
+    // reused `Response` instance (the previous `mockResolvedValue(new
+    // Response(...))`) can only have its body read once, so the sidebar's
+    // fetch would consume it before `handleFeedback`'s POST does, throwing
+    // "Body has already been used". Branch by URL and return a fresh
+    // `Response` per call instead.
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).includes('/api/sessions')
+          ? new Response(JSON.stringify({ items: [], total: 0 }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            })
+          : new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }),
       ),
     );
   });
@@ -141,10 +154,20 @@ describe('ChatArea conversation actions', () => {
     });
     fireEvent.click(upButton);
 
-    await waitFor(() => expect(fetch).toHaveBeenCalled());
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
-    // biome-ignore lint/style/noNonNullAssertion: awaited call is guaranteed present
-    const [url, init] = fetchMock.mock.calls[0]!;
+    // Task T55: `SessionsSidebar`'s own mount-time fetch means `fetch` is
+    // already truthy before the click; wait for (and locate) the specific
+    // `/api/feedback` call rather than assuming index 0 or mere call count.
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => u === '/api/feedback')).toBe(
+        true,
+      ),
+    );
+    const feedbackCall = fetchMock.mock.calls.find(
+      ([u]) => u === '/api/feedback',
+    );
+    // biome-ignore lint/style/noNonNullAssertion: presence just asserted above
+    const [url, init] = feedbackCall!;
     expect(url).toBe('/api/feedback');
     expect(JSON.parse(init.body as string)).toEqual({
       messageId: 'm1',
@@ -185,6 +208,10 @@ describe('ChatArea conversation actions', () => {
     // Truncates to BEFORE the edited user message (index 0) — drops it and
     // everything after, since the edited text is resent as a fresh turn.
     expect(updater(mockMessages)).toEqual([]);
-    expect(sendMessage).toHaveBeenCalledWith({ text: 'edited question' });
+    // Slice 30b Phase 6 (D2): every send threads a body.sessionId, edit+resend included.
+    expect(sendMessage).toHaveBeenCalledWith(
+      { text: 'edited question' },
+      { body: { sessionId: expect.any(String) } },
+    );
   });
 });

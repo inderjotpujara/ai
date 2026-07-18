@@ -16,6 +16,23 @@ export function sessionToken(): string {
   return w.window?.__AGENT_TOKEN__ ?? '';
 }
 
+/** Web-only runtime config the BFF injects alongside the session token
+ *  (Slice 30b Phase 6 — `server/main.ts`'s `renderIndexHtml`). Falls back to
+ *  the same defaults `config/schema.ts` documents when unset (e.g. the
+ *  Phase-1 stub page, or a component test with no injected globals). */
+export function notifyConfig(): { pollMs: number; minDurationMs: number } {
+  const w = globalThis as {
+    window?: {
+      __AGENT_NOTIFY_POLL_MS__?: number;
+      __AGENT_NOTIFY_MIN_DURATION_MS__?: number;
+    };
+  };
+  return {
+    pollMs: w.window?.__AGENT_NOTIFY_POLL_MS__ ?? 5_000,
+    minDurationMs: w.window?.__AGENT_NOTIFY_MIN_DURATION_MS__ ?? 60_000,
+  };
+}
+
 type FetchOpts<T> = {
   schema: ZodType<T>;
   method?: string;

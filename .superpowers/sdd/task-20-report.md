@@ -1,128 +1,86 @@
-# Task 20 report — Slice 21 documentation sweep (all four surfaces + SDD ledger)
+## Task 20 report: MCP mapper + addressable mount-status snapshot
 
-## Commit
+**Commit:** `05921c4a` — `feat(mcp): McpServerDTO mapper + addressable mount-status snapshot (Phase 5)`
 
-`5a1a80b` — `docs(slice-21): reliability subsystem across all four surfaces + SDD ledger`
-(branch `slice-21-graceful-degradation-retries`)
+### What was implemented
 
-Staged **exactly** the 5 intended files (verified with `git status --porcelain`
-before commit): `docs/architecture.md`, `README.md`, `docs/ROADMAP.md`,
-`docs/superpowers/specs/2026-07-05-slice-21-graceful-degradation-retries-design.md`,
-`.superpowers/sdd/progress.md`. Did **not** touch the other modified files
-already sitting in the working tree (`.remember/*`, various `task-*-brief/report.md`
-scratch files from other tasks) — those are pre-existing uncommitted state from
-other parts of this slice, out of this task's scope per the brief.
+- `src/mcp/mcp-dto.ts` (new): pure mapper module.
+  - `McpMountStatusEntry = { status: 'mounted' | 'skipped'; reason?: string }` — what the mount-status snapshot records per server name.
+  - `mapMcpEntryToDto(entry: McpServerEntry, mounted: McpMountStatusEntry | undefined): McpServerDTO` — projects one validated engine `McpServerEntry` (`src/mcp/types.ts`) joined with its optional mount-status record into the wire `McpServerDTO`. Never-attempted entries default to `status: Skipped` with the hint `'not mounted this session — use Test Mount'`. `authKind` is `OAuth` only for an `Http` entry with `auth.kind === McpAuthKind.OAuth`; everything else is `Static`. `agents` is carried through only when present (optional field).
+  - `mapMcpDormantToDto(d: McpConfig['dormant'][number]): McpServerDTO` — projects a dormant config entry (Task 19's retained `kind`) to a `status: Dormant` DTO row with reason `'set <VARS> to activate'`, always `authKind: Static` (a dormant entry's raw `auth` field isn't retained by `McpConfig.dormant`).
+  - Pure, no I/O — matches the run-dto / crew-dto / workflow-dto mapper idiom (engine enum used for narrowing internally, contract enum used for the DTO's output fields, kept as two separate imports since contracts stay isomorphic).
+- `src/server/mcp/mount-status.ts` (new): `createMcpMountStatus(): McpMountStatus` — an addressable, in-memory `Map<string, McpMountStatusEntry>` keyed by server name, with `.record(name, status, reason?)` and `.get(name)`. Exactly the brief's Step 7 code.
+- `tests/mcp/mcp-dto.test.ts` (new): 4 tests — never-mounted stdio → skipped+hint; recorded-mounted http+OAuth; agents-scope carry-through; dormant → reason with retained `kind`. Both transport kinds (stdio + http) are covered, closing the gap T19 left (T19's tests only covered http).
+- `tests/server/mcp-mount-status.test.ts` (new): 1 test — record/get round-trip, unrecorded name is `undefined`, second `.record` overwrites with a reason.
 
-## What I verified before writing (not just the task brief's summary)
+### Status-enum decision: introduced (as `McpServerStatus`, not `McpMountStatus`)
 
-- `ls src/reliability/` + `grep -n "^export"` on all 9 files to confirm the
-  real exported symbols (`Lane`, `classify`, `CircuitBreaker`/`breakerFor`/
-  `resetBreakers`, `withRetry`/`abortableSleep`/`parseRetryAfter`,
-  `withWallClock`/`IdleWatchdog`/`withIdleTimeout`, `degradeChain`/
-  `failureDomain`, `DegradationLedger`/`DegradeKind`/`createLedger`/
-  `formatLedger`/`serializeLedger`, `CircuitOpenError`,
-  `defaultDownloadRetry`/`downloadStallMs`).
-- `grep -rn "from '.*reliability" src/` to get the **real** cross-file import
-  graph (30 call sites) — every mermaid edge I added is sourced from an
-  actual import, not inferred from the brief.
-- Read `src/provisioning/supervisor.ts` and `src/verified-build/dry-run.ts`
-  directly — confirmed both are now literal 2-line re-export files pointing
-  at `src/reliability/`, which is what the architecture-doc prose now says.
-- Confirmed `src/reliability/ledger.ts`'s exact `DegradeKind` enum values,
-  `formatLedger`/`serializeLedger` behavior, and `src/cli/with-mcp-run.ts`'s
-  persistence to `run.dir/degradation.jsonl`.
-- Confirmed `src/telemetry/spans.ts`'s actual `ATTR.RELIABILITY_*` key names
-  and `recordDegrade` — the architecture doc's telemetry claims match these
-  exactly (did not invent keys beyond what the file defines).
-- Read the SDD ledger's existing Slice-21 task history to confirm the
-  already-recorded §11 decision text (Task 19b's `§11 DECISION` note) so the
-  spec-file update and the landing summary don't contradict it.
+The T5 review flagged `McpServerDTO.status` as a raw `z.enum(['mounted','skipped','dormant'])` instead of a named enum. I introduced a proper enum:
 
-## Per-surface changes
+```ts
+// src/contracts/enums.ts
+export enum McpServerStatus {
+  Mounted = 'mounted',
+  Skipped = 'skipped',
+  Dormant = 'dormant',
+}
+```
 
-**`docs/architecture.md`**
-- Expanded the `REL` mermaid subgraph (§2) from a config-only stub to all 9
-  files with one-line responsibilities.
-- Added ~30 new mermaid edges (grep-verified) covering: `classify→retry/
-  breaker/degrade`; `delegate/agent/workflow/crew/mcp/selector/provisioning/
-  verified-build` consuming reliability; `ledger→spans`.
-- Rewrote the §2 layer-table **Reliability** row from a one-line config
-  description into the full subsystem (all 9 files, wiring, migrations).
-- Updated node labels for `provsup` (supervisor.ts) and `vbdry` (dry-run.ts)
-  to say "re-exports reliability ...".
-- Updated the Provisioning table row, the §13 "Supervisor guards" section,
-  and the §20 dry-run prose to say retry/stall/wall-clock now come from
-  `src/reliability` (not reimplemented locally).
-- Added new **§21 "Reliability — graceful degradation + retries"** — taxonomy,
-  D5 no-double-retry rationale, per-file table, ledger mechanics, wiring,
-  migrations, telemetry, the recorded §11/OWASP-ASI08 decision, and
-  testing/live-verify (823 pass/6 skip/0 fail).
+and wired `src/contracts/dto.ts`'s `McpServerDtoSchema.status` to `z.enum(McpServerStatus)`. No parity test — this is contract-owned (no engine mirror), same pattern as `RunKind`/`BuilderKind`.
 
-**`README.md`**
-- Status line flipped to Slice 21 (Phase A closed); the old Slice-20 status
-  paragraph kept as a "**Previously:**" continuation (not deleted — Phase D
-  narrative stays intact).
-- Top "where this is going" blurb updated: Slice 21 folded into the Phase-D
-  sentence, "Next" now points at Slice 22.
-- New slice-table row **21** (✅ Done) before the "Next (product line)" row;
-  that row's "**A** reliability..." leg was removed since it's shipped,
-  leaving **C** Codex (22) as the lead item.
+**Naming deviation from the task note:** the note suggested naming it `McpMountStatus`, but the brief's own Step 7 code already declares `export type McpMountStatus = { record(...), get(...) }` in `src/server/mcp/mount-status.ts` (the addressable snapshot-store's factory return type). Reusing the same name for the DTO enum would create two unrelated concepts sharing one identifier across the module (no TS compile error since they're never imported into the same file, but a real readability/grep hazard). I named the enum `McpServerStatus` instead — describes exactly what it is (the status of one server row on the DTO) — and documented the rationale in the enum's doc comment.
 
-**`docs/ROADMAP.md`**
-- n8n/CrewAI gap table: `Reliability / retries` row ❌→✅ shipped (Slice 21).
-- Phase-A table: `Graceful degradation` row flipped to shipped with a full
-  description + live-verify note.
-- Recommended-sequence item 12: "in progress" → ✅ shipped, full narrative +
-  the recorded §11 decision + test count; item 13 (Codex, Slice 22) tagged
-  "— next".
-- Closing backlog note: "next slice" 21 → 22.
-- **New row 37** appended to the existing (uncommitted, user-authored)
-  "Backlog beyond Slice 30" table for the OWASP-ASI08 downstream
-  degradation-taint candidate slice — the table's intro paragraph, the
-  existing rows 31-36, and the closing "Slices 32-35 follow..." sentence
-  were **left untouched**, per the brief's explicit instruction. Confirmed
-  with `git diff` that only one new table row was added, nothing else in
-  that block changed.
+**Deliberately kept as a literal:** `McpMountStatusEntry.status` (`'mounted' | 'skipped'`, in `src/mcp/mcp-dto.ts`) stays a plain literal union, not the enum. It's the narrower, un-addressable per-attempt outcome type that `.record()` takes bare string arguments for (per the brief's exact `mount-status.test.ts` calls, e.g. `status.record('gh', 'mounted')`), and it doesn't need a `dormant` value (a dormant entry never attempts a mount). Widening it to reuse `McpServerStatus` would have forced call sites to import and reference enum members instead of bare strings, which is out of scope of the review note (that flagged only `McpServerDTO.status`) and would have been unnecessary churn.
 
-**Spec `docs/superpowers/specs/2026-07-05-slice-21-graceful-degradation-retries-design.md` §11**
-- Flipped from "not yet a decision" to the recorded decision: shipped
-  observability-complete in-slice (ledger + newly-emitted
-  `DegradeKind.Retried`); the `degraded: true` downstream taint marker is
-  deferred to its own future slice, referenced as candidate Slice 37 in
-  ROADMAP.
+### TDD evidence
 
-**`.superpowers/sdd/progress.md`**
-- Appended a `Task 20 (docs sweep): complete` entry detailing exactly what
-  was verified/changed per surface.
-- Appended a `⭐⭐⭐⭐ SLICE 21 LANDING SUMMARY` covering all 20+1 tasks
-  (including the mid-slice Task 19b addition from the §11 decision), the
-  Task-5 CRITICAL (IdleWatchdog silent-stall gap) and the Task-10 real
-  regression (Transient-only retry silently broke provisioning's
-  unconditional retry) caught and fixed in-slice, gate status
-  (`docs:check` PASSES, full suite 823 pass/6 skip/0 fail), and NEXT steps
-  (final review → merge → Slice 22).
+RED (before implementation):
+```
+error: Cannot find module '../../src/server/mcp/mount-status.ts' from '/Users/inderjotsingh/ai/tests/server/mcp-mount-status.test.ts'
+error: Cannot find module '../../src/mcp/mcp-dto.ts' from '/Users/inderjotsingh/ai/tests/mcp/mcp-dto.test.ts'
+0 pass / 2 fail / 2 errors
+```
 
-## Verify
+GREEN (after implementation):
+```
+bun test tests/mcp/mcp-dto.test.ts tests/server/mcp-mount-status.test.ts
+5 pass / 0 fail / 7 expect() calls
+```
 
-`bun run docs:check` → **PASSES** (`✔ docs-check: living docs present + linked;
-every src subsystem documented.`) — ran once standalone and again via the
-pre-commit hook on `git commit`.
+### A typecheck-driven test adjustment (not a behavior change)
 
-Per the task's global constraint, the full test suite was **not** run (this
-is a docs-only change).
+Implementing the mapper exactly per the brief's Step 3 code, and the tests exactly per Step 1, revealed two `bun run typecheck` failures that are unrelated to runtime behavior:
 
-## Note
+1. In `tests/mcp/mcp-dto.test.ts`, `const entry = { kind: EngineKind.Stdio, ... }` (no annotation) widens the `kind` property's inferred type from the specific enum-member literal (`McpTransportKind.Stdio`) to the general `McpTransportKind` enum type — a documented TS quirk (object-literal property widening applies to enum members too, confirmed via an isolated repro). That broke assignability to the `McpServerEntry` discriminated union. Fix: annotate each `entry` const with its specific engine type (`StdioServerEntry` / `HttpServerEntry`), which supplies the contextual type and prevents the widening — zero behavior change, only added type annotations + two new type-only imports from `src/mcp/types.ts`.
+2. Once `McpServerDTO.status` became enum-typed, the `toEqual({ status: 'skipped' })`-style raw string literals in both `tests/mcp/mcp-dto.test.ts` and the pre-existing `tests/contracts/library-dto.test.ts` no longer type-checked against the enum. Fixed by referencing `McpServerStatus.Skipped/.Mounted/.Dormant` instead — matching the repo's existing convention of asserting against the enum member (e.g. `tests/run/error-lifecycle.test.ts` uses `RunLifecycle.Failed`, never raw strings). Runtime values are identical (`McpServerStatus.Mounted === 'mounted'`).
 
-This exact path (`.superpowers/sdd/task-20-report.md`) previously held a
-stale report from Slice 19's own "Task 20" docs sweep (task numbers restart
-per slice). It has been overwritten with this slice's report; nothing else
-in `.superpowers/sdd/` scratch was touched.
+Neither fix touches the mapper's actual logic or any test's asserted values — both are required precisely because the strict per-task gate runs `bun run typecheck`, which `bun test` alone does not exercise.
 
-## Confirmation: user's ROADMAP backlog block is intact
+### Gate results
 
-Verified via `git diff docs/ROADMAP.md` that the existing "Backlog beyond
-Slice 30 (Slices 31–35, +36)" block — its intro paragraph, all of rows
-31–36, and the closing "Slices 32–35 follow the same cycle..." sentence —
-is byte-for-byte unchanged except for one new appended row (**37**,
-downstream degradation-taint). Nothing in that block was removed or
-rewritten.
+- `bun run typecheck` — clean, 0 errors.
+- `bun run lint:file -- src/mcp/mcp-dto.ts src/server/mcp/mount-status.ts src/contracts/enums.ts src/contracts/dto.ts tests/mcp/mcp-dto.test.ts tests/server/mcp-mount-status.test.ts tests/contracts/library-dto.test.ts` — 0 errors after `biome check --write` auto-formatted 4 files (pure formatting, no logic changes — reviewed the diffs, all just line-wrapping).
+- Focused tests: 5/5 pass (`tests/mcp/mcp-dto.test.ts` + `tests/server/mcp-mount-status.test.ts`).
+- Full regression sweep: `bun test tests/mcp/ tests/server/` — 227 pass / 0 fail (48 files). `bun test tests/contracts/` — 79 pass / 0 fail.
+
+### Files changed
+
+- `src/contracts/enums.ts` — added `McpServerStatus` enum.
+- `src/contracts/dto.ts` — `McpServerDtoSchema.status` now `z.enum(McpServerStatus)` instead of the raw string-literal enum.
+- `src/mcp/mcp-dto.ts` (new) — `McpMountStatusEntry`, `mapMcpEntryToDto`, `mapMcpDormantToDto`.
+- `src/server/mcp/mount-status.ts` (new) — `McpMountStatus` type, `createMcpMountStatus()`.
+- `tests/mcp/mcp-dto.test.ts` (new) — 4 mapper tests (both transport kinds, OAuth, dormant, agents-scope).
+- `tests/server/mcp-mount-status.test.ts` (new) — 1 snapshot round-trip test.
+- `tests/contracts/library-dto.test.ts` (pre-existing, minimally touched) — updated its one `status: 'mounted'` literal to `McpServerStatus.Mounted` to keep typecheck clean after the enum introduction.
+
+### Self-review
+
+- Mapper is pure (no I/O, no side effects) — matches run-dto/crew-dto/workflow-dto style.
+- Engine-vs-contract enum boundary is respected: `entry.kind === McpTransportKind.Http` (engine enum, narrows `entry` to `HttpServerEntry` so `.auth` is reachable) vs. the DTO's output `kind`/`authKind`/`status` fields (contract enums). Contracts import nothing from `src/mcp` (isomorphic rule intact — verified via the import list in `dto.ts`/`enums.ts`, no new cross-import introduced).
+- `docs:check` (pre-commit hook) passed clean — this task only touches `src/contracts` and `src/mcp`/`src/server/mcp`, both already-documented subsystems in `docs/architecture.md`; no new subsystem introduced, so no `architecture.md` edit was required for this specific task (Task 21's route handler and later Phase-5 doc pass are where the MCP tab's wiring gets documented end-to-end).
+- No parity test was added for `McpServerStatus`, correctly — it's contract-owned with no engine mirror, matching the existing `RunKind`/`BuilderKind` precedent the codebase already established.
+
+### Concerns
+
+- None blocking. One minor naming note already covered above (chose `McpServerStatus` over the note's suggested `McpMountStatus` to avoid a collision with the brief's own `src/server/mcp/mount-status.ts` factory-return type name) — flagging here again for visibility in case a later task/reviewer expected the exact name `McpMountStatus` for the DTO enum.
+- `tests/contracts/library-dto.test.ts` needed a 1-line update outside the brief's stated file list — purely to keep `bun run typecheck` clean after the enum change; no assertion semantics changed.

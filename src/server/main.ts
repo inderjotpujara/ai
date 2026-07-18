@@ -9,6 +9,7 @@ import { createMemoryStore } from '../memory/store.ts';
 import { freeDiskBytes } from '../provisioning/cli-deps.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { runtimeFor } from '../runtime/registry.ts';
+import { createSessionStore } from '../session/store.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createConsentRegistry } from './consent/registry.ts';
@@ -58,11 +59,25 @@ const MODULE_SCRIPT_TAG = /<script\s+type="module"[^>]*>/i;
  * index (the app hasn't been built), falls back to the minimal Phase-1 stub
  * page used by Ollama-free/unbuilt dev and tests.
  */
-export function renderIndexHtml(token: string, distIndexHtml?: string): string {
+export type NotifyConfig = { pollMs: number; minDurationMs: number };
+
+const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
+  pollMs: 5_000,
+  minDurationMs: 60_000,
+};
+
+export function renderIndexHtml(
+  token: string,
+  distIndexHtml?: string,
+  notify: NotifyConfig = DEFAULT_NOTIFY_CONFIG,
+): string {
   // JSON.stringify does not escape `</`, so a token value could break out of
   // the <script> tag; escape `<` to a unicode escape before interpolating.
   const safeToken = JSON.stringify(token).replace(/</g, '\\u003c');
-  const tokenScript = `<script>window.__AGENT_TOKEN__=${safeToken};</script>`;
+  const tokenScript =
+    `<script>window.__AGENT_TOKEN__=${safeToken};` +
+    `window.__AGENT_NOTIFY_POLL_MS__=${JSON.stringify(notify.pollMs)};` +
+    `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${JSON.stringify(notify.minDurationMs)};</script>`;
   if (distIndexHtml !== undefined) {
     if (MODULE_SCRIPT_TAG.test(distIndexHtml)) {
       return distIndexHtml.replace(
@@ -112,10 +127,6 @@ export function startWebServer(opts: StartOptions = {}): {
 
   const policy = { port, allowedOrigins };
   const runsRoot = 'runs';
-  // Lazy engine: nothing (registry build, model manager, MCP mount) runs at
-  // boot — only on the FIRST `/api/chat` request — so server startup and the
-  // perimeter/health tests stay Ollama-free.
-  const runChatTurn = createRealRunChatTurn(createLazyEngine(runsRoot));
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
@@ -159,6 +170,22 @@ export function startWebServer(opts: StartOptions = {}): {
       reranker: makeCrossEncoderReranker(),
     },
   );
+  // Cheap + synchronous, mirroring memoryStore's own construction discipline
+  // just above (SqliteStore's constructor runs mkdirSync + opens the db +
+  // migrates — no Ollama/network dependency at construction time).
+  const sessionStore = createSessionStore(
+    { path: String(cfg.AGENT_SESSIONS_PATH) },
+    {},
+  );
+  // Lazy engine: nothing (registry build, model manager, MCP mount) runs at
+  // boot — only on the FIRST `/api/chat` request — so server startup and the
+  // perimeter/health tests stay Ollama-free. `memoryStore` threads through so
+  // `runChatSession`'s `injectRecall` call (Slice 30b Phase 6, D5) gets the
+  // SAME store instance the auto-ingest write path (below) uses.
+  const runChatTurn = createRealRunChatTurn(
+    createLazyEngine(runsRoot),
+    memoryStore,
+  );
   // Serve the real built app when it exists (`cd web && bun run build`);
   // fall back to the Phase-1 stub otherwise (unbuilt/Ollama-free dev + tests).
   const distIndexHtml = readWebDistIndexHtml();
@@ -170,7 +197,10 @@ export function startWebServer(opts: StartOptions = {}): {
     policy,
     recordIo,
     staticDir,
-    indexHtml: renderIndexHtml(token, distIndexHtml),
+    indexHtml: renderIndexHtml(token, distIndexHtml, {
+      pollMs: cfg.AGENT_WEB_NOTIFY_POLL_MS as number,
+      minDurationMs: cfg.AGENT_WEB_NOTIFY_MIN_DURATION_MS as number,
+    }),
     runChatTurn,
     consent,
     uploadsDir,
@@ -184,6 +214,7 @@ export function startWebServer(opts: StartOptions = {}): {
     mcpMountStatus,
     mountOne,
     memoryStore,
+    sessionStore,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });

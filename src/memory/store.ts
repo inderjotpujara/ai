@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MemoryError } from '../core/errors.ts';
-import { withMemoryIngestSpan } from '../telemetry/spans.ts';
+import {
+  withMemoryIngestSpan,
+  withMemoryRememberSpan,
+} from '../telemetry/spans.ts';
 import { chunk } from './chunk.ts';
 import { defineMemory, type ResolvedMemoryConfig } from './define.ts';
 import { LanceStore } from './lancedb-store.ts';
@@ -134,6 +137,31 @@ export function createMemoryStore(config: MemoryConfig, deps: StoreDeps) {
         sql.recordDoc(space, path, hash, n, o.at);
         return { chunks: n, skipped: false };
       });
+    },
+
+    async rememberOnce(
+      text: string,
+      o: { space?: string; namespace?: string; source: string; at: number },
+    ): Promise<{ skipped: boolean }> {
+      const space = o.space ?? DEFAULT_SPACE;
+      return withMemoryRememberSpan(
+        { space, namespace: o.namespace },
+        async () => {
+          const hash = createHash('sha256').update(text).digest('hex');
+          if (sql.seenDoc(space, o.source, hash)) return { skipped: true };
+          const meta = await ensureSpace(space, o.at);
+          const n = await writeChunks(
+            meta,
+            o.namespace ?? '',
+            MemoryKind.RunMemory,
+            o.source,
+            text,
+            o.at,
+          );
+          sql.recordDoc(space, o.source, hash, n, o.at);
+          return { skipped: false };
+        },
+      );
     },
 
     async recall(

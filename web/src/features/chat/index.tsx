@@ -1,7 +1,8 @@
 import { useChat } from '@ai-sdk/react';
 import type { FeedbackRating } from '@contracts';
+import { SessionDtoSchema } from '@contracts';
 import { DefaultChatTransport, type UIMessage } from 'ai';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { z } from 'zod';
 import { apiFetch, sessionToken } from '../../shared/contract/client.ts';
 import { createSseTransport } from '../../shared/transport/sse-adapter.ts';
@@ -24,9 +25,16 @@ function joinedText(message: UIMessage): string {
 /** A user message being edited: its index (truncation point) + prefill text. */
 type EditDraft = { index: number; text: string };
 
+/** Persists the active chat's client-minted session id across reloads (Slice
+ *  30b Phase 6, D2): minted once via `crypto.randomUUID()` on the first send
+ *  of a new chat, then reused for every later turn in that chat; on a fresh
+ *  mount, a stored id triggers a rehydrate fetch instead of a fresh mint. */
+const SESSION_STORAGE_KEY = 'agent.activeSessionId';
+
 export function ChatArea() {
   const { view, handleData, pendingConfirm, runId, clearConfirm } =
     useStatusEvents();
+  const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const { messages, sendMessage, status, stop, regenerate, setMessages } =
     useChat({
       transport: new DefaultChatTransport({
@@ -39,6 +47,33 @@ export function ChatArea() {
 
   const isBusy = status === 'streaming' || status === 'submitted';
 
+  // Rehydrate a previously-active session on mount (D2): a stored id both
+  // becomes the active sessionId (so the next send threads the SAME id, not
+  // a fresh mint) and triggers a one-shot transcript fetch. A stale/deleted
+  // id (404, or any other fetch/parse failure) clears the stored id rather
+  // than repeatedly failing on every later send.
+  // One-time mount effect (rehydrate) — not a live sync on every render.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see above
+  useEffect(() => {
+    const stored = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!stored) return;
+    setSessionId(stored);
+    apiFetch(`/sessions/${stored}`, { schema: SessionDtoSchema })
+      .then((session) => {
+        setMessages(
+          session.messages.map((m) => ({
+            id: m.id,
+            role: m.role as 'user' | 'assistant' | 'system',
+            parts: [{ type: 'text' as const, text: m.text }],
+          })),
+        );
+      })
+      .catch(() => {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        setSessionId(undefined);
+      });
+  }, []);
+
   function handleSend(text: string, uploadIds: string[]) {
     if (editDraft) {
       // Edit+resend: drop the edited message and everything after it, then
@@ -46,14 +81,19 @@ export function ChatArea() {
       setMessages((msgs) => msgs.slice(0, editDraft.index));
       setEditDraft(undefined);
     }
-    // Media-by-reference (Task 16): only thread a `body` override when
-    // there's actually an attachment — keeps the plain-text send path
-    // byte-for-byte the same call AI SDK's `useChat().sendMessage` sees.
-    if (uploadIds.length > 0) {
-      sendMessage({ text }, { body: { uploadIds } });
-    } else {
-      sendMessage({ text });
+    // Mint a session id on the FIRST send of a brand-new chat (D2); once
+    // minted (or rehydrated above) it's reused for every later turn.
+    let activeSessionId = sessionId;
+    if (!activeSessionId) {
+      activeSessionId = crypto.randomUUID();
+      setSessionId(activeSessionId);
+      localStorage.setItem(SESSION_STORAGE_KEY, activeSessionId);
     }
+    const body: { sessionId: string; uploadIds?: string[] } = {
+      sessionId: activeSessionId,
+    };
+    if (uploadIds.length > 0) body.uploadIds = uploadIds;
+    sendMessage({ text }, { body });
   }
 
   function handleCopy(message: UIMessage) {

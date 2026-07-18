@@ -1,118 +1,69 @@
-# Task 8 report: `handleRunDetail` — `GET /api/runs/:id` → RunDTO / 404 (Slice 30b Phase 3)
+# Task 8 Report: `listSessions` — SQL keyset cursor pagination (Slice 30b Phase 6, Increment 1)
 
-(Note: this file name was previously used by an earlier Slice-30b-Phase-2
-Task 8 — the `POST /api/chat` SSE handler + task builder. That work is
-preserved in git history on `slice-30b-phase2-chat`. This report replaces
-it for the current, Phase-3 Task 8: the `GET /api/runs/:id` run-detail
-handler.)
+(Note: this file name was previously used by an earlier Slice-30b-Phase-5
+Task 8 — the web Builders route scaffold. That work is preserved in git
+history/on the Phase-5 branch/merge commits. This report replaces it for
+the current Phase-6 Task 8: `listSessions` on `src/session/store.ts`, the
+last method of the Increment-1 `SessionStore`.)
 
-## Status: COMPLETE
+## Status: DONE
+
+## Implemented
+
+- `src/session/store.ts`:
+  - Added `import type { SessionListItemDTO } from '../contracts/index.ts'`.
+  - Added `encodeSessionCursor(sortKey, id)` / `decodeSessionCursor(cursor)` helpers
+    right after `toStoredMessage` (before `SessionStoreDeps`). Cursor is
+    `base64url(sortKey:id)`; decode wraps in `try/catch`, validates the `:`
+    separator, `Number.isFinite(sortKey)`, and non-empty `id` — any failure
+    returns `undefined` (never throws), matching `src/server/runs/list.ts`'s
+    `decodeCursorId` precedent.
+  - Added `listSessions(q: { search?; cursor?; limit })` inside
+    `createSessionStore`, after `getMessages`:
+    - `total` = `SELECT COUNT(*) ... WHERE 1=1 [AND lower(title) LIKE ?]`
+      (post-search-filter count, not page size).
+    - Keyset WHERE clause (only when a valid cursor decodes):
+      `AND (COALESCE(last_message_at, created_at) < ? OR (COALESCE(last_message_at, created_at) = ? AND id > ?))`.
+    - Page query: `SELECT * FROM sessions WHERE 1=1 [search] [cursor] ORDER BY COALESCE(last_message_at, created_at) DESC, id ASC LIMIT ?` with `limit + 1` to detect `hasMore` without a second round trip.
+    - Maps `SessionRowRaw` → `SessionListItemDTO` (via existing `toSessionRow`), slices to `q.limit`, and only emits `nextCursor` when `hasMore` and a last row exists.
+  - Wired `listSessions` into the final returned object (now: `upsertSession, getSession, renameSession, deleteSession, listSessions, appendMessage, getMessages, close`) — this is the final Increment-1 shape.
+- `tests/session/store.test.ts`: appended `describe('listSessions', ...)` with the 8 tests verbatim from the brief (empty page, COALESCE sort order, id tie-break, page-boundary cursor pagination over 5 rows at limit=2, malformed-cursor-never-throws, case-insensitive search match, search-no-match empty page, exact DTO shape). Two of those tests were reformatted by `biome format --write` (wrapped the `upsertSession` object args onto multiple lines to fit line width) — pure formatting, no logic change.
+
+## RED evidence
+
+Before implementation: `bun test tests/session/store.test.ts` → 17 pass / 8 fail, all 8 failures `TypeError: store.listSessions is not a function`.
+
+## GREEN evidence
+
+- `bun test tests/session/store.test.ts` → **25 pass, 0 fail** (63 expect() calls).
+- `bun test tests/session/` (regression) → **30 pass, 0 fail** (73 expect() calls) — 5 migrations + 25 store.
+
+## Gate
+
+- `bun run typecheck` → clean (`tsc --noEmit`, no output/errors).
+- `bun run lint:file -- src/session/store.ts tests/session/store.test.ts` → initially flagged a formatting issue in the two new search tests (line-wrap of `upsertSession` call args); fixed via `bunx biome format --write tests/session/store.test.ts` (pure reformat, no semantic change), then clean on re-run.
+
+## Files changed
+
+- `/Users/inderjotsingh/ai/src/session/store.ts`
+- `/Users/inderjotsingh/ai/tests/session/store.test.ts`
 
 ## Commit
 
-`dabb9ee` — `feat(server): handleRunDetail — GET /api/runs/:id → RunDTO / 404 (confineToDir guarded)`
-
-## Files created
-
-- `src/server/runs/detail.ts` — `RunsDeps = { runsRoot: string }`,
-  `handleRunDetail(id, deps): Promise<Response>`.
-- `tests/server/runs-detail.test.ts` — 3 tests.
-
-## TDD RED/GREEN
-
-- RED: wrote `tests/server/runs-detail.test.ts` first, ran
-  `bun test --path-ignore-patterns 'web/**' tests/server/runs-detail.test.ts`
-  → `Cannot find module '../../src/server/runs/detail.ts'` (module didn't
-  exist yet).
-- Implemented `src/server/runs/detail.ts` exactly per the brief's sample
-  (it matches the established handler shape already used by
-  `src/server/chat/handler.ts`: a local `json()` helper re-declared rather
-  than imported from `app.ts`, to avoid a circular import — `app.ts` will
-  import this handler to wire the route in Task 11).
-- GREEN: `3 pass / 0 fail / 7 expect() calls`.
-
-## Behavior implemented
-
-1. `confineToDir(id, deps.runsRoot)` runs FIRST, before any run lookup —
-   realpath-confines the `:id` path segment under `runsRoot`, rejecting
-   `../`/symlink/absolute escapes.
-2. A `MediaPathError` thrown by `confineToDir` maps to the exact same
-   404 `{error:'not found'}` used for a genuinely missing run — the
-   response gives a caller no way to distinguish "id escapes the runs
-   root" from "no such run id" (no traversal-vs-missing leak), matching
-   how `serveStatic` already treats `MediaPathError` elsewhere in
-   `src/server`.
-3. `mapRunToDto(deps.runsRoot, id)` returning `undefined` (no
-   `spans.jsonl` for that run) also 404s with the identical body.
-4. Otherwise: 200 with the `RunDTO` JSON body under `ISOLATION_HEADERS`
-   (COOP/COEP) plus `content-type: application/json; charset=utf-8`.
-
-`mapRunToDto` (in `src/run/run-dto.ts`) already runs
-`RunDtoSchema.parse(dto)` internally before returning, so every 200 body
-this handler serves is guaranteed schema-valid by construction — no
-additional validation needed in the handler itself.
-
-## Test cases
-
-- **200** — real temp run dir with a `spans.jsonl` containing one
-  `agent.run` span (`agent.outcome: 'answer'`): asserts status 200,
-  `body.id === 'run-1'`, `body.outcome === 'answer'`, and the
-  `cross-origin-opener-policy: same-origin` header is present.
-- **404 missing** — an id with no corresponding run dir: asserts status
-  404 and body exactly `{ error: 'not found' }`.
-- **404 traversal** — id `'../../../../etc'`: asserts status 404 (the
-  `confineToDir` → `MediaPathError` → 404 path), same status/shape as
-  the missing-run case, confirming no leak.
-
-## Scope note (per brief)
-
-Route wiring into `handleApi`/`app.ts` is explicitly Task 11 per the
-brief — not touched here. This task is the standalone handler function
-plus its unit tests, fabricating a temp `runsRoot` + request id directly
-rather than going through the full server/`app.ts` request path.
-
-## Gate results
-
-- `bun run typecheck` — clean (`tsc --noEmit`, no output;
-  `noUncheckedIndexedAccess` respected).
-- `bun run lint:file -- "src/server/runs/detail.ts" "tests/server/runs-detail.test.ts"`
-  — clean. One biome auto-format was applied to the test file (multi-line
-  wrapping of the `span()` helper and one long `writeFile` call broken
-  across lines) — no logic change, purely formatting; re-verified clean
-  afterward (`Checked 2 files. No fixes applied.`).
-- `bun test --path-ignore-patterns 'web/**' tests/server/runs-detail.test.ts`
-  — `3 pass, 0 fail, 7 expect() calls`.
+`34298d0` — `feat(session): add listSessions SQL keyset cursor pagination (Phase 6 Incr 1)`
+(2 files changed, 177 insertions(+); pre-commit `docs:check` hook passed — no `src/` subsystem shape changed, only a method added to an already-documented store).
 
 ## Self-review
 
-- **Traversal → 404 no-leak (the security-critical path):** verified by
-  reading `confineToDir`'s implementation
-  (`src/server/security/media-path.ts`) — it realpath-resolves both the
-  root and the candidate, and throws `MediaPathError` uniformly whether
-  the candidate doesn't exist (`realpathSync` throws internally, caught
-  and rethrown as `MediaPathError`) or exists but resolves outside the
-  root's prefix. `handleRunDetail` catches only `MediaPathError` and maps
-  it to the identical `{error:'not found'}`/404 used for a plain missing
-  run; any *other* thrown error (a genuine bug, e.g. `root` itself not
-  existing) is rethrown rather than swallowed, matching the brief's
-  sample and the same pattern `chat/handler.ts` uses for its own
-  `confineToDir` call.
-- **200 bodies validate `RunDtoSchema`:** confirmed by reading
-  `mapRunToDto` in `src/run/run-dto.ts` — it constructs the `RunDTO` object
-  and returns `RunDtoSchema.parse(dto)`, so a malformed projection would
-  throw inside `mapRunToDto` itself (500, loud) rather than ever reach this
-  handler's 200 branch with an invalid shape.
-- No new subsystem introduced (`src/server/runs/` sits inside the already-
-  documented `src/server` tree) — `bun run docs:check` (run as part of the
-  pre-commit hook) passed with no living-doc gap.
-- Only this task's 2 new files were staged/committed; pre-existing
-  unrelated modified files in the working tree (SDD ledger bookkeeping,
-  `.remember/` buffers, other task briefs/reports from parallel
-  Phase-3 tasks) were left untouched, verified via `git status --short`
-  before `git add`.
+- SQL keyset clause implemented byte-for-byte from the brief — did not "improve" it (e.g. did not collapse to a single comparison or use a computed column).
+- `noUncheckedIndexedAccess` respected: `page[page.length - 1]` is typed `SessionRowRaw | undefined` and guarded via `hasMore && lastRaw` before use.
+- Malformed-cursor test only asserts `not.toThrow()`, consistent with brief; decode helper correctly returns `undefined` for `'not-a-valid-cursor!!'` (base64url-decodes to garbage with no `:` separator or non-finite sortKey), so the query silently runs as page-1.
+- No `console.log` introduced; no `interface` used (all `type`); no new enums needed (YAGNI — task brief specifies only these two helpers + `listSessions`).
 
 ## Concerns
 
-None. Implementation follows the brief's sample code verbatim; it matched
-the established handler shape in `chat/handler.ts` with no deviations
-needed.
+None blocking. Two minor observations for later phases, not this task's scope:
+1. `search` and `cursor` clauses are string-interpolated into the SQL (not parameterized in the query text itself — only their bound `?` args are parameterized). This is safe because the interpolated strings are fixed literals chosen from a closed set (`''` or the exact clause text), never user input, so there's no injection surface. Flagging only so a future refactor doesn't assume otherwise.
+2. This task only wires `listSessions` into the SessionStore; the HTTP-facing `GET /api/sessions` endpoint (server route) is presumably a later Increment/task in this phase — not built here per brief scope (YAGNI holds to `listSessions` + cursor helpers only).
+
+Report file: `/Users/inderjotsingh/ai/.superpowers/sdd/task-8-report.md`

@@ -1,18 +1,31 @@
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
+import { CHAT_MEMORY_SPACE } from '../../cli/run-chat-session.ts';
+import { ChatRole, StatusEventType } from '../../contracts/enums.ts';
 import { ChatRequestSchema } from '../../contracts/requests.ts';
 import type { StreamSink } from '../../core/agent.ts';
 import type { EventSink } from '../../core/events.ts';
 import type { IngestFlags } from '../../media/ingest.ts';
+import type { MemoryStore } from '../../memory/store.ts';
+import type { SessionStore } from '../../session/store.ts';
 import { withUiStreamSpan } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 import { confineToDir, MediaPathError } from '../security/media-path.ts';
 import type { RunChatTurn } from './run-turn.ts';
-import { buildTaskFromMessages } from './task.ts';
+import { buildTaskFromMessages, latestUserMessage, textOf } from './task.ts';
 
 /** `uploadsDir` is optional so existing fakes/tests that never send
  *  `uploadIds` (and so never touch upload-path resolution) don't need to
- *  supply it; the real server (`src/server/main.ts`) always sets it. */
-export type ChatHandlerDeps = { runChatTurn: RunChatTurn; uploadsDir?: string };
+ *  supply it; the real server (`src/server/main.ts`) always sets it.
+ *  `sessionStore`/`memoryStore` are optional for the identical reason: every
+ *  pre-existing chat test that never exercises persistence/auto-ingest keeps
+ *  passing untouched, while the real server always supplies both (Slice 30b
+ *  Phase 6, D3/D4/D5/D6). */
+export type ChatHandlerDeps = {
+  runChatTurn: RunChatTurn;
+  uploadsDir?: string;
+  sessionStore?: SessionStore;
+  memoryStore?: MemoryStore;
+};
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -30,6 +43,28 @@ function json(body: unknown, status: number): Response {
  * stream: `StatusEvent`s become transient `data-*` parts (the enum values
  * ARE the AI-SDK data-part type names) and the orchestrator's own token
  * stream is merged straight through.
+ *
+ * Turn-boundary persistence (Slice 30b Phase 6, D3/D4/D7, spec §7.1): when
+ * `sessionId` + `sessionStore` are both present, the user's ask is upserted
+ * and appended HERE, in this function's own synchronous body — well before
+ * `createUIMessageStream` (and so before the Response, and any first token,
+ * ever exist), which is what satisfies §7.1(a). The assistant's answer
+ * persists later, inside `execute`'s `try` block, only once
+ * `deps.runChatTurn(...)` has actually resolved — reusing the SAME `result`
+ * value the stream-outcome branch already computes, no extra stream tap; a
+ * thrown/aborted turn skips straight to `catch`, so the assistant row is
+ * simply never written (§7.1(b)/(e) — a deliberate, visible gap, not
+ * silent data loss).
+ *
+ * Auto-ingest (Slice 30b Phase 6, D5/D6): when `sessionId` + `memoryStore`
+ * are both present, the completed turn (user ask + assistant answer) is
+ * fire-and-forgotten into the shared `chat` memory space via
+ * `rememberOnce` — deliberately NOT awaited, so the SSE response is free to
+ * end without waiting on an embedding round-trip.
+ *
+ * See `tests/server/chat-handler-persistence.test.ts` (T26) and
+ * `tests/server/chat-handler-auto-ingest.test.ts` (this task) for the
+ * adversarially-verified requirements.
  */
 export async function handleChat(
   req: Request,
@@ -43,6 +78,36 @@ export async function handleChat(
   }
 
   const task = buildTaskFromMessages(body.messages);
+  const sessionId = body.sessionId;
+  const lastUserMsg = latestUserMessage(body.messages);
+
+  // Turn-boundary persistence, part 1 of 2 (D3/D4, §7.1(a)/(c)): the user's
+  // ask is durably written BEFORE any engine work starts — this whole block
+  // is plain synchronous code in `handleChat`'s own body, not inside
+  // `execute`, so nothing below this point can produce output before these
+  // calls have returned. `upsertSession`'s `INSERT OR IGNORE` (§7.1(c)) and
+  // `appendMessage`'s `INSERT OR IGNORE` on `msg.id` make a retried request
+  // for the SAME sessionId/message a safe no-op, never a constraint-
+  // violation throw.
+  if (sessionId && deps.sessionStore) {
+    const startedAt = Date.now();
+    deps.sessionStore.upsertSession(sessionId, {
+      defaultTitle:
+        (lastUserMsg ? textOf(lastUserMsg) : '').slice(0, 80) || 'New chat',
+      at: startedAt,
+    });
+    if (lastUserMsg) {
+      deps.sessionStore.appendMessage(
+        sessionId,
+        {
+          id: lastUserMsg.id,
+          role: lastUserMsg.role,
+          parts: lastUserMsg.parts,
+        },
+        startedAt,
+      );
+    }
+  }
 
   // Media-by-reference (Task 16): the browser sends opaque ids minted by a
   // PRIOR `POST /api/upload`, never a raw filesystem path. Resolve each id
@@ -93,6 +158,13 @@ export async function handleChat(
   const stream = createUIMessageStream({
     execute: async ({ writer }) => {
       await withUiStreamSpan({ route: '/api/chat' }, async (rec) => {
+        // D7: tapped alongside the existing status-event write below — a
+        // Degrade event marks the WHOLE turn degraded (never un-marked by a
+        // later event); RunStart's runId is captured the same way so the
+        // persisted assistant row can carry it (closes Increment 1's
+        // flagged `sessions.run_id`-never-written gap, via T21's extension).
+        let degradedThisTurn = false;
+        let capturedRunId: string | undefined;
         const events: EventSink = (e) => {
           writer.write({ type: e.type, data: e, transient: true });
           // Best-effort: this counts status-event writes only. The merged
@@ -100,6 +172,8 @@ export async function handleChat(
           // an extra tap on the ReadableStream passed to `streamSink` — that
           // instrumentation is deferred (documented, not implemented).
           rec.chunk(JSON.stringify(e).length);
+          if (e.type === StatusEventType.Degrade) degradedThisTurn = true;
+          if (e.type === StatusEventType.RunStart) capturedRunId = e.runId;
         };
         const streamSink: StreamSink = (s) => writer.merge(s);
         try {
@@ -117,11 +191,51 @@ export async function handleChat(
           // reached the stream yet; without this, the browser renders an empty
           // assistant bubble (the CLI doesn't have this gap — it prints
           // `result.message` directly). Write it as a one-shot text part.
+          const assistantText =
+            result.kind === 'answer' ? result.text : result.message;
           if (result.kind !== 'answer') {
             const id = `outcome-${result.kind}`;
             writer.write({ type: 'text-start', id });
-            writer.write({ type: 'text-delta', id, delta: result.message });
+            writer.write({ type: 'text-delta', id, delta: assistantText });
             writer.write({ type: 'text-end', id });
+          }
+          // Turn-boundary persistence, part 2 of 2 (D3/D4/D7, §7.1(b)/(e)):
+          // reached ONLY after `runChatTurn` has actually resolved — a throw
+          // above (caught below) skips this entirely, so a dropped
+          // connection/turn leaves the assistant row simply absent, never
+          // partial. The assistant message's id is server-minted: the AI-SDK
+          // client mints its own display id independently, so there is no
+          // client-generated id available here to reuse — this same id is
+          // what the auto-ingest `source` string below is built from,
+          // keeping every turn's dedup key unique (§7.1(d)).
+          const assistantMsgId = `asst-${crypto.randomUUID()}`;
+          if (sessionId && deps.sessionStore) {
+            deps.sessionStore.appendMessage(
+              sessionId,
+              {
+                id: assistantMsgId,
+                role: ChatRole.Assistant,
+                parts: [{ type: 'text', text: assistantText }],
+                degraded: degradedThisTurn,
+                runId: capturedRunId,
+              },
+              Date.now(),
+            );
+          }
+          // Auto-ingest (D5/D6): fire-and-forget — `void`, never awaited —
+          // so the SSE response can end without waiting on an embedding
+          // round-trip (the store's own `memory.recall`/`memory.ingest`
+          // spans already prove that round-trip is not instant).
+          if (sessionId && deps.memoryStore) {
+            const userText = lastUserMsg ? textOf(lastUserMsg) : '';
+            void deps.memoryStore
+              .rememberOnce(`user: ${userText}\nassistant: ${assistantText}`, {
+                space: CHAT_MEMORY_SPACE,
+                namespace: sessionId,
+                source: `chat:${sessionId}:${assistantMsgId}`,
+                at: Date.now(),
+              })
+              .catch(() => {});
           }
           rec.outcome(result.kind);
         } catch (err) {

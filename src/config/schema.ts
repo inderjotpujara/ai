@@ -155,6 +155,14 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     doc: "Enable reranking on recall; '0' disables (memory/retrieve.ts defaultRerank).",
   },
 
+  // --- Session persistence (src/session/*, Slice 30b Phase 6) ---
+  {
+    env: 'AGENT_SESSIONS_PATH',
+    kind: 'string',
+    def: 'sessions',
+    doc: 'Directory for the session/chat-history SQLite store (session/store.ts createSessionStore), mirroring AGENT_MEMORY_PATH.',
+  },
+
   // --- Verification / anti-hallucination (src/verification/config.ts) ---
   {
     env: 'AGENT_VERIFY_MODEL',
@@ -488,6 +496,18 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: false,
     doc: "Record prompt/response IO into spans for SERVED (web) runs; default OFF for served/web mode per the Slice-30b web-perimeter hardening; only '1' enables. Distinct from AGENT_TELEMETRY_RECORD_IO (CLI, default on).",
     strict: true,
+  },
+  {
+    env: 'AGENT_WEB_NOTIFY_POLL_MS',
+    kind: 'number',
+    def: 5_000,
+    doc: 'How often the browser polls GET /api/runs for long-run completion notifications (server/main.ts injects this into the served page; web/src/features/notifications/use-run-notifications.ts reads it). Slice 30b Phase 6.',
+  },
+  {
+    env: 'AGENT_WEB_NOTIFY_MIN_DURATION_MS',
+    kind: 'number',
+    def: 60_000,
+    doc: "Minimum durationMs a completed Crew/Workflow/Agent run must have crossed before a completion notification fires. Spec §7.2's correctness argument depends on this staying well above AGENT_WEB_NOTIFY_POLL_MS (a run cannot both start and finish inside one poll interval, so it is always observed Running at least once before terminal). Slice 30b Phase 6.",
   },
 ];
 

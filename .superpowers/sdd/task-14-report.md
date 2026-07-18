@@ -1,100 +1,184 @@
-### Task 14 (Slice 30b Phase 3 — Runs): `use-run-trace` — pure `foldSpan` + `useRunTrace` hook — Report
+# Task 14 Report: web guided-flow wizard + proposal `DagView` (agent-only)
 
-**Status:** DONE, GREEN.
+**Status:** DONE
+**Commit:** `0d9b026` — feat(web): guided-build wizard (Agent/Crew) + D6 post-write proposal DagView (Phase 5)
 
-**Note:** This file previously held a report for an unrelated Task 14 from
-Slice 30b Phase 2 (the live agent/model status rail, `use-status-events.ts` /
-`live-rail.tsx`). That content is superseded by this report — see git history
-for the prior content if needed.
+## What was implemented
 
-## What was built
+Increment 2's final, visible payoff: a guided-build wizard UI wired to T13's
+`useBuildEvents`, replacing T8's echo-stub scaffold in the Builders area.
 
-- `web/src/features/runs/use-run-trace.ts` — `RunTraceState` type
-  (`{ spans: SpanDTO[]; cursor: string | null }`), pure `foldSpan(state, span,
-  eventId?)` reducer, and `useRunTrace(initial: SpanDTO[])` hook returning
-  `{ spans, cursor, ingest }`. Implemented exactly per the brief's sample:
-  `foldSpan` filters out any existing span with the same `spanId` (de-dupe /
-  replace-in-place), pushes the new span onto that filtered (new) array,
-  sorts by `offsetMs`, and sets `cursor = eventId ?? state.cursor`.
-  `useRunTrace` seeds state by folding the `initial` snapshot array through
-  `foldSpan`, then mirrors `use-status-events.ts`'s `useState` +
-  stable `useCallback` shape for `ingest`.
-- `web/src/features/runs/use-run-trace.test.ts` — the brief's exact test,
-  verbatim: appends+sorts+cursor-tracks; de-dupes by `spanId` (replace, not
-  duplicate).
+- **`web/src/features/builders/proposal-graph.ts`** — `agentProposalGraph(p: AgentProposalDTO): DagModel`,
+  a pure projection of a committed `AgentProposalDTO` to D6's 2-tier `DagModel`:
+  one `manager`-kind node for the agent, one `StepKind.Tool`-kind node per
+  `suggestedServers` entry (id `${agent}::${packName}`), linked by `delegates`
+  edges, all rendered `DagStatus.Done` (per the brief's design note D6: the
+  proposal only reaches the browser on `BuildResultDTO.proposal`, which is
+  populated post-commit for a `written` agent build, not pre-consent — so
+  `Done`, not `Proposed`, is the honest status here).
+- **`web/src/features/builders/builder-wizard.tsx`** — `BuilderWizard({ kind, title })`,
+  the shared wizard body: need-textarea → `Build` button → streamed narration
+  list → `ConfirmPrompt` on a pending `data-confirm` → terminal render (D6
+  `DagView` for a written agent result with a `proposal`, else a raw
+  `<pre>` JSON dump of the result for every other outcome/kind).
+- **`web/src/features/builders/agent-wizard.tsx`** / **`crew-wizard.tsx`** — thin
+  wrappers binding `BuilderKind.Agent`/`BuilderKind.Crew` + a title onto
+  `BuilderWizard` (per D11: one reusable wizard body, not two near-duplicates).
+- **`web/src/features/builders/index.tsx`** — `BuildersArea` now hosts an
+  Agent/Crew mode toggle (`role="tablist"`/`role="tab"`, `data-testid`
+  `builders-mode-agent`/`builders-mode-crew`) over `AgentWizard`/`CrewWizard`,
+  replacing T8's echo-stub body entirely.
+- **Deleted** `echo-stub.ts`, `echo-stub.test.ts`, and the old `index.test.tsx`
+  (T8's scaffold, per its own note that Increment 2 replaces it wholesale).
+- **`index.test.tsx`** recreated against the real wizard (renders
+  `area-builders`, defaults to "Agent Builder").
 
-Confirmed `SpanDTO` (from `src/contracts/dto.ts`'s `SpanDtoSchema`, re-exported
-via the `@contracts` barrel) matches the test fixture's shape (`spanId`,
-`parentSpanId`, `name`, `offsetMs`, `durationMs`, `depth`, `status`,
-`degraded`, `attributes`, `events`) — no signature mismatch, no escalation
-needed. The `web/tsconfig.json` / `vite.config.ts` `@contracts` path alias
-resolves to `../src/contracts/index.ts`; the runs feature directory already
-existed (`index.tsx`, `run-detail.tsx` from earlier phase tasks).
+## Deviation from the brief's test snippet (verified against real code)
 
-## Non-mutation confirmation (per the brief's explicit ask)
+The brief's Step-5 `builder-wizard.test.tsx` snippet modeled the terminal
+build result as a `text-delta` (id `'build-result'`) carrying a
+JSON-stringified `BuildResultDTO`, and modeled `data-run-start`/`data-confirm`/
+`data-run-end` as flat (unenveloped) objects. Both are stale relative to the
+ACTUAL T13 implementation (`use-build-events.ts`, `use-build-events.test.ts`'s
+own integration test, and `src/server/builders/build.ts`), which:
+- wraps `data-run-start`/`data-confirm`/`data-run-end` in an AI-SDK data-part
+  envelope (`{ type, data: <StatusEvent>, transient: true }`), and
+- writes the terminal `BuildResultDTO` as a one-shot **`data-build-result`
+  DATA part** (`{ type: 'data-build-result', data: <DTO> }`), never a
+  text-delta/JSON-string.
 
-`state.spans.filter((s) => s.spanId !== span.spanId)` returns a **brand-new**
-array (`next`); the subsequent `next.push(span)` and `next.sort(...)` mutate
-only that new array, never `state.spans` itself. So `foldSpan` is pure and
-safe for React state identity — the previous `state` object and its `.spans`
-array are left untouched, and callers (`setState((prev) => foldSpan(prev, ...))`)
-always get a genuinely new object/array pair back, which is what triggers a
-correct re-render.
+This was already called out in `use-build-events.ts`'s own doc comments as a
+Task-11 adversarial-verification correction to the original Task-13 brief
+snippet. I adjusted `builder-wizard.test.tsx`'s two SSE mocks to match the
+real wire shape (envelope-wrapped status events + `data-build-result` data
+part) rather than the brief's stale snippet — same resolution the codebase
+already applied to `use-build-events.test.ts`. `agentProposalGraph`,
+`BuilderWizard`, `agent-wizard.tsx`, `crew-wizard.tsx`, and `index.tsx` were
+implemented verbatim from the brief.
 
-## TDD RED → GREEN
+One additional fix: `index.test.tsx`'s first assertion used
+`screen.getByTestId` (sync) per the brief's literal snippet, but this repo's
+routed tests are async-first (per the task's own execution note) — changed
+to `await screen.findByTestId('area-builders')` to avoid a race with
+`TanStack Router`'s async route resolution; this was confirmed necessary by
+an initial RED run (`Unable to find an element by: [data-testid="area-builders"]`).
 
-1. Wrote `use-run-trace.test.ts` first (brief's exact test).
-2. `cd web && bun run test src/features/runs/use-run-trace.test.ts` →
-   **FAIL** — `Failed to resolve import "./use-run-trace.ts"` (module
-   missing), confirming the test exercises real code, not a stub.
-3. Wrote `use-run-trace.ts` (brief's exact sample impl).
-4. Re-ran the same test → **PASS**, `Test Files 1 passed (1)`, `Tests 2
-   passed (2)`.
+## TDD evidence
 
-## Gate results
+- **RED** (`proposal-graph.test.ts`): `Failed to resolve import "./proposal-graph.ts"` — confirmed before creating the module.
+- **GREEN**: `cd web && bun run test -- proposal-graph.test.ts` → 2/2 passed.
+- **RED** (`builder-wizard.test.tsx`): `Failed to resolve import "./builder-wizard.tsx"` — confirmed before creating the component.
+- **GREEN**: `cd web && bun run test -- builder-wizard.test.tsx proposal-graph.test.ts` → 4/4 passed.
+- **RED** (`index.test.tsx`, post-implementation first run): `Unable to find an element by: [data-testid="area-builders"]` — caught the sync-vs-async-first gap; fixed with `findByTestId`.
+- **GREEN** (full builders group): `cd web && bun run test -- builders/` → 4 test files, 11/11 tests passed.
 
-- `cd web && bun run test src/features/runs/use-run-trace.test.ts` → **PASS**,
-  1 file / 2 tests (`appends new spans sorted by offsetMs and tracks the
-  cursor`, `de-dupes by spanId (replace, not duplicate)`).
-- `cd web && bun run typecheck` (`tsc --noEmit`) → clean, no errors.
-- `bun run lint:file -- "web/src/features/runs/use-run-trace.ts"
-  "web/src/features/runs/use-run-trace.test.ts"` → root Biome linter **does**
-  cover `web/`. First pass flagged one formatting error in the test file (the
-  brief's sample crammed two fields onto compressed lines inside the `span()`
-  fixture's return object — not multi-line per Biome's formatter rules).
-  Fixed via `bunx biome check --write` on both files (reformatted the
-  `span()` return object onto one field per line; no logic change). Re-ran
-  `lint:file` → clean, no fixes applied, 0 errors. Re-ran the vitest test and
-  `tsc --noEmit` after the reformat to confirm nothing regressed — both still
-  green/clean.
+## Gate (WEB task — both root + web)
 
-## Commit
+- `cd web && bun run typecheck` — clean.
+- `cd web && bun run test` — 35 test files, 133 tests, all passed (an
+  unrelated `ECONNREFUSED :3000` stack trace appears in stderr from a
+  pre-existing test's fetch-failure path; it is a logged trace, not a test
+  failure — exit code 0, all green).
+- `bun run typecheck` (root) — clean (no root files touched by this task).
+- `bun run lint:file -- <8 changed builders files>` (biome) — initially
+  flagged import-order + formatting; fixed via `bunx biome check --write`
+  on the same file set; re-run confirmed clean (`No fixes applied`).
 
-`ee0c7d4 feat(web): use-run-trace — pure foldSpan reducer + useRunTrace hook
-(snapshot+stream merge)` — staged only the 2 task files explicitly (`git add
-web/src/features/runs/use-run-trace.ts web/src/features/runs/use-run-trace.test.ts`,
-not `-A`). `git status --short` before committing showed numerous unrelated
-in-flight files modified by other concurrent tasks (`.remember/*`, other
-`.superpowers/sdd/task-*-brief.md`/`report.md`, `docs/superpowers/plans/*`) —
-none of those were staged or committed here. `git show --stat HEAD`: 2 files
-changed, 71 insertions(+) — exactly the files this task owns. Pre-commit
-`docs-check` hook ran and passed (`✔ docs-check: living docs present +
-linked; every src subsystem documented`) — this is a `web/` UI addition
-inside the already-documented Slice 30b Phase 3 runs subsystem; no new
-`src/` subsystem was introduced, so no `architecture.md` edit was required at
-this task-level granularity (phase-level doc updates are the
-controller's/final-review's job per the slice plan).
+## Files changed
+
+- Created: `web/src/features/builders/proposal-graph.ts`, `proposal-graph.test.ts`, `builder-wizard.tsx`, `builder-wizard.test.tsx`, `agent-wizard.tsx`, `crew-wizard.tsx`
+- Modified: `web/src/features/builders/index.tsx`, `index.test.tsx`
+- Deleted: `web/src/features/builders/echo-stub.ts`, `echo-stub.test.ts`
+
+## Self-review
+
+- `agentProposalGraph` is pure/dependency-free (no React, no fetch) — matches
+  `workflow-graph.ts`/`crew-graph.ts` sibling precedent for a `DagModel`
+  producer.
+- `BuilderWizard` consumes `useBuildEvents()` exactly as T13 exports it
+  (`narration`, `pendingConfirm`, `result`, `start`, `respond`); `respond`
+  is passed straight to `ConfirmPrompt`'s `onAnswer`, matching the existing
+  chat-area consumption pattern (Task 15's `ConfirmPrompt`).
+  `isWrittenWithProposal` is a narrow runtime type guard over the otherwise-
+  `unknown` fold `result` — deliberately conservative (checks `kind ===
+  'written'` + a present `proposal` key) so a crew/workflow `written` result
+  (no `proposal`, per the D6 engine-side gap) correctly falls through to the
+  plain JSON `<pre>` render instead of crashing on a missing graph.
+  Agent-only scope honored: no crew/workflow IR→DagModel projector was built
+  (`CrewWizard` intentionally has no graph path — matches the brief's design
+  note verbatim).
+- Mode toggle in `BuildersArea` follows the existing `role="tablist"`/
+  `role="tab"`/`aria-selected` + `data-testid` idiom already used elsewhere
+  in the app shell; Tailwind v4 token classes (`var(--color-*)`) match
+  sibling feature components (crews/workflows/runs detail).
+- Confirmed via `git diff --cached --stat` before commit that only the 10
+  intended `web/src/features/builders/*` files were staged — no accidental
+  inclusion of concurrently-modified `.superpowers/sdd/*` or `.remember/*`
+  files from other in-flight tasks in this multi-task run.
 
 ## Concerns
 
-- None blocking. `useRunTrace` itself has no dedicated hook-level test (only
-  `foldSpan` is unit-tested, per the brief's exact scope) — the hook is a
-  thin `useState`/`useCallback` wrapper around the already-tested pure
-  reducer, consistent with how `use-status-events.ts`'s `useStatusEvents`
-  is tested only indirectly (via `renderHook` in a sibling task) rather than
-  directly. If a later task wires `useRunTrace` into a live SSE-consuming run
-  view, that integration point would be the place to add a `renderHook`-based
-  test exercising `ingest` end-to-end.
-- `foldSpan`'s de-dupe is O(n) per call (full array filter + re-sort); fine
-  for typical single-run trace sizes, but if a run ever streams a very large
-  number of spans this could be revisited (out of scope for this task).
+- None blocking. The brief's own design note (D6) already flags the one
+  real limitation carried forward: `DagStatus.Done` (not `Proposed`) because
+  the browser only ever sees the proposal post-commit this phase; a genuine
+  pre-consent staged preview is an explicitly deferred follow-on, not a gap
+  in this task's scope.
+
+## Follow-up fix (post-review): 2 Important findings
+
+**Commit:** `4b73405` — fix(web): validate builder terminal result via
+`BuildResultDtoSchema` + cover crew-toggle switch (Phase 5 T14 review)
+
+**Finding 1 — terminal result never schema-validated.** The original
+`isWrittenWithProposal` guard was a hand-rolled duck-type check (`kind ===
+'written'` + truthy `proposal`) that did NOT validate against
+`BuildResultDtoSchema`, even though the comments in `use-build-events.ts`
+claimed Task 14 does. Since `BuildResultDTO.proposal` is an UNdiscriminated
+union of Agent/Crew/Workflow proposal schemas, a crew/workflow `written`
+result carrying a `.proposal` would have passed the old guard and been fed
+into `agentProposalGraph` (which assumes agent-shaped `.name`/
+`.suggestedServers`) — the exact defect the review predicted.
+
+Fix, in `builder-wizard.tsx`:
+- `BuildResultDtoSchema.safeParse(result)` validates the whole terminal
+  payload before anything derives from it (matches the existing repo
+  pattern in `use-status-events.ts`'s `StatusEventSchema.safeParse`). An
+  invalid/unparseable result now renders nothing rather than a raw dump of
+  an untrusted shape.
+- `AgentProposalDtoSchema.safeParse(dto.proposal)` is the real agent
+  discriminant gating the `DagView` render — a crew/workflow proposal fails
+  this parse (no `suggestedServers`/`modelReq`) and correctly falls through
+  to the generic `<pre>` result card, which now renders the validated `dto`
+  instead of the raw `result`.
+- Removed the `isWrittenWithProposal`/`WrittenResult` hand-rolled guard
+  entirely.
+
+**Finding 2 — mode-toggle switch had no test coverage.** The
+"defaults to the Agent wizard and can switch to Crew/Workflow" test in
+`index.test.tsx` only asserted the default Agent state; it never exercised
+the toggle. Added, in the same test: `fireEvent.click(screen.getByTestId('builders-mode-crew'))`,
+then `await screen.findByText('Crew / Workflow Builder')` and
+`await screen.findByTestId('builder-wizard-crew')` assert the Crew/Workflow
+wizard actually rendered, plus a negative assertion that "Agent Builder" is
+no longer present — using this repo's async-first (`findBy*`) convention.
+
+### Gate evidence (fix commit)
+
+- Root: `bun run typecheck` — clean.
+- Web: `cd web && bun run typecheck` — clean.
+- Web: `cd web && bun run test` — **35 test files, 133 tests, all passed**
+  (same benign `ECONNREFUSED :3000` stderr trace as the original task run,
+  unrelated pre-existing fetch-failure path, exit 0). Re-ran scoped:
+  `cd web && bun run test -- builders` → **4 test files, 11 tests, all
+  passed** (covers `builder-wizard.test.tsx`, `index.test.tsx`,
+  `proposal-graph.test.ts`, `use-build-events.test.ts`).
+- Lint: `bun run lint:file -- web/src/features/builders/builder-wizard.tsx web/src/features/builders/index.test.tsx`
+  (biome) — 1 formatting error caught on first run (test-file line wrap),
+  fixed; re-run clean (`No fixes applied`).
+- `git diff --cached --stat` confirmed only the 2 intended files were
+  staged before commit.
+
+### Files changed (fix)
+
+- Modified: `web/src/features/builders/builder-wizard.tsx`,
+  `web/src/features/builders/index.test.tsx`

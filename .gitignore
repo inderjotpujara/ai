@@ -9,6 +9,10 @@ node_modules/
 # Anchored to the repo root so src/memory/ + tests/memory/ stay tracked.
 /memory/
 
+# Session/chat-history datastore (bun:sqlite; local, never committed). See docs/architecture.md
+# Anchored to the repo root so src/session/ + tests/session/ stay tracked.
+/sessions/
+
 # Local model image/blob files (large; never committed). See model-images/README.md
 model-images/*
 !model-images/.gitkeep

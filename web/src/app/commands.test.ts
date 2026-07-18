@@ -16,4 +16,14 @@ describe('navCommands', () => {
     const cmd = navCommands.find((c) => c.id === 'jump-to-workflow');
     expect(cmd?.label).toMatch(/workflow/i);
   });
+
+  it('includes a jump-to-sessions command targeting /sessions', () => {
+    const cmd = navCommands.find((c) => c.id === 'jump-to-sessions');
+    expect(cmd?.label).toMatch(/session/i);
+  });
+
+  it('includes a search-sessions command also targeting /sessions', () => {
+    const cmd = navCommands.find((c) => c.id === 'search-sessions');
+    expect(cmd?.label).toMatch(/session/i);
+  });
 });

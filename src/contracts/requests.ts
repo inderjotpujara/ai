@@ -4,6 +4,7 @@ import {
   McpServerDtoSchema,
   ModelInventoryDtoSchema,
   RunListItemDtoSchema,
+  SessionListItemDtoSchema,
   WorkflowListItemDtoSchema,
 } from './dto.ts';
 import {
@@ -32,9 +33,19 @@ export const UiMessageLikeSchema = z.object({
 });
 export type UiMessageLike = z.infer<typeof UiMessageLikeSchema>;
 
+/** Matches `crypto.randomUUID()`'s output shape (RFC 4122 v4): 8-4-4-4-12 hex
+ *  groups, version nibble '4', variant nibble in [89ab]. Slice 30b Phase 6,
+ *  D2 — the session id is client-minted; this is the ONLY validation gate
+ *  before it's used as a SQLite primary key. */
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export const ChatRequestSchema = z.object({
   messages: z.array(UiMessageLikeSchema),
-  sessionId: z.string().optional(),
+  /** Client-minted via `crypto.randomUUID()` (D2); the server never mints
+   *  one. A malformed id is rejected at this SAME parse call — no separate
+   *  validation branch in `handleChat` (Slice 30b Phase 6). */
+  sessionId: z.string().regex(SESSION_ID_PATTERN).optional(),
   /** Ids returned by a prior `POST /api/upload` (Slice 30b Phase 2, Task 16)
    *  — media-by-reference: the browser never sends a raw filesystem path,
    *  only the opaque id the upload endpoint minted. */
@@ -224,3 +235,31 @@ export const BuilderRegistryListResponseSchema = z.object({
 export type BuilderRegistryListResponse = z.infer<
   typeof BuilderRegistryListResponseSchema
 >;
+
+/** `GET /api/sessions?search=&cursor=&limit=` query — mirrors
+ *  `RunListQuerySchema`'s shape (Phase 3) minus the outcome/degraded/kind
+ *  facets that don't apply to sessions. Slice 30b Phase 6 (spec D10/§4.1). */
+export const SessionListQuerySchema = z.object({
+  search: z.string().optional(),
+  limit: z.coerce.number().int().positive().max(200).default(25),
+  cursor: z.string().optional(),
+});
+export type SessionListQuery = z.infer<typeof SessionListQuerySchema>;
+
+/** `GET /api/sessions` response — byte-for-byte `RunListResponseSchema`'s
+ *  shape (Phase 3): same opaque-cursor contract with the client, just backed
+ *  by a real SQL keyset page instead of an in-process array (spec D10). */
+export const SessionListResponseSchema = z.object({
+  items: z.array(SessionListItemDtoSchema),
+  nextCursor: z.string().optional(),
+  total: z.number(),
+});
+export type SessionListResponse = z.infer<typeof SessionListResponseSchema>;
+
+/** `PATCH /api/sessions/:id` body — bounded the same way every other
+ *  free-text body is (`BuilderBuildRequestSchema.need`, etc). Slice 30b
+ *  Phase 6 (spec §4.1). */
+export const SessionRenameRequestSchema = z.object({
+  title: z.string().min(1).max(200),
+});
+export type SessionRenameRequest = z.infer<typeof SessionRenameRequestSchema>;

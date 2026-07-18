@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { type ApiError, apiFetch, sessionToken } from './client.ts';
+import {
+  type ApiError,
+  apiFetch,
+  notifyConfig,
+  sessionToken,
+} from './client.ts';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -55,5 +60,15 @@ describe('contract client', () => {
       name: 'ApiError',
       status: 401,
     } satisfies Partial<ApiError>);
+  });
+
+  it('reads the notify config from window, defaults when absent', () => {
+    vi.stubGlobal('window', {});
+    expect(notifyConfig()).toEqual({ pollMs: 5_000, minDurationMs: 60_000 });
+    vi.stubGlobal('window', {
+      __AGENT_NOTIFY_POLL_MS__: 1234,
+      __AGENT_NOTIFY_MIN_DURATION_MS__: 99_999,
+    });
+    expect(notifyConfig()).toEqual({ pollMs: 1234, minDurationMs: 99_999 });
   });
 });

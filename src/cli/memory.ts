@@ -45,7 +45,7 @@ function parseFlags(argv: string[]): { positional: string[]; flags: Flags } {
 /** Build the real, manager-backed memory store (Ollama embedder via the model manager).
  * Returns both the store and a manager instance for lifecycle management.
  */
-function makeRealStore(flags: Flags): {
+export function makeRealStore(flags: Flags): {
   store: MemoryStore;
   manager: ReturnType<typeof createModelManager>;
 } {

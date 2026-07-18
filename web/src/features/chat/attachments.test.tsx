@@ -60,13 +60,26 @@ describe('Composer drag-drop / paste-image attachments', () => {
   beforeEach(() => {
     sendMessage.mockClear();
     mockStatus = 'ready';
+    localStorage.clear();
+    // Task T55: `SessionsSidebar` now mounts (AppShell) alongside the
+    // composer under test and independently fetches `/api/sessions?limit=10`
+    // on mount. A single reused `Response` instance (the previous
+    // `mockResolvedValue(new Response(...))`) can only have its body read
+    // once, so the sidebar's own fetch would consume it before the upload
+    // fetch does, throwing "Body has already been used". Branch by URL and
+    // return a fresh `Response` per call instead.
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ uploadId: 'dropped-abc123.png' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).includes('/api/sessions')
+          ? new Response(JSON.stringify({ items: [], total: 0 }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            })
+          : new Response(JSON.stringify({ uploadId: 'dropped-abc123.png' }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }),
       ),
     );
   });
@@ -108,20 +121,28 @@ describe('Composer drag-drop / paste-image attachments', () => {
     await waitFor(() =>
       expect(sendMessage).toHaveBeenCalledWith(
         { text: 'look at this' },
-        { body: { uploadIds: ['dropped-abc123.png'] } },
+        {
+          body: {
+            uploadIds: ['dropped-abc123.png'],
+            sessionId: expect.any(String),
+          },
+        },
       ),
     );
     expect(screen.queryByText('cat.png')).not.toBeInTheDocument();
   });
 
-  it('a plain text send with no attachment calls sendMessage with just { text } (regression: no empty body override)', async () => {
+  it('a plain text send with no attachment carries sessionId but no uploadIds key (Slice 30b Phase 6: sessionId always threads; uploadIds is attachment-only)', async () => {
     renderAt('/');
     const textarea = await screen.findByPlaceholderText(/./i);
     fireEvent.change(textarea, { target: { value: 'no image here' } });
     fireEvent.click(screen.getByRole('button', { name: /send/i }));
 
     await waitFor(() =>
-      expect(sendMessage).toHaveBeenCalledWith({ text: 'no image here' }),
+      expect(sendMessage).toHaveBeenCalledWith(
+        { text: 'no image here' },
+        { body: { sessionId: expect.any(String) } },
+      ),
     );
   });
 });

@@ -1,115 +1,106 @@
-# Task 6 report: `summarizeRunListItem` + mtime-keyed summary cache
+# Task 6 report — `renameSession` / `deleteSession` (transactional cascade)
 
-_(Slice-30b Phase-3 runs plan. Note: a prior, unrelated "Task 6" report — the Phase-2
-`runChatSession` CLI/server-parity extraction — previously occupied this file; that work
-already landed on main. This file now documents the Phase-3 list-projection task per the
-current brief/controller spec.)_
+## Status: DONE
 
-**Status:** Done. Typecheck clean, lint clean, focused tests green.
+## What was implemented
 
-**Commit:** `0e18909` — `feat(run): summarizeRunListItem + mtime-keyed summary cache`
+Per `.superpowers/sdd/task-6-brief.md`, added two methods to the
+`createSessionStore` closure in `src/session/store.ts` (Task 5's store),
+inserted immediately after `getSession`, before the `return { ... }` block:
 
-## What was built
+- **`renameSession(id, title, at)`** — plain `UPDATE sessions SET title = ?,
+  updated_at = ? WHERE id = ?`. No existence check: a rename of an absent id
+  affects 0 rows and never throws, consistent with `upsertSession`'s
+  never-throw style.
+- **`deleteSession(id)`** — a single `db.transaction(...)` that runs
+  `DELETE FROM messages WHERE session_id = ?` then
+  `DELETE FROM sessions WHERE id = ?` (spec §4.3), so a crash mid-delete
+  never leaves orphaned messages with no parent session.
 
-`src/run/run-dto.ts` gained:
+Both added to the returned object (now `upsertSession, getSession,
+renameSession, deleteSession, close`).
 
-1. **Shared `runRootSummary(tree: TraceNode[])` helper** (private, not exported) — derives
-   `{ startMs, durationMs, outcome, lifecycle, contentPolicy }` from the top-level trace roots,
-   name-agnostic across `agent.run` / `crew.run` / `workflow.run` (earliest recognized root in
-   the existing `RUN_ROOT_NAMES` set, which `mapRunToDto` already used). **Both `mapRunToDto`
-   and `summarizeRunListItem` now call this one function** — `mapRunToDto` was refactored to
-   replace its inline root-derivation logic (previously ~25 lines computing `rootSpan`,
-   `runRootPresent`, `outcomeSource`, `outcome`, `lifecycle` directly in the function body) with
-   a single `const { startMs, durationMs, outcome, lifecycle, contentPolicy } = runRootSummary(tree)`
-   call. This is the "genuinely shared, not replicated" path the task demanded: there is exactly
-   one place that decides lifecycle/duration/outcome/startMs from a trace tree, so the list and
-   detail projections cannot drift, and neither can inherit the bug in `run-trace.ts`'s
-   `summarizeRun` (which does `spans.find(s => s.name === 'agent.run')` and reports completed
-   crew.run/workflow.run runs as durationMs 0 / lifecycle Running). `run-trace.ts` was **not**
-   touched — confirmed via `git show --stat 0e18909`, only `src/run/run-dto.ts` and the new test
-   file changed.
+`tests/session/store.test.ts` — appended the
+`describe('renameSession / deleteSession', ...)` block verbatim from the
+brief's Step 1 snippet, directly after the existing
+`describe('upsertSession / getSession', ...)` block: 4 tests (rename
+updates title+updatedAt; rename on absent id is a silent no-op; delete
+removes the session row; delete on absent id is a silent no-op), plus the
+brief's own comment noting the full cascade assertion (messages also gone)
+is deferred to Task 7 Step 3 once `appendMessage`/`getMessages` exist. No
+`test.skip` was added — the brief's snippet doesn't use one.
 
-2. **`summarizeRunListItem(runsRoot, id): Promise<RunListItemDTO | undefined>`** — reads
-   `spans.jsonl` only (no artifacts readdir, no degradation.jsonl read), builds the tree via the
-   existing `buildTree`, calls `runRootSummary`, then does a single pass over the raw
-   `SpanRecord[]` to collect `models` (from `ATTR.MODEL_ID`), summed `tokens` (from
-   `ATTR.USAGE_INPUT_TOKENS`/`USAGE_OUTPUT_TOKENS`), and `degraded` (`true` if any span carries a
-   `reliability.degrade` event — already present in spans.jsonl, so no separate degradation.jsonl
-   read is needed, which is the whole point of this projection being cheap). Output is validated
-   through `RunListItemDtoSchema.parse` before returning, matching `mapRunToDto`'s
-   fail-loudly-here convention.
+## TDD evidence
 
-3. **Module-level `summaryCache: Map<string, { mtimeMs: number; item: RunListItemDTO }>`** keyed
-   on **`runDir` → `{mtimeMs of spans.jsonl, item}`** — the approved deviation from the brief's
-   literal directory-mtime wording. A `// why:` comment on the declaration explains: a directory's
-   mtime does not change on file append (only on entry add/remove/rename), so keying on the run
-   directory would leave an in-flight run's list summary stale as spans stream in; keying on
-   `spans.jsonl`'s own `mtimeMs` (read via `stat`) is what actually invalidates on append. A cache
-   miss (file absent) returns `undefined` immediately without ever calling `readSpans`.
-   `__summaryCacheSize()` is exported test-only so cache-hit-vs-miss can be asserted by entry count
-   rather than a spy/mock.
-
-## Tests — `tests/run/run-summary.test.ts` (new, 7 tests)
-
-- `summarizes an agent.run without spans/artifacts arrays` — brief's base case, plus explicit
-  `'spans' in item` / `'artifacts' in item` assertions (both `false`) to prove the projection is
-  genuinely list-cheap in shape, not just by omission of fields in the type.
-- **Guardrail (required by the task, not present in the brief's literal sample code):**
-  `completed crew.run (no agent.run) gets Done lifecycle + non-zero duration, NOT the agent.run-only
-  bug` — asserts `lifecycle: Done`, `durationMs: 42`, `outcome: 'answer'`, `startMs: 2000` for a
-  `crew.run` root with a `workflow.step` child and no `agent.run` span anywhere. This is exactly the
-  fixture shape that would report `durationMs: 0` / `lifecycle: Running` under the old
-  `spans.find(s => s.name === 'agent.run')` logic pattern.
-- Guardrail: `completed workflow.run (no agent.run) gets Done lifecycle + non-zero duration` —
-  `durationMs: 33`, `lifecycle: Done`.
-- Guardrail: `crew.run root with resource outcome → Failed lifecycle`.
-- `degraded=true derived from span reliability.degrade events (no degrades-file read)` — proves
-  `degraded` detection works without a `degradation.jsonl` on disk at all.
-- **Cache invalidation-on-append (the mechanism under test in the brief):** writes run `r2` with 1
-  span, calls `summarizeRunListItem` once, snapshots `__summaryCacheSize()`, calls it again and
-  asserts the cache size is unchanged (a hit — no new entry) while also asserting the returned
-  item's `spanCount` is still 1 (proves the hit returns a *correct* memoized value, not just "some"
-  value). Then sleeps 10ms and **overwrites** `spans.jsonl` with 2 spans (content shape identical to
-  what a real append produces), which bumps the file's real `mtimeMs`, and asserts the next call
-  returns `spanCount: 2` — proving the recompute path fires on a genuine mtime change.
-- `undefined for a run with no spans`.
-
-## Gate output
-
+**RED** — `bun test tests/session/store.test.ts` before adding the two methods:
 ```
-bun test --path-ignore-patterns 'web/**' tests/run/run-summary.test.ts tests/run/run-dto.test.ts
-  21 pass / 0 fail / 77 expect() calls
-bun test --path-ignore-patterns 'web/**' tests/run/
-  34 pass / 0 fail / 110 expect() calls   (full run/ directory — nothing else regressed)
-bun run typecheck
-  tsc --noEmit — clean (noUncheckedIndexedAccess)
-bun run lint:file -- "src/run/run-dto.ts" "tests/run/run-summary.test.ts"
-  Checked 2 files. No fixes applied.  (one bunx biome check --write formatting pass needed first —
-  two multi-line-wrap reflows, no logic change)
+error: store.renameSession is not a function
+error: store.deleteSession is not a function
+ 5 pass
+ 4 fail
+ 17 expect() calls
+Ran 9 tests across 1 file. [52.00ms]
+```
+The 5 pre-existing `upsertSession`/`getSession` tests passed unchanged; all 4
+new tests failed as expected (methods not yet defined).
+
+**GREEN** — after adding `renameSession`/`deleteSession` + updating the
+return object:
+```
+bun test v1.3.11 (af24e281)
+ 9 pass
+ 0 fail
+ 21 expect() calls
+Ran 9 tests across 1 file. [41.00ms]
 ```
 
-TDD sequence followed: wrote `tests/run/run-summary.test.ts` first, ran it, confirmed it failed
-with `Export named 'summarizeRunListItem' not found in module '.../src/run/run-dto.ts'` (0 pass / 1
-fail / 1 error), then implemented, then reran to green.
+## Gate (all three, before commit)
 
-## Self-review / concerns
+- `bun run typecheck` — clean, no errors (`tsc --noEmit`, no output).
+- `bun run lint:file -- src/session/store.ts tests/session/store.test.ts` —
+  `Checked 2 files in 27ms. No fixes applied.`
+- Focused test: `bun test tests/session/store.test.ts` — 9 pass, 0 fail
+  (shown above).
 
-1. **How the run-root logic is shared:** literally one function (`runRootSummary`), called from
-   both `mapRunToDto` and `summarizeRunListItem` — not two hand-copied implementations. This was
-   verified by re-reading the diff after the edit: `mapRunToDto`'s body no longer contains any
-   `RUN_ROOT_NAMES.has(...)` check or `outcomeSource`/`runRootPresent` local logic — that entire
-   block was deleted and replaced with the destructured call. There is now no code path in this
-   file that computes lifecycle/duration/outcome from a trace tree except through
-   `runRootSummary`, so a future edit to one caller's expectations can't silently diverge from the
-   other's.
-2. **How cache invalidation-on-append was tested:** no mock of `fs.stat` or the clock — a real
-   10ms sleep followed by a real file rewrite, then asserting the *content* of the recomputed
-   summary (`spanCount: 2`) changed, not just that recompute was *attempted*. This proves both that
-   the mtime comparison correctly detects the change and that the recompute path produces a
-   correct result, not merely that some new object was returned.
-3. Did not add a live end-to-end smoke test against a real orchestrator run — out of scope for
-   this task (pure projection over on-disk spans.jsonl fixtures, same style as the existing
-   `run-dto.test.ts` and `run-trace.test.ts`).
-4. `run-trace.ts`'s `summarizeRun` (the CLI path with the known agent.run-only bug) was
-   deliberately left untouched per the task's explicit instruction — it is out of scope here and
-   is not depended on by the new code.
+## Files changed
+
+- `src/session/store.ts` — +21 lines (`renameSession`, `deleteSession`,
+  updated return object).
+- `tests/session/store.test.ts` — +28 lines (new `describe` block, 4 tests).
+
+## Commit
+
+`643e746` — `feat(session): add renameSession/deleteSession with
+transactional cascade (Phase 6 Incr 1)`
+Branch: `slice-30b-phase6-persistence`. 2 files changed, 49 insertions(+).
+`docs-check` pre-commit hook passed (session subsystem already documented
+from Task 5; no new subsystem introduced by this task).
+
+## Self-review
+
+- Implementation matches the brief verbatim: same SQL text, parameter order,
+  transaction shape, and return-object shape.
+- `renameSession` correctly performs no existence check — confirmed by the
+  "absent id" test passing (an `UPDATE` affecting 0 rows is not an error in
+  `bun:sqlite`).
+- `deleteSession`'s transaction deletes `messages` before `sessions`,
+  satisfying the cascade-safety ordering from spec §4.3. This task's tests
+  can't yet assert the messages side (no `appendMessage` yet), so that
+  assertion is correctly deferred to Task 7 Step 3 per the brief's own
+  sequencing note — no forward reference to an unbuilt Task 7 method was
+  added, and no `test.skip` was introduced since the brief's snippet uses a
+  plain comment instead.
+- No `console.log`, no `any`; both new functions return `void` per the
+  brief's interface signatures — no new `type` was needed.
+- Did not touch the `messages` table schema/migrations — out of scope for
+  this task (Task 7's concern).
+- Verified only the two intended files (`src/session/store.ts`,
+  `tests/session/store.test.ts`) were staged/committed — other unstaged
+  files present in the working tree (`.superpowers/`, `.remember/`) from
+  sibling/parallel sessions were left untouched.
+
+## Concerns
+
+None. Task is self-contained; the brief's sequencing note was followed
+exactly, and the 4-test scope matches the brief's Step 1 snippet with no
+additions or omissions.

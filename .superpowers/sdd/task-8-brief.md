@@ -1,105 +1,231 @@
-### Task 8: `handleRunDetail` — `GET /api/runs/:id` → RunDTO / 404
+## Task 8: `listSessions` — SQL keyset cursor pagination (search + `COALESCE` sort + id tie-break)
 
 **Files:**
-- Create: `src/server/runs/detail.ts`
-- Test: `tests/server/runs-detail.test.ts`
+- Modify: `src/session/store.ts` (add cursor encode/decode helpers, `listSessions`, wire into the returned object; add a `SessionListItemDTO` import from contracts)
+- Modify: `tests/session/store.test.ts` (append a `describe` block)
 
 **Interfaces:**
-- Consumes: `mapRunToDto` (Task 5); `confineToDir`, `MediaPathError` from `../security/media-path.ts`; the `json` helper (re-declare the small local `json` as in `chat/handler.ts`, or import from `../app.ts` — prefer a local copy to avoid a cycle, mirroring `chat/handler.ts`).
-- Produces: `type RunsDeps = { runsRoot: string }` and `handleRunDetail(id: string, deps: RunsDeps): Promise<Response>` — `confineToDir(id, runsRoot)` guards traversal (`MediaPathError` → 404, no leak); `mapRunToDto` `undefined` → 404; else 200 JSON `RunDTO` under `ISOLATION_HEADERS`.
+- Consumes: `SessionListItemDTO` (Task 1, `src/contracts/index.ts`).
+- Produces: `listSessions(q: { search?: string; cursor?: string; limit: number }): { items: SessionListItemDTO[]; nextCursor?: string; total: number }`. Sort key is `COALESCE(last_message_at, created_at)` descending, `id` ascending tie-break (spec D10) — matches `GET /api/runs`'s opaque `base64url(sortKey:id)` cursor CONTRACT with the client (`src/server/runs/list.ts:22-33`'s `encodeCursor`/`decodeCursorId`), but the sort/filter/page happens in SQL, not an in-process array, since sessions live in a real table (spec D10's explicit authorized deviation on internals only). `search` matches case-insensitively against `title` via `LIKE`. `total` reflects the post-search-filter row count (not the page size) — same semantics as `RunListResponseSchema.total`.
 
-- [ ] **Step 1: Write the failing test** — `tests/server/runs-detail.test.ts`:
+- [ ] **Step 1: Write the failing tests**
 
-```ts
-import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { handleRunDetail } from '../../src/server/runs/detail.ts';
-import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
-
-function span(p: Partial<SpanRecord> & { name: string; spanId: string }): SpanRecord {
-  return { kind: 0, traceId: 't', parentSpanId: null, startUnixNano: 0, endUnixNano: 1_000_000, durationMs: 1, status: { code: 0 }, attributes: {}, events: [], ...p };
-}
-
-let root: string;
-beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'det-'));
-});
-afterEach(async () => {
-  await rm(root, { recursive: true, force: true });
-});
-
-test('200 with a RunDTO for an existing run', async () => {
-  const dir = join(root, 'run-1');
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, 'spans.jsonl'), `${JSON.stringify(span({ name: 'agent.run', spanId: 'a', attributes: { 'agent.outcome': 'answer' } }))}\n`);
-  const res = await handleRunDetail('run-1', { runsRoot: root });
-  expect(res.status).toBe(200);
-  const body = (await res.json()) as { id: string; outcome: string };
-  expect(body.id).toBe('run-1');
-  expect(body.outcome).toBe('answer');
-  expect(res.headers.get('cross-origin-opener-policy')).toBe('same-origin');
-});
-
-test('404 for a missing run', async () => {
-  const res = await handleRunDetail('nope', { runsRoot: root });
-  expect(res.status).toBe(404);
-  expect(await res.json()).toEqual({ error: 'not found' });
-});
-
-test('path traversal on :id → 404 (no leak, MediaPathError)', async () => {
-  const res = await handleRunDetail('../../../../etc', { runsRoot: root });
-  expect(res.status).toBe(404);
-});
-```
-
-- [ ] **Step 2: Run to fail** — `bun test --path-ignore-patterns 'web/**' tests/server/runs-detail.test.ts` → FAIL (module missing).
-
-- [ ] **Step 3: Minimal impl** — `src/server/runs/detail.ts`:
-
-```ts
-import { mapRunToDto } from '../../run/run-dto.ts';
-import { ISOLATION_HEADERS } from '../isolation-headers.ts';
-import { confineToDir, MediaPathError } from '../security/media-path.ts';
-
-export type RunsDeps = { runsRoot: string };
-
-function json(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      ...ISOLATION_HEADERS,
-    },
+Append a new `describe` block to `tests/session/store.test.ts`, after `describe('appendMessage / getMessages', ...)`:
+```typescript
+describe('listSessions', () => {
+  test('an empty store returns an empty page with total 0', () => {
+    const page = store.listSessions({ limit: 10 });
+    expect(page.items).toEqual([]);
+    expect(page.total).toBe(0);
+    expect(page.nextCursor).toBeUndefined();
   });
+
+  test('sorts by COALESCE(last_message_at, created_at) desc — a session with a later message outranks an older-created session with no messages', () => {
+    store.upsertSession('s1', { defaultTitle: 'One', at: 1_000 });
+    store.upsertSession('s2', { defaultTitle: 'Two', at: 2_000 });
+    store.upsertSession('s3', { defaultTitle: 'Three', at: 3_000 });
+    store.appendMessage('s1', { id: 'm1', role: 'user', parts: [] }, 5_000);
+
+    const page = store.listSessions({ limit: 10 });
+    expect(page.items.map((i) => i.id)).toEqual(['s1', 's3', 's2']);
+    expect(page.total).toBe(3);
+    expect(page.nextCursor).toBeUndefined();
+  });
+
+  test('ties on the sort key break by id ascending', () => {
+    store.upsertSession('b', { defaultTitle: 'B', at: 1_000 });
+    store.upsertSession('a', { defaultTitle: 'A', at: 1_000 });
+    const page = store.listSessions({ limit: 10 });
+    expect(page.items.map((i) => i.id)).toEqual(['a', 'b']);
+  });
+
+  test('cursor pagination pages correctly at page boundaries (limit=2 over 5 rows)', () => {
+    for (let i = 0; i < 5; i++) {
+      store.upsertSession(`s${i}`, {
+        defaultTitle: `Session ${i}`,
+        at: 1_000 + i,
+      });
+    }
+    const page1 = store.listSessions({ limit: 2 });
+    expect(page1.items.map((i) => i.id)).toEqual(['s4', 's3']);
+    expect(page1.total).toBe(5);
+    expect(page1.nextCursor).toBeDefined();
+
+    const page2 = store.listSessions({ limit: 2, cursor: page1.nextCursor });
+    expect(page2.items.map((i) => i.id)).toEqual(['s2', 's1']);
+    expect(page2.total).toBe(5);
+    expect(page2.nextCursor).toBeDefined();
+
+    const page3 = store.listSessions({ limit: 2, cursor: page2.nextCursor });
+    expect(page3.items.map((i) => i.id)).toEqual(['s0']);
+    expect(page3.nextCursor).toBeUndefined();
+  });
+
+  test('a malformed cursor is treated as no cursor (returns page 1) rather than throwing', () => {
+    store.upsertSession('s1', { defaultTitle: 'One', at: 1_000 });
+    expect(() =>
+      store.listSessions({ limit: 10, cursor: 'not-a-valid-cursor!!' }),
+    ).not.toThrow();
+  });
+
+  test('search filters by title, case-insensitive substring match', () => {
+    store.upsertSession('s1', { defaultTitle: 'Talking about cats', at: 1_000 });
+    store.upsertSession('s2', { defaultTitle: 'Talking about dogs', at: 2_000 });
+    const page = store.listSessions({ search: 'CATS', limit: 10 });
+    expect(page.items.map((i) => i.id)).toEqual(['s1']);
+    expect(page.total).toBe(1);
+  });
+
+  test('search with no matches returns an empty page, not an error', () => {
+    store.upsertSession('s1', { defaultTitle: 'Talking about cats', at: 1_000 });
+    const page = store.listSessions({ search: 'zzz-no-match', limit: 10 });
+    expect(page.items).toEqual([]);
+    expect(page.total).toBe(0);
+  });
+
+  test('listSessions items carry the exact SessionListItemDTO shape (owner/timestamps present, lastMessageAt/runId optional)', () => {
+    store.upsertSession('s1', { defaultTitle: 'New chat', at: 1_000 });
+    const page = store.listSessions({ limit: 10 });
+    expect(page.items[0]).toEqual({
+      id: 's1',
+      title: 'New chat',
+      owner: 'local',
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `bun test tests/session/store.test.ts`
+Expected: FAIL — `store.listSessions` is not a function yet.
+
+- [ ] **Step 3: Add cursor helpers + `listSessions` to `src/session/store.ts`**
+
+Add the contracts import at the top of the file (alongside the existing `bun:sqlite`/`node:fs`/`node:path` imports):
+```typescript
+import type { SessionListItemDTO } from '../contracts/index.ts';
+```
+
+Add the cursor encode/decode helpers near the top of the file, after `toStoredMessage`:
+```typescript
+function encodeSessionCursor(sortKey: number, id: string): string {
+  return Buffer.from(`${sortKey}:${id}`).toString('base64url');
 }
 
-/** `GET /api/runs/:id` — full RunDTO, or 404 (missing OR path-escaping id). */
-export async function handleRunDetail(
-  id: string,
-  deps: RunsDeps,
-): Promise<Response> {
+function decodeSessionCursor(
+  cursor: string,
+): { sortKey: number; id: string } | undefined {
   try {
-    confineToDir(id, deps.runsRoot); // realpath-confine; throws on ../ / symlink / missing
-  } catch (err) {
-    if (err instanceof MediaPathError) return json({ error: 'not found' }, 404);
-    throw err;
+    const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+    const idx = decoded.indexOf(':');
+    if (idx === -1) return undefined;
+    const sortKey = Number(decoded.slice(0, idx));
+    const id = decoded.slice(idx + 1);
+    if (!Number.isFinite(sortKey) || id.length === 0) return undefined;
+    return { sortKey, id };
+  } catch {
+    return undefined;
   }
-  const dto = await mapRunToDto(deps.runsRoot, id);
-  if (!dto) return json({ error: 'not found' }, 404);
-  return json(dto, 200);
 }
 ```
 
-- [ ] **Step 4: Run to pass** — `bun test --path-ignore-patterns 'web/**' tests/server/runs-detail.test.ts` → PASS.
+Add `listSessions` after `getMessages` (before the `return { ... }` block):
+```typescript
+  function listSessions(q: {
+    search?: string;
+    cursor?: string;
+    limit: number;
+  }): { items: SessionListItemDTO[]; nextCursor?: string; total: number } {
+    const searchClause = q.search ? 'AND lower(title) LIKE ?' : '';
+    const searchArgs: (string | number)[] = q.search
+      ? [`%${q.search.toLowerCase()}%`]
+      : [];
 
-- [ ] **Step 5: Gate + commit**
+    const totalRow = db
+      .query(`SELECT COUNT(*) as n FROM sessions WHERE 1 = 1 ${searchClause}`)
+      .get(...searchArgs) as { n: number };
+
+    // A malformed cursor is treated as absent (page 1), never thrown — the
+    // list endpoint must degrade gracefully on a tampered/garbage cursor
+    // value, matching runs/list.ts's decodeCursorId precedent.
+    const cursor = q.cursor ? decodeSessionCursor(q.cursor) : undefined;
+    const cursorClause = cursor
+      ? `AND (COALESCE(last_message_at, created_at) < ?
+          OR (COALESCE(last_message_at, created_at) = ? AND id > ?))`
+      : '';
+    const cursorArgs: (string | number)[] = cursor
+      ? [cursor.sortKey, cursor.sortKey, cursor.id]
+      : [];
+
+    // Fetch one extra row to detect "more remain" without a second query.
+    const rows = db
+      .query(
+        `SELECT * FROM sessions WHERE 1 = 1 ${searchClause} ${cursorClause}
+         ORDER BY COALESCE(last_message_at, created_at) DESC, id ASC
+         LIMIT ?`,
+      )
+      .all(...searchArgs, ...cursorArgs, q.limit + 1) as SessionRowRaw[];
+
+    const hasMore = rows.length > q.limit;
+    const page = rows.slice(0, q.limit);
+    const items: SessionListItemDTO[] = page.map((r) => {
+      const row = toSessionRow(r);
+      return {
+        id: row.id,
+        title: row.title,
+        owner: row.owner,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        lastMessageAt: row.lastMessageAt,
+        runId: row.runId,
+      };
+    });
+
+    const lastRaw = page[page.length - 1];
+    const nextCursor =
+      hasMore && lastRaw
+        ? encodeSessionCursor(
+            lastRaw.last_message_at ?? lastRaw.created_at,
+            lastRaw.id,
+          )
+        : undefined;
+
+    return { items, nextCursor, total: totalRow.n };
+  }
+```
+Update the returned object to its final Increment-1 shape:
+```typescript
+  return {
+    upsertSession,
+    getSession,
+    renameSession,
+    deleteSession,
+    listSessions,
+    appendMessage,
+    getMessages,
+    close: (): void => db.close(),
+  };
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `bun test tests/session/store.test.ts`
+Expected: PASS (all 25 tests — 17 from Tasks 5-7 + 8 new in this task).
+
+- [ ] **Step 5: Run the full session module suite (regression check)**
+
+Run: `bun test tests/session/`
+Expected: PASS — `tests/session/migrations.test.ts` (5) + `tests/session/store.test.ts` (25) = 30 tests, all green.
+
+- [ ] **Step 6: Gate + commit**
 
 ```bash
-bun run typecheck && bun run lint:file -- "src/server/runs/detail.ts" "tests/server/runs-detail.test.ts"
-git add src/server/runs/detail.ts tests/server/runs-detail.test.ts
-git commit -m "feat(server): handleRunDetail — GET /api/runs/:id → RunDTO / 404 (confineToDir guarded)"
+bun run typecheck && bun run lint:file -- src/session/store.ts tests/session/store.test.ts
+git add src/session/store.ts tests/session/store.test.ts
+git commit -m "feat(session): add listSessions SQL keyset cursor pagination (Phase 6 Incr 1)"
 ```
 
 ---

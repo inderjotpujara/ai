@@ -1,132 +1,125 @@
-# Task 16 report: `RunsArea` — rich searchable/faceted/paginated list
-
-Slice 30b Phase 3 (Runs), web layer. Status: **DONE, gate green, committed.**
+# Task 16 Report: `GET /api/models` inventory handler
 
 (Note: this overwrites a stale `task-16-report.md` from an earlier
-task-numbering pass in Phase 2 of this same slice — an unrelated
-"composer drag-drop + paste-image upload" report — per the numbering-reuse
-convention already applied to this file once before.)
+task-numbering pass — an unrelated `RunsArea` web-list report from Phase 3
+— per this repo's numbering-reuse convention.)
+
+## Summary
+
+Implemented the read-side model inventory for the BFF, exactly per the brief (verbatim code/tests, no deviations):
+
+- `src/server/models/discover.ts` — `discoverModels(deps?)`: composes `buildRegistry()` (installed, offline-safe) with `fitAndRank(readCatalog(), detectHost().liveBudgetBytes)` (pullable, ranked against the cached catalog — no live network re-discovery per request, per the brief's design note).
+- `src/server/models/list.ts` — `handleModelList(deps)`: thin BFF adapter. Builds installed rows (`fits: true` always), dedupes pullable rows against the installed set by `runtime::model`, computes each pullable row's `sizeBytes` (preferring `fileSizeBytes`, falling back to `estimatedBytes`) and a disk-shortfall via `checkDiskSpace()` against live free space, then validates/serializes the merged list through `ModelListResponseSchema.parse(...)` and returns a 200 JSON `Response` with `ISOLATION_HEADERS` (matching the crews/workflows/runs GET-handler idiom exactly — same `json()` helper shape as `src/server/crews/list.ts`).
+
+No `app.ts` route wiring in this task — confirmed via `task-17-brief.md` that `GET /api/models` + `POST /api/models/pull` are wired together in Task 17 (`ServerDeps.runModelPull` needs to exist first). Task 16's file list (discover.ts, list.ts, two test files) is exhaustive as written.
+
+## TDD evidence
+
+**RED** (`bun test tests/server/models-discover.test.ts tests/server/models-list.test.ts`):
+```
+error: Cannot find module '../../src/server/models/discover.ts' ...
+error: Cannot find module '../../src/server/models/list.ts' ...
+0 pass / 2 fail / 2 errors
+```
+
+**GREEN** (after implementing both files):
+```
+2 pass
+0 fail
+6 expect() calls
+Ran 2 tests across 2 files.
+```
+
+## Gate (all three, before commit)
+
+- `bun run typecheck` — clean (`tsc --noEmit`, no output).
+- `bun run lint:file -- src/server/models/discover.ts src/server/models/list.ts tests/server/models-discover.test.ts tests/server/models-list.test.ts` — 0 errors after one `bunx biome check --write` pass to fix import-sort + object-literal formatting on the two new test files (content unchanged, only formatting).
+- Focused tests — 2 pass / 0 fail (above).
+
+## Files changed
+
+- `src/server/models/discover.ts` (new)
+- `src/server/models/list.ts` (new)
+- `tests/server/models-discover.test.ts` (new)
+- `tests/server/models-list.test.ts` (new)
 
 ## Commit
 
-`5de53d9885c05210701d4da1740025496875e2f2` —
-`feat(web): RunsArea — searchable/faceted/paginated runs history list`
+`f2bfaca` — `feat(server): GET /api/models — installed + pullable inventory (Phase 5)`
+(4 files changed, 181 insertions; only these 4 files staged/committed — other pre-existing unstaged repo changes from earlier tasks were left untouched.)
 
-## What was built
+## Self-review
 
-Replaced the Phase-1b stub (`web/src/features/runs/index.tsx`, previously
-just a static "Streaming chat lands in Phase 2" placeholder) with a real,
-working component:
+- Verified interface types line up exactly with prior-task contracts: `ModelDeclaration`/`ProviderKind`/`RuntimeKind` (`src/core/types.ts`), `Candidate`/`HostCapabilities` (`src/discovery/catalog-source.ts`), `FitCandidate`/`fitAndRank` (`src/provisioning/fit.ts`), `checkDiskSpace`/`PreflightInput` (`src/provisioning/supervisor.ts`), `ModelListResponseSchema`/`ModelInventoryDtoSchema` (contracts T5/T6) — no shape mismatches, no `any`.
+- `handleModelList`'s dependency-injection shape (`{ freeDiskBytes, discovery? }`) matches the sibling GET handlers' testability pattern (deps object, real implementations as defaults inside `discoverModels`).
+- No `provider` field leaks onto the wire for pullable rows (per Task 5's design note, called out in the handler's doc comment) — `ModelInventoryDtoSchema` doesn't have that field so `.parse()` strips it; the mapped literal never includes it either.
+- Read-only, no side effects: `discoverModels` never touches `CatalogSource.listCandidates()` (live network) — only the cached `readCatalog()` — matching the "no live re-discovery per request" design note.
 
-- Search input (`data-testid="runs-search"`), an outcome facet `<select>`
-  (`runs-outcome-filter`, options sourced from the actual outcome strings
-  `src/run/run-dto.ts` emits — `answer`/`error`/`resource`/`gap`/`unknown`
-  — plus an "All outcomes" escape hatch, since `outcome` is a free-form
-  `z.string()` in `RunListItemDtoSchema`, not a closed enum), and a
-  degraded facet `<select>` (`runs-degraded-filter`: All / Degraded only /
-  Clean only).
-- State (`search`, `outcome`, `degraded`) is assembled into a query string
-  via `URLSearchParams` in a pure `toQueryString(query, cursor)` helper; a
-  `useEffect` keyed on `[query, cursor]` calls
-  `apiFetch('/runs?<qs>', { schema: RunListResponseSchema })`. Changing any
-  facet/search resets the cursor stack (a fresh query goes back to page 1).
-- Rows render as `<Link to="/runs/$runId" params={{ runId: item.id }}>`
-  (route confirmed present in `web/src/app/router.tsx`), showing
-  id / outcome / lifecycle / models (joined) / tokens
-  (`(tokens?.input ?? 0) + (tokens?.output ?? 0)`, since `TokensSchema` in
-  `src/contracts/dto.ts` makes the whole `tokens` object optional) / a
-  "degraded" badge when `item.degraded`.
-- Cursor pagination: a `cursors: string[]` stack. "Next" pushes
-  `page.nextCursor` (rendered only when present); "First page" pops back to
-  the empty stack (rendered only once you've paged forward). Matches what
-  `RunListResponseSchema` actually exposes — a `nextCursor`, no
-  `prevCursor` — so there's no arbitrary jump-to-page, only forward + reset.
-- Empty page → "No runs yet"; fetch failure → a `role="alert"` in-region
-  message. This error state is handled as component-local `useState`, not
-  via `RegionErrorBoundary` — that boundary only catches render-time throws
-  through `componentDidCatch`, not async/promise rejections from the
-  `useEffect` fetch (verified by reading
-  `web/src/shared/ui/error-boundary.tsx`). The whole component is still
-  wrapped in `<RegionErrorBoundary region="Runs">` for genuine render
-  errors, matching `ChatArea`'s pattern.
-- Styled with `var(--color-*)` tokens matching `ChatArea`/`Button`
-  (`--color-fg`, `--color-muted`, `--color-surface`, `--color-border`,
-  `--color-accent`).
+## Concerns
 
-## Sibling pattern followed
+None blocking. Two minor forward-notes, both expected/by-design:
+1. Route is not yet reachable at `/api/models` — that's Task 17's job (route wiring + `ServerDeps.runModelPull`), confirmed by reading `task-17-brief.md` before finishing.
+2. Did not run the full repo test suite (per `feedback-sdd-implementer-inline-tests.md`, that's the controller's job between tasks) — only the two focused new test files, both green.
 
-`web/src/features/chat/index.tsx` (`ChatArea`) — the only other
-feature-area doing real data work at the time — for the
-`RegionErrorBoundary` wrap + `apiFetch` usage shape. `web/src/shared/ui/button.tsx`
-for the Next/First-page buttons. `web/src/features/runs/run-detail.tsx`
-confirmed the `/runs/$runId` route already exists in the router config, and
-`web/src/shared/contract/client.ts` confirmed `apiFetch`'s exact signature
-(`(path, { schema, method?, body?, signal? })`, prepends `/api`, throws
-`ApiError` on `!res.ok`, otherwise `schema.parse(await res.json())`).
+## Follow-up fix (post-review)
 
-## Tests
+**Finding addressed (Important — coverage gap on real branches):** the original
+two tests only exercised one installed row + one fitting pullable row, leaving
+two real code branches unexercised: (1) empty inventory, (2) a
+degraded/undefined discovery source.
 
-Brief's one test plus 4 more (5 total, all in
-`web/src/features/runs/index.test.tsx`):
-1. Brief's test — lists `run-1` fetched from `/api/runs`.
-2. Empty page (`{ items: [], total: 0 }`) → renders "No runs yet".
-3. A 500 response → renders `role="alert"`.
-4. Changing the search input triggers a re-fetch whose URL contains
-   `search=hello`.
-5. Clicking Next when `nextCursor` is present triggers a re-fetch whose URL
-   contains `cursor=abc`.
+**What was added** (test-only, no production code changed):
 
-All 5 use `renderAt('/runs')` (not a bare `render(<RunsArea />)`) — `<Link>`
-needs router context, which turned out to be required for every test that
-renders a populated row, not just the brief's original one.
+- `tests/server/models-discover.test.ts` — 3 new tests:
+  1. Empty inventory: `buildRegistry` → `[]`, `readCatalog` → `[]` — asserts
+     `discoverModels` returns `{ installed: [], pullable: [] }`, no throw.
+  2. Undefined catalog (cache miss): `readCatalog: () => undefined` — asserts
+     `discoverModels` degrades gracefully to `pullable: []` via the real
+     `catalog ?? []` guard in `discover.ts:27` (genuine code path, not
+     invented).
+  3. Throwing `buildRegistry`: asserts the rejection **propagates** —
+     `discoverModels` does NOT catch it.
+- `tests/server/models-list.test.ts` — 3 matching tests at the handler layer:
+  empty-inventory → valid empty `ModelListResponse` (`items: []`, schema
+  parses); undefined-catalog → degrades to installed-only rows; throwing
+  `buildRegistry` → `handleModelList` also propagates (no try/catch wraps
+  `discoverModels` in `list.ts:28` either).
 
-**Test command + output:**
+**Degrade semantics — ACTUAL observed behavior (not invented):**
+- The `catalog ?? []` guard in `discover.ts` **is** genuine graceful
+  degradation for an undefined/cache-miss catalog — confirmed by test and by
+  reading the code (`discover.ts:27`).
+- A **throwing `buildRegistry` dep propagates** — `discover.ts` has no
+  try/catch around `await (deps.buildRegistry ?? realBuildRegistry)()`, and
+  `list.ts` has no try/catch around its call to `discoverModels`. The
+  per-runtime try/catch the finding refers to lives *inside* the real
+  `buildRegistry` implementation (`src/discovery/build-registry.ts`:
+  `installedFromRuntimes` and `filterInstalledCatalog` each catch internally
+  so the real default `buildRegistry` itself never throws for a down
+  runtime) — it is not, and was never meant to be, duplicated in
+  `discoverModels`/`handleModelList`. Since this matches the original design
+  intent (offline-safety lives in `buildRegistry`, not in its callers) and
+  isn't a spec mismatch, no production code was changed — only test
+  assertions documenting the real propagate behavior for an injected
+  throwing dep.
+
+**Fix commit:** `dc913d7` — `test(server): cover empty-inventory +
+degraded-source paths for GET /api/models (Phase 5 T16 review)` (2 files
+changed, 104 insertions, test-only).
+
+**Test evidence:**
+
 ```
-cd web && bun run test src/features/runs/index.test.tsx
- Test Files  1 passed (1)
-      Tests  5 passed (5)
+$ bun test tests/server/models-discover.test.ts tests/server/models-list.test.ts
+bun test v1.3.11 (af24e281)
+
+ 8 pass
+ 0 fail
+ 17 expect() calls
+Ran 8 tests across 2 files. [185.00ms]
 ```
 
-## Gate results
-
-- `cd web && bun run typecheck` → clean (`tsc --noEmit`, no output). One
-  fix needed along the way: a mock `fetch` in the search test had no typed
-  parameter, so `fetchMock.mock.calls.at(-1)?.[0]` inferred against an
-  empty tuple (`TS2493`) — fixed by giving the mock an explicit
-  `(_input: RequestInfo | URL) => ...` signature.
-- `cd web && bun run test src/features/runs/index.test.tsx` → 5/5 pass.
-- `bun run lint:file -- "web/src/features/runs/index.tsx"
-  "web/src/features/runs/index.test.tsx"` → clean (root linter does cover
-  `web/`; it invokes `biome check`). Two fixes needed:
-  1. `useEffect` deps: biome's `useExhaustiveDependencies` wanted the whole
-     `query` object as a dependency, not the three destructured fields —
-     changed `[query.search, query.outcome, query.degraded, cursor]` to
-     `[query, cursor]`.
-  2. Ran `bunx biome check --write` once to auto-fix formatting (collapsed
-     a multi-line `vi.stubGlobal` call and two single-child JSX blocks per
-     biome's line-width rule); re-verified typecheck + tests still green
-     after the auto-fix.
-- `bun run docs:check` (pre-commit hook) → passed automatically on commit;
-  no new `src/` subsystem was added (only `web/src/features/runs/index.tsx`
-  changed, an already-documented area), so no `architecture.md` edit was
-  required for this task-level UI change.
-
-## Concerns / notes for follow-on work
-
-- `outcome` is `z.string()` in the contract (not an enum), so the facet
-  options list (`answer`/`error`/`resource`/`gap`/`unknown`) is a
-  best-effort mirror of what `src/run/run-dto.ts` currently emits, not a
-  contract-enforced set. If the server starts emitting a new outcome
-  string, the dropdown won't offer it (it's a `<select>`, not free text).
-  Worth revisiting if outcome is ever promoted to a proper enum, or if a
-  later UI wants per-facet counts.
-- No debounce on the search input — every keystroke re-fetches. The brief
-  explicitly allowed "a plain controlled input re-fetching on change is
-  fine," so this is a deliberate, brief-sanctioned simplification, not an
-  oversight; a follow-on could debounce if it proves noisy against a real
-  `runsRoot` with many files.
-- Per the T13 review carry-forward noted in the dispatch brief: this list
-  uses plain `apiFetch` (not the SSE stream `useRunTrace`/`waterfall.tsx`
-  consume for the detail view), so the schema-decoupling concern from that
-  earlier review doesn't apply here — `RunListResponseSchema` is passed
-  straight into `apiFetch` as intended.
+**Gate:** `bun run typecheck` — clean (`tsc --noEmit`, no output). `bun run
+lint:file -- tests/server/models-discover.test.ts
+tests/server/models-list.test.ts` — `Checked 2 files in 3ms. No fixes
+applied.` (0 errors).

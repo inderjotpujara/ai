@@ -21,10 +21,11 @@ function renderAt(path: string) {
 }
 
 describe('AppShell', () => {
-  it('renders navigation for all 7 areas', async () => {
+  it('renders navigation for all 8 areas', async () => {
     renderAt('/');
     for (const label of [
       'Chat',
+      'Sessions',
       'Crews',
       'Workflows',
       'Builders',
@@ -53,5 +54,10 @@ describe('AppShell', () => {
     expect(
       await screen.findByRole('button', { name: /theme/i }),
     ).toBeInTheDocument();
+  });
+
+  it('mounts a ToastHost so useToast works anywhere under AppShell', async () => {
+    renderAt('/');
+    expect(await screen.findByTestId('toast-host')).toBeInTheDocument();
   });
 });

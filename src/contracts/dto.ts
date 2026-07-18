@@ -130,6 +130,37 @@ export const ChatMessageDtoSchema = z.object({
 });
 export type ChatMessageDTO = z.infer<typeof ChatMessageDtoSchema>;
 
+/** A session's list-row projection — enough for `/sessions`'s list/search
+ *  view. `owner` is reserved (constant `'local'` today; Slices 24/33 backfill
+ *  real ownership — same precedent as `RunDtoSchema.owner`). `lastMessageAt`
+ *  is absent for a brand-new session with no messages yet (the store falls
+ *  back to `createdAt` for sorting — spec D10). Slice 30b Phase 6 (spec §4.1). */
+export const SessionListItemDtoSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  owner: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  lastMessageAt: z.number().optional(),
+  runId: z.string().optional(),
+});
+export type SessionListItemDTO = z.infer<typeof SessionListItemDtoSchema>;
+
+/** A session's full detail projection — the list-item fields plus its
+ *  complete transcript, reusing `ChatMessageDtoSchema` verbatim (spec D8) —
+ *  no new message DTO. Slice 30b Phase 6 (spec §4.1). */
+export const SessionDtoSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  owner: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  lastMessageAt: z.number().optional(),
+  runId: z.string().optional(),
+  messages: z.array(ChatMessageDtoSchema),
+});
+export type SessionDTO = z.infer<typeof SessionDtoSchema>;
+
 /** Projected crew member — prompt scaffolding + selection policy only. The
  *  engine's `tools: ToolSet` is dropped (not JSON-serializable). `requires`/
  *  `prefer` are the raw capability/policy strings (Capability/PreferPolicy

@@ -47,4 +47,19 @@ export const navCommands: Command[] = [
     label: 'Jump to Workflows',
     run: (n) => n({ to: '/workflows' }),
   },
+  {
+    id: 'jump-to-sessions',
+    label: 'Jump to Sessions',
+    run: (n) => n({ to: '/sessions' }),
+  },
+  // A true prefilled-query jump would need /sessions to accept a URL search
+  // param and SessionsArea to read it on mount — real ⌘K completeness is
+  // explicitly Phase 8 (this file's own comment, above). Kept as a second
+  // plain nav command for now (spec §4.5's own hedge: "kept to the
+  // 'navigation-command' shape").
+  {
+    id: 'search-sessions',
+    label: 'Search Sessions',
+    run: (n) => n({ to: '/sessions' }),
+  },
 ];
