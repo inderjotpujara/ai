@@ -1,152 +1,171 @@
-### Task 4: `readRunArtifacts` — readdir + classify into `ArtifactKind`
+## Task 4: `src/session/migrations.ts` — `SESSION_MIGRATIONS`
 
 **Files:**
-- Create: `src/run/artifacts.ts`
-- Test: `tests/run/artifacts.test.ts`
+- Create: `src/session/migrations.ts`
+- Test: `tests/session/migrations.test.ts` (create)
 
 **Interfaces:**
-- Consumes: `ArtifactKind` from `../contracts/index.ts`; `node:fs/promises` (`readdir`, `stat`), `node:path`.
-- Produces: `readRunArtifacts(runDir: string): Promise<{ name: string; bytes: number; kind: ArtifactKind }[]>` — `readdir` the run dir; classify each entry by filename via a table (unknown files → `Other`); `bytes` = `stat().size` for files, and for the `media/` **directory** the rolled-up sum of contained file sizes. A missing run dir → `[]` (never throws).
+- Consumes: `Migration`/`migrate` (`src/db/migrate.ts`, unchanged — `Migration = { name: string; up: (db: Database) => void }`).
+- Produces: `SESSION_MIGRATIONS: Migration[]` — one migration, `'init-sessions-and-messages'`, creating `sessions(id PK, title, owner NOT NULL DEFAULT 'local', created_at, updated_at, last_message_at NULL, run_id NULL)` and `messages(id PK, session_id NOT NULL REFERENCES sessions(id), parent_message_id NULL, role, parts TEXT NOT NULL, created_at, degraded NULL)`, plus a supporting index `idx_messages_session (session_id, created_at)` (needed by Task 7's `getMessages` ORDER BY).
 
-Classification table (from spec):
+- [ ] **Step 1: Write the failing tests**
 
-| entry | `ArtifactKind` |
-|---|---|
-| `answer.txt` | `Answer` |
-| `gap.txt` | `Gap` |
-| `resource.txt` | `Resource` |
-| `result.txt` | `Result` |
-| `unverified.txt` | `Unverified` |
-| `failed.txt` | `Failed` |
-| `spans.jsonl` | `Spans` |
-| `degradation.jsonl` | `Degradation` |
-| `error.json` | `Error` |
-| `media/` (dir) | `Media` |
-| anything else | `Other` |
-
-- [ ] **Step 1: Write the failing test** — `tests/run/artifacts.test.ts`:
-
-```ts
+`tests/session/migrations.test.ts`:
+```typescript
+import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ArtifactKind } from '../../src/contracts/enums.ts';
-import { readRunArtifacts } from '../../src/run/artifacts.ts';
+import { migrate } from '../../src/db/migrate.ts';
+import { SESSION_MIGRATIONS } from '../../src/session/migrations.ts';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'art-'));
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'session-migrations-'));
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('classifies known files and falls unknown files through to Other', async () => {
-  await writeFile(join(dir, 'answer.txt'), 'hello');
-  await writeFile(join(dir, 'result.txt'), 'r');
-  await writeFile(join(dir, 'spans.jsonl'), '{}\n');
-  await writeFile(join(dir, 'degradation.jsonl'), '{}\n');
-  await writeFile(join(dir, 'error.json'), '{}');
-  await writeFile(join(dir, 'random.log'), 'x');
-  const arts = await readRunArtifacts(dir);
-  const byName = new Map(arts.map((a) => [a.name, a]));
-  expect(byName.get('answer.txt')?.kind).toBe(ArtifactKind.Answer);
-  expect(byName.get('result.txt')?.kind).toBe(ArtifactKind.Result);
-  expect(byName.get('spans.jsonl')?.kind).toBe(ArtifactKind.Spans);
-  expect(byName.get('degradation.jsonl')?.kind).toBe(ArtifactKind.Degradation);
-  expect(byName.get('error.json')?.kind).toBe(ArtifactKind.Error);
-  expect(byName.get('random.log')?.kind).toBe(ArtifactKind.Other);
-  expect(byName.get('answer.txt')?.bytes).toBe(5);
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
 });
 
-test('classifies the media/ directory as Media with a rolled-up byte size', async () => {
-  await mkdir(join(dir, 'media'), { recursive: true });
-  await writeFile(join(dir, 'media', 'a.png'), '1234');
-  await writeFile(join(dir, 'media', 'b.png'), '56');
-  const arts = await readRunArtifacts(dir);
-  const media = arts.find((a) => a.name === 'media');
-  expect(media?.kind).toBe(ArtifactKind.Media);
-  expect(media?.bytes).toBe(6);
+test('migrate() applies init-sessions-and-messages from an empty db', () => {
+  const db = new Database(join(dir, 'test.db'));
+  const version = migrate(db, SESSION_MIGRATIONS);
+  expect(version).toBe(1);
+
+  const tables = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    .all() as { name: string }[];
+  const names = tables.map((t) => t.name);
+  expect(names).toContain('sessions');
+  expect(names).toContain('messages');
+  db.close();
 });
 
-test('returns [] for a missing run dir (never throws)', async () => {
-  expect(await readRunArtifacts(join(dir, 'nope'))).toEqual([]);
+test('migrate() is idempotent — re-running against an already-migrated db is a no-op', () => {
+  const dbPath = join(dir, 'test.db');
+  const db1 = new Database(dbPath);
+  migrate(db1, SESSION_MIGRATIONS);
+  db1.close();
+
+  const db2 = new Database(dbPath);
+  const version = migrate(db2, SESSION_MIGRATIONS);
+  expect(version).toBe(1); // user_version already 1 → the migration loop runs zero iterations
+  db2.close();
+});
+
+test('sessions row defaults owner to \'local\' and accepts the documented columns', () => {
+  const db = new Database(join(dir, 'test.db'));
+  migrate(db, SESSION_MIGRATIONS);
+  db.run(
+    "INSERT INTO sessions (id, title, created_at, updated_at) VALUES ('s1', 'New chat', 1, 1)",
+  );
+  const row = db.query('SELECT * FROM sessions WHERE id = ?').get('s1') as
+    | { id: string; title: string; owner: string; last_message_at: number | null; run_id: string | null }
+    | undefined;
+  expect(row?.owner).toBe('local');
+  expect(row?.last_message_at).toBeNull();
+  expect(row?.run_id).toBeNull();
+  db.close();
+});
+
+test('messages.session_id enforces the sessions(id) foreign key when PRAGMA foreign_keys is ON', () => {
+  const db = new Database(join(dir, 'test.db'));
+  db.run('PRAGMA foreign_keys = ON');
+  migrate(db, SESSION_MIGRATIONS);
+  expect(() =>
+    db.run(
+      "INSERT INTO messages (id, session_id, role, parts, created_at) VALUES ('m1', 'missing-session', 'user', '[]', 1)",
+    ),
+  ).toThrow();
+  db.close();
+});
+
+test('messages row accepts a NULL parent_message_id and NULL degraded (both reserved/optional)', () => {
+  const db = new Database(join(dir, 'test.db'));
+  db.run('PRAGMA foreign_keys = ON');
+  migrate(db, SESSION_MIGRATIONS);
+  db.run(
+    "INSERT INTO sessions (id, title, created_at, updated_at) VALUES ('s1', 'New chat', 1, 1)",
+  );
+  db.run(
+    "INSERT INTO messages (id, session_id, role, parts, created_at) VALUES ('m1', 's1', 'user', '[]', 1)",
+  );
+  const row = db.query('SELECT * FROM messages WHERE id = ?').get('m1') as
+    | { parent_message_id: string | null; degraded: number | null }
+    | undefined;
+  expect(row?.parent_message_id).toBeNull();
+  expect(row?.degraded).toBeNull();
+  db.close();
 });
 ```
 
-- [ ] **Step 2: Run to fail** — `bun test --path-ignore-patterns 'web/**' tests/run/artifacts.test.ts` → FAIL (module missing).
+- [ ] **Step 2: Run the tests to verify they fail**
 
-- [ ] **Step 3: Minimal impl** — `src/run/artifacts.ts`:
+Run: `bun test tests/session/migrations.test.ts`
+Expected: FAIL — `src/session/migrations.ts` does not exist yet (module resolution error).
 
-```ts
-import type { Dirent } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { ArtifactKind } from '../contracts/index.ts';
+- [ ] **Step 3: Create `src/session/migrations.ts`**
 
-const FILE_KINDS: Record<string, ArtifactKind> = {
-  'answer.txt': ArtifactKind.Answer,
-  'gap.txt': ArtifactKind.Gap,
-  'resource.txt': ArtifactKind.Resource,
-  'result.txt': ArtifactKind.Result,
-  'unverified.txt': ArtifactKind.Unverified,
-  'failed.txt': ArtifactKind.Failed,
-  'spans.jsonl': ArtifactKind.Spans,
-  'degradation.jsonl': ArtifactKind.Degradation,
-  'error.json': ArtifactKind.Error,
-};
+```typescript
+import type { Database } from 'bun:sqlite';
+import type { Migration } from '../db/migrate.ts';
 
-/** Sum of file sizes directly under `dir` (one level; media dirs are flat). */
-async function dirBytes(dir: string): Promise<number> {
-  let total = 0;
-  const entries = await readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    total += (await stat(join(dir, entry.name))).size;
-  }
-  return total;
-}
-
-/** Readdir + classify one run dir's artifacts into the extended ArtifactKind.
- *  Missing dir → [] (the mapper tolerates a run with only spans.jsonl). */
-export async function readRunArtifacts(
-  runDir: string,
-): Promise<{ name: string; bytes: number; kind: ArtifactKind }[]> {
-  let entries: Dirent[];
-  try {
-    entries = await readdir(runDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const out: { name: string; bytes: number; kind: ArtifactKind }[] = [];
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (entry.name === 'media') {
-        out.push({
-          name: 'media',
-          bytes: await dirBytes(join(runDir, 'media')),
-          kind: ArtifactKind.Media,
-        });
-      }
-      continue;
-    }
-    const kind = FILE_KINDS[entry.name] ?? ArtifactKind.Other;
-    const bytes = (await stat(join(runDir, entry.name))).size;
-    out.push({ name: entry.name, bytes, kind });
-  }
-  return out;
-}
+/**
+ * One migration for the whole `sessions.db`: `sessions` (one row per chat
+ * conversation) and `messages` (one row per persisted turn-half). Mirrors
+ * `src/memory/sqlite-store.ts`'s `MEMORY_MIGRATIONS` shape/idiom, but lives in
+ * its own file (`src/session/migrations.ts`) per spec §4.3, since `store.ts`
+ * is already the bigger of the two files here.
+ *
+ * `parent_message_id` is nullable and written but NOT consumed for threading
+ * this phase (spec D12 — reserved for Slice 41's edit-in-place history).
+ * `degraded` is nullable — set only for an assistant turn that saw a
+ * `StatusEventType.Degrade` event (spec D7); a user message row always has it
+ * NULL. `run_id` on `sessions` is nullable — reserved for a future increment
+ * to populate (see the Increment 1 report's note on `appendMessage`).
+ */
+export const SESSION_MIGRATIONS: Migration[] = [
+  {
+    name: 'init-sessions-and-messages',
+    up: (db: Database) => {
+      db.run(`CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        owner TEXT NOT NULL DEFAULT 'local',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_message_at INTEGER,
+        run_id TEXT
+      )`);
+      db.run(`CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        parent_message_id TEXT,
+        role TEXT NOT NULL,
+        parts TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        degraded INTEGER
+      )`);
+      db.run(
+        'CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at)',
+      );
+    },
+  },
+];
 ```
 
-- [ ] **Step 4: Run to pass** — `bun test --path-ignore-patterns 'web/**' tests/run/artifacts.test.ts` → PASS.
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `bun test tests/session/migrations.test.ts`
+Expected: PASS (all 5 tests).
 
 - [ ] **Step 5: Gate + commit**
 
 ```bash
-bun run typecheck && bun run lint:file -- "src/run/artifacts.ts" "tests/run/artifacts.test.ts"
-git add src/run/artifacts.ts tests/run/artifacts.test.ts
-git commit -m "feat(run): readRunArtifacts — readdir+classify run dir into ArtifactKind"
+bun run typecheck && bun run lint:file -- src/session/migrations.ts tests/session/migrations.test.ts
+git add src/session/migrations.ts tests/session/migrations.test.ts
+git commit -m "feat(session): add SESSION_MIGRATIONS (sessions + messages tables) (Phase 6 Incr 1)"
 ```
 
 ---

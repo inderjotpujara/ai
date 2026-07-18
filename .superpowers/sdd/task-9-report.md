@@ -1,157 +1,115 @@
-# Task 9 Report: `handleRunList` — `GET /api/runs` filtered/sorted/paginated list (Slice 30b Phase 3)
+# Task 9 Report: Builder confirm/log adapter (pure, unit-tested)
 
-Note: this filename was previously reused for an earlier, unrelated Task 9
-(Slice 30b Phase 2 consent registry / `POST /api/runs/:id/respond`). That
-content is superseded here — this is the Slice 30b **Phase 3** runs-list
-Task 9.
+Note: this filename was previously used for an unrelated Task 9 from Slice 30b
+Phase 4 (workflow browse handlers). That content is superseded — this is Slice
+30b Phase 5's Task 9 (builder confirm/log adapter), Increment 2 (Builders).
 
 ## Status: DONE
 
-## Commit
-`46350f9` — feat(server): handleRunList — filtered/sorted/paginated GET /api/runs
+## What was implemented
 
-## Files
-- Created: `src/server/runs/list.ts`
-- Created: `tests/server/runs-list.test.ts`
+Created `src/server/builders/adapter.ts` — the pure, I/O-free bridge (D4) between the
+frozen `BuilderDeps`/`CrewBuilderVerifyDeps` engine hooks (Slices 17/20:
+`confirm: (text: string) => Promise<boolean>`, `confirmReuse?: (kind: ReuseKind, text:
+string) => Promise<boolean>`, `log?: (m: string) => void`) and the server's
+`ConsentRegistry`/SSE writer. Three exports, matching the brief verbatim:
 
-## TDD flow
-1. **RED**: Wrote `tests/server/runs-list.test.ts` exactly per the brief's
-   Step 1 sample (4 tests: sort-desc-by-startMs+total, case-insensitive
-   search over id/models/outcome, outcome+degraded facet filters,
-   limit+opaque-cursor pagination). Ran to fail:
-   ```
-   $ bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts
-   error: Cannot find module '../../src/server/runs/list.ts' from
-     '/Users/inderjotsingh/ai/tests/server/runs-list.test.ts'
-   0 pass, 1 fail, 1 error
-   ```
-2. **GREEN**: Implemented `src/server/runs/list.ts` per the brief's Step 3
-   sample verbatim — `encodeCursor`/`decodeCursorId`/`matchesSearch`/
-   `handleRunList`, importing `RunsDeps` from `./detail.ts` (Task 8,
-   committed) and `summarizeRunListItem` from `../../run/run-dto.ts`
-   (Task 6, committed, mtime-cache-fronted).
-3. Ran to pass (final run after formatting fix, see Gate below):
-   ```
-   $ bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts
-   bun test v1.3.11 (af24e281)
-    4 pass
-    0 fail
-    17 expect() calls
-   Ran 4 tests across 1 file. [117.00ms]
-   ```
+- `confirmViaPort(port: ConfirmPort, events: EventSink, kind: string): (question: string) => Promise<boolean>`
+  — fixed `kind` per call site (e.g. `'build'`); mints `{ kind, question }` through the
+  port on the same event sink the build's narration also writes to, coerces the port's
+  `unknown` resolution to `boolean` via `Boolean(...)`.
+- `confirmReuseViaPort(port: ConfirmPort, events: EventSink): (kind: string, question: string) => Promise<boolean>`
+  — same bridge, but `kind` (the `ReuseKind` value, `'reuse'`/`'offer'`) is supplied per
+  call instead of fixed.
+- `TextPartWriter` type + `logToTextDelta(write: TextPartWriter): (m: string) => void`
+  — bridges the builder's narration hook to a `text-start`/`text-delta`/`text-end`
+  triple per call, each with a fresh incrementing `narration-N` id so the browser
+  renders one line per call rather than a run-on paragraph. `TextPartWriter` is
+  structurally narrower than the AI-SDK `UIMessageStreamWriter['write']`, so
+  `logToTextDelta(writer.write)` type-checks by ordinary contravariance without this
+  module importing `ai`.
 
-## Interfaces confirmed against already-landed code
-- `RunsDeps = { runsRoot: string }` — confirmed exported from
-  `src/server/runs/detail.ts` (Task 8).
-- `summarizeRunListItem(runsRoot, id): Promise<RunListItemDTO | undefined>` —
-  confirmed exported + mtime-cache-fronted in `src/run/run-dto.ts` (Task 6).
-- `RunListQuerySchema` (`src/contracts/requests.ts`) — confirmed: `search`/
-  `outcome` are plain optional strings; `degraded` is
-  `z.enum(['true','false']).optional().transform(...)` → boolean or
-  `undefined`; `limit` is `z.coerce.number().int().positive().max(200).default(25)`.
-- `RunListResponseSchema` — confirmed: `{ items: RunListItemDtoSchema[],
-  nextCursor?: string, total: number }`.
-- `RunListItemDtoSchema` (`src/contracts/dto.ts`) — confirmed field set
-  (`id`, `startMs`, `durationMs`, `outcome: string`, `lifecycle`, `origin`,
-  `models: string[]`, `degraded: boolean`, `spanCount`, `tokens`) matches
-  what `list.ts`'s filter/sort/search logic assumes.
+No engine-side code changed — this task only adds the adapter.
 
-## Implementation notes
-- `handleRunList(params, deps)` builds the raw query object from
-  `URLSearchParams`, `RunListQuerySchema.parse`s it, `readdir`s
-  `deps.runsRoot` for directory entries (a `readdir` failure — root doesn't
-  exist yet — degrades to an empty `{items:[], total:0}` 200 rather than
-  throwing/500ing), projects each id through `summarizeRunListItem`
-  (`undefined` entries, e.g. dirs with no `spans.jsonl`, are dropped),
-  filters by `search`/`outcome`/`degraded`, sorts descending by `startMs`,
-  then paginates: an opaque cursor is `base64url(startMs:id)`, decoded back
-  to just the `id` half, used to find that item's index in the filtered+
-  sorted array and slice from the next index; `nextCursor` is only set when
-  `start + limit < filtered.length`.
-- `search` matching is over
-  `` `${id} ${models.join(' ')} ${outcome}`.toLowerCase() `` — a substring
-  match against the lowercased search term, exactly per the brief.
+## TDD evidence
 
-## Gate results (all three, before commit)
-1. **typecheck** — `bun run typecheck` → `$ tsc --noEmit` clean, no errors.
-2. **lint** — `bun run lint:file -- "src/server/runs/list.ts"
-   "tests/server/runs-list.test.ts"` — first pass reported 2 formatting
-   errors (Biome's line-width/wrapping rules differ from the brief's inline
-   sample formatting, e.g. multi-arg `writeRun({...})` object literals and
-   the `matchesSearch` template-literal length in `list.ts`). Ran `bunx
-   biome check --write` on both files to auto-fix formatting only (no logic
-   changes — confirmed by re-reading the diff, purely re-wrapped
-   lines/object literals). Re-ran lint → `Checked 2 files in 5ms. No fixes
-   applied.` (clean). Re-ran the focused test suite and typecheck after the
-   autofix to confirm nothing broke — both still green/clean (results shown
-   above are the post-autofix final runs).
-3. **focused tests** — 4 pass / 0 fail, 17 `expect()` calls (see above).
-4. `bun run scripts/docs-check.ts` (pre-commit hook) → passed: "living docs
-   present + linked; every src subsystem documented" — `src/server/runs/`
-   already exists as a documented subsystem surface from Task 8; adding
-   `list.ts` alongside `detail.ts` didn't introduce a new subsystem.
-
-## Commit
-`git add src/server/runs/list.ts tests/server/runs-list.test.ts` (no `git
-add -A` — the working tree has unrelated dirty ledger/scratch files from
-other in-flight tasks, left untouched). `git status --short` before commit
-confirmed only these two files were staged (`A  src/server/runs/list.ts`,
-`A  tests/server/runs-list.test.ts`); everything else stayed as pre-existing
-modified/untracked.
-
-Commit: `46350f9` — "feat(server): handleRunList — filtered/sorted/paginated
-GET /api/runs"
+**RED** (module not found, confirmed before implementation):
 ```
-2 files changed, 218 insertions(+)
- create mode 100644 src/server/runs/list.ts
- create mode 100644 tests/server/runs-list.test.ts
+bun test tests/server/builders-adapter.test.ts
+error: Cannot find module '../../src/server/builders/adapter.ts' from '/Users/inderjotsingh/ai/tests/server/builders-adapter.test.ts'
+0 pass / 1 fail / 1 error
 ```
 
-## Deviations from brief
-None in logic — the implementation matches the brief's Step 3 sample
-verbatim. The only change from the brief's literal text was Biome's
-auto-formatting (line wrapping / multi-line object literals) applied to
-both the test file and `list.ts` to satisfy the project's lint gate; no
-behavioral change.
+**GREEN** (after implementing `src/server/builders/adapter.ts` verbatim per brief):
+```
+bun test tests/server/builders-adapter.test.ts
+4 pass
+0 fail
+8 expect() calls
+Ran 4 tests across 1 file. [13.00ms - 15.00ms]
+```
+
+Four tests, all passing:
+1. `confirmViaPort` mints a fixed-kind ask through the port and resolves its answer.
+2. `confirmViaPort` coerces a non-boolean port answer (`undefined`) to `false`.
+3. `confirmReuseViaPort` threads the caller-supplied kind (varies per call: `'reuse'`
+   then `'offer'`).
+4. `logToTextDelta` writes one start/delta/end triple per call with distinct
+   incrementing ids (`narration-0`, `narration-1`).
+
+## Per-task gate (all three, before commit)
+
+- `bun run typecheck` — clean (`tsc --noEmit`, no output/errors).
+- `bun run lint:file -- src/server/builders/adapter.ts tests/server/builders-adapter.test.ts`
+  — 0 errors after one auto-fix pass (`bunx biome check --write` reordered the test's
+  type-only import after the value import and reflowed a long `emit(...)` call across
+  multiple lines — pure formatting, no logic change). Final run: "Checked 2 files in
+  3ms. No fixes applied."
+- Focused tests — 4/4 pass (see GREEN above).
+
+## Files changed
+
+- `src/server/builders/adapter.ts` (new, 55 lines)
+- `tests/server/builders-adapter.test.ts` (new, 60 lines)
+
+## Commit
+
+`f0161ab` — `feat(server): builder confirm/confirmReuse/log adapters onto ConfirmPort + SSE writer (Phase 5)`
+(2 files changed, 115 insertions(+); pre-commit `docs:check` passed — no `src/`
+subsystem-doc gap since `builders/` sits under the already-documented `src/server/`
+tree.)
+
+Branch: `slice-30b-phase5-builders-library` (pre-existing branch, unchanged). Only
+`src/server/builders/adapter.ts` and `tests/server/builders-adapter.test.ts` were
+staged — no `git add -A` — working tree had numerous unrelated dirty files from other
+in-flight Phase 5 tasks (`.remember/*`, `.superpowers/sdd/task-*-brief.md`/
+`task-*-report.md`, `.superpowers/sdd/progress.md`); these were deliberately left
+unstaged and NOT included in this commit.
+
+## Self-review
+
+- Implementation is byte-for-byte the brief's Step 3 code (only whitespace differs,
+  from the biome auto-format pass on the test file's imports/wrapping — the adapter
+  file itself needed no reformatting).
+- Verified `ConfirmPort` (`src/server/consent/registry.ts:10-13`) and `EventSink`
+  (`src/core/events.ts`) signatures against the brief's claims before writing: both
+  match exactly (`ConfirmPort = (ask: ConfirmAsk, emit: EventSink) => Promise<unknown>`;
+  `EventSink = (e: StatusEvent) => void`).
+- `Boolean(await port(...))` is the only coercion point — correctly turns the
+  `Promise<unknown>` port contract into the `Promise<boolean>` the engine's
+  `confirm`/`confirmReuse` hooks require; test 2 explicitly locks in the `undefined →
+  false` case.
+- `logToTextDelta`'s closure-scoped counter (`let n = 0`) is per-adapter-instance, not
+  global — each `logToTextDelta(...)` call site gets its own independent narration-id
+  sequence starting at 0, which is what a fresh build run wants (verified by reasoning
+  through the closure semantics, not just by the given test, since the test only
+  exercises one instance).
+- Only two files touched; no incidental changes to unrelated pre-existing modified
+  files in the working tree (confirmed via `git status --short` before staging).
 
 ## Concerns
-None blocking. Same interim-cache caveat already noted in Task 6's report
-applies transitively here (the in-process `summaryCache` in `run-dto.ts` is
-a stateless-friendly interim, not a persisted index — Phase 6 territory,
-not this task's scope).
 
----
-
-## Follow-up: review-requested test-coverage gaps (post-review)
-
-Review came back Spec ✅ / Quality Approved with two Important
-test-coverage gaps (code already correct by inspection — these lock in the
-behavior). Added exactly two tests to `tests/server/runs-list.test.ts`:
-
-1. **missing/unreadable runsRoot → 200 with empty list** — asserts the
-   "degrade, never crash" contract: `handleRunList(new URLSearchParams(''),
-   { runsRoot: join(root, 'does-not-exist') })` returns 200 with body
-   `{ items: [], total: 0 }` and `nextCursor` undefined.
-2. **stale cursor id → resets to page 1 (never throws)** — two runs, request
-   with a cursor for an absent id (`Buffer.from('999:ghost').toString(
-   'base64url')`, same encoding the impl uses); asserts 200 and all items
-   returned (`items.length === 2`, start resets to 0).
-
-Gate (changed test file only):
-- `bun run typecheck` → `$ tsc --noEmit` clean.
-- `bun run lint:file -- "tests/server/runs-list.test.ts"` → clean after one
-  `biome check --write` autofix (pure line-wrap formatting, no logic change).
-- Test run:
-  ```
-  $ bun test --path-ignore-patterns 'web/**' tests/server/runs-list.test.ts
-  bun test v1.3.11 (af24e281)
-   6 pass
-   0 fail
-   23 expect() calls
-  Ran 6 tests across 1 file. [111.00ms]
-  ```
-
-Follow-up commit (NOT amended into T9): `d2dc6f6` — "test(server): cover
-runList empty-root degrade + stale-cursor fallback". `git add
-tests/server/runs-list.test.ts` only (no `git add -A`); 1 file changed,
-19 insertions. Pre-commit docs-check passed.
+None. The adapter's output shapes (the `data-confirm` ask parameter, the
+`text-start`/`text-delta`/`text-end` part shapes) are fixed exactly as given in the
+brief and match the existing `ConfirmPort`/`EventSink` contracts with no
+interpretation required. No ambiguity encountered — nothing to flag for Task 11/13.

@@ -1,175 +1,119 @@
-# Task 1 Report: Extend `ArtifactKind` for Run-Artifact Classification (Slice 30b Phase 3)
+# Task 1 Report: Session DTOs — `SessionListItemDtoSchema` + `SessionDtoSchema`
 
-Branch: `slice-30b-phase3-runs`. Task: Slice 30b Phase 3, Task 1 (Artifact Classification).
+Branch: `slice-30b-phase6-persistence`. Task: Slice 30b Phase 6 (Persistence), Task 1.
 
 ## Status: DONE
 
-## Summary
-Implemented Task 1: extended the web-contracts `ArtifactKind` enum with six new classification members to enable granular run-artifact categorization. The mapper will now classify every run-directory file instead of collapsing to `Other`.
+## What was implemented
 
-- **New members added:** `Result='result'`, `Resource='resource'`, `Unverified='unverified'`, `Failed='failed'`, `Error='error'`, `Media='media'`
-- **Existing members unchanged:** `Answer`, `Gap`, `Spans`, `Degradation`, `Other` remain in place with original values
-- **Isomorphic preservation:** No new imports added; enum imports only zod (already satisfied)
+Appended two new Zod schema/type pairs to `src/contracts/dto.ts`, inserted immediately
+after `export type ChatMessageDTO = z.infer<typeof ChatMessageDtoSchema>;` (verified
+actual file at lines 124-131 pre-edit, matching the brief's cited anchor exactly) and
+before the `CrewMemberDtoSchema` doc comment:
 
-## Files Changed
+- `SessionListItemDtoSchema` / `SessionListItemDTO` — the list-row projection:
+  `{ id, title, owner, createdAt, updatedAt, lastMessageAt?, runId? }`.
+- `SessionDtoSchema` / `SessionDTO` — the full detail projection: same fields plus
+  `messages: ChatMessageDTO[]` (reusing `ChatMessageDtoSchema` verbatim, no new
+  message DTO, per spec D8).
 
-1. **`src/contracts/enums.ts`** (modified) — Added six new enum members to `ArtifactKind` (lines 38–43)
-2. **`tests/contracts/enums.test.ts`** (modified) — Added comprehensive test verifying all 11 members (Answer + Gap + Spans + Degradation + Other + Result + Resource + Unverified + Failed + Error + Media)
+No edits to `src/contracts/index.ts` — its existing `export * from './dto.ts'`
+wildcard picks up both new exports automatically, which the test proves by importing
+from `index.ts` rather than `dto.ts` directly.
 
-## TDD RED → GREEN Evidence
+Created `tests/contracts/session-dto.test.ts` with the 5 tests specified verbatim in
+the brief (round-trip minimal payload, optional fields present, missing-required-field
+rejection, embedded `ChatMessageDTO[]` round-trip, empty transcript).
 
-### Step 1: Write Failing Test
-Appended test to `tests/contracts/enums.test.ts` (as per brief) that verifies all 11 enum members in correct order:
+## TDD RED/GREEN evidence
 
-```typescript
-test('ArtifactKind carries the Phase-3 classification members (additive)', () => {
-  expect(Object.values(ArtifactKind) as string[]).toEqual([
-    'answer', 'gap', 'spans', 'degradation', 'other',
-    'result', 'resource', 'unverified', 'failed', 'error', 'media',
-  ]);
-});
+**Step 1/2 — RED** (test written first, against not-yet-existing exports):
 ```
-
-### Step 2: Test Fails (RED)
-```bash
-$ bun test --path-ignore-patterns 'web/**' tests/contracts/enums.test.ts
-Exit code 1
-error: expect(received).toEqual(expected)
-@@ -6,8 +6,3 @@
-    "other",
--   "result",
--   "resource",
--   "unverified",
--   "failed",
--   "error",
--   "media",
-  ]
-
-(fail) ArtifactKind carries the Phase-3 classification members (additive)
-
- 4 pass
- 1 fail
-```
-
-### Step 3: Minimal Implementation
-Modified `src/contracts/enums.ts`, appending six new members to `ArtifactKind` enum (kept existing five unchanged):
-
-```typescript
-export enum ArtifactKind {
-  Answer = 'answer',
-  Gap = 'gap',
-  Spans = 'spans',
-  Degradation = 'degradation',
-  Other = 'other',
-  Result = 'result',          // NEW
-  Resource = 'resource',      // NEW
-  Unverified = 'unverified',  // NEW
-  Failed = 'failed',          // NEW
-  Error = 'error',            // NEW
-  Media = 'media',            // NEW
-}
-```
-
-### Step 4: Test Passes (GREEN)
-```bash
-$ bun test --path-ignore-patterns 'web/**' tests/contracts
+$ bun test tests/contracts/session-dto.test.ts
 bun test v1.3.11 (af24e281)
 
- 31 pass
- 0 fail
- 54 expect() calls
-Ran 31 tests across 6 files. [41.00ms]
+tests/contracts/session-dto.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+SyntaxError: Export named 'SessionDtoSchema' not found in module '/Users/inderjotsingh/ai/src/contracts/index.ts'.
+-------------------------------
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [32.00ms]
 ```
 
-All 31 contract tests pass (including our new test + all existing dto + isomorphic tests).
+**Step 3** — implemented the two schema/type pairs in `src/contracts/dto.ts` exactly
+as specified in the brief.
 
-### Step 5: Gate Checks (All Pass)
+**Step 4 — GREEN**:
+```
+$ bun test tests/contracts/session-dto.test.ts
+bun test v1.3.11 (af24e281)
 
-**Typecheck:**
-```bash
+ 5 pass
+ 0 fail
+ 10 expect() calls
+Ran 5 tests across 1 file. [26.00ms]
+```
+
+## Gate (per-task, before commit — all three)
+
+```
 $ bun run typecheck
 $ tsc --noEmit
-(clean — no output)
+(clean, no output)
+
+$ bun run lint:file -- src/contracts/dto.ts tests/contracts/session-dto.test.ts
+$ biome check src/contracts/dto.ts tests/contracts/session-dto.test.ts
+Checked 2 files in 4ms. No fixes applied.
 ```
 
-**Lint:**
-```bash
-$ bun run lint:file -- "src/contracts/enums.ts" "tests/contracts/enums.test.ts"
-$ biome check src/contracts/enums.ts tests/contracts/enums.test.ts
-Checked 2 files in 7ms. No fixes applied.
-```
+One formatting fixup was needed mid-gate: biome collapsed the multi-line
+`expect(() => SessionListItemDtoSchema.parse({ title: 'New chat' })).toThrow();`
+in the "rejects a payload missing a required field" test from the brief's
+3-line form to a single line. Applied the reformat, then reran test + typecheck +
+lint to confirm all three still pass clean after the change (test count/content
+unaffected — pure formatting, no assertion changed).
 
-**Focused Test:**
-```bash
-$ bun test --path-ignore-patterns 'web/**' tests/contracts/enums.test.ts
-4 pass (RunOrigin + ArtifactKind + RunLifecycle + DegradeKind)
-```
+## Files changed
 
-All three gates **PASS** ✓.
-
-## Correctness Verification
-
-✅ **Test Coverage:**
-- Test imports `ArtifactKind` from correct path (`../../src/contracts/enums.ts`)
-- Verifies all 11 members present in correct order (5 existing + 6 new)
-- Uses `Object.values()` to ensure enum structure is intact
-
-✅ **Implementation:**
-- Six new members match brief specification exactly (capitalization, string values, order)
-- Existing five members unchanged (no renames, deletions, or reordering)
-- Enum definition maintains consistent style (PascalCase members, lowercase string values)
-- Isomorphic contract preserved — no new imports (still only relies on being imported, no imports of its own)
-- Comment updated to reference "Slice 30b Phase 3" (already present in codebase)
-
-✅ **Isomorphic Compliance:**
-- `src/contracts/enums.ts` imports nothing — not `zod`, not `node:*`, not AI SDK
-- Enum is used by `src/contracts/index.ts` which re-exports it (existing pattern)
-- No cross-file changes required — `ArtifactKind` is appended-only
-
-## Diff Summary
-
-```
- src/contracts/enums.ts        |  6 ++++++
- tests/contracts/enums.test.ts | 17 +++++++++++++++++
- 2 files changed, 23 insertions(+)
-```
-
-- 6 lines: new enum members (Result, Resource, Unverified, Failed, Error, Media)
-- 17 lines: new test (import + test function with 11 expected values)
-- 0 deletions: strict additive change
+- `src/contracts/dto.ts` — +30 lines (two schema/type pairs), inserted per anchor
+  (after `ChatMessageDTO` type export, before `CrewMemberDtoSchema` block).
+- `tests/contracts/session-dto.test.ts` — new file, 5 tests (biome-reformatted one
+  `expect().toThrow()` call to single-line vs. the brief's multi-line form).
 
 ## Commit
 
-**Hash:** `5cab7440abe63c954e1c47c860ac915588f988f4`
-
-**Message:**
 ```
-feat(contracts): extend ArtifactKind for run-artifact classification (Slice 30b Phase 3)
-
-Add six new classification members (Result, Resource, Unverified, Failed, Error, Media)
-to enable granular run-artifact categorization in the mapper. Existing members
-(Answer, Gap, Spans, Degradation, Other) remain unchanged; isomorphic contract
-imports only zod.
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+308029a feat(contracts): add SessionListItemDtoSchema/SessionDtoSchema (Phase 6 Incr 1)
+ 2 files changed, 103 insertions(+)
+ create mode 100644 tests/contracts/session-dto.test.ts
 ```
+Pre-commit hook (`bun run scripts/docs-check.ts`) passed: "living docs present +
+linked; every src subsystem documented." Only the two intended files were staged
+(confirmed via `git status --short` before commit) — the many other pre-existing
+modified files in `.superpowers/sdd/*`, `.remember/*` from earlier/parallel session
+work were deliberately left untouched/uncommitted.
 
-**Pre-commit Hook:** Docs-check passed (`✔ docs-check: living docs present + linked; every src subsystem documented.`)
+## Self-review findings
 
-## Concerns & Notes
+- Verified the insertion point against the actual working tree (not blindly trusting
+  the brief's possibly-stale line numbers) before editing — matched exactly (124-131).
+- Confirmed no edit to `src/contracts/index.ts` was needed or made; the test's
+  import from `index.ts` (not `dto.ts`) is the proof the wildcard re-export works.
+- `strict`/`noUncheckedIndexedAccess` respected: test uses `parsed.messages[0]?.role`
+  optional-chaining as the brief specifies, since `messages` is a plain array (index
+  access is `T | undefined` under this compiler flag).
+- No `.strict()`, no non-`zod` imports in `dto.ts` — contracts stay isomorphic.
+- `type X = z.infer<...>` pairing preserved for both new schemas, consistent with
+  every existing DTO in the file.
+- No `console.log` introduced. No scope creep — schemas match the brief's field
+  list exactly, no extra fields/methods added (YAGNI honored).
 
-### None — Clean Implementation
+## Concerns
 
-- ✅ Strict TDD: red → green
-- ✅ All 31 contract tests pass (no regressions)
-- ✅ Typecheck clean, lint clean, no warnings
-- ✅ Isomorphic contract rules followed exactly
-- ✅ Enum is additive only — no breaking changes
-- ✅ Test verifies complete enum surface (all 11 members in order)
-- ✅ Pre-commit hook validated docs state
-
----
-
-## Next Steps
-
-This Task 1 prepares the `ArtifactKind` enum for Task 2 (the run-artifact mapper), which will use these classification members to categorize files from run directories during phase 3's artifact capture flow.
+None. Task is self-contained, scope matched the brief exactly, gate is fully green,
+and the commit message matches the brief's Step 5 verbatim.

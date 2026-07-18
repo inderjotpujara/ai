@@ -1,170 +1,85 @@
-# Task 3 report — RunListQuery + RunListResponse request/response schemas
+# Task 3 Report: Config — `AGENT_SESSIONS_PATH` (Phase 6)
 
-## Status: DONE — GREEN, committed
+## Status: DONE
 
-## TDD Cycle
+## What was implemented
 
-**RED** — Added three failing tests to `tests/contracts/requests.test.ts`:
-1. `RunListQuery coerces string query params and defaults limit` — verifies coercion of string `limit` to number, `degraded` from string `'true'/'false'` to boolean, and optional fields pass through
-2. `RunListQuery applies the default limit when omitted` — confirms the `limit` field defaults to 25 when omitted, and optional fields remain undefined
-3. `RunListResponse validates items + pagination` — verifies response validation with array of `RunListItemDTO`, optional `nextCursor`, and required `total`
+- `src/config/schema.ts`: appended a new "Session persistence" `CONFIG_SPEC` group
+  immediately after the existing "Memory / RAG" group (right before the
+  "Verification / anti-hallucination" comment), containing one entry:
+  ```typescript
+  // --- Session persistence (src/session/*, Slice 30b Phase 6) ---
+  {
+    env: 'AGENT_SESSIONS_PATH',
+    kind: 'string',
+    def: 'sessions',
+    doc: 'Directory for the session/chat-history SQLite store (session/store.ts createSessionStore), mirroring AGENT_MEMORY_PATH.',
+  },
+  ```
+  This is picked up automatically by the existing generic `loadConfig()` loop — no new
+  code path was added.
+- `tests/config/schema.test.ts`: appended 2 new test cases after the 4 pre-existing ones
+  (all 4 preserved unchanged, verified by reading the file before editing):
+  - `'AGENT_SESSIONS_PATH defaults to "sessions" (Slice 30b Phase 6)'`
+  - `'AGENT_SESSIONS_PATH honors an env override (Slice 30b Phase 6)'`
+  One deviation from the brief's literal snippet: the env-override test's `loadConfig({ AGENT_SESSIONS_PATH: '/tmp/custom-sessions' })` call was wrapped onto 3 lines instead of 1, to satisfy Biome's line-length formatting rule. Purely cosmetic — same call, same assertions.
 
-Ran focused test:
+## TDD evidence
+
+**RED** (`bun test tests/config/schema.test.ts`, before the schema change):
 ```
-bun test --path-ignore-patterns 'web/**' tests/contracts/requests.test.ts
+4 pass
+2 fail
+142 expect() calls
 ```
-Failed as expected: `RunListQuerySchema` and `RunListResponseSchema` not yet exported (import error).
+Both new `AGENT_SESSIONS_PATH` cases failed with `values.AGENT_SESSIONS_PATH` = `undefined` (no such `CONFIG_SPEC` entry yet); all 4 pre-existing tests passed.
 
-**Implementation** — Exactly per brief (`/.superpowers/sdd/task-3-brief.md`):
-- `src/contracts/requests.ts`: 
-  - Added import: `import { RunListItemDtoSchema } from './dto.ts';` (after zod import, before enums import per biome sort order)
-  - Appended `RunListQuerySchema` with fields: `search?` (string), `outcome?` (string), `degraded?` (enum ['true', 'false'] with transform to boolean), `limit` (z.coerce.number with `.int().positive().max(200).default(25)`), `cursor?` (string)
-  - Appended `RunListResponseSchema` with fields: `items` (array of `RunListItemDtoSchema`), `nextCursor?` (string), `total` (number)
-  - Added type aliases using `z.infer<typeof ...Schema>` per existing pattern
-- `tests/contracts/requests.test.ts`: 
-  - Updated imports to include `RunListQuerySchema`, `RunListResponseSchema`, `RunLifecycle`, `RunOrigin`
-  - Appended all three test cases verbatim from brief
-- `src/contracts/index.ts`: No changes needed — barrel already exports `* from './requests.ts'`.
-
-**GREEN**:
+**GREEN** (same command, after adding the `CONFIG_SPEC` entry):
 ```
-bun test --path-ignore-patterns 'web/**' tests/contracts/requests.test.ts
- 14 pass / 0 fail / 19 expect() calls
+6 pass
+0 fail
+146 expect() calls
 ```
-All 14 tests pass (11 pre-existing + 3 new for RunListQuery/RunListResponse).
 
+**Regression** (`bun test tests/config/` — full config suite):
 ```
-bun test --path-ignore-patterns 'web/**' tests/contracts/
- 36 pass / 0 fail / 65 expect() calls
+9 pass
+0 fail
+156 expect() calls
+Ran 9 tests across 2 files.
 ```
-All 36 contract tests pass (no regressions).
+No other `CONFIG_SPEC` entry's coercion was affected.
 
-## Gate
+## Gate (all three, before commit)
 
-- `bun run typecheck` → clean (no output from `tsc --noEmit`).
-- `bun run lint:file -- "src/contracts/requests.ts" "tests/contracts/requests.test.ts"` → `Checked 2 files in 2ms. No fixes applied.` (after applying biome auto-fixes for import sort order and formatting).
-- Pre-commit hook ran automatically on `git commit` → `✔ docs-check: living docs present + linked; every src subsystem documented.`
+- `bun run typecheck` — clean (`tsc --noEmit`, no errors).
+- `bun run lint:file -- src/config/schema.ts tests/config/schema.test.ts` — initially flagged one formatting issue (the env-override test line exceeded Biome's line-length limit); fixed by wrapping the `loadConfig({...})` call onto 3 lines. Re-ran: clean, 0 errors.
+- Focused test: `bun test tests/config/schema.test.ts` — 6 pass, 0 fail (see GREEN above).
+- Full config suite regression: `bun test tests/config/` — 9 pass, 0 fail (see above).
+
+## Files changed
+
+- `src/config/schema.ts` (modified — appended new group + 1 `CONFIG_SPEC` entry, 7 lines)
+- `tests/config/schema.test.ts` (modified — appended 2 new test cases, net +9 lines after formatting fix)
 
 ## Commit
 
-```
-70ced40 feat(contracts): RunListQuery + RunListResponse schemas for Runs list endpoint
-```
+`9a1679a feat(config): add AGENT_SESSIONS_PATH knob (Phase 6 Incr 1)`
 
-Commit message body:
-```
-Add RunListQuerySchema with query param coercion (limit defaults to 25,
-degraded coerces string 'true'/'false' to boolean) and RunListResponseSchema
-for paginated run summaries with nextCursor and total. Imports RunListItemDtoSchema
-from dto.ts (Task 2) per the isomorphism guard.
-```
+Pre-commit hook (`docs-check`) passed: "living docs present + linked; every src subsystem documented." Only the two intended files were staged/committed (verified via `git status --short` before commit — numerous other unstaged repo changes from prior/parallel task work were left untouched).
 
-## Files Changed
-- `src/contracts/requests.ts` — added import + `RunListQuerySchema` + `RunListQuery` type + `RunListResponseSchema` + `RunListResponse` type (23 new lines).
-- `tests/contracts/requests.test.ts` — expanded imports, appended 3 new test cases (52 new lines, 1 modified line for import expansion).
+## Self-review
 
-## Self-Review
-
-- **Schema completeness**: 
-  - `RunListQuerySchema`: All 5 fields match brief exactly. `search?`, `outcome?`, `cursor?` are plain optional strings. `degraded?` uses `.enum(['true', 'false']).optional().transform(...)` to coerce web query strings to boolean. `limit` uses `z.coerce.number().int().positive().max(200).default(25)` — coerces string input from query params, validates positive integer, enforces max 200, applies default 25.
-  - `RunListResponseSchema`: `items` references `RunListItemDtoSchema` (imported from dto.ts per isomorphism guard). `nextCursor?` optional string. `total` required number.
-
-- **Query param coercion**: Verified by test: `degraded: 'true'` (string from HTTP query) parses to `degraded: true` (boolean); `limit: '10'` (string) parses to `limit: 10` (number). Default limit applied when `{ }` parsed.
-
-- **Pagination shape**: Response includes `items` (array of DTO), `nextCursor?` (for continuation), `total` (cardinality hint). Matches typical paginated API envelope.
-
-- **Import ordering**: Biome auto-organized imports: zod first, then sibling imports (dto, enums) in alphabetical order.
-
-- **Export barrel**: No changes needed; auto-exported via existing `export * from './requests.ts'` in `src/contracts/index.ts`. Confirmed by isomorphic test suite pass (contract tests include `isomorphic.test.ts` which verifies the sibling import is allowed by the isomorphism guard).
-
-- **Type inference**: Both schemas use `z.infer<typeof XSchema>` pattern, matching existing `ChatRequest`, `FeedbackRequest`, etc. in the same file.
-
-- **Tests exercise real behavior**:
-  1. Test 1: Coercion + optional fields present
-  2. Test 2: Default + optional fields absent (undefined, not omitted from object)
-  3. Test 3: Response validation with a minimal RunListItemDTO, pagination fields
-
-- **Code style consistency**: Schema formatting, optional placement, and enum reference pattern match existing request schemas in the same file.
+- Entry shape mirrors the existing `AGENT_MEMORY_PATH` entry exactly (`kind: 'string'`, `def` a bare relative directory name, no hardcoded absolute path) — honors the repo's "never hardcode limits, env-fallback-only" rule and the "Memory / RAG" precedent it's explicitly modeled on.
+- No new code path introduced: relies entirely on the existing generic `loadConfig()` loop, plus the pre-existing `'every entry has a doc string and a default'` test which already covers this new entry (non-empty `doc`, defined `def`) without any test change needed for it.
+- The `doc` string forward-references `session/store.ts createSessionStore` (Tasks 4–8 of this phase, not yet built) — intentional per the brief; the config knob is designed to land ahead of its consumer.
+- Anchor was verified by reading the live file rather than trusting brief line numbers — the "Memory / RAG" group's last entry (`AGENT_MEMORY_RERANK`) and the following "Verification / anti-hallucination" comment were confirmed present and adjacent before inserting between them.
+- Verified the existing test file contained exactly the 4 tests the brief described (no extra pre-existing tests were at risk of being dropped by treating the brief's snippet as "full file content").
 
 ## Concerns
 
-None. Implementation matches brief exactly: schemas, types, tests, and exports all correct. Isomorphic guard satisfied (sibling import from dto.ts permitted). All 36 contract tests pass with no regressions. Typecheck and lint clean.
+None. Scope was a single, isolated `CONFIG_SPEC` entry (YAGNI honored, one entry only) with no downstream code yet depending on it.
 
----
+## Note
 
-## Review Fix — untested coercion rejection/boundary paths
-
-**Finding (Important):** The task review found the `RunListQuerySchema` coercion's rejection/boundary paths were untested — only the happy-path coercion (`limit: '10'` → `10`, `degraded: 'true'` → `true`) and the default-limit case were covered. The `.int().positive().max(200)` guards on `limit` and the `.enum(['true', 'false'])` guard on `degraded` had no tests proving they actually reject bad input. This was a **test-only** fix — `src/contracts/requests.ts` logic was already correct and unchanged.
-
-**Verified guards (read from `src/contracts/requests.ts` lines 53–70 before writing tests, to match reality rather than assume):**
-```ts
-export const RunListQuerySchema = z.object({
-  search: z.string().optional(),
-  outcome: z.string().optional(),
-  degraded: z
-    .enum(['true', 'false'])
-    .optional()
-    .transform((v) => (v === undefined ? undefined : v === 'true')),
-  limit: z.coerce.number().int().positive().max(200).default(25),
-  cursor: z.string().optional(),
-});
-
-export const RunListResponseSchema = z.object({
-  items: z.array(RunListItemDtoSchema),
-  nextCursor: z.string().optional(),
-  total: z.number(),
-});
-```
-Confirmed `max` is indeed `200` (not assumed) and `positive()` means `0` is rejected, not just negatives.
-
-**Tests added** to `tests/contracts/requests.test.ts` (following the existing `FeedbackRequest rejects an invalid rating enum value` / `FeedbackRequest rejects a missing messageId` prior art — `expect(() => Schema.parse(bad)).toThrow()` / `.safeParse(...).success === false`), inserted between the existing `RunListQuery applies the default limit when omitted` test and the `RunListResponse validates items + pagination` test:
-
-1. `RunListQuery coerces a numeric-string limit to a number` — `RunListQuerySchema.parse({ limit: '10' })` → `parsed.limit === 10` (positive control, proves coercion still works).
-2. `RunListQuery rejects a non-numeric limit` — `{ limit: 'abc' }` throws.
-3. `RunListQuery rejects a zero limit (must be positive)` — `{ limit: '0' }` throws (boundary: `positive()` excludes 0).
-4. `RunListQuery rejects a negative limit` — `{ limit: '-5' }` throws.
-5. `RunListQuery rejects a limit above the max of 200` — `{ limit: '201' }` throws (boundary: confirms `max(200)`, i.e. `200` itself would pass, `201` fails).
-6. `RunListQuery rejects a non-integer limit` — `{ limit: '10.5' }` throws (`int()` guard).
-7. `RunListQuery rejects a degraded value that is neither true nor false` — `{ degraded: 'yes' }` and `{ degraded: '1' }` both throw (enum guard, not a loose boolean coercion).
-8. `RunListResponse rejects a payload missing the required total` — `{ items: [] }` via `.safeParse(...).success === false`.
-9. `RunListResponse rejects a payload missing the required items` — `{ total: 0 }` via `.safeParse(...).success === false`.
-
-### Commands run + output
-
-```
-$ bun test tests/contracts/requests.test.ts
-bun test v1.3.11 (af24e281)
- 23 pass
- 0 fail
- 29 expect() calls
-Ran 23 tests across 1 file. [31.00ms]
-```
-(14 pre-existing + 9 new = 23; all green, no regressions.)
-
-```
-$ bun run typecheck
-$ tsc --noEmit
-(clean, no output)
-```
-
-```
-$ bun run lint:file -- "tests/contracts/requests.test.ts"
-$ biome check tests/contracts/requests.test.ts
-Checked 1 file in 3ms. No fixes applied.
-```
-
-Pre-commit hook ran automatically on `git commit` → `✔ docs-check: living docs present + linked; every src subsystem documented.`
-
-### Commit
-
-```
-0956bc4 test(contracts): boundary/rejection tests for RunListQuery coercion + RunListResponse required fields
-```
-1 file changed (`tests/contracts/requests.test.ts`), 40 insertions, 0 deletions. No changes to `src/contracts/requests.ts` — schema logic untouched, as required.
-
-### Files changed
-- `tests/contracts/requests.test.ts` — 9 new tests added (boundary/rejection coverage for `RunListQuerySchema.limit`, `RunListQuerySchema.degraded`, and `RunListResponseSchema` required fields).
-
-### Concerns
-
-None. This closes the Important finding without touching production schema logic. All boundary values were read from the actual schema source (not assumed) before writing assertions.
+This file previously held a report for an earlier Phase 5 Task 3 (Proposal + BuildResult DTOs, commit `eac5290`), which itself had overwritten a still-earlier Task 3 (Workflow DTOs, commit `c650c17`) and an even earlier one (RunListQuery/RunListResponse, commits `70ced40` + `0956bc4`). Per the established pattern, this report fully overwrites that prior content for the current Phase 6 Task 3 — the earlier work already landed under its own commits and is unaffected by this document overwrite.
