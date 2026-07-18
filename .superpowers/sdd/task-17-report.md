@@ -157,3 +157,39 @@ Two inaccuracies fixed: (1) `downsample-worklet.ts`'s table row claimed it posts
 - No finding was skipped; all eight (S1, C1, C2, C3, D1–D5) applied.
 - The `onInterim` removal goes slightly beyond the letter of C3's "wire it" instruction, but the brief itself authorized this explicitly ("If `onInterim`/Composer threading is now genuinely unused, remove the dead prop threading rather than leave it") — verified no caller anywhere in `web/src` ever passed it, and no test asserted on it.
 - Did not touch `docs/ROADMAP.md` — its Slice 30b row title already said "+ 7" correctly (confirmed by grep) and no other stale Phase-7 wording was found there; only README.md needed D3/D4.
+
+---
+
+## Live-verify fix: Silero VAD load + inference (stt.worker.ts) — 2026-07-18
+
+**Trigger:** driving the real browser, the worker loaded Moonshine ASR (~130MB, OK under COEP require-corp) then FAILED loading Silero VAD:
+`Could not locate file: ".../onnx-community/silero-vad/resolve/main/config.json"`. `onnx-community/silero-vad` is a CUSTOM model with no root config.json, so `AutoModel.from_pretrained(id, { device })` made transformers.js fetch a non-existent config.json. Mocked-worker unit tests never hit the real HF fetch, so this only surfaced live.
+
+**Reference API validated against (authoritative):** HuggingFace `transformers.js-examples/moonshine-web/src/worker.js` (fetched verbatim via `gh api …/contents/moonshine-web/src/worker.js`) — the exact Silero-VAD-+-Moonshine architecture this feature mirrors. Cross-checked the installed `@huggingface/transformers@4.2.0` type surface (`processing_utils.d.ts`, `modeling_utils.d.ts`) and `moonshine-web/src/constants.js` (`SAMPLE_RATE = 16000`).
+
+### Fix 1 — Silero VAD load (was crashing live)
+- **Before:** `AutoModel.from_pretrained(VAD_MODEL_ID, { device })`
+- **After:** `AutoModel.from_pretrained(VAD_MODEL_ID, { config: { model_type: 'custom' } as PretrainedConfig, dtype: 'fp32' })` — no `device` (VAD runs CPU/WASM). The inline `model_type: 'custom'` tells transformers.js to skip the config.json fetch that 404'd. Matches the reference exactly. (TS cast needed because 4.2.0 types `config` as a full `PretrainedConfig`; the runtime accepts the partial, as the JS reference does.)
+
+### Fix 2 — Silero VAD inference (`detectSpeech`), was wrong shape + non-stateful
+- **Before:** `vadModel({ input: chunk })` → `result.output?.data?.[0]`. Raw Float32Array as `input`, no `sr`, no `state` — Silero would not run correctly.
+- **After:** stateful, reference-exact:
+  - Module scope: `const VAD_SR = new Tensor('int64', [16000], [])`; `let vadState` reset to a zeroed `new Tensor('float32', new Float32Array(2*1*128), [2,1,128])` on every (re)load.
+  - Per call: `const input = new Tensor('float32', chunk, [1, chunk.length]); const { stateN, output } = await vadModel({ input, sr: VAD_SR, state: vadState }); vadState = stateN;` then `output.data[0] > 0.5`.
+  - External `detectSpeech(chunk)→Promise<boolean>` signature UNCHANGED; state is threaded internally across calls and reset per session. Threshold kept at 0.5 (existing behavior; not part of the load/shape bug).
+
+### Fix 3 — Moonshine inference (`transcribe`): VERIFIED CORRECT, no change
+- Current flow `asrProcessor(samples)` → `asrModel.generate({ ...inputs, max_new_tokens: 256 })` → `asrProcessor.batch_decode(output, { skip_special_tokens: true })` is the standard whisper-style seq2seq path. Confirmed `Processor.batch_decode` exists in `processing_utils.d.ts` (delegates to `PreTrainedTokenizer.batch_decode`) and `MoonshineProcessor._call(audio)` returns feature-extractor inputs. The reference uses the `pipeline()` wrapper which does the same three steps internally. Left ASR load `{ device }` untouched (loaded fine live; the reference's per-module `dtype` map is a perf choice, not a correctness fix).
+
+### Other changes
+- `import { … , Tensor }` changed from `type Tensor` to a value import (needed to construct tensors); added `type PretrainedConfig`. D10 header + `detectWebGpuDevice` WebGPU logic + COEP headers untouched. External worker message protocol and `SttEngine`/`useVoiceInput` contract unchanged.
+
+### Gate results
+- `bun run typecheck` (web): clean.
+- `bun run test` (web): 56 files, **284 passed**. (Existing tests mock the worker and assert only `detectWebGpuDevice` / the message protocol — none asserted the old VAD tensor shape, so none needed updating.)
+- `bun run lint:file -- web/src/features/voice/stt.worker.ts`: clean.
+- `bun run build` (web): success (stt.worker chunk 516 kB).
+
+### Could NOT statically verify (needs the real browser — controller to re-drive)
+- That Silero VAD actually reaches `ready` and that `silero_vad({ input, sr, state })` returns `{ stateN, output }` at runtime with these exact ONNX I/O names (validated only against the reference + docs, not executed — no ONNX/WASM under happy-dom).
+- Real end-to-end transcription output from Moonshine `generate`/`batch_decode`.

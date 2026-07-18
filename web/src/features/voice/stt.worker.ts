@@ -16,9 +16,10 @@ import {
   AutoProcessor,
   env,
   type PreTrainedModel,
+  type PretrainedConfig,
   type Processor,
   type ProgressInfo,
-  type Tensor,
+  Tensor,
 } from '@huggingface/transformers';
 import { ModelTier } from './model-tier.ts';
 
@@ -43,12 +44,26 @@ const MODEL_IDS: Record<ModelTier, string> = {
   [ModelTier.Tiny]: 'onnx-community/moonshine-tiny-ONNX',
 };
 const VAD_MODEL_ID = 'onnx-community/silero-vad';
+// Silero VAD + Moonshine operate at 16 kHz mono (spec §7; the AudioWorklet
+// downsamples the mic to this rate before frames reach the worker).
+const SAMPLE_RATE = 16000;
 
 env.useBrowserCache = true; // D1/D7: Cache-API persistence, skip re-download on reload
 
 let asrModel: PreTrainedModel | undefined;
 let asrProcessor: Processor | undefined;
 let vadModel: PreTrainedModel | undefined;
+// Silero VAD is STATEFUL: each inference takes the previous RNN state and
+// returns the next one, threaded across calls within a session and reset on
+// (re)load. `sr` is a fixed scalar int64 tensor of the sample rate. Both match
+// the canonical transformers.js `moonshine-web` reference worker exactly.
+const VAD_SR = new Tensor('int64', [SAMPLE_RATE], []);
+let vadState: Tensor | undefined;
+
+/** Fresh zeroed Silero VAD RNN state — shape [2, 1, 128], fp32 (reference). */
+function newVadState(): Tensor {
+  return new Tensor('float32', new Float32Array(2 * 1 * 128), [2, 1, 128]);
+}
 
 function post(msg: SttWorkerResponse, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage(msg, transfer);
@@ -92,18 +107,39 @@ async function load(model: ModelTier): Promise<void> {
     progress_callback,
   })) as PreTrainedModel;
   asrProcessor = await AutoProcessor.from_pretrained(modelId, {});
+  // `onnx-community/silero-vad` is a CUSTOM model with no root config.json, so
+  // it MUST be loaded with an inline `config: { model_type: 'custom' }` (this
+  // tells transformers.js to skip the config.json fetch that would 404) and
+  // `dtype: 'fp32'` — and NOT a `device` (it runs on CPU/WASM). This exact
+  // call is the canonical `moonshine-web` reference; the previous
+  // `from_pretrained(id, { device })` triggered the live config.json 404.
   vadModel = (await AutoModel.from_pretrained(VAD_MODEL_ID, {
-    device,
+    // Only `model_type` is meaningful here; cast because transformers.js's TS
+    // surface types `config` as a full PretrainedConfig (the runtime accepts a
+    // partial, exactly as the JS reference passes it).
+    config: { model_type: 'custom' } as PretrainedConfig,
+    dtype: 'fp32',
   })) as PreTrainedModel;
+  vadState = newVadState(); // reset stateful VAD for the new session
   post({ kind: 'ready' });
 }
 
 async function detectSpeech(chunk: Float32Array): Promise<boolean> {
-  if (!vadModel) throw new Error('VAD model not loaded — call load() first');
-  const result = (await vadModel({ input: chunk })) as {
-    output?: { data?: ArrayLike<number> };
-  };
-  const score = Number(result.output?.data?.[0] ?? 0);
+  if (!vadModel || !vadState) {
+    throw new Error('VAD model not loaded — call load() first');
+  }
+  // Silero VAD ONNX inputs (reference): `input` = float32 [1, N] waveform,
+  // `sr` = int64 scalar sample rate, `state` = float32 [2, 1, 128] RNN state.
+  // It returns `{ stateN (next state), output (speech probability) }`; the new
+  // state is threaded into the next call so the RNN keeps temporal context.
+  const input = new Tensor('float32', chunk, [1, chunk.length]);
+  const { stateN, output } = (await vadModel({
+    input,
+    sr: VAD_SR,
+    state: vadState,
+  })) as { stateN: Tensor; output: { data: ArrayLike<number> } };
+  vadState = stateN;
+  const score = Number(output.data[0] ?? 0);
   return score > 0.5;
 }
 
