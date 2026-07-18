@@ -106,4 +106,11 @@ describe('SettingsArea — voice input', () => {
     fireEvent.change(select, { target: { value: 'moonshine-tiny' } });
     expect(voiceModelTier()).toBe('moonshine-tiny');
   });
+
+  it('associates a real (visually-hidden) label with the voice model-tier select (D1)', async () => {
+    renderAt('/settings');
+    expect(await screen.findByLabelText(/voice model tier/i)).toBe(
+      screen.getByTestId('voice-model-tier'),
+    );
+  });
 });

@@ -159,7 +159,11 @@ export function SettingsArea() {
         >
           {voiceEnabled ? 'Voice input: on' : 'Enable voice input'}
         </Button>
+        <label htmlFor="voice-model-tier" className="sr-only">
+          Voice model tier
+        </label>
         <select
+          id="voice-model-tier"
           data-testid="voice-model-tier"
           value={modelTier}
           disabled={!voiceEnabled}

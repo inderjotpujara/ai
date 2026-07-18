@@ -43,7 +43,11 @@ export function PromptInput({
       onSubmit={handleSubmit}
       className="flex items-end gap-2 border-t border-[var(--color-border)] bg-[var(--color-surface)] p-3"
     >
+      <label htmlFor="composer-input" className="sr-only">
+        Message
+      </label>
       <textarea
+        id="composer-input"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={handleKeyDown}
