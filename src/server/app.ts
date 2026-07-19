@@ -19,6 +19,7 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleJobEnqueue } from './jobs/enqueue.ts';
 import { handleMcpAdd } from './mcp/add.ts';
 import { handleMcpList } from './mcp/list.ts';
 import type { McpMountOne } from './mcp/mount-one.ts';
@@ -240,6 +241,11 @@ async function handleApi(
             runsRoot: deps.runsRoot,
             runModelPull: deps.runModelPull,
           });
+        }
+        if (req.method === 'POST' && url.pathname === '/api/jobs') {
+          const res = await handleJobEnqueue(req, deps);
+          rec.status(res.status);
+          return res;
         }
         // /run sub-path matches MUST precede the bare-:name/:id detail
         // matches below — same ordering discipline as the stream-before-
