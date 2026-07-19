@@ -18,9 +18,9 @@
 // So this worker records the HONEST behavior: with no durable store reachable from
 // the installed API, a `--resume` run has nothing to replay and re-executes `a`.
 
-import { WorkflowAgent } from '@ai-sdk/workflow';
-import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { WorkflowAgent } from '@ai-sdk/workflow';
 
 const STORE = process.env.WF_STORE;
 const LOG = process.env.WF_LOG;
@@ -30,7 +30,9 @@ if (!STORE || !LOG) {
 }
 
 const args = process.argv.slice(2);
-const killAfter = args.includes('--kill-after') ? args[args.indexOf('--kill-after') + 1] : null;
+const killAfter = args.includes('--kill-after')
+  ? args[args.indexOf('--kill-after') + 1]
+  : null;
 const isResume = args.includes('--resume');
 
 function ensureStoreDirs() {
@@ -66,16 +68,28 @@ async function nodeC() {
 // Probe the REAL installed surface for any durable store / resume capability.
 function probeDurableSurface(): { hasStore: boolean; hasResume: boolean } {
   const wf = WorkflowAgent as unknown as Record<string, unknown>;
-  const proto = (WorkflowAgent?.prototype ?? {}) as Record<string, unknown>;
-  const keys = [...Object.getOwnPropertyNames(wf), ...Object.getOwnPropertyNames(proto)];
-  const hasStore = keys.some((k) => /store|persist|checkpoint|durable|filesystem/i.test(k));
-  const hasResume = keys.some((k) => /resume|replay|restore|fromStore/i.test(k));
+  const proto = (WorkflowAgent?.prototype ?? {}) as unknown as Record<
+    string,
+    unknown
+  >;
+  const keys = [
+    ...Object.getOwnPropertyNames(wf),
+    ...Object.getOwnPropertyNames(proto),
+  ];
+  const hasStore = keys.some((k) =>
+    /store|persist|checkpoint|durable|filesystem/i.test(k),
+  );
+  const hasResume = keys.some((k) =>
+    /resume|replay|restore|fromStore/i.test(k),
+  );
   return { hasStore, hasResume };
 }
 
 // Try to load the actual durable substrate (the Workflow DevKit). Absent here.
 async function devkitAvailable(): Promise<boolean> {
   try {
+    // @ts-expect-error - probing for the optional, uninstalled Vercel Workflow
+    // DevKit package (no @types available); absence is the expected/proven case.
     await import('workflow');
     return true;
   } catch {

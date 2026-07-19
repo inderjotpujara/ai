@@ -1,6 +1,6 @@
-import { test, expect } from 'bun:test';
-import { rmSync, readFileSync, existsSync } from 'node:fs';
+import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 
 const STORE = 'spikes/workflow-agent/.wf-store';
 const LOG = 'spikes/workflow-agent/.wf-store/nodes.log';
@@ -13,10 +13,14 @@ test('WorkflowAgent resumes mid-DAG from a filesystem store with no re-execution
   rmSync(STORE, { recursive: true, force: true });
 
   // Run 1: KILL after node "a" completes but before "c" finishes.
-  const first = spawnSync('bun', ['spikes/workflow-agent/worker.ts', '--kill-after', 'a'], {
-    env: { ...process.env, WF_STORE: STORE, WF_LOG: LOG },
-    timeout: 30_000,
-  });
+  const first = spawnSync(
+    'bun',
+    ['spikes/workflow-agent/worker.ts', '--kill-after', 'a'],
+    {
+      env: { ...process.env, WF_STORE: STORE, WF_LOG: LOG },
+      timeout: 30_000,
+    },
+  );
   expect(first.status).not.toBe(0); // killed mid-run
   expect(existsSync(LOG)).toBe(true);
   const afterKill = readFileSync(LOG, 'utf8').trim().split('\n');
@@ -24,10 +28,14 @@ test('WorkflowAgent resumes mid-DAG from a filesystem store with no re-execution
   expect(afterKill).not.toContain('c'); // did not finish
 
   // Run 2: resume against the SAME store — must finish c WITHOUT re-running a.
-  const second = spawnSync('bun', ['spikes/workflow-agent/worker.ts', '--resume'], {
-    env: { ...process.env, WF_STORE: STORE, WF_LOG: LOG },
-    timeout: 30_000,
-  });
+  const second = spawnSync(
+    'bun',
+    ['spikes/workflow-agent/worker.ts', '--resume'],
+    {
+      env: { ...process.env, WF_STORE: STORE, WF_LOG: LOG },
+      timeout: 30_000,
+    },
+  );
   expect(second.status).toBe(0);
   const finalLog = readFileSync(LOG, 'utf8').trim().split('\n');
   expect(finalLog).toContain('c'); // completed
