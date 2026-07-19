@@ -59,9 +59,13 @@ function mockFetch(overrides?: {
   daemon?: unknown;
   queue?: unknown;
   jobs?: unknown;
+  logs?: unknown;
 }) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/api/daemon/logs')) {
+      return jsonResponse(overrides?.logs ?? { lines: [] });
+    }
     if (url.includes('/api/daemon/status')) {
       return jsonResponse(overrides?.daemon ?? daemonStatus);
     }

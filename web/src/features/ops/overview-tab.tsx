@@ -3,6 +3,7 @@ import { JobStatusWire } from '@contracts';
 import { Fragment } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
 import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
+import { DaemonLogs } from './daemon-logs.tsx';
 import { useDaemonStatus } from './use-daemon-status.ts';
 import { useJobActions } from './use-job-actions.ts';
 import { useJobs } from './use-jobs.ts';
@@ -46,8 +47,10 @@ function actionLabel(status: JobDTO['status']): 'Resume' | 'Retry' {
 /** Overview tab (Task 33): three health cards — Daemon, Queue, Recent
  *  failures — consuming the Task-32 polling hooks (`useDaemonStatus`,
  *  `useQueueStats`) plus `useJobs`/`useJobActions` (T27/T30). Card-lite by
- *  design (no visx charts — deferred); the daemon-logs viewer itself is
- *  T34, this only reserves its mount point.
+ *  design (no visx charts — deferred). The Daemon card also mounts
+ *  `<DaemonLogs />` (T34) — the redacted tail viewer + copy-CLI daemon-
+ *  lifecycle guidance; see `daemon-logs.tsx` for why there is no remote
+ *  start/stop control (D6, bootstrap paradox).
  *
  *  `QueueStatsDTO.counts` is a PARTIAL map (`z.partialRecord` — see
  *  `use-queue-stats.ts`): a status with zero jobs is simply absent, not
@@ -105,8 +108,9 @@ export function OverviewTab() {
               <dd>{formatUptime(status.uptimeMs)}</dd>
             </dl>
           )}
-          {/* Daemon-logs viewer mount point — filled in Task 34. */}
-          <div data-testid="ops-daemon-logs-mount" className="mt-3" />
+          <div data-testid="ops-daemon-logs-mount" className="mt-3">
+            <DaemonLogs />
+          </div>
         </div>
       </RegionErrorBoundary>
 
