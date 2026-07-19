@@ -3,6 +3,7 @@ import { type KeyboardEvent, useRef } from 'react';
 import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
 import { nextTabIndex } from '../../shared/ui/tab-list.ts';
 import { JobsTab } from './jobs-tab.tsx';
+import { OverviewTab } from './overview-tab.tsx';
 
 /** The four Ops tabs. `enum` per this repo's enum-over-union convention. */
 export enum OpsTab {
@@ -95,9 +96,9 @@ export function OpsArea() {
                 data-testid={`ops-panel-${t.id}`}
               >
                 <RegionErrorBoundary region={`Ops: ${t.label}`}>
-                  {t.id === OpsTab.Jobs ? (
-                    <JobsTab />
-                  ) : (
+                  {t.id === OpsTab.Overview && <OverviewTab />}
+                  {t.id === OpsTab.Jobs && <JobsTab />}
+                  {t.id !== OpsTab.Overview && t.id !== OpsTab.Jobs && (
                     // Replaced tab-by-tab with the real panel content in later increments.
                     <p className="text-sm text-[var(--color-muted)]">
                       {t.label} — coming in a later increment.
