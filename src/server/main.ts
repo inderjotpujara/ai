@@ -132,6 +132,10 @@ export function renderIndexHtml(
 
 export type StartOptions = {
   port?: number;
+  /** Hostname/interface Bun.serve binds (Slice 24 Incr 5, item 5). Defaults to
+   *  `AGENT_WEB_BIND` (127.0.0.1, loopback-only — no implicit 0.0.0.0). The
+   *  Tailscale tunnel recipe overrides this to the 100.x tailnet interface. */
+  bind?: string;
   allowedOrigins?: string[];
   recordIo?: boolean;
   staticDir?: string;
@@ -358,8 +362,14 @@ export function startWebServer(opts: StartOptions = {}): {
   // 413 at the runtime layer, before the fetch handler (and any parsing) ever
   // runs. The per-route upload cap (MAX_UPLOAD_BYTES, upload.ts) is unchanged
   // and stricter still — this is the outer, global backstop.
+  // hostname (Slice 24 Incr 5, item 5): with no hostname, Bun.serve binds the
+  // implicit 0.0.0.0 (all interfaces) — "localhost is not a trust boundary".
+  // Thread the configured bind address through instead, defaulting to
+  // AGENT_WEB_BIND (127.0.0.1, loopback-only); the Tailscale tunnel recipe
+  // opts in to a wider interface explicitly via `opts.bind`/the env override.
   const server = Bun.serve({
     port,
+    hostname: opts.bind ?? String(cfg.AGENT_WEB_BIND),
     fetch: buildFetch(deps),
     idleTimeout: 0,
     maxRequestBodySize: cfg.AGENT_WEB_MAX_BODY_BYTES as number,

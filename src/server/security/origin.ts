@@ -2,11 +2,17 @@ export type OriginPolicy = { port: number; allowedOrigins: string[] };
 
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 
-/** The Host header must name a loopback host on the configured port (DNS-rebinding defense). */
-export function hostAllowed(req: Request, port: number): boolean {
+/** The Host header must name a loopback host — or an explicitly configured
+ *  extra host (the bind interface / tunnel host, Slice 24 Incr 5 item 5/12) —
+ *  on the configured port (DNS-rebinding defense). */
+export function hostAllowed(
+  req: Request,
+  port: number,
+  extraHosts: string[] = [],
+): boolean {
   const host = req.headers.get('host');
   if (host === null) return false;
-  return LOCAL_HOSTS.some((h) => host === `${h}:${port}`);
+  return [...LOCAL_HOSTS, ...extraHosts].some((h) => host === `${h}:${port}`);
 }
 
 /**

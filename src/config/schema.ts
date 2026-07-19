@@ -565,6 +565,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 65_536,
     doc: 'Max /api/telemetry request-body bytes, checked from Content-Length BEFORE req.json() (server/telemetry/handler.ts). The beacon is header-guard-exempt (app.ts), so cap it pre-parse. Over-limit or missing Content-Length → 413. Env-override.',
   },
+  {
+    env: 'AGENT_WEB_BIND',
+    kind: 'string',
+    def: '127.0.0.1',
+    doc: 'Hostname/interface Bun.serve binds (server/main.ts). Default 127.0.0.1 = loopback-only — no implicit 0.0.0.0 ("localhost is not a trust boundary"). Tailscale recipe: set to the 100.x tailnet interface AND keep localhost; auth (Tasks 32-34) still gates every request.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in
