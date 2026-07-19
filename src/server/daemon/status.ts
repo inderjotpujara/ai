@@ -33,7 +33,8 @@ export function handleDaemonStatus(deps: DaemonStatusDeps): Response {
   const pid = readLivePid(deps.daemonPidPath);
   const startedAt =
     pid !== undefined ? readStartedAt(deps.daemonPidPath) : undefined;
-  const uptimeMs = startedAt !== undefined ? Date.now() - startedAt : undefined;
+  const uptimeMs =
+    startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined;
   recordDaemonStatusRead();
   return json(
     DaemonStatusDtoSchema.parse({
