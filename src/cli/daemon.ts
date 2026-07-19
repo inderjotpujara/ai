@@ -115,7 +115,10 @@ export async function runDaemonCli(
  */
 function buildRealDaemon() {
   const cfg = loadConfig().values;
-  const runsRoot = 'runs';
+  // Honor AGENT_RUNS_ROOT (same expression as the CLI runs/usage/archive
+  // readers) so the always-on daemon writer and those readers agree — never
+  // hardcode the path (repo no-hardcode rule; capstone finding).
+  const runsRoot = process.env.AGENT_RUNS_ROOT ?? 'runs';
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);

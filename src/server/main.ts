@@ -235,7 +235,10 @@ export function startWebServer(opts: StartOptions = {}): {
   }
 
   const policy = { port, allowedOrigins, allowedHosts };
-  const runsRoot = 'runs';
+  // Honor AGENT_RUNS_ROOT (same expression as the CLI runs/usage/archive
+  // readers, src/cli/{runs,usage,archive}.ts) so the server writer and those
+  // readers agree — never hardcode the path (repo no-hardcode rule).
+  const runsRoot = process.env.AGENT_RUNS_ROOT ?? 'runs';
   // ONE process-shared limiter (Slice 24 Incr 5, item 2): gates run-dir
   // creation across ALL FOUR run-launch routes (jobs/crews/workflows/pull) so
   // a client (now potentially remote) can't spam createRun — see

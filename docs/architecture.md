@@ -3752,7 +3752,10 @@ turn against the same `runId` and the checkpoint **skips completed nodes with no
 re-execution** (proven: a 3-node `a→b→c`, `b` throwing on pass 1, resumes to done
 with `counts.a===1` across both passes). Only **sequential** crew DAGs are
 step-resumable; hierarchical/orchestrator crews are not (they have no static task
-graph — documented, not a bug). Durable consent survives restart too:
+graph — documented, not a bug). Because the durable predicate still re-queues a
+crew orphan, a **hierarchical/orchestrator** crew is **re-executed from scratch**
+on restart (not left Interrupted) — acceptable on a single-owner box; a
+task-graph for those is future work. Durable consent survives restart too:
 `src/server/consent/durable-registry.ts` writes a pending approval to
 `runs/_consent/consent.json` (0600) **before** emitting it, and a fresh registry
 over the same file post-restart re-lists and resolves it once (subsuming the old
