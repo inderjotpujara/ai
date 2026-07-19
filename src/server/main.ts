@@ -241,6 +241,7 @@ export function startWebServer(opts: StartOptions = {}): {
       runModelPull,
       runChatTurn,
       runBuilderTurn,
+      runsRoot,
     });
     pool = createWorkerPool({
       store: jobStore,

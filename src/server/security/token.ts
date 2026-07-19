@@ -9,6 +9,12 @@ export function mintSessionToken(): string {
 export type TokenGuard = {
   verify(req: Request): boolean;
   verifyToken(raw: string): boolean;
+  /** The authorizing principal for a verified request — the reserved
+   *  `server.principal` span attribute's source (Slice 24 Incr 3, item 17).
+   *  Always `'local'` today (this single-token guard has no per-device
+   *  identity); Increment 5's session tokens resolve a real per-device id
+   *  here once they land, without any caller-side change. */
+  principal(req: Request): string;
 };
 
 /** Constant-time bearer verification against the session token. */
@@ -38,6 +44,9 @@ export function createTokenGuard(token: string): TokenGuard {
     // timing-safe BEFORE parsing the event. Scoped narrowly to that one route.
     verifyToken(raw) {
       return matches(raw);
+    },
+    principal() {
+      return 'local';
     },
   };
 }

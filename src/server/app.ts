@@ -160,7 +160,11 @@ async function handleApi(
   guard: TokenGuard,
 ): Promise<Response> {
   return withServerRequestSpan(
-    { route: url.pathname, method: req.method },
+    {
+      route: url.pathname,
+      method: req.method,
+      principal: guard.principal(req),
+    },
     async (rec) => {
       try {
         if (url.pathname === '/api/health') {

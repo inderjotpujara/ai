@@ -4,9 +4,13 @@
  * discriminated unions elsewhere take their discriminant from `StatusEventType`.
  */
 
-/** Run provenance (reserved; Slice 25 sets the non-`manual` values). */
+/** Run provenance (reserved; Slice 25 sets the remaining non-`manual` values).
+ *  `Daemon` (Slice 24 Incr 3, item 17) marks a run dispatched through the
+ *  queue/daemon worker pool, distinguishing it from a directly-launched
+ *  (`Manual`) run in the same runs list/detail view. */
 export enum RunOrigin {
   Manual = 'manual',
+  Daemon = 'daemon',
   Schedule = 'schedule',
   Webhook = 'webhook',
   Api = 'api',
