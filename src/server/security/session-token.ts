@@ -24,7 +24,14 @@
 import { Buffer } from 'node:buffer';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+
+/** Default per-device revocation-set location: `~/.agent/revoked-devices.json`
+ *  (sits beside the root token, same `0600`/`0700` convention). */
+export function defaultRevocationPath(): string {
+  return join(homedir(), '.agent', 'revoked-devices.json');
+}
 
 export type SessionPrincipal = { deviceId: string };
 

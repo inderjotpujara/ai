@@ -28,7 +28,15 @@ import {
 } from './launch-turns.ts';
 import { createRealMcpMountOne } from './mcp/mount-one.ts';
 import { createMcpMountStatus } from './mcp/mount-status.ts';
-import { mintSessionToken } from './security/token.ts';
+import {
+  createRootTokenStore,
+  defaultRootTokenPath,
+} from './security/root-token.ts';
+import {
+  createSessionTokenStore,
+  defaultRevocationPath,
+  type SessionTokenStore,
+} from './security/session-token.ts';
 
 // The built web/ SPA (`cd web && bun run build`) lands at web/dist/, two
 // directories up from this file (src/server/ -> src/ -> repo root).
@@ -127,7 +135,24 @@ export type StartOptions = {
   allowedOrigins?: string[];
   recordIo?: boolean;
   staticDir?: string;
+  /** LEGACY escape hatch: a raw constant bearer. When set, the durable
+   *  root→session auth is bypassed and the server uses the constant-token
+   *  guard. Production/daemon boot never sets it (durable auth is built below);
+   *  it exists only for narrow fixtures that still want a fixed token. */
   token?: string;
+  /** Path of the durable daemon root token (security/root-token.ts). Defaults
+   *  to `~/.agent/daemon-token`; overridable so tests stay hermetic. */
+  rootTokenPath?: string;
+  /** Path of the per-device revocation set (security/session-token.ts).
+   *  Defaults to `~/.agent/revoked-devices.json`; overridable for tests. */
+  sessionRevocationPath?: string;
+  /** TTL (ms) of the local-browser session token. Defaults to
+   *  `AGENT_WEB_SESSION_TTL_MS`. */
+  sessionTtlMs?: number;
+  /** Inject a pre-built session-token store (e.g. the daemon's single live
+   *  instance, so revoke/rotate operate on the SAME store the guard verifies).
+   *  Absent = build one from the root store below. */
+  sessionTokens?: SessionTokenStore;
   /** Injected, pre-reconciled queue owned by the caller (the daemon, T27). When
    *  present, startWebServer does NOT construct or start/stop a pool — the
    *  caller already ran reconcileOrphans() then pool.start() in the correct
@@ -155,7 +180,38 @@ export function startWebServer(opts: StartOptions = {}): {
       .map((s) => s.trim())
       .filter(Boolean);
   const recordIo = opts.recordIo ?? (cfg.AGENT_WEB_RECORD_IO as boolean);
-  const token = opts.token ?? mintSessionToken();
+
+  // Durable auth (Slice 24 Incr 5, D4): ONE root + ONE live session-token store
+  // per server. The root is minted-once + persisted (~/.agent/daemon-token), so
+  // auth survives restarts; a reconnecting device stays authorized without a
+  // re-pair. The session store is the SINGLE instance the guard verifies
+  // against, so an in-process revoke/rotate takes effect immediately (nit #2).
+  // For the localhost browser we mint a SESSION token for the `'local'` device
+  // (short TTL) and inject THAT as window.__AGENT_TOKEN__ — the root NEVER
+  // leaves the server (nit #6). `opts.token` is a legacy bypass only.
+  let sessionTokens: SessionTokenStore | undefined;
+  let token: string;
+  if (opts.token !== undefined) {
+    token = opts.token; // legacy constant-token fixture path
+  } else if (opts.sessionTokens) {
+    sessionTokens = opts.sessionTokens; // caller (daemon) owns the live store
+    token = sessionTokens.mintSessionToken({
+      deviceId: 'local',
+      ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
+    });
+  } else {
+    const rootStore = createRootTokenStore({
+      path: opts.rootTokenPath ?? defaultRootTokenPath(),
+    });
+    sessionTokens = createSessionTokenStore({
+      path: opts.sessionRevocationPath ?? defaultRevocationPath(),
+      rootToken: rootStore.getOrCreateRoot(),
+    });
+    token = sessionTokens.mintSessionToken({
+      deviceId: 'local',
+      ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
+    });
+  }
 
   const policy = { port, allowedOrigins };
   const runsRoot = 'runs';
@@ -263,6 +319,7 @@ export function startWebServer(opts: StartOptions = {}): {
 
   const deps: ServerDeps = {
     token,
+    sessionTokens,
     policy,
     recordIo,
     staticDir,

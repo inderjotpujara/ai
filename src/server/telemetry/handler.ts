@@ -1,7 +1,11 @@
 import { TelemetryEventSchema } from '../../contracts/telemetry.ts';
 import { recordVoiceTranscribeWeb } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
-import type { TokenGuard } from '../security/token.ts';
+
+/** Only the body-token check is needed here — both the legacy `TokenGuard` and
+ *  the durable `SessionGuard` (Slice 24 Incr 5) satisfy this shape, so the
+ *  beacon path verifies against whichever the server booted with. */
+type BeaconTokenVerifier = { verifyToken(raw: string): boolean };
 
 function jsonError(message: string, status: number): Response {
   return new Response(JSON.stringify({ error: message }), {
@@ -29,7 +33,7 @@ function jsonError(message: string, status: number): Response {
  */
 export async function handleTelemetry(
   req: Request,
-  guard: TokenGuard,
+  guard: BeaconTokenVerifier,
 ): Promise<Response> {
   // Parse the body once; a non-JSON body simply yields no token → 401 below.
   let body: unknown;

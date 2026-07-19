@@ -547,6 +547,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 0,
     doc: 'Max simultaneously-open run SSE streams (server/runs/stream-limit.ts). 0/unset = computed from worker concurrency (×8 headroom); a positive integer overrides. Over the cap, GET /api/runs/:id/stream returns 503. Never hardcode.',
   },
+  {
+    env: 'AGENT_WEB_SESSION_TTL_MS',
+    kind: 'number',
+    def: 43_200_000,
+    doc: 'TTL (ms) of the per-device SESSION token the server mints for the local browser at boot and injects as window.__AGENT_TOKEN__ (server/main.ts; signed by the durable daemon root, security/session-token.ts). Default 12h — long enough to span a working session, short enough to bound a leaked browser token. A reload re-mints. Fallback-only override; never hardcode elsewhere.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in

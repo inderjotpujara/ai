@@ -15,7 +15,12 @@ import { startWebServer } from '../../src/server/main.ts';
 test('standalone startWebServer self-hosts a jobStore + pool that enqueues and reports activeCount', async () => {
   const prev = process.env.AGENT_QUEUE_PATH;
   process.env.AGENT_QUEUE_PATH = mkdtempSync(join(tmpdir(), 'queue-boot-'));
-  const handle = startWebServer({ port: 0 });
+  const authDir = mkdtempSync(join(tmpdir(), 'queue-boot-auth-'));
+  const handle = startWebServer({
+    port: 0,
+    rootTokenPath: join(authDir, 'daemon-token'),
+    sessionRevocationPath: join(authDir, 'revoked-devices.json'),
+  });
   try {
     const rec = handle.jobStore.enqueue({
       kind: JobKind.Chat,
@@ -57,7 +62,13 @@ test('injected startWebServer reuses the caller pool + store and never starts a 
     activeCount: () => 0,
   };
 
-  const handle = startWebServer({ port: 0, queue: { jobStore, pool } });
+  const authDir = mkdtempSync(join(tmpdir(), 'queue-inject-auth-'));
+  const handle = startWebServer({
+    port: 0,
+    queue: { jobStore, pool },
+    rootTokenPath: join(authDir, 'daemon-token'),
+    sessionRevocationPath: join(authDir, 'revoked-devices.json'),
+  });
   try {
     // The SAME instances flow back out — no self-hosted duplicates.
     expect(handle.pool).toBe(pool);

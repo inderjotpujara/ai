@@ -40,7 +40,12 @@ import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
-import { createTokenGuard, type TokenGuard } from './security/token.ts';
+import type { SessionTokenStore } from './security/session-token.ts';
+import {
+  createSessionGuard,
+  createTokenGuard,
+  type SessionGuard,
+} from './security/token.ts';
 import { handleSessionDelete } from './sessions/delete.ts';
 import { handleSessionDetail } from './sessions/detail.ts';
 import { handleSessionExport } from './sessions/export.ts';
@@ -59,7 +64,18 @@ import { handleWorkflowRun } from './workflows/run.ts';
  * wiring (chat/runs/crews/…) attaches in later phases.
  */
 export type ServerDeps = {
+  /** The injected browser bearer — a durable-backed per-device SESSION token
+   *  (deviceId `'local'`) when `sessionTokens` is wired at boot, or a legacy
+   *  raw constant for older test fixtures. Also injected into the served HTML
+   *  as `window.__AGENT_TOKEN__`. Never the root token. */
   token: string;
+  /** The SINGLE live per-device session-token store the guard verifies against
+   *  (Slice 24 Incr 5, D4). When present, `buildFetch` builds the durable
+   *  `createSessionGuard` over it; when absent (legacy fixtures that only set
+   *  `token`), it falls back to the constant-token `createTokenGuard` — the
+   *  same timing-safe guard, not a weakened one. Production/daemon boot always
+   *  wires this so revoke/rotate on this instance take effect immediately. */
+  sessionTokens?: SessionTokenStore;
   policy: OriginPolicy;
   staticDir?: string;
   recordIo: boolean;
@@ -121,7 +137,12 @@ export function json(body: unknown, status = 200): Response {
 export function buildFetch(
   deps: ServerDeps,
 ): (req: Request) => Promise<Response> {
-  const guard = createTokenGuard(deps.token);
+  // The durable per-device session guard when a store is wired (production /
+  // daemon boot); the legacy constant-token guard only as a fallback for test
+  // fixtures that construct ServerDeps with a raw `token` and no store.
+  const guard: SessionGuard = deps.sessionTokens
+    ? createSessionGuard(deps.sessionTokens)
+    : createTokenGuard(deps.token);
   return async (req) => {
     // Top-level backstop: ANY throw anywhere below (perimeter, static serving,
     // URL parsing, ...) degrades to a JSON 500, never crashes the process.
@@ -157,7 +178,7 @@ async function handleApi(
   req: Request,
   url: URL,
   deps: ServerDeps,
-  guard: TokenGuard,
+  guard: SessionGuard,
 ): Promise<Response> {
   return withServerRequestSpan(
     {
