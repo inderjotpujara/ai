@@ -1,189 +1,48 @@
-### Task 3: `aria-pressed` on the theme/OS-notify/voice toggles + `aria-label` on the three unnamed `<aside>` landmarks (D1)
+## Task 3: Decision record — adopt `@ai-sdk/workflow` vs. custom per-node checkpoint store
 
 **Files:**
-- Modify: `web/src/app/app-shell.tsx:82` (theme toggle `<Button>`)
-- Modify: `web/src/app/app-shell.test.tsx` (append)
-- Modify: `web/src/features/settings/index.tsx:136-161` (OS-notify + voice-input toggle `<Button>`s)
-- Modify: `web/src/features/settings/index.test.tsx` (append)
-- Modify: `web/src/features/sessions/index.tsx:38` (`<aside data-testid="sessions-sidebar">`)
-- Modify: `web/src/features/sessions/index.test.tsx` (append)
-- Modify: `web/src/features/workflows/workflow-detail.tsx:111` (`<aside data-testid="step-detail">`)
-- Modify: `web/src/features/workflows/workflow-detail.test.tsx` (append)
-- Modify: `web/src/features/runs/waterfall.tsx:53` (`<aside data-testid="span-detail">`)
-- Modify: `web/src/features/runs/waterfall.test.tsx` (append)
+- Create: `docs/superpowers/decisions/2026-07-19-slice-24-resume-substrate.md`
+- Modify: this plan file — set the Increment 6 "SELECTED PATH" marker (Task 40's header) to the decision's outcome.
 
 **Interfaces:**
-- Consumes: nothing new — `Button` (`web/src/shared/ui/button.tsx`) already forwards arbitrary `ButtonHTMLAttributes`, including `aria-pressed`, via its `...rest` spread.
-- Produces: no new exports; five existing elements gain accessibility attributes only (no behavior/prop-shape change).
+- Consumes: the Task 2 spike transcript + Task 1 peer-range result.
+- Produces: a single machine-checkable verdict — `SUBSTRATE = adopt` or `SUBSTRATE = custom` — that Increment 6 (Task 40/41) branches on. D5 pre-commits BOTH paths, so the deliverable (resume at DAG-node granularity) is fixed either way.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the decision record**
 
-Append to `web/src/app/app-shell.test.tsx` (inside `describe('AppShell', ...)`):
-
-```tsx
-it('the theme toggle exposes aria-pressed reflecting dark mode (D1)', async () => {
-  renderAt('/');
-  const btn = await screen.findByRole('button', { name: /theme/i });
-  expect(btn).toHaveAttribute('aria-pressed', 'true'); // ThemeProvider defaults to dark
-});
+`docs/superpowers/decisions/2026-07-19-slice-24-resume-substrate.md` must contain, in order: (1) the question (D5c / §7.2), (2) the Task 2 transcript, (3) the peer-range result, (4) the answers to the three spike questions — runs local-first? filesystem store, no Vercel? wraps-or-replaces our `src/workflow/` engine? — (5) the verdict line, EXACTLY one of:
 ```
-
-Append to `web/src/features/settings/index.test.tsx` (inside `describe('SettingsArea', ...)` for the notify toggle, and inside `describe('SettingsArea — voice input', ...)` for the voice toggle):
-
-```tsx
-it('exposes aria-pressed on the OS-notify toggle reflecting its state (D1)', async () => {
-  stubNotification('granted');
-  renderAt('/settings');
-  const btn = await screen.findByTestId('notify-os-toggle');
-  expect(btn).toHaveAttribute('aria-pressed', 'false');
-  fireEvent.click(btn);
-  expect(await screen.findByText('OS notifications: on')).toBeInTheDocument();
-  expect(btn).toHaveAttribute('aria-pressed', 'true');
-});
+SUBSTRATE = adopt   (Increment 6 uses WorkflowAgent resume — Task 40a/41a)
+SUBSTRATE = custom  (Increment 6 uses src/workflow/checkpoint.ts — Task 40b/41b)
 ```
+(6) a one-paragraph rationale.
 
-```tsx
-it('exposes aria-pressed on the voice-input toggle reflecting its state (D1)', async () => {
-  renderAt('/settings');
-  const btn = await screen.findByTestId('voice-input-toggle');
-  expect(btn).toHaveAttribute('aria-pressed', 'false');
-  fireEvent.click(btn);
-  expect(btn).toHaveAttribute('aria-pressed', 'true');
-});
-```
+- [ ] **Step 2: Stamp the Increment 6 header**
 
-Append to `web/src/features/sessions/index.test.tsx` (inside `describe('SessionsSidebar', ...)`):
+Edit this plan's Increment 6 "SELECTED PATH" line (below) to name the chosen path so the executor cannot miss it.
 
-```tsx
-it('labels the sidebar landmark for assistive tech (D1)', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => jsonResponse({ items: [], total: 0 })),
-  );
-  renderAt('/');
-  expect(
-    await screen.findByRole('complementary', { name: /recent sessions/i }),
-  ).toBeInTheDocument();
-  vi.unstubAllGlobals();
-});
-```
-
-Append to `web/src/features/workflows/workflow-detail.test.tsx` (inside `describe('WorkflowDetail', ...)`):
-
-```tsx
-it('labels the step-detail landmark for assistive tech (D1)', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => jsonResponse(detail)),
-  );
-  renderAt('/workflows/fetch-then-summarize');
-  fireEvent.click(await screen.findByTestId('dag-node-fetch'));
-  expect(
-    await screen.findByRole('complementary', { name: /selected step detail/i }),
-  ).toBeInTheDocument();
-  vi.unstubAllGlobals();
-});
-```
-
-Append to `web/src/features/runs/waterfall.test.tsx` (inside `describe('Waterfall', ...)`):
-
-```tsx
-it('labels the span-detail landmark for assistive tech (D1)', () => {
-  render(<Waterfall spans={[span({ spanId: 'a' })]} />);
-  fireEvent.click(screen.getByTestId('bar-a'));
-  expect(
-    screen.getByRole('complementary', { name: /selected span detail/i }),
-  ).toBeInTheDocument();
-});
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cd web && bun run test -- app-shell.test.tsx settings/index.test.tsx sessions/index.test.tsx workflows/workflow-detail.test.tsx runs/waterfall.test.tsx`
-Expected: FAIL on all five new assertions — none of the five elements has the attribute yet.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Modify `web/src/app/app-shell.tsx:82`:
-
-```tsx
-          <Button
-            onClick={toggle}
-            aria-label={`theme: ${theme}`}
-            aria-pressed={theme === 'dark'}
-          >
-            {theme === 'dark' ? '☾' : '☀'}
-          </Button>
-```
-
-Modify `web/src/features/settings/index.tsx` (both toggle buttons):
-
-```tsx
-        <Button
-          data-testid="notify-os-toggle"
-          variant={enabled ? 'accent' : 'default'}
-          aria-pressed={enabled}
-          onClick={handleToggle}
-        >
-          {enabled ? 'OS notifications: on' : 'Enable OS notifications'}
-        </Button>
-```
-
-```tsx
-        <Button
-          data-testid="voice-input-toggle"
-          variant={voiceEnabled ? 'accent' : 'default'}
-          aria-pressed={voiceEnabled}
-          onClick={() => setVoiceEnabled((v) => !v)}
-        >
-          {voiceEnabled ? 'Voice input: on' : 'Enable voice input'}
-        </Button>
-```
-
-Modify `web/src/features/sessions/index.tsx:38`:
-
-```tsx
-    <aside
-      data-testid="sessions-sidebar"
-      aria-label="Recent sessions"
-      className="w-[var(--spacing-rail)] shrink-0 border-r border-[var(--color-border)] p-4"
-    >
-```
-
-Modify `web/src/features/workflows/workflow-detail.tsx:111`:
-
-```tsx
-                <aside
-                  data-testid="step-detail"
-                  aria-label="Selected step detail"
-                  className="min-w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-fg)]"
-                >
-```
-
-Modify `web/src/features/runs/waterfall.tsx:53`:
-
-```tsx
-        <aside
-          data-testid="span-detail"
-          aria-label="Selected span detail"
-          className="min-w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-fg)]"
-        >
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cd web && bun run test -- app-shell.test.tsx settings/index.test.tsx sessions/index.test.tsx workflows/workflow-detail.test.tsx runs/waterfall.test.tsx`
-Expected: PASS.
-
-Run: `cd web && bun run typecheck`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add web/src/app/app-shell.tsx web/src/app/app-shell.test.tsx web/src/features/settings/index.tsx web/src/features/settings/index.test.tsx web/src/features/sessions/index.tsx web/src/features/sessions/index.test.tsx web/src/features/workflows/workflow-detail.tsx web/src/features/workflows/workflow-detail.test.tsx web/src/features/runs/waterfall.tsx web/src/features/runs/waterfall.test.tsx
-git commit -m "feat(a11y): aria-pressed on toggle buttons + aria-label on unnamed aside landmarks (D1)"
+git add docs/superpowers/decisions/2026-07-19-slice-24-resume-substrate.md docs/superpowers/plans/2026-07-19-slice-24-daemon-queue-remote.md
+DOCS_OK=1 git commit -m "docs(queue): Slice 24 resume-substrate decision record (Incr 1 gate)"
 ```
+(`DOCS_OK=1`: a `docs/superpowers/` decision record + plan edit is not a slice landing.)
+
+## Task 3b: Boundary gate — Increment 1
+
+**Files:** none (verification only).
+
+- [ ] **Step 1: Run the full root gate**
+
+```bash
+bun run typecheck && bun run lint && bun run test
+```
+Expected: PASS. The spike test lives under `spikes/` and is NOT run by `bun run test` (which the normal suite scopes to `tests/` + `src/`); if it is picked up, exclude `spikes/**` the same way `web/**` is excluded in the `test` script. The decision record's verdict line is set. No `src/**` changed yet — nothing to break.
 
 ---
+
+# Increment 2 — Queue core (`src/queue/`, SQLite jobs store + bounded worker pool)
+
+**Purpose (spec §5.2, D6):** the persistent job control plane. SQLite `jobs` table mirroring `src/session/store.ts` (WAL + `busy_timeout=5000` + `foreign_keys=ON`, `user_version` migrations via `src/db/migrate.ts`, `INSERT OR IGNORE` idempotency, `db.transaction()` atomicity, base64url keyset pagination, snake_case↔camelCase mappers). Scheduler + bounded worker pool (N from hardware, env-override) + priority lanes + retry reusing `src/reliability/`. **No HTTP yet** — unit-tested against a temp SQLite db (mirrors the `SessionStore` test precedent). Closes deferred items 7 (concurrent-launch cap = the pool) and 11 (persistence chartered out of Slice 21). This increment's spans (item 18) are added in Increment 4 once the daemon owns the tracer.
 
