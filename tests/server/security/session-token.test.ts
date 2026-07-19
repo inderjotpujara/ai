@@ -105,6 +105,37 @@ test('rotating the root invalidates every session minted under the old root', ()
   expect(after.verifySessionToken(tok)).toBeNull();
 });
 
+// AUDIT CRITICAL-1 — the root getter. When the store is built with a GETTER
+// (not a captured string), a rotate() of the underlying root takes effect on
+// the SAME live store: a token minted AFTER the rotate verifies against the new
+// root, and one minted BEFORE it no longer does. A captured-string store would
+// keep signing/verifying with the stale root, making rotate-root a no-op — this
+// is exactly the seam T19's rotate-root route depends on.
+test('a store built with a root GETTER honours rotate() per-call (pre-rotate token dies, post-rotate token lives)', () => {
+  const dir = tempDir();
+  const rootStore = createRootTokenStore({ path: join(dir, 'daemon-token') });
+  rootStore.getOrCreateRoot();
+  // Build the store over a GETTER that re-reads the live root every call.
+  const store = createSessionTokenStore({
+    path: join(dir, 'sessions'),
+    rootToken: () => rootStore.getOrCreateRoot(),
+  });
+
+  const before = store.mintSessionToken({ deviceId: 'mac-2', ttlMs: 60_000 });
+  expect(store.verifySessionToken(before)?.deviceId).toBe('mac-2');
+
+  // Break-glass: rotate the underlying root (overwrites the file).
+  rootStore.rotate();
+
+  // The pre-rotate token no longer verifies — its sig was over the OLD root,
+  // and the getter now resolves the NEW one on every verify call.
+  expect(store.verifySessionToken(before)).toBeNull();
+  // A token minted AFTER the rotate is signed with the new root and verifies —
+  // proving mint + verify both resolve the root per-call, not once at build.
+  const after = store.mintSessionToken({ deviceId: 'mac-3', ttlMs: 60_000 });
+  expect(store.verifySessionToken(after)?.deviceId).toBe('mac-3');
+});
+
 // Property 5: verify is constant-time by construction — a length-mismatched
 // candidate signature returns null (via the timingSafeEqual length guard),
 // it never throws (which is what an unguarded timingSafeEqual would do).

@@ -158,6 +158,9 @@ export const ATTR = {
   SERVER_DURATION_MS: 'server.duration_ms',
   /** Request principal/owner; reserved "local" now, upgrades to audit-grade in Slice 35. */
   SERVER_PRINCIPAL: 'server.principal',
+  /** Target device id for the ops device/security spans (Slice 25b): the device
+   *  being paired/revoked. Never a token — only the opaque device id. */
+  DEVICE_ID: 'device.id',
   UI_STREAM_CHUNKS: 'ui.stream.chunks',
   UI_STREAM_BYTES: 'ui.stream.bytes',
   UI_STREAM_RESUMES: 'ui.stream.resumes',

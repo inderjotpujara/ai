@@ -41,8 +41,10 @@ import { handleQueueStats } from './queue/stats.ts';
 import { handleRunDetail } from './runs/detail.ts';
 import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
+import type { DeviceRegistry } from './security/device-registry.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
+import type { RootTokenStore } from './security/root-token.ts';
 import type { SessionTokenStore } from './security/session-token.ts';
 import {
   createSessionGuard,
@@ -150,6 +152,17 @@ export type ServerDeps = {
   /** Directory holding `agent.{out,err}.log` for the redacted tail. Optional —
    *  the /api/daemon/logs route degrades to 503 when unset. */
   daemonLogDir?: string;
+  /** Persisted positive device registry (T13). Optional: absent in legacy
+   *  fixtures; the pair/revoke/list/rotate routes degrade to 503 (via `need()`)
+   *  when unset, until T20 wires it. */
+  deviceRegistry?: DeviceRegistry;
+  /** The durable root-token store (root-token.ts). Optional (as above); the
+   *  rotate-root route degrades to 503 when unset. Shares ONE instance with the
+   *  session store's root getter (T20). */
+  rootTokens?: RootTokenStore;
+  /** Public base URL the pairing URL/QR (POST /api/devices) is built from —
+   *  `AGENT_WEB_PUBLIC_URL` or derived from the request origin. Optional. */
+  publicBaseUrl?: string;
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
