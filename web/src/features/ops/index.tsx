@@ -2,6 +2,7 @@ import { useNavigate, useSearch } from '@tanstack/react-router';
 import { type KeyboardEvent, useRef } from 'react';
 import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
 import { nextTabIndex } from '../../shared/ui/tab-list.ts';
+import { DevicesTab } from './devices-tab.tsx';
 import { JobsTab } from './jobs-tab.tsx';
 import { OverviewTab } from './overview-tab.tsx';
 
@@ -98,8 +99,9 @@ export function OpsArea() {
                 <RegionErrorBoundary region={`Ops: ${t.label}`}>
                   {t.id === OpsTab.Overview && <OverviewTab />}
                   {t.id === OpsTab.Jobs && <JobsTab />}
-                  {t.id !== OpsTab.Overview && t.id !== OpsTab.Jobs && (
-                    // Replaced tab-by-tab with the real panel content in later increments.
+                  {t.id === OpsTab.Devices && <DevicesTab />}
+                  {t.id === OpsTab.Triggers && (
+                    // Replaced with the real panel content in a later increment.
                     <p className="text-sm text-[var(--color-muted)]">
                       {t.label} — coming in a later increment.
                     </p>
