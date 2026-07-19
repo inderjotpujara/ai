@@ -1,18 +1,25 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { getCrew } from '../../crews/index.ts';
+import { getWorkflow } from '../../workflows/index.ts';
 import { loadConfig } from '../config/schema.ts';
 import { RuntimeKind } from '../core/types.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
 import { createMemoryStore } from '../memory/store.ts';
+import { onShutdown } from '../process/lifecycle.ts';
 import { freeDiskBytes } from '../provisioning/cli-deps.ts';
+import { computeConcurrency } from '../queue/concurrency.ts';
+import { createWorkerPool, type WorkerPool } from '../queue/pool.ts';
+import { createJobStore, type JobStore } from '../queue/store.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { createSessionStore } from '../session/store.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createConsentRegistry } from './consent/registry.ts';
+import { createJobDispatch } from './jobs/dispatch.ts';
 import {
   createRealRunBuilderTurn,
   createRealRunCrewTurn,
@@ -121,6 +128,14 @@ export type StartOptions = {
   recordIo?: boolean;
   staticDir?: string;
   token?: string;
+  /** Injected, pre-reconciled queue owned by the caller (the daemon, T27). When
+   *  present, startWebServer does NOT construct or start/stop a pool — the
+   *  caller already ran reconcileOrphans() then pool.start() in the correct
+   *  §7.3 order and owns the drain. Absent = standalone: startWebServer
+   *  self-hosts one pool (`bun run web` / all-in-one tests). Running a second
+   *  pool on the same AGENT_QUEUE_PATH DB would double concurrency and bypass
+   *  the reconcile-before-claim guarantee — the bug this dual mode closes. */
+  queue?: { jobStore: JobStore; pool: WorkerPool };
 };
 
 /** Boot the local web BFF. Returns the server handle for tests/shutdown. */
@@ -128,6 +143,8 @@ export function startWebServer(opts: StartOptions = {}): {
   server: ReturnType<typeof Bun.serve>;
   token: string;
   port: number;
+  jobStore: JobStore;
+  pool: WorkerPool;
 } {
   const cfg = loadConfig().values;
   const port = opts.port ?? (cfg.AGENT_WEB_PORT as number);
@@ -201,6 +218,42 @@ export function startWebServer(opts: StartOptions = {}): {
     createLazyEngine(runsRoot),
     memoryStore,
   );
+  // §7.3 double-pool fix (T17 C1 seam): inject the caller's reconciled queue
+  // when given; otherwise self-host one. NEVER run two pools on the same
+  // AGENT_QUEUE_PATH DB. In injected mode the daemon (T27) already ran
+  // reconcileOrphans() -> pool.start() in order and owns stop()/close(), so we
+  // must NOT start/stop/close here. In standalone mode we own the full
+  // lifecycle: construct, start, and tear down on shutdown.
+  const injected = opts.queue;
+  const jobStore =
+    injected?.jobStore ??
+    createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
+  let pool: WorkerPool;
+  if (injected) {
+    // Caller (daemon) owns lifecycle: do NOT start/stop or close here.
+    pool = injected.pool;
+  } else {
+    const dispatch = createJobDispatch({
+      runCrewTurn,
+      getCrew,
+      runWorkflowTurn,
+      getWorkflow,
+      runModelPull,
+      runChatTurn,
+      runBuilderTurn,
+    });
+    pool = createWorkerPool({
+      store: jobStore,
+      concurrency: computeConcurrency(),
+      dispatch,
+      pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
+    });
+    pool.start();
+    onShutdown(async () => {
+      await pool.stop();
+      jobStore.close();
+    });
+  }
   // Serve the real built app when it exists (`cd web && bun run build`);
   // fall back to the Phase-1 stub otherwise (unbuilt/Ollama-free dev + tests).
   const distIndexHtml = readWebDistIndexHtml();
@@ -238,6 +291,7 @@ export function startWebServer(opts: StartOptions = {}): {
     mountOne,
     memoryStore,
     sessionStore,
+    jobStore,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });
@@ -249,7 +303,7 @@ export function startWebServer(opts: StartOptions = {}): {
     throw new Error('Bun.serve() did not report a bound port');
   }
   policy.port = boundPort; // reconcile when port === 0 (ephemeral)
-  return { server, token, port: boundPort };
+  return { server, token, port: boundPort, jobStore, pool };
 }
 
 if (import.meta.main) {

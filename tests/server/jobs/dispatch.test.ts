@@ -148,5 +148,8 @@ test('chat dispatch threads the pool signal into runChatTurn', async () => {
   );
   expect((calls[0] as { task: string }).task).toBe('hello');
   expect((calls[0] as { signal: AbortSignal }).signal).toBe(controller.signal);
+  // T17: the chat executor threads job.runId into RunChatTurn so the chat run
+  // dir === job.runId (returned as 202 {runId}) — no longer self-minted.
+  expect((calls[0] as { runId: string }).runId).toBe('run-xyz');
   expect(res).toEqual({ kind: 'answer', text: 'hi' });
 });

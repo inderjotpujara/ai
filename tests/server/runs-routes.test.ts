@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MemoryStore } from '../../src/memory/store.ts';
+import type { JobStore } from '../../src/queue/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
@@ -97,6 +98,8 @@ const deps: ServerDeps = {
   mountOne: async () => ({ outcome: 'mounted' }),
   memoryStore: noMemoryStore,
   sessionStore: noSessionStore,
+  // No queue/jobs route is exercised here (they land in T18-20).
+  jobStore: {} as unknown as JobStore,
 };
 
 let server: ReturnType<typeof Bun.serve>;

@@ -1,5 +1,6 @@
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
+import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
@@ -91,6 +92,11 @@ export type ServerDeps = {
   /** The session/chat-history store chat persistence + the Sessions UI read
    *  and write through (Slice 30b Phase 6). */
   sessionStore: SessionStore;
+  /** The durable job-queue store the async-launch routes enqueue into and the
+   *  Jobs UI reads (Slice 24 Incr 3, T17). In standalone mode `startWebServer`
+   *  self-hosts it; in injected mode the daemon owns it (T27). Routes land in
+   *  T18-20. */
+  jobStore: JobStore;
 };
 
 export function json(body: unknown, status = 200): Response {

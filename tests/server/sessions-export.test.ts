@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ChatRole } from '../../src/contracts/enums.ts';
 import type { MemoryStore } from '../../src/memory/store.ts';
+import type { JobStore } from '../../src/queue/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
@@ -167,6 +168,7 @@ function deps(sessionStore: SessionStore): ServerDeps {
     mountOne: async () => ({ outcome: 'mounted' }),
     memoryStore: unusedMemoryStore,
     sessionStore,
+    jobStore: {} as unknown as JobStore,
   };
 }
 

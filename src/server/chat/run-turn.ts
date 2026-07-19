@@ -29,6 +29,12 @@ export type RunChatTurn = (input: {
   events: EventSink;
   stream: StreamSink;
   signal?: AbortSignal;
+  /** Run id to execute UNDER (Slice 24 Incr 3, T17). When the queue enqueues a
+   *  chat job it mints `job.runId` up front and returns it as `202 {runId}`;
+   *  the chat turn must create its run dir under THAT id so
+   *  `/api/runs/:runId/stream` polling resolves. When absent (the synchronous
+   *  `POST /api/chat` path), the turn self-mints as before. */
+  runId?: string;
 }) => Promise<OrchestratorResult>;
 
 /**
@@ -88,10 +94,12 @@ export function createRealRunChatTurn(
   engine: LazyEngine,
   memoryStore?: MemoryStore,
 ): RunChatTurn {
-  return async ({ task, media, events, stream, signal }) => {
+  return async ({ task, media, events, stream, signal, runId }) => {
     const registry = await engine.registry();
     return withMcpRun(
-      { runsRoot: engine.runsRoot, runId: newRunId() },
+      // Execute under the caller's runId (enqueued chat job) when given, so
+      // `job.runId` === the on-disk run dir; else self-mint (sync /api/chat).
+      { runsRoot: engine.runsRoot, runId: runId ?? newRunId() },
       async ({ run, reg, ledger }) => {
         const capture: ResourceCapture = {};
         const selectHook = createSelectHook({

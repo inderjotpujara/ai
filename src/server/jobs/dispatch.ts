@@ -114,16 +114,17 @@ export function createJobDispatch(
       case JobKind.Chat:
         return async (job, signal) => {
           const { task, media } = ChatJobPayloadSchema.parse(job.payload);
-          // RunChatTurn mints its OWN runId inside `withMcpRun` (it takes no
-          // runId param) — so a chat job's journal lives under that self-minted
-          // id, NOT job.runId. Threading job.runId would require changing the
-          // RunChatTurn seam (out of scope here); flagged for the enqueue task.
+          // Execute under the job's pre-minted runId (T17 resolved the T16 seam
+          // gap): RunChatTurn now accepts a runId and threads it into
+          // `withMcpRun`, so the chat run dir === job.runId (the id returned as
+          // `202 {runId}`) and `/api/runs/:runId/stream` polling resolves.
           return deps.runChatTurn({
             task,
             media,
             events: noopEventSink,
             stream: () => {},
             signal,
+            runId: requireRunId(job),
           });
         };
       case JobKind.Build:

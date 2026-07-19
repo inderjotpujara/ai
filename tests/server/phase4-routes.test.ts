@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MemoryStore } from '../../src/memory/store.ts';
+import type { JobStore } from '../../src/queue/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
@@ -90,6 +91,7 @@ function deps(): ServerDeps {
     mountOne: async () => ({ outcome: 'mounted' }),
     memoryStore: unusedMemoryStore,
     sessionStore: unusedSessionStore,
+    jobStore: {} as unknown as JobStore,
   };
 }
 
