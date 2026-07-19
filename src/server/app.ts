@@ -1,5 +1,6 @@
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
+import type { WorkerPool } from '../queue/pool.ts';
 import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
@@ -19,6 +20,7 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleJobCancel } from './jobs/cancel.ts';
 import { handleJobDetail } from './jobs/detail.ts';
 import { handleJobEnqueue } from './jobs/enqueue.ts';
 import { handleJobList } from './jobs/list.ts';
@@ -100,6 +102,10 @@ export type ServerDeps = {
    *  self-hosts it; in injected mode the daemon owns it (T27). Routes land in
    *  T18-20. */
   jobStore: JobStore;
+  /** The worker pool draining `jobStore` — `POST /api/jobs/:id/cancel` (T20)
+   *  fires its per-job `AbortController` for a Running job. Same standalone-
+   *  vs-injected duality as `jobStore` above. */
+  pool: WorkerPool;
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -253,9 +259,17 @@ async function handleApi(
           rec.status(200);
           return handleJobList(new URLSearchParams(url.search), deps);
         }
-        // Bare-:id detail match. A future action sub-path (e.g. `/cancel`)
-        // MUST be checked BEFORE this — same stream/action-before-detail
-        // discipline as `/api/runs/:id/stream` vs `/api/runs/:id` above.
+        // Action sub-path match MUST precede the bare-:id detail match below
+        // — same stream/action-before-detail discipline as
+        // `/api/runs/:id/stream` vs `/api/runs/:id` above.
+        const cancelMatch = url.pathname.match(
+          /^\/api\/jobs\/([^/]+)\/cancel$/,
+        );
+        if (req.method === 'POST' && cancelMatch?.[1]) {
+          const res = handleJobCancel(cancelMatch[1], deps);
+          rec.status(res.status);
+          return res;
+        }
         const jobDetail = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
         if (req.method === 'GET' && jobDetail?.[1]) {
           const res = handleJobDetail(jobDetail[1], deps);
