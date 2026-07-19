@@ -87,6 +87,12 @@ export const commands: Command[] = [
     run: (n) => n({ to: '/runs' }),
   },
   {
+    id: 'go-ops',
+    label: 'Go to Ops',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/ops' }),
+  },
+  {
     id: 'go-library',
     label: 'Go to Library',
     kind: CommandKind.Nav,

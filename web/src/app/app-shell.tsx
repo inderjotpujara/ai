@@ -17,6 +17,7 @@ const NAV: { to: string; label: string }[] = [
   { to: '/workflows', label: 'Workflows' },
   { to: '/builders', label: 'Builders' },
   { to: '/runs', label: 'Runs' },
+  { to: '/ops', label: 'Ops' },
   { to: '/library', label: 'Library' },
   { to: '/settings', label: 'Settings' },
 ];
