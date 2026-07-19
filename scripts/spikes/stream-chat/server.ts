@@ -70,7 +70,7 @@ const server = Bun.serve({
 
           const result = streamText({
             model: createOllamaModel(leafDecl),
-            system: 'You are a concise assistant. Answer in 2-4 sentences.',
+            instructions: 'You are a concise assistant. Answer in 2-4 sentences.',
             messages: await convertToModelMessages(messages), // v6: async
             abortSignal: req.signal, // client disconnect stops generation
           });

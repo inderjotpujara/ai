@@ -3,7 +3,7 @@ import {
   generateText,
   type LanguageModel,
   type ModelMessage,
-  stepCountIs,
+  isStepCount,
   streamText,
   type ToolSet,
 } from 'ai';
@@ -74,7 +74,7 @@ export async function runAgent(input: RunAgentInput): Promise<{
       async (signal) => {
         const result = streamText({
           model: input.model,
-          system: input.systemPrompt,
+          instructions: input.systemPrompt,
           ...buildCallInput(input.prompt, input.attachments),
           tools: input.tools,
           temperature: input.temperature,
@@ -83,8 +83,8 @@ export async function runAgent(input: RunAgentInput): Promise<{
           // withWallClock's combined signal (timeout + external abort) and
           // must be passed unconditionally.
           abortSignal: signal,
-          stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
-          experimental_telemetry: {
+          stopWhen: isStepCount(input.maxSteps ?? DEFAULT_MAX_STEPS),
+          telemetry: {
             isEnabled: true,
             functionId: input.functionId,
             recordInputs: recordIoEnabled(),
@@ -120,7 +120,7 @@ export async function runAgent(input: RunAgentInput): Promise<{
     (signal) =>
       generateText({
         model: input.model,
-        system: input.systemPrompt,
+        instructions: input.systemPrompt,
         ...buildCallInput(input.prompt, input.attachments),
         tools: input.tools,
         temperature: input.temperature,
@@ -132,8 +132,8 @@ export async function runAgent(input: RunAgentInput): Promise<{
         // signal whenever a caller supplies one, so the timeout would no
         // longer abort the model call (the exact background-leak this fixes).
         abortSignal: signal,
-        stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
-        experimental_telemetry: {
+        stopWhen: isStepCount(input.maxSteps ?? DEFAULT_MAX_STEPS),
+        telemetry: {
           isEnabled: true,
           functionId: input.functionId,
           recordInputs: recordIoEnabled(),
