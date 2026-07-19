@@ -255,6 +255,44 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     );
   }
 
+  function listJobs(q: {
+    status?: JobStatus;
+    cursor?: string;
+    limit: number;
+  }): { items: JobRecord[]; nextCursor?: string; total: number } {
+    const statusClause = q.status ? 'AND status = ?' : '';
+    const statusArgs: (string | number)[] = q.status ? [q.status] : [];
+
+    const totalRow = db
+      .query(`SELECT COUNT(*) as n FROM jobs WHERE 1 = 1 ${statusClause}`)
+      .get(...statusArgs) as { n: number };
+
+    const cursor = q.cursor ? decodeJobCursor(q.cursor) : undefined;
+    const cursorClause = cursor
+      ? 'AND (created_at < ? OR (created_at = ? AND id > ?))'
+      : '';
+    const cursorArgs: (string | number)[] = cursor
+      ? [cursor.createdAt, cursor.createdAt, cursor.id]
+      : [];
+
+    const rows = db
+      .query(
+        `SELECT * FROM jobs WHERE 1 = 1 ${statusClause} ${cursorClause}
+         ORDER BY created_at DESC, id ASC LIMIT ?`,
+      )
+      .all(...statusArgs, ...cursorArgs, q.limit + 1) as JobRowRaw[];
+
+    const hasMore = rows.length > q.limit;
+    const page = rows.slice(0, q.limit);
+    const items = page.map(toJobRecord);
+    const lastRaw = page[page.length - 1];
+    const nextCursor =
+      hasMore && lastRaw
+        ? encodeJobCursor(lastRaw.created_at, lastRaw.id)
+        : undefined;
+    return { items, nextCursor, total: totalRow.n };
+  }
+
   return {
     enqueue,
     getJob,
@@ -263,8 +301,9 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     markFailed,
     markInterrupted,
     markCanceled,
+    listJobs,
     close: (): void => db.close(),
-    // listJobs / reconcileOrphans added in Tasks 9-10.
+    // reconcileOrphans added in Task 10.
     _db: db,
     _decodeJobCursor: decodeJobCursor,
     _encodeJobCursor: encodeJobCursor,
