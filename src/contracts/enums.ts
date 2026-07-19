@@ -210,3 +210,30 @@ export enum CaptureSource {
   Mic = 'mic',
   File = 'file',
 }
+
+/** Wire mirror of `src/queue/types.ts` JobStatus (isomorphic — no engine
+ *  import). `tests/contracts/job-kind-parity.test.ts` guards value parity,
+ *  same precedent as the `RuntimeKind` mirror above. Slice 24. */
+export enum JobStatusWire {
+  Queued = 'queued',
+  Running = 'running',
+  Done = 'done',
+  Failed = 'failed',
+  Interrupted = 'interrupted',
+  Canceled = 'canceled',
+}
+
+/** Wire mirror of `src/queue/types.ts` JobPriority. Slice 24. */
+export enum JobPriorityWire {
+  High = 'high',
+  Normal = 'normal',
+}
+
+/** Wire mirror of `src/queue/types.ts` JobKind. Slice 24. */
+export enum JobKindWire {
+  Chat = 'chat',
+  Crew = 'crew',
+  Workflow = 'workflow',
+  Pull = 'pull',
+  Build = 'build',
+}

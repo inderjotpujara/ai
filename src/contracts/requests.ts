@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   CrewListItemDtoSchema,
+  JobDtoSchema,
   McpServerDtoSchema,
   ModelInventoryDtoSchema,
   RunListItemDtoSchema,
@@ -11,6 +12,9 @@ import {
   BuilderKind,
   ChatRole,
   FeedbackRating,
+  JobKindWire,
+  JobPriorityWire,
+  JobStatusWire,
   RunKind,
   RuntimeKind,
 } from './enums.ts';
@@ -263,3 +267,40 @@ export const SessionRenameRequestSchema = z.object({
   title: z.string().min(1).max(200),
 });
 export type SessionRenameRequest = z.infer<typeof SessionRenameRequestSchema>;
+
+/** `POST /api/jobs` body — enqueue a durable job. `payload` is the per-kind
+ *  launch input validated again at dispatch (`src/server/jobs/dispatch.ts`);
+ *  `priority` defaults to Normal store-side when omitted. Slice 24 Incr 3. */
+export const JobEnqueueRequestSchema = z.object({
+  kind: z.enum(JobKindWire),
+  payload: z.unknown(),
+  priority: z.enum(JobPriorityWire).optional(),
+});
+export type JobEnqueueRequest = z.infer<typeof JobEnqueueRequestSchema>;
+
+/** `POST /api/jobs` response — the minted jobId plus the runId its execution
+ *  will write to (pre-minted at enqueue so the browser can open the watch
+ *  stream immediately, same idiom as `RunLaunchResponseSchema`). */
+export const JobLaunchResponseSchema = z.object({
+  jobId: z.string(),
+  runId: z.string(),
+});
+export type JobLaunchResponse = z.infer<typeof JobLaunchResponseSchema>;
+
+/** `GET /api/jobs?status=&cursor=&limit=` query — mirrors
+ *  `SessionListQuerySchema`'s keyset-page shape with a `status` facet. */
+export const JobListQuerySchema = z.object({
+  status: z.enum(JobStatusWire).optional(),
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().positive().max(200).default(25),
+});
+export type JobListQuery = z.infer<typeof JobListQuerySchema>;
+
+/** `GET /api/jobs` response — a page of job records + cursor when more remain,
+ *  byte-for-byte `RunListResponseSchema`'s shape. */
+export const JobListResponseSchema = z.object({
+  items: z.array(JobDtoSchema),
+  nextCursor: z.string().optional(),
+  total: z.number(),
+});
+export type JobListResponse = z.infer<typeof JobListResponseSchema>;
