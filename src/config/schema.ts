@@ -163,6 +163,26 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     doc: 'Directory for the session/chat-history SQLite store (session/store.ts createSessionStore), mirroring AGENT_MEMORY_PATH.',
   },
 
+  // --- Daemon / queue (Slice 24) ---
+  {
+    env: 'AGENT_QUEUE_CONCURRENCY',
+    kind: 'number',
+    def: 0,
+    doc: 'Max concurrent jobs the worker pool runs (queue/pool.ts). 0/unset = computed from hardware (queue/concurrency.ts, half of logical cores, floored at 1); a positive integer overrides. Never hardcode N.',
+  },
+  {
+    env: 'AGENT_QUEUE_PATH',
+    kind: 'string',
+    def: 'jobs',
+    doc: 'Directory for the durable job-queue SQLite store (queue/store.ts createJobStore), mirroring AGENT_SESSIONS_PATH.',
+  },
+  {
+    env: 'AGENT_QUEUE_POLL_MS',
+    kind: 'number',
+    def: 250,
+    doc: 'How often an idle worker re-checks the queue for claimable jobs (queue/pool.ts). Fallback-only override.',
+  },
+
   // --- Verification / anti-hallucination (src/verification/config.ts) ---
   {
     env: 'AGENT_VERIFY_MODEL',
