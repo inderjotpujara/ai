@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { RUN_ROOT_NAMES } from '../run/run-dto.ts';
+import { TERMINAL_RUN_ROOTS } from '../run/run-dto.ts';
 import type { RunSummary } from '../run/run-trace.ts';
 import { buildTree, readSpans, summarizeRun } from '../run/run-trace.ts';
 import { renderRunList, renderTimeline } from './render-trace.ts';
@@ -60,13 +60,17 @@ async function main(): Promise<void> {
     }, 500);
     const stopper = setInterval(async () => {
       const { spans } = await readSpans(join(root, id));
-      // Stop tailing once a recognized run-root span is present. A span is
-      // only flushed to spans.jsonl when it ends, so a run-root's presence == a
-      // terminated run. Keying off the shared RUN_ROOT_NAMES set (not the
-      // hardcoded 'agent.run') means a chat turn (`chat.run`, D9) and
-      // crew/workflow runs now terminate the tail instead of re-rendering
-      // forever.
-      if (spans.some((s) => RUN_ROOT_NAMES.has(s.name))) {
+      // Stop tailing once the run's OWN terminal root span is present. A span is
+      // only flushed to spans.jsonl when it ends, so a terminal-root's presence
+      // == a terminated run. Gating on TERMINAL_RUN_ROOTS (NOT the full
+      // RUN_ROOT_NAMES set) is deliberate: a chat/crew/workflow run opens
+      // ephemeral precursors (mcp.mount via withMcpRun, memory.recall) that
+      // flush to spans.jsonl at run START — keying off RUN_ROOT_NAMES would stop
+      // the tail at mount time, before the body ever streams. A chat turn now
+      // stops only when `chat.run` (its terminal root) lands. (Tradeoff: a
+      // standalone mcp.mount/memory.*-only run won't auto-stop the tail — rare
+      // short dev commands that were never reliably handled anyway.)
+      if (spans.some((s) => TERMINAL_RUN_ROOTS.has(s.name))) {
         clearInterval(timer);
         clearInterval(stopper);
         await tick();

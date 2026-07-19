@@ -23,13 +23,15 @@ import {
   buildTree,
   RUN_ROOT_NAMES,
   readSpans,
+  TERMINAL_RUN_ROOTS,
   type TraceNode,
 } from './run-trace.ts';
 
 // Re-exported so the web projection and CLI (`src/cli/runs.ts`) share one
 // definition. Canonical home is run-trace.ts (the dependency-free base module)
-// to avoid a circular import back into this file.
-export { RUN_ROOT_NAMES };
+// to avoid a circular import back into this file. TERMINAL_RUN_ROOTS is the
+// precursor-excluding subset the CLI `--follow` stopper gates on.
+export { RUN_ROOT_NAMES, TERMINAL_RUN_ROOTS };
 
 const NANOS_PER_MS = 1e6;
 const OTEL_STATUS_ERROR = 2;

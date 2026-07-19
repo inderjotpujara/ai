@@ -2,7 +2,13 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildTree, readSpans, summarizeRun } from '../../src/run/run-trace.ts';
+import {
+  buildTree,
+  RUN_ROOT_NAMES,
+  readSpans,
+  summarizeRun,
+  TERMINAL_RUN_ROOTS,
+} from '../../src/run/run-trace.ts';
 import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
 
 function span(
@@ -132,6 +138,100 @@ test.each([
   // lookup (the root would go unrecognized and fall through to defaults).
   expect(s?.durationMs).toBe(314);
   expect(s?.outcome).toBe('answer');
+});
+
+// D9 blast-radius over-correction: a chat/crew/workflow CLI run is wrapped in
+// withMcpRun, which opens+ends an `mcp.mount` span BEFORE the run body. Since
+// each span flushes to spans.jsonl on end, mcp.mount lands FIRST (spans are in
+// span-END order). A plain `RUN_ROOT_NAMES.has` find returned mcp.mount's
+// durationMs/outcome — the WRONG root. summarizeRun must prefer the terminal
+// root (chat.run / crew.run / workflow.run) even though the precursor precedes
+// it in the file.
+test.each([
+  ['chat.run', 'mcp.mount'],
+  ['crew.run', 'mcp.mount'],
+  ['workflow.run', 'mcp.mount'],
+  ['chat.run', 'memory.recall'],
+])('summarizeRun resolves the terminal %s root, not the ephemeral %s precursor that ends first', async (terminalName, precursorName) => {
+  const dir = join(root, `run-${terminalName}-${precursorName}`);
+  await mkdir(dir, { recursive: true });
+  // Precursor: opens first, SHORT, ends first → appears first in spans.jsonl.
+  const precursor = span({
+    name: precursorName,
+    spanId: 'p',
+    startUnixNano: 1_000_000,
+    durationMs: 3,
+    attributes: { 'agent.outcome': 'ready' },
+  });
+  // Terminal root: the run's own root, LONGER, ends later.
+  const terminal = span({
+    name: terminalName,
+    spanId: 'r',
+    startUnixNano: 2_000_000,
+    durationMs: 500,
+    attributes: { 'agent.outcome': 'answer' },
+  });
+  // Written in span-END order (precursor first) — as the JSONL sink flushes.
+  await writeFile(
+    join(dir, 'spans.jsonl'),
+    `${JSON.stringify(precursor)}\n${JSON.stringify(terminal)}\n`,
+  );
+  const s = await summarizeRun(root, `run-${terminalName}-${precursorName}`);
+  // Pre-fix (RUN_ROOT_NAMES.has find) would return the precursor: 3 / 'ready'.
+  expect(s?.durationMs).toBe(500);
+  expect(s?.outcome).toBe('answer');
+});
+
+test('summarizeRun still resolves a standalone model.pull run via the RUN_ROOT_NAMES fallback', async () => {
+  const dir = join(root, 'run-pull');
+  await mkdir(dir, { recursive: true });
+  const pull = span({
+    name: 'model.pull',
+    spanId: 'a',
+    durationMs: 99,
+    attributes: { 'agent.outcome': 'answer' },
+  });
+  await writeFile(join(dir, 'spans.jsonl'), `${JSON.stringify(pull)}\n`);
+  const s = await summarizeRun(root, 'run-pull');
+  expect(s?.durationMs).toBe(99);
+  expect(s?.outcome).toBe('answer');
+});
+
+test('summarizeRun resolves a standalone mcp.mount-only run via the RUN_ROOT_NAMES fallback (no terminal root)', async () => {
+  const dir = join(root, 'run-mount-only');
+  await mkdir(dir, { recursive: true });
+  const mount = span({
+    name: 'mcp.mount',
+    spanId: 'a',
+    durationMs: 8,
+    attributes: { 'agent.outcome': 'ready' },
+  });
+  await writeFile(join(dir, 'spans.jsonl'), `${JSON.stringify(mount)}\n`);
+  const s = await summarizeRun(root, 'run-mount-only');
+  // No terminal root → falls back to the RUN_ROOT_NAMES match (mcp.mount itself).
+  expect(s?.durationMs).toBe(8);
+  expect(s?.outcome).toBe('ready');
+});
+
+test('TERMINAL_RUN_ROOTS excludes the ephemeral precursor roots and includes the 7 run/build/pull roots', () => {
+  for (const precursor of ['mcp.mount', 'memory.recall', 'memory.ingest']) {
+    expect(TERMINAL_RUN_ROOTS.has(precursor)).toBe(false);
+    // ...but they remain full run roots for the fallback path.
+    expect(RUN_ROOT_NAMES.has(precursor)).toBe(true);
+  }
+  for (const terminal of [
+    'agent.run',
+    'chat.run',
+    'crew.run',
+    'workflow.run',
+    'agent.build',
+    'crew.build',
+    'model.pull',
+  ]) {
+    expect(TERMINAL_RUN_ROOTS.has(terminal)).toBe(true);
+  }
+  // TERMINAL_RUN_ROOTS is exactly RUN_ROOT_NAMES minus the 3 precursors.
+  expect(TERMINAL_RUN_ROOTS.size).toBe(RUN_ROOT_NAMES.size - 3);
 });
 
 test('summarizeRun falls back to spans[0] when no recognized run root is present (never throws)', async () => {

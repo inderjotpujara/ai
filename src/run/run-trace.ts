@@ -107,6 +107,25 @@ export const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
   'memory.ingest',
 ]);
 
+// Top-level run roots that signal a run's OWN completion — EXCLUDES the ephemeral
+// sub-run roots (mcp.mount / memory.recall / memory.ingest) that a chat/crew/workflow
+// run emits as EARLY precursors (via withMcpRun / injectRecall) before its body.
+// Those precursors land in spans.jsonl at run START (each span flushes on end), so
+// keying "run finished?" off the full RUN_ROOT_NAMES set fires prematurely (at mount
+// time) and mis-resolves the run root to whichever precursor ended first. The two CLI
+// consumers (`summarizeRun` below, and the `--follow` stopper in src/cli/runs.ts) gate
+// on THIS set instead. The web projection (run-dto.ts) keeps its own multi-root
+// semantics and is intentionally not switched.
+export const TERMINAL_RUN_ROOTS: ReadonlySet<string> = new Set([
+  'agent.run',
+  'chat.run',
+  'crew.run',
+  'workflow.run',
+  'agent.build',
+  'crew.build',
+  'model.pull',
+]);
+
 export type RunSummary = {
   id: string;
   startMs: number;
@@ -121,12 +140,17 @@ export async function summarizeRun(
 ): Promise<RunSummary | undefined> {
   const { spans } = await readSpans(join(runsRoot, id));
   if (spans.length === 0) return undefined;
-  // Find the run root by the shared RUN_ROOT_NAMES set (not just `agent.run`):
-  // a chat turn writes `chat.run`, a crew/workflow writes `crew.run`/
-  // `workflow.run`. Keying only off `agent.run` made those report durationMs 0
-  // / outcome 'unknown' in the CLI `runs` list. Fall back to spans[0] when no
-  // recognized root is present (never throw).
-  const root = spans.find((s) => RUN_ROOT_NAMES.has(s.name));
+  // Resolve the run root with PRECEDENCE. `spans` is in span-END order, so a
+  // chat/crew/workflow run's ephemeral precursors (mcp.mount / memory.recall,
+  // opened via withMcpRun / injectRecall BEFORE the body) end — and thus appear
+  // — first. A plain `RUN_ROOT_NAMES.has` find would return the precursor's
+  // durationMs/outcome, not the real root's. So prefer a TERMINAL_RUN_ROOTS
+  // match (the run's own top-level root: chat.run / crew.run / …); only if none
+  // is present fall back to any RUN_ROOT_NAMES root (a standalone pull / mcp /
+  // memory run), then to spans[0] (never throw).
+  const root =
+    spans.find((s) => TERMINAL_RUN_ROOTS.has(s.name)) ??
+    spans.find((s) => RUN_ROOT_NAMES.has(s.name));
   const models = new Set<string>();
   for (const s of spans) {
     const m = s.attributes[ATTR.MODEL_ID];
