@@ -20,6 +20,7 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleDaemonLogs } from './daemon/logs.ts';
 import { handleDaemonStatus } from './daemon/status.ts';
+import { handleDeviceList } from './devices/list.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleJobCancel } from './jobs/cancel.ts';
@@ -353,6 +354,17 @@ async function handleApi(
         if (req.method === 'GET' && url.pathname === '/api/daemon/logs') {
           const res = handleDaemonLogs(new URLSearchParams(url.search), {
             daemonLogDir: need(deps.daemonLogDir, 'daemonLogDir'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        // POST /api/devices (pair) and /api/devices/:id/revoke (T17/T18) land
+        // beside this GET later — remember the action-sub-path-before-bare-
+        // :id ordering discipline (same as /api/runs/:id/stream above) when
+        // those routes are added.
+        if (req.method === 'GET' && url.pathname === '/api/devices') {
+          const res = handleDeviceList({
+            deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
           });
           rec.status(res.status);
           return res;

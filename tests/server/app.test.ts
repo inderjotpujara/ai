@@ -177,6 +177,22 @@ test('GET /api/daemon/status requires the bearer token and degrades to 503 when 
   });
 });
 
+test('GET /api/devices requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the queue/stats and daemon/status 503 tests above: this
+  // fixture never sets the OPTIONAL `deviceRegistry` field, so `need()` trips
+  // a clean 503 rather than a crash — AND the route stays behind the session
+  // guard (401 with no token) like every other /api route.
+  const unauth = await fetch(`${base}/api/devices`);
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/devices`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: deviceRegistry',
+  });
+});
+
 const validEvent = {
   kind: 'voice.transcribe.web',
   durationMs: 1200,
