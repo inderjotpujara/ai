@@ -553,6 +553,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 43_200_000,
     doc: 'TTL (ms) of the per-device SESSION token the server mints for the local browser at boot and injects as window.__AGENT_TOKEN__ (server/main.ts; signed by the durable daemon root, security/session-token.ts). Default 12h — long enough to span a working session, short enough to bound a leaked browser token. A reload re-mints. Fallback-only override; never hardcode elsewhere.',
   },
+  {
+    env: 'AGENT_WEB_MAX_BODY_BYTES',
+    kind: 'number',
+    def: 26_214_400,
+    doc: 'Max HTTP request body bytes Bun.serve accepts (server/main.ts maxRequestBodySize). Over-cap requests get 413 at the runtime layer before the handler runs. Default 25 MiB — allows chat media uploads (MAX_UPLOAD_BYTES 20 MiB, server/upload.ts) plus framing overhead while bounding abuse. Env-override.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in

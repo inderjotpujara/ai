@@ -353,7 +353,17 @@ export function startWebServer(opts: StartOptions = {}): {
     pool,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
-  const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });
+  // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB
+  // process-wide; tighten it via config so an over-cap body is rejected with
+  // 413 at the runtime layer, before the fetch handler (and any parsing) ever
+  // runs. The per-route upload cap (MAX_UPLOAD_BYTES, upload.ts) is unchanged
+  // and stricter still — this is the outer, global backstop.
+  const server = Bun.serve({
+    port,
+    fetch: buildFetch(deps),
+    idleTimeout: 0,
+    maxRequestBodySize: cfg.AGENT_WEB_MAX_BODY_BYTES as number,
+  });
   // .port is `number | undefined` under the installed bun-types; guard with a
   // real runtime check (never `!` or a cast) before reconciling the ephemeral
   // port (port: 0) back into the perimeter policy and the return value.
