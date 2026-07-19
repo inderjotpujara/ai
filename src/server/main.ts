@@ -320,6 +320,12 @@ export function startWebServer(opts: StartOptions = {}): {
     injected?.jobStore ??
     createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
   let pool: WorkerPool;
+  // Worker-pool concurrency surfaced on the Overview queue card (T8's
+  // /api/queue/stats). In standalone mode we own the pool and thread the exact
+  // value it was built with; in injected (daemon) mode the daemon owns the pool
+  // and threads its own value through in T11 — undefined here degrades the
+  // route to a clean 503 rather than reporting a guessed number.
+  let queueConcurrency: number | undefined;
   if (injected) {
     // Caller (daemon) owns lifecycle: do NOT start/stop or close here.
     pool = injected.pool;
@@ -334,9 +340,10 @@ export function startWebServer(opts: StartOptions = {}): {
       runBuilderTurn,
       runsRoot,
     });
+    queueConcurrency = computeConcurrency();
     pool = createWorkerPool({
       store: jobStore,
-      concurrency: computeConcurrency(),
+      concurrency: queueConcurrency,
       dispatch,
       pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
     });
@@ -387,6 +394,7 @@ export function startWebServer(opts: StartOptions = {}): {
     jobStore,
     pool,
     runLimiter,
+    queueConcurrency,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB

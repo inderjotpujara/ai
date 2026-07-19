@@ -35,6 +35,7 @@ import { handleMemorySpaces } from './memory/spaces.ts';
 import { handleModelList } from './models/list.ts';
 import type { RunModelPullTurn } from './models/pull.ts';
 import { handleModelPull } from './models/pull.ts';
+import { handleQueueStats } from './queue/stats.ts';
 import { handleRunDetail } from './runs/detail.ts';
 import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
@@ -130,7 +131,26 @@ export type ServerDeps = {
    *  this knob) — each handler's own `Deps.runLimiter` falls back to
    *  `ALWAYS_ALLOW`, so an unset limiter never blocks. */
   runLimiter?: { allow(): boolean };
+  /** Worker-pool concurrency for the Overview queue card (`computeConcurrency()`,
+   *  threaded from main.ts/daemon). Optional — the /api/queue/stats route degrades
+   *  to 503 when unset (legacy fixtures need not set it). */
+  queueConcurrency?: number;
 };
+
+/** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
+ *  legacy fixtures need not set it). A route that needs one degrades to 503 with
+ *  a clear message rather than throwing an opaque TypeError. */
+export class DepUnavailableError extends Error {
+  override name = 'DepUnavailableError';
+  constructor(readonly field: string) {
+    super(`server dependency not configured: ${field}`);
+  }
+}
+/** Narrow an optional ServerDeps field to its required type, or signal a 503. */
+export function need<T>(value: T | undefined, field: string): T {
+  if (value === undefined) throw new DepUnavailableError(field);
+  return value;
+}
 
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -285,6 +305,15 @@ async function handleApi(
           rec.status(res.status);
           return res;
         }
+        if (req.method === 'GET' && url.pathname === '/api/queue/stats') {
+          const res = handleQueueStats({
+            jobStore: deps.jobStore,
+            pool: deps.pool,
+            queueConcurrency: need(deps.queueConcurrency, 'queueConcurrency'),
+          });
+          rec.status(res.status);
+          return res;
+        }
         if (req.method === 'POST' && url.pathname === '/api/jobs') {
           const res = await handleJobEnqueue(req, deps);
           rec.status(res.status);
@@ -412,6 +441,10 @@ async function handleApi(
         rec.status(404);
         return json({ error: 'not found' }, 404);
       } catch (err) {
+        if (err instanceof DepUnavailableError) {
+          rec.status(503);
+          return json({ error: err.message }, 503);
+        }
         // Never crash the handler: map the typed error to an actionable JSON body.
         rec.status(500);
         return json({ error: explain(err).title }, 500);

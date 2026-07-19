@@ -100,3 +100,9 @@ export function recordJobCancel(job: JobRecord): void {
   setJobAttrs(span, job);
   span.end();
 }
+
+/** Record an Overview-tab queue-health read as a `queue.stats.read` span. */
+export function recordQueueStatsRead(): void {
+  const span = tracer().startSpan('queue.stats.read');
+  span.end();
+}

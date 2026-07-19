@@ -147,6 +147,20 @@ test('/api/health requires the bearer token', async () => {
   expect(await ok.json()).toEqual({ ok: true });
 });
 
+test('GET /api/queue/stats degrades to 503 when queueConcurrency is unwired', async () => {
+  // This fixture never sets the OPTIONAL `queueConcurrency` field, so the
+  // shared `need()` guard trips DepUnavailableError → the handleApi catch maps
+  // it to a clean 503 (never an opaque 500). Proves both the shared 503 seam
+  // and that the optional field keeps the legacy fixture compiling unedited.
+  const res = await fetch(`${base}/api/queue/stats`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: queueConcurrency',
+  });
+});
+
 const validEvent = {
   kind: 'voice.transcribe.web',
   durationMs: 1200,
