@@ -13,6 +13,11 @@ node_modules/
 # Anchored to the repo root so src/session/ + tests/session/ stay tracked.
 /sessions/
 
+# Durable job-queue datastore (bun:sqlite; local, never committed) — the
+# standalone web server self-hosts it at the default AGENT_QUEUE_PATH (Slice 24
+# Incr 3). Anchored to the repo root so src/queue/ + tests/queue/ stay tracked.
+/jobs/
+
 # Local model image/blob files (large; never committed). See model-images/README.md
 model-images/*
 !model-images/.gitkeep
