@@ -20,6 +20,7 @@ import {
   createSessionStore,
   type SessionStore,
 } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
 
 test('renderSessionMarkdown assembles a heading per message with ISO timestamps', () => {
   const md = renderSessionMarkdown({ id: 's1', title: 'My chat' }, [
@@ -169,6 +170,7 @@ function deps(sessionStore: SessionStore): ServerDeps {
     memoryStore: unusedMemoryStore,
     sessionStore,
     jobStore: {} as unknown as JobStore,
+    pool: makeFakePool(),
   };
 }
 

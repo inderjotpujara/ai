@@ -15,6 +15,7 @@ import {
   createSessionStore,
   type SessionStore,
 } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
 
 const TOKEN = 'a'.repeat(64);
 const uploadsDir = mkdtempSync(join(tmpdir(), 'sessions-routes-uploads-'));
@@ -71,6 +72,7 @@ function deps(sessionStore: SessionStore): ServerDeps {
     memoryStore: unusedMemoryStore,
     sessionStore,
     jobStore: {} as unknown as JobStore,
+    pool: makeFakePool(),
   };
 }
 

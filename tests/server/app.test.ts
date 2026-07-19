@@ -12,6 +12,7 @@ import type { RunCrewTurn } from '../../src/server/crews/run.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 import type { SessionStore } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -86,6 +87,9 @@ const unusedSessionStore = {
 // None of these tests exercise a queue/jobs route (they land in T18-20), so a
 // never-touched stub keeps the fixture honest about what's under test here.
 const unusedJobStore = {} as unknown as JobStore;
+// None of these tests exercise POST /api/jobs/:id/cancel, so a fake that
+// never registers a real controller (cancel() -> false) suffices here too.
+const unusedPool = makeFakePool();
 // A bare, never-populated mcp.json — these tests don't exercise /api/mcp.
 const mcpConfigPath = join(mkdtempSync(join(tmpdir(), 'app-mcp-')), 'mcp.json');
 writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
@@ -109,6 +113,7 @@ const deps: ServerDeps = {
   memoryStore: unusedMemoryStore,
   sessionStore: unusedSessionStore,
   jobStore: unusedJobStore,
+  pool: unusedPool,
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -253,6 +258,7 @@ test('an unexpected throw outside /api handling degrades to a JSON 500 (top-leve
     memoryStore: unusedMemoryStore,
     sessionStore: unusedSessionStore,
     jobStore: unusedJobStore,
+    pool: unusedPool,
   };
   const throwingServer = Bun.serve({
     port: 0,
@@ -302,6 +308,7 @@ test('serveStatic confines staticDir: a normal file serves, a traversal/absolute
     memoryStore: unusedMemoryStore,
     sessionStore: unusedSessionStore,
     jobStore: unusedJobStore,
+    pool: unusedPool,
   };
   const confinedServer = Bun.serve({
     port: 0,
@@ -406,6 +413,7 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     memoryStore: unusedMemoryStore,
     sessionStore: unusedSessionStore,
     jobStore: unusedJobStore,
+    pool: unusedPool,
   };
   const symlinkServer = Bun.serve({
     port: 0,

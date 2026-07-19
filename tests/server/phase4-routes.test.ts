@@ -9,6 +9,7 @@ import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { SessionStore } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
 
 // None of these tests exercise a memory route, so a throwing fake keeps the
 // fixture honest about what's actually under test here.
@@ -92,6 +93,7 @@ function deps(): ServerDeps {
     memoryStore: unusedMemoryStore,
     sessionStore: unusedSessionStore,
     jobStore: {} as unknown as JobStore,
+    pool: makeFakePool(),
   };
 }
 

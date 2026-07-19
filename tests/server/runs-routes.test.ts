@@ -12,6 +12,7 @@ import type { RunCrewTurn } from '../../src/server/crews/run.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 import type { SessionStore } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
 
 const TOKEN = 'a'.repeat(64);
 const policy = { port: 0, allowedOrigins: [] as string[] };
@@ -100,6 +101,7 @@ const deps: ServerDeps = {
   sessionStore: noSessionStore,
   // No queue/jobs route is exercised here (they land in T18-20).
   jobStore: {} as unknown as JobStore,
+  pool: makeFakePool(),
 };
 
 let server: ReturnType<typeof Bun.serve>;
