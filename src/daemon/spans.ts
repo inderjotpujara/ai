@@ -112,3 +112,9 @@ export function recordDaemonStatusRead(): void {
   const span = tracer().startSpan('daemon.status.read');
   span.end();
 }
+
+/** Record a daemon-logs tail read as a `daemon.logs.read` span. */
+export function recordDaemonLogsRead(): void {
+  const span = tracer().startSpan('daemon.logs.read');
+  span.end();
+}

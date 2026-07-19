@@ -18,6 +18,7 @@ import { handleCrewDetail } from './crews/detail.ts';
 import { handleCrewList } from './crews/list.ts';
 import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
+import { handleDaemonLogs } from './daemon/logs.ts';
 import { handleDaemonStatus } from './daemon/status.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
@@ -146,6 +147,9 @@ export type ServerDeps = {
     port: number;
     sessionTtlMs: number;
   };
+  /** Directory holding `agent.{out,err}.log` for the redacted tail. Optional —
+   *  the /api/daemon/logs route degrades to 503 when unset. */
+  daemonLogDir?: string;
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
@@ -329,6 +333,13 @@ async function handleApi(
           const res = handleDaemonStatus({
             daemonPidPath: need(deps.daemonPidPath, 'daemonPidPath'),
             bindInfo: need(deps.bindInfo, 'bindInfo'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/daemon/logs') {
+          const res = handleDaemonLogs(new URLSearchParams(url.search), {
+            daemonLogDir: need(deps.daemonLogDir, 'daemonLogDir'),
           });
           rec.status(res.status);
           return res;
