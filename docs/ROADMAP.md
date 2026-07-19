@@ -400,8 +400,17 @@ Slice 26), not license to create more.
           locked voice to dictation-only — this phase corrects that
           citation here, in README, and in the spec itself, recording
           barge-in/interruptible voice + TTS voice-out as explicit
-          **future scope, not debt**. Live-verified (real browser +
-          Ollama). Spec: `docs/superpowers/specs/2026-07-19-slice-30b-phase8-polish-a11y-design.md`;
+          **future scope, not debt**. Live-verified: the automated
+          real-browser voice e2e (Vitest browser-mode + Chromium
+          fake-audio, `bun run test:voice-e2e`) transcribes a fixture
+          end-to-end through the real Moonshine/Silero pipeline (observed
+          "The quick brown fox…"), the real-Ollama `run-viewer.live` test
+          confirms chat turns write a `chat.run` root, and the full gate is
+          green (root 1572 / web 348). A hands-on native-browser mic
+          click-through isn't possible in this headless env (no real
+          microphone) — the fake-audio e2e is the equivalent, and the
+          durable, live-verify harness Phase 7 established for exactly this.
+          Spec: `docs/superpowers/specs/2026-07-19-slice-30b-phase8-polish-a11y-design.md`;
           plan: `docs/superpowers/plans/2026-07-19-slice-30b-phase8-polish-a11y.md`;
           ledger: `.superpowers/sdd/progress.md` (§"SLICE 30b — PHASE 8").
           See `docs/architecture.md` §"Voice (web UI — Slice 30b Phase 7)",
