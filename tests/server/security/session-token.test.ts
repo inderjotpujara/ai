@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, statSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
+import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRootTokenStore } from '../../../src/server/security/root-token.ts';
@@ -116,4 +117,60 @@ test('a length-mismatched signature returns null, never throws', () => {
   const shortSig = `${payload}.aa`;
   expect(() => store.verifySessionToken(shortSig)).not.toThrow();
   expect(store.verifySessionToken(shortSig)).toBeNull();
+});
+
+// Fix 1 — finite-exp guard: a non-finite `exp` must be rejected exactly like a
+// missing/wrong-type `exp`, not merely "any number" as the old guard allowed.
+// NaN/Infinity can't survive JSON.stringify (they coerce to `null`), so we
+// can't get one out of `mintSessionToken`. Instead we hand-build the wire
+// payload and sign it with the SAME HMAC helper the store documents in its
+// header comment (`HMAC-SHA256(rootToken, payload)`, hex-encoded) — a valid
+// signature over a malicious payload, exactly what a store-internal bug or a
+// future JSON-quirk could produce. `1e400` is valid JSON number syntax, but
+// overflows a double to `Infinity` once parsed — the reachable case the guard
+// exists for.
+test('a validly-signed payload with a non-finite exp verifies null (finite-exp guard)', () => {
+  const { store, rootToken } = stores();
+  const payloadJson = '{"deviceId":"d","exp":1e400}';
+  // Sanity: confirm this really does parse to a non-finite exp.
+  expect(Number.isFinite(JSON.parse(payloadJson).exp)).toBe(false);
+
+  const payload = Buffer.from(payloadJson).toString('base64url');
+  const sig = createHmac('sha256', rootToken).update(payload).digest('hex');
+  expect(store.verifySessionToken(`${payload}.${sig}`)).toBeNull();
+});
+
+// Fix 2 — fail-closed revocation store: an ABSENT file is a legitimate "no
+// revocations yet" (verifies still succeed); a PRESENT-but-corrupt file must
+// fail CLOSED at construction rather than silently collapsing to "nothing
+// revoked" (which would un-revoke every device).
+test('an absent revocation file yields an empty revoked set — verifies still succeed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tok-'));
+  const rootStore = createRootTokenStore({ path: join(dir, 'daemon-token') });
+  const rootToken = rootStore.getOrCreateRoot();
+  // Note: `join(dir, 'sessions')` is never created before construction.
+  const store = createSessionTokenStore({
+    path: join(dir, 'sessions'),
+    rootToken,
+  });
+  const tok = store.mintSessionToken({ deviceId: 'd', ttlMs: 60_000 });
+  expect(store.verifySessionToken(tok)?.deviceId).toBe('d');
+});
+
+test('a present-but-corrupt revocation file fails closed at construction (throws, never silently un-revokes)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tok-'));
+  const path = join(dir, 'sessions');
+  writeFileSync(path, 'not-json{{{', { mode: 0o600 });
+  expect(() =>
+    createSessionTokenStore({ path, rootToken: 'a'.repeat(64) }),
+  ).toThrow();
+});
+
+test('a present-but-non-array-JSON revocation file also fails closed at construction', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tok-'));
+  const path = join(dir, 'sessions');
+  writeFileSync(path, JSON.stringify({ not: 'an array' }), { mode: 0o600 });
+  expect(() =>
+    createSessionTokenStore({ path, rootToken: 'a'.repeat(64) }),
+  ).toThrow();
 });

@@ -23,7 +23,7 @@
 
 import { Buffer } from 'node:buffer';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export type SessionPrincipal = { deviceId: string };
@@ -60,9 +60,12 @@ export function createSessionTokenStore(config: {
 }): SessionTokenStore {
   const { path, rootToken } = config;
 
-  // Revocation set persisted at construction — survives restarts. A corrupt or
-  // absent file collapses to "nothing revoked" rather than throwing (fail into
-  // a known state; the file is only ever written by us at 0600).
+  // Revocation set persisted at construction — survives restarts. An ABSENT
+  // file is fine (nothing revoked yet, e.g. first boot) and collapses to an
+  // empty set. A PRESENT-but-corrupt/unparseable file is a security-relevant
+  // failure — silently treating it as "nothing revoked" would un-revoke every
+  // device — so `loadRevoked` throws instead (fail CLOSED at construction: the
+  // daemon refuses to start rather than serve verifies against a broken store).
   const revoked = new Set<string>(loadRevoked(path));
 
   function persistRevoked(): void {
@@ -98,7 +101,8 @@ export function createSessionTokenStore(config: {
       }
       if (
         typeof parsed?.deviceId !== 'string' ||
-        typeof parsed?.exp !== 'number'
+        typeof parsed?.exp !== 'number' ||
+        !Number.isFinite(parsed.exp) // defense-in-depth: NaN/Infinity reject, not just wrong-type
       ) {
         return null;
       }
@@ -114,14 +118,36 @@ export function createSessionTokenStore(config: {
   };
 }
 
+/**
+ * Load the persisted revocation set. An ABSENT file is a legitimate "nothing
+ * revoked yet" — returns `[]`. A PRESENT file that is unreadable or fails to
+ * parse as a JSON array is a corrupt security-relevant store: this throws
+ * rather than silently returning `[]`, because collapsing a tampered/corrupt
+ * file to "no revocations" would fail OPEN (un-revoking every device). Fail
+ * CLOSED instead — the caller (construction) refuses to proceed.
+ */
 function loadRevoked(path: string): string[] {
-  if (!existsSync(path)) return [];
+  let raw: string;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    return Array.isArray(parsed)
-      ? parsed.filter((d): d is string => typeof d === 'string')
-      : [];
-  } catch {
-    return [];
+    raw = readFileSync(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Revocation file at ${path} exists but is not valid JSON — refusing to ` +
+        `start with an unreadable revocation store (fail closed): ${(err as Error).message}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `Revocation file at ${path} exists but is not a JSON array — refusing ` +
+        `to start with an unreadable revocation store (fail closed).`,
+    );
+  }
+  return parsed.filter((d): d is string => typeof d === 'string');
 }
