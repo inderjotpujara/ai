@@ -578,6 +578,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     doc: 'Comma-separated extra Host-header hostnames allowed past the DNS-rebinding Host check beyond localhost/127.0.0.1/[::1] (server/security/origin.ts hostAllowed). Empty = loopback-only (default-safe); a Slice-24 Tailscale/Cloudflare tunnel adds its MagicDNS/hostname here (paired with its origin in AGENT_WEB_ORIGIN_ALLOWLIST) so remote requests pass the perimeter — the durable session-token guard (Tasks 32-34) still gates every request (§7.4: the network is not the trust boundary). Matched with or without the configured port. The AGENT_WEB_BIND interface is always included automatically.',
   },
   {
+    env: 'AGENT_WEB_PUBLIC_URL',
+    kind: 'string',
+    def: '',
+    doc: 'Public base URL the device-pairing URL/QR (POST /api/devices) is built from — e.g. a Tailscale MagicDNS name or Cloudflare hostname. Empty = derive from the bind interface + port at boot (fine for a same-box pair). The pairing token rides the URL fragment (never a query — fragments do not reach the server/logs). Slice 25b D4.',
+  },
+  {
     env: 'AGENT_WEB_RUN_RATE',
     kind: 'number',
     def: 0,

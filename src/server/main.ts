@@ -31,8 +31,13 @@ import { createRealMcpMountOne } from './mcp/mount-one.ts';
 import { createMcpMountStatus } from './mcp/mount-status.ts';
 import { createProcessRunLimiter } from './run-rate.ts';
 import {
+  createDeviceRegistry,
+  defaultDeviceRegistryPath,
+} from './security/device-registry.ts';
+import {
   createRootTokenStore,
   defaultRootTokenPath,
+  type RootTokenStore,
 } from './security/root-token.ts';
 import {
   createSessionTokenStore,
@@ -164,6 +169,18 @@ export type StartOptions = {
    *  instance, so revoke/rotate operate on the SAME store the guard verifies).
    *  Absent = build one from the root store below. */
   sessionTokens?: SessionTokenStore;
+  /** Inject the durable root-token store (security/root-token.ts). Absent =
+   *  build one from `rootTokenPath` below. A fixture that injects its OWN
+   *  `sessionTokens` should inject the SAME `rootStore` its session store was
+   *  constructed over, so rotate-root rotates the key that store actually
+   *  signs/verifies with (the getter/same-instance invariant — T20). */
+  rootTokens?: RootTokenStore;
+  /** Path of the persisted positive device registry (security/device-registry.ts).
+   *  Defaults to `~/.agent/devices.json`; overridable so tests stay hermetic. */
+  deviceRegistryPath?: string;
+  /** Public base URL the pairing URL/QR (POST /api/devices) is built from.
+   *  Defaults to `AGENT_WEB_PUBLIC_URL`, then the loopback bind fallback. */
+  publicBaseUrl?: string;
   /** Injected, pre-reconciled queue owned by the caller (the daemon, T27). When
    *  present, startWebServer does NOT construct or start/stop a pool — the
    *  caller already ran reconcileOrphans() then pool.start() in the correct
@@ -230,6 +247,17 @@ export function startWebServer(opts: StartOptions = {}): {
   // For the localhost browser we mint a SESSION token for the `'local'` device
   // (short TTL) and inject THAT as window.__AGENT_TOKEN__ — the root NEVER
   // leaves the server (nit #6). `opts.token` is a legacy bypass only.
+  // The ONE root store per server — hoisted so it is ALWAYS in scope: it becomes
+  // BOTH the session store's root source (the getter below) AND `deps.rootTokens`
+  // (the rotate-root route). Those MUST be the same instance, or rotate-root
+  // becomes a silent no-op (200 while revoked/rotated devices keep verifying) —
+  // the AUDIT CRITICAL-1 seam. A fixture may inject its own (paired with its own
+  // injected `sessionTokens`); production/daemon boot never does.
+  const rootStore =
+    opts.rootTokens ??
+    createRootTokenStore({
+      path: opts.rootTokenPath ?? defaultRootTokenPath(),
+    });
   let sessionTokens: SessionTokenStore | undefined;
   let token: string;
   if (opts.token !== undefined) {
@@ -241,18 +269,31 @@ export function startWebServer(opts: StartOptions = {}): {
       ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
     });
   } else {
-    const rootStore = createRootTokenStore({
-      path: opts.rootTokenPath ?? defaultRootTokenPath(),
-    });
     sessionTokens = createSessionTokenStore({
       path: opts.sessionRevocationPath ?? defaultRevocationPath(),
-      rootToken: rootStore.getOrCreateRoot(),
+      // Root GETTER, not a captured string: the live store re-reads the CURRENT
+      // root on every sign/verify, so `rotate()` on `rootStore` (via the
+      // rotate-root route, which holds this SAME instance as `deps.rootTokens`)
+      // immediately invalidates every outstanding session. A captured
+      // `rootStore.getOrCreateRoot()` string here would keep verifying against
+      // the stale root — the no-op rotate bug this getter closes.
+      rootToken: () => rootStore.getOrCreateRoot(),
     });
     token = sessionTokens.mintSessionToken({
       deviceId: 'local',
       ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
     });
   }
+  // Positive device registry + pairing base URL for the device routes. The
+  // registry shares the `~/.agent` secure-file convention; the base URL falls
+  // back to the loopback bind (fine for a same-box pair — a real tunnel sets
+  // AGENT_WEB_PUBLIC_URL / opts.publicBaseUrl).
+  const deviceRegistry = createDeviceRegistry({
+    path: opts.deviceRegistryPath ?? defaultDeviceRegistryPath(),
+  });
+  const publicBaseUrl =
+    opts.publicBaseUrl ??
+    ((cfg.AGENT_WEB_PUBLIC_URL as string) || `http://${bind}:${port}`);
 
   const policy = { port, allowedOrigins, allowedHosts };
   // Bind posture surfaced on `ServerDeps.bindInfo` for the Overview/Devices
@@ -431,6 +472,13 @@ export function startWebServer(opts: StartOptions = {}): {
     daemonPidPath: opts.daemonPidPath ?? defaultPidPath(),
     bindInfo,
     daemonLogDir: opts.daemonLogDir ?? join(dirname(defaultPidPath()), 'logs'),
+    // Device/security surface (T20, audit CRITICAL-1 completion): the device
+    // routes (list/pair/revoke) + rotate-root stop 503-ing. `rootTokens` is the
+    // SAME hoisted `rootStore` the session store's getter reads, so a rotate on
+    // it invalidates the live guard rather than being a silent no-op.
+    deviceRegistry,
+    rootTokens: rootStore,
+    publicBaseUrl,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB

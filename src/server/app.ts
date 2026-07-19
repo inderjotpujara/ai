@@ -29,6 +29,7 @@ import { handleJobCancel } from './jobs/cancel.ts';
 import { handleJobDetail } from './jobs/detail.ts';
 import { handleJobEnqueue } from './jobs/enqueue.ts';
 import { handleJobList } from './jobs/list.ts';
+import { handleJobRetry } from './jobs/retry.ts';
 import { handleMcpAdd } from './mcp/add.ts';
 import { handleMcpList } from './mcp/list.ts';
 import type { McpMountOne } from './mcp/mount-one.ts';
@@ -438,6 +439,14 @@ async function handleApi(
         );
         if (req.method === 'POST' && cancelMatch?.[1]) {
           const res = handleJobCancel(cancelMatch[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        // Same action-before-detail discipline as `cancel` above: the retry
+        // sub-path must match before the bare-:id detail regex below.
+        const retryMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/retry$/);
+        if (req.method === 'POST' && retryMatch?.[1]) {
+          const res = await handleJobRetry(retryMatch[1], deps);
           rec.status(res.status);
           return res;
         }
