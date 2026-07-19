@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { getCrew } from '../../crews/index.ts';
 import { getWorkflow } from '../../workflows/index.ts';
 import { loadConfig } from '../config/schema.ts';
 import { RuntimeKind } from '../core/types.ts';
+import { defaultPidPath } from '../daemon/pid.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
@@ -169,8 +170,27 @@ export type StartOptions = {
    *  §7.3 order and owns the drain. Absent = standalone: startWebServer
    *  self-hosts one pool (`bun run web` / all-in-one tests). Running a second
    *  pool on the same AGENT_QUEUE_PATH DB would double concurrency and bypass
-   *  the reconcile-before-claim guarantee — the bug this dual mode closes. */
-  queue?: { jobStore: JobStore; pool: WorkerPool };
+   *  the reconcile-before-claim guarantee — the bug this dual mode closes.
+   *  `concurrency` (Slice 25b Task 11) is the SAME `computeConcurrency()` value
+   *  the caller built `pool` with — threaded through so `/api/queue/stats`
+   *  (T8) and `/api/daemon/status` never report a number that disagrees with
+   *  the pool actually draining jobs. Required (not re-derived here) so this
+   *  file can never call `computeConcurrency()` a second time and silently
+   *  diverge from the daemon's own value. */
+  queue?: { jobStore: JobStore; pool: WorkerPool; concurrency: number };
+  /** Daemon pid-file path (Slice 25b Task 11), surfaced on `ServerDeps.daemonPidPath`
+   *  for `/api/daemon/status`'s uptime-from-mtime read. Defaults to the same
+   *  `defaultPidPath()` the daemon itself writes (`daemon/pid.ts`), so standalone
+   *  boot and daemon-injected boot report the identical path unless a test
+   *  overrides it. */
+  daemonPidPath?: string;
+  /** Directory holding `agent.{out,err}.log` (Slice 25b Task 11), surfaced on
+   *  `ServerDeps.daemonLogDir` for `/api/daemon/logs`. Defaults to the sibling
+   *  `logs/` dir next to the pid file — the SAME directory `defaultLogDir()`
+   *  in `src/cli/daemon.ts` resolves to (kept as two independent expressions
+   *  of the same default rather than a shared import, since `cli/daemon.ts`'s
+   *  version isn't exported; both derive from `defaultPidPath()`). */
+  daemonLogDir?: string;
 };
 
 /** Boot the local web BFF. Returns the server handle for tests/shutdown. */
@@ -235,6 +255,16 @@ export function startWebServer(opts: StartOptions = {}): {
   }
 
   const policy = { port, allowedOrigins, allowedHosts };
+  // Bind posture surfaced on `ServerDeps.bindInfo` for the Overview/Devices
+  // tabs (Slice 25b Task 11). A separate mutable local (not inlined into
+  // `deps` below) mirrors `policy` just above: `port` is reconciled to the
+  // real bound port after `Bun.serve()` resolves an ephemeral `port: 0`.
+  const bindInfo = {
+    bind,
+    allowedHosts,
+    port,
+    sessionTtlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
+  };
   // Honor AGENT_RUNS_ROOT (same expression as the CLI runs/usage/archive
   // readers, src/cli/{runs,usage,archive}.ts) so the server writer and those
   // readers agree — never hardcode the path (repo no-hardcode rule).
@@ -321,14 +351,17 @@ export function startWebServer(opts: StartOptions = {}): {
     createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
   let pool: WorkerPool;
   // Worker-pool concurrency surfaced on the Overview queue card (T8's
-  // /api/queue/stats). In standalone mode we own the pool and thread the exact
-  // value it was built with; in injected (daemon) mode the daemon owns the pool
-  // and threads its own value through in T11 — undefined here degrades the
-  // route to a clean 503 rather than reporting a guessed number.
-  let queueConcurrency: number | undefined;
+  // /api/queue/stats) and the daemon status card. In standalone mode we own
+  // the pool and thread the exact value it was built with; in injected
+  // (daemon) mode the daemon owns the pool and passes ITS OWN
+  // `computeConcurrency()` value through `injected.concurrency` (T11) — this
+  // file never calls `computeConcurrency()` in that branch, so the reported
+  // number and the pool's real concurrency can never diverge.
+  let queueConcurrency: number;
   if (injected) {
     // Caller (daemon) owns lifecycle: do NOT start/stop or close here.
     pool = injected.pool;
+    queueConcurrency = injected.concurrency;
   } else {
     const dispatch = createJobDispatch({
       runCrewTurn,
@@ -395,6 +428,9 @@ export function startWebServer(opts: StartOptions = {}): {
     pool,
     runLimiter,
     queueConcurrency,
+    daemonPidPath: opts.daemonPidPath ?? defaultPidPath(),
+    bindInfo,
+    daemonLogDir: opts.daemonLogDir ?? join(dirname(defaultPidPath()), 'logs'),
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB
@@ -422,6 +458,7 @@ export function startWebServer(opts: StartOptions = {}): {
     throw new Error('Bun.serve() did not report a bound port');
   }
   policy.port = boundPort; // reconcile when port === 0 (ephemeral)
+  bindInfo.port = boundPort; // same reconcile for the daemon-status DTO
   return { server, token, port: boundPort, jobStore, pool };
 }
 

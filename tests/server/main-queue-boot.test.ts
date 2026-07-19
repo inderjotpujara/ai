@@ -65,7 +65,7 @@ test('injected startWebServer reuses the caller pool + store and never starts a 
   const authDir = mkdtempSync(join(tmpdir(), 'queue-inject-auth-'));
   const handle = startWebServer({
     port: 0,
-    queue: { jobStore, pool },
+    queue: { jobStore, pool, concurrency: 3 },
     rootTokenPath: join(authDir, 'daemon-token'),
     sessionRevocationPath: join(authDir, 'revoked-devices.json'),
   });

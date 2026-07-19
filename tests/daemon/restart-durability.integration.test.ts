@@ -69,6 +69,7 @@ test('restart resumes durable orphans at-most-once; non-durable → Interrupted;
     })) as never,
     queue: store,
     pool,
+    concurrency: 2,
     pidPath,
     installSignals: () => {},
     // Incr-6 wiring: the daemon reconciles with the durable predicate BEFORE
@@ -219,6 +220,7 @@ test('mid-DAG crash: restart resumes from checkpoint — node a executes EXACTLY
     })) as never,
     queue: wrappedStore,
     pool: wrappedPool,
+    concurrency: 2,
     pidPath,
     installSignals: () => {},
     durable: (j) => j.kind === JobKind.Crew || j.kind === JobKind.Workflow,

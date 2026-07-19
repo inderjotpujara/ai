@@ -156,9 +156,14 @@ function buildRealDaemon() {
     runBuilderTurn,
     runsRoot,
   });
+  // ONE `computeConcurrency()` call, hoisted to a local shared by the pool
+  // AND `createDaemon` (Slice 25b Task 11) — so the worker pool and the
+  // daemon-status/queue-stats routes it feeds into `startWebServer` can never
+  // report a concurrency value that disagrees with the pool actually running.
+  const concurrency = computeConcurrency();
   const pool = createWorkerPool({
     store: jobStore,
-    concurrency: computeConcurrency(),
+    concurrency,
     dispatch,
     pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
   });
@@ -166,6 +171,7 @@ function buildRealDaemon() {
     startWebServer,
     queue: jobStore,
     pool,
+    concurrency,
     // Crew/workflow orphans are checkpoint-resumable (per-node checkpoint.json)
     // → re-queue them at boot so the pool re-claims and resumes from the last
     // completed node, instead of Interrupting them (Task 41).

@@ -10,9 +10,13 @@
  *      own transaction and can never be picked up mid-flight (§7.3).
  *   3. `writePid` — record this process as the running daemon.
  *   4. `pool.start()` — only now may workers begin claiming.
- *   5. `startWebServer({ queue: { jobStore, pool } })` in INJECTED mode — the
- *      server reuses THIS reconciled, already-started pool and does NOT spin up
- *      a second one on the same DB (the §7.3 double-pool fix; see Task 17).
+ *   5. `startWebServer({ queue: { jobStore, pool, concurrency } })` in INJECTED
+ *      mode — the server reuses THIS reconciled, already-started pool and does
+ *      NOT spin up a second one on the same DB (the §7.3 double-pool fix; see
+ *      Task 17). `concurrency` (Slice 25b Task 11) is the SAME
+ *      `computeConcurrency()` value `buildRealDaemon` (src/cli/daemon.ts) built
+ *      `pool` with, so `/api/queue/stats` and `/api/daemon/status` never
+ *      report a number that disagrees with the pool actually running.
  *   6. Register a shutdown drain + install signal handlers so SIGTERM/SIGINT
  *      drain gracefully via `stop()`.
  *
@@ -40,6 +44,14 @@ export type CreateDaemonOptions = {
   startWebServer: typeof StartWebServer;
   queue: JobStore;
   pool: WorkerPool;
+  /** The `computeConcurrency()` value `pool` was built with (Slice 25b Task
+   *  11) — threaded into the injected `startWebServer({ queue: { ... } })`
+   *  call below so the daemon-status/queue-stats routes report the SAME
+   *  number the pool actually runs at, never a second, independently-computed
+   *  one. The caller (`buildRealDaemon`, src/cli/daemon.ts) hoists this to a
+   *  local shared with the `createWorkerPool` call — never calls
+   *  `computeConcurrency()` twice. */
+  concurrency: number;
   pidPath?: string;
   /** Bounded graceful-drain deadline handed to `pool.stop`. Undefined = the
    *  pool's default unbounded drain (await every in-flight job). */
@@ -104,7 +116,11 @@ export function createDaemon(opts: CreateDaemonOptions): Daemon {
       //    started queue so it does NOT construct or start a second pool on the
       //    same DB (§7.3 double-pool fix — Task 17). Exactly one pool exists.
       const handle = opts.startWebServer({
-        queue: { jobStore: opts.queue, pool: opts.pool },
+        queue: {
+          jobStore: opts.queue,
+          pool: opts.pool,
+          concurrency: opts.concurrency,
+        },
       });
       server = handle.server;
       started = true;
