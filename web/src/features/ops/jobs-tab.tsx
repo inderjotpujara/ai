@@ -1,6 +1,7 @@
 import { JobKindWire, JobPriorityWire, JobStatusWire } from '@contracts';
 import { useState } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
+import { JobDetailDrawer } from './job-detail-drawer.tsx';
 import { useJobs } from './use-jobs.ts';
 
 const STATUS_OPTIONS = ['', ...Object.values(JobStatusWire)];
@@ -22,6 +23,10 @@ export function JobsTab({ onSelect }: Props) {
   const jobs = useJobs();
   const { page, error, query, goNext, goFirst } = jobs;
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
+  // The open drawer's job id — separate from `selectedId` (the row highlight)
+  // so `retriedFrom`'s back-link can re-target the drawer to a job whose row
+  // isn't even in the current page without disturbing the row selection.
+  const [openJobId, setOpenJobId] = useState<string | undefined>(undefined);
   // `useJobs` doesn't expose its internal `cursors[]` — mirror it locally so
   // "First page" only shows once we've actually paged forward, same gate
   // `RunsArea` applies via `cursors.length`.
@@ -44,6 +49,7 @@ export function JobsTab({ onSelect }: Props) {
 
   function selectRow(jobId: string) {
     setSelectedId(jobId);
+    setOpenJobId(jobId);
     onSelect?.(jobId);
   }
 
@@ -158,6 +164,14 @@ export function JobsTab({ onSelect }: Props) {
         {hasPaged && <Button onClick={first}>First page</Button>}
         {page?.nextCursor && <Button onClick={next}>Next</Button>}
       </div>
+
+      {openJobId && (
+        <JobDetailDrawer
+          jobId={openJobId}
+          onClose={() => setOpenJobId(undefined)}
+          onSelect={setOpenJobId}
+        />
+      )}
     </section>
   );
 }
