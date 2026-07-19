@@ -137,6 +137,11 @@ export type StartOptions = {
    *  Tailscale tunnel recipe overrides this to the 100.x tailnet interface. */
   bind?: string;
   allowedOrigins?: string[];
+  /** Extra Host-header hostnames allowed past the DNS-rebinding Host check
+   *  beyond loopback (Slice 24 Incr 5, item 5/12/13). Defaults to the bind
+   *  interface + `AGENT_WEB_ALLOWED_HOSTS` (the tunnel host). Empty =
+   *  loopback-only (default-safe). */
+  allowedHosts?: string[];
   recordIo?: boolean;
   staticDir?: string;
   /** LEGACY escape hatch: a raw constant bearer. When set, the durable
@@ -183,6 +188,17 @@ export function startWebServer(opts: StartOptions = {}): {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+  // The interface Bun.serve binds; also always allowed as a Host so a request
+  // to the bound interface (e.g. a 100.x tailnet IP) passes the perimeter.
+  const bind = opts.bind ?? String(cfg.AGENT_WEB_BIND);
+  // Extra Host-header hosts past the loopback DNS-rebinding check (item 5/12/13):
+  // the bind interface + the configured tunnel host(s). Empty (default) keeps
+  // today's localhost-only perimeter — remote reach is an explicit opt-in.
+  const allowedHosts =
+    opts.allowedHosts ??
+    [bind, ...String(cfg.AGENT_WEB_ALLOWED_HOSTS).split(',')]
+      .map((s) => s.trim())
+      .filter(Boolean);
   const recordIo = opts.recordIo ?? (cfg.AGENT_WEB_RECORD_IO as boolean);
 
   // Durable auth (Slice 24 Incr 5, D4): ONE root + ONE live session-token store
@@ -217,7 +233,7 @@ export function startWebServer(opts: StartOptions = {}): {
     });
   }
 
-  const policy = { port, allowedOrigins };
+  const policy = { port, allowedOrigins, allowedHosts };
   const runsRoot = 'runs';
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
@@ -369,7 +385,7 @@ export function startWebServer(opts: StartOptions = {}): {
   // opts in to a wider interface explicitly via `opts.bind`/the env override.
   const server = Bun.serve({
     port,
-    hostname: opts.bind ?? String(cfg.AGENT_WEB_BIND),
+    hostname: bind,
     fetch: buildFetch(deps),
     idleTimeout: 0,
     maxRequestBodySize: cfg.AGENT_WEB_MAX_BODY_BYTES as number,

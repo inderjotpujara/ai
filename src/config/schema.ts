@@ -571,6 +571,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: '127.0.0.1',
     doc: 'Hostname/interface Bun.serve binds (server/main.ts). Default 127.0.0.1 = loopback-only — no implicit 0.0.0.0 ("localhost is not a trust boundary"). Tailscale recipe: set to the 100.x tailnet interface AND keep localhost; auth (Tasks 32-34) still gates every request.',
   },
+  {
+    env: 'AGENT_WEB_ALLOWED_HOSTS',
+    kind: 'string',
+    def: '',
+    doc: 'Comma-separated extra Host-header hostnames allowed past the DNS-rebinding Host check beyond localhost/127.0.0.1/[::1] (server/security/origin.ts hostAllowed). Empty = loopback-only (default-safe); a Slice-24 Tailscale/Cloudflare tunnel adds its MagicDNS/hostname here (paired with its origin in AGENT_WEB_ORIGIN_ALLOWLIST) so remote requests pass the perimeter — the durable session-token guard (Tasks 32-34) still gates every request (§7.4: the network is not the trust boundary). Matched with or without the configured port. The AGENT_WEB_BIND interface is always included automatically.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in
