@@ -1,15 +1,16 @@
 import type { ProviderOptions } from '@ai-sdk/provider-utils';
 import {
   generateText,
+  isStepCount,
   type LanguageModel,
   type ModelMessage,
-  isStepCount,
   streamText,
   type ToolSet,
 } from 'ai';
 import type { MediaFilePart } from '../media/types.ts';
 import { runTimeoutMs } from '../reliability/config.ts';
 import { withWallClock } from '../reliability/timeout.ts';
+import { ensureAiSdkTelemetry } from '../telemetry/ai-sdk.ts';
 import { recordIoEnabled } from '../telemetry/provider.ts';
 import { MaxStepsError } from './errors.ts';
 
@@ -68,6 +69,10 @@ export async function runAgent(input: RunAgentInput): Promise<{
   text: string;
   steps: Awaited<ReturnType<typeof generateText>>['steps'];
 }> {
+  // AI SDK v7 no longer emits telemetry spans unless an OTel integration is
+  // registered (it was extracted from core `ai` into `@ai-sdk/otel`). Register
+  // once, idempotently, before any generateText/streamText call.
+  ensureAiSdkTelemetry();
   if (input.stream) {
     const { text, finishReason, steps } = await withWallClock(
       runTimeoutMs(),
