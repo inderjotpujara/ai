@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
 import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
 import { PairDeviceDialog } from './pair-device-dialog.tsx';
+import { RotateRootDialog } from './rotate-root-dialog.tsx';
 import { useDaemonStatus } from './use-daemon-status.ts';
 import { useDevices } from './use-devices.ts';
 
@@ -34,8 +35,8 @@ AGENT_WEB_ALLOWED_HOSTS=<your-tunnel>.trycloudflare.com`;
  *  here), (b) the device-session list from `useDevices()` with a wired
  *  Revoke button per row, and (c) a "Pair a device" button that mounts
  *  `<PairDeviceDialog>` (T38, self-contained bundled-QR pairing) and a
- *  "Rotate root token" button that opens a LOCAL-STATE placeholder — the
- *  real rotate-confirm dialog (T39/T40) mounts in a later task.
+ *  "Rotate root token" button that mounts `<RotateRootDialog>` (T39,
+ *  break-glass strong-confirm).
  *
  *  SECURITY (mandatory, Fable T17 finding): `DeviceDTO.label` is stored
  *  unsanitized server-side by design. It is rendered below via plain React
@@ -156,15 +157,7 @@ export function DevicesTab() {
               Rotate root token
             </Button>
           </div>
-          {rotateOpen && (
-            // The real rotate-confirm dialog mounts here — a later task.
-            <p
-              data-testid="ops-devices-rotate-placeholder"
-              className="mt-2 text-sm text-[var(--color-muted)]"
-            >
-              Rotate-root-token confirm — coming in a later task.
-            </p>
-          )}
+          <RotateRootDialog open={rotateOpen} onOpenChange={setRotateOpen} />
         </div>
       </RegionErrorBoundary>
     </section>
