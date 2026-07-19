@@ -39,6 +39,24 @@ test('enqueue honours an explicit priority + caller-minted runId', () => {
   store.close();
 });
 
+test('enqueue defaults availableAt to 0 and preserves an explicit availableAt', () => {
+  const store = tempStore();
+  // Default: immediately claimable.
+  const def = store.enqueue({ kind: JobKind.Chat, payload: 'now' });
+  expect(def.availableAt).toBe(0);
+  expect(store.getJob(def.id)?.availableAt).toBe(0);
+  // Explicit floor survives enqueue -> getJob (Task 8 retry backoff depends on this).
+  const at = Date.now() + 60_000;
+  const later = store.enqueue({
+    kind: JobKind.Chat,
+    payload: 'later',
+    availableAt: at,
+  });
+  expect(later.availableAt).toBe(at);
+  expect(store.getJob(later.id)?.availableAt).toBe(at);
+  store.close();
+});
+
 test('getJob round-trips payload JSON and returns undefined for a missing id', () => {
   const store = tempStore();
   const job = store.enqueue({

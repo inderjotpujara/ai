@@ -11,6 +11,7 @@ import {
   JobPriority,
   type JobRecord,
   type JobStatus,
+  type JobStoreDeps,
 } from './types.ts';
 
 type JobRowRaw = {
@@ -79,8 +80,15 @@ function newJobId(now = Date.now(), rand: () => number = Math.random): string {
   return `job-${ms}-${r}`;
 }
 
-/** Parity seam mirroring `SessionStoreDeps` (`src/session/store.ts:102`). */
-export type JobStoreDeps = Record<string, never>;
+// The claim scan orders by `priority ASC` and relies on the JobPriority enum's
+// TEXT values sorting High-before-Normal lexically (see idx_jobs_claim in
+// migrations.ts). Assert that intent once, at module load, so a future rename of
+// a JobPriority value that silently broke scheduling fails loudly here instead.
+if (!(JobPriority.High < JobPriority.Normal)) {
+  throw new Error(
+    'JobPriority values must sort High-before-Normal lexically for claimNext ordering',
+  );
+}
 
 export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
   const dbPath = join(config.path ?? 'jobs', 'jobs.db');
@@ -130,9 +138,44 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     return r ? toJobRecord(r) : undefined;
   }
 
+  function claimNext(now = Date.now()): JobRecord | null {
+    // Single transaction: SELECT the winning Queued row then UPDATE it to
+    // Running, so two workers calling claimNext concurrently cannot both read
+    // the same row as Queued and both claim it (busy_timeout=5000 serialises
+    // the writers; the UPDATE's WHERE status='queued' is the guard). bun:sqlite
+    // runs synchronously, so the transaction body is a critical section.
+    const tx = db.transaction((): JobRecord | null => {
+      // `available_at <= now` gates retry-backoff'd rows: a job re-queued by
+      // markFailed with a future available_at is NOT re-claimed until it
+      // matures, so backoff actually spaces re-claims under concurrency
+      // (the delay is enforced here, durably, not by a worker sleeping).
+      // ORDER BY priority ASC uses the enum TEXT ordering (High before Normal;
+      // asserted at module load), then created_at ASC = FIFO, then id ASC as a
+      // stable tiebreak — served by idx_jobs_claim(status, priority, created_at).
+      const r = db
+        .query(
+          `SELECT * FROM jobs WHERE status = 'queued' AND available_at <= ?
+           ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1`,
+        )
+        .get(now) as JobRowRaw | undefined;
+      if (!r) return null;
+      db.run(
+        `UPDATE jobs SET status = 'running', started_at = ?, updated_at = ?,
+         attempts = attempts + 1 WHERE id = ? AND status = 'queued'`,
+        [now, now, r.id],
+      );
+      const claimed = db.query('SELECT * FROM jobs WHERE id = ?').get(r.id) as
+        | JobRowRaw
+        | undefined;
+      return claimed ? toJobRecord(claimed) : null;
+    });
+    return tx();
+  }
+
   return {
     enqueue,
     getJob,
+    claimNext,
     close: (): void => db.close(),
     // claimNext / mark* / listJobs / reconcileOrphans added in Tasks 7-10.
     _db: db,
