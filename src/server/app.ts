@@ -18,6 +18,7 @@ import { handleCrewDetail } from './crews/detail.ts';
 import { handleCrewList } from './crews/list.ts';
 import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
+import { handleDaemonStatus } from './daemon/status.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleJobCancel } from './jobs/cancel.ts';
@@ -135,6 +136,16 @@ export type ServerDeps = {
    *  threaded from main.ts/daemon). Optional — the /api/queue/stats route degrades
    *  to 503 when unset (legacy fixtures need not set it). */
   queueConcurrency?: number;
+  /** Daemon pid-file path (for uptime from mtime, §7.3). Optional — the
+   *  /api/daemon/status route degrades to 503 when unset. */
+  daemonPidPath?: string;
+  /** Bind posture the Overview/Devices tabs render. Optional (as above). */
+  bindInfo?: {
+    bind: string;
+    allowedHosts: string[];
+    port: number;
+    sessionTtlMs: number;
+  };
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
@@ -310,6 +321,14 @@ async function handleApi(
             jobStore: deps.jobStore,
             pool: deps.pool,
             queueConcurrency: need(deps.queueConcurrency, 'queueConcurrency'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/daemon/status') {
+          const res = handleDaemonStatus({
+            daemonPidPath: need(deps.daemonPidPath, 'daemonPidPath'),
+            bindInfo: need(deps.bindInfo, 'bindInfo'),
           });
           rec.status(res.status);
           return res;

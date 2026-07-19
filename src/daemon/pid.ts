@@ -9,7 +9,13 @@
  * are free to overwrite/clear it rather than refusing to start.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -80,6 +86,21 @@ export function readLivePid(path: string): number | undefined {
   if (isPidAlive(pid)) return pid;
   clearPid(path);
   return undefined;
+}
+
+/**
+ * The daemon's boot instant, derived from the pid file's mtime (§7.3): the
+ * pid is written ONCE at `start()`, so its mtime is the daemon's boot time —
+ * robust to WHICH process answers a status request (the responder's own
+ * `process.uptime()` would be wrong the moment status is ever proxied). Returns
+ * `undefined` when the file is absent/unreadable (every failure → "unknown").
+ */
+export function readStartedAt(path: string): number | undefined {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Remove the pid file at `path`. A no-op (never throws) if it's already gone. */

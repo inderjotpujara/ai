@@ -161,6 +161,22 @@ test('GET /api/queue/stats degrades to 503 when queueConcurrency is unwired', as
   });
 });
 
+test('GET /api/daemon/status requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the queue/stats 503 test above: this fixture never sets
+  // the OPTIONAL `daemonPidPath`/`bindInfo` fields, so `need()` trips a clean
+  // 503 rather than a crash — AND the route stays behind the session guard
+  // (401 with no token) like every other /api route.
+  const unauth = await fetch(`${base}/api/daemon/status`);
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/daemon/status`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: daemonPidPath',
+  });
+});
+
 const validEvent = {
   kind: 'voice.transcribe.web',
   durationMs: 1200,

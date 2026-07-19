@@ -106,3 +106,9 @@ export function recordQueueStatsRead(): void {
   const span = tracer().startSpan('queue.stats.read');
   span.end();
 }
+
+/** Record an Overview-tab daemon-status read as a `daemon.status.read` span. */
+export function recordDaemonStatusRead(): void {
+  const span = tracer().startSpan('daemon.status.read');
+  span.end();
+}
