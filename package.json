@@ -33,6 +33,7 @@
     "archive": "bun run src/cli/archive.ts",
     "config": "bun run src/cli/config.ts",
     "start": "bun run src/cli/start.ts",
+    "daemon": "bun run src/cli/daemon.ts",
     "status": "bun run src/cli/status.ts",
     "usage": "bun run src/cli/usage.ts"
   },
