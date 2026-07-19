@@ -60,4 +60,10 @@ describe('AppShell', () => {
     renderAt('/');
     expect(await screen.findByTestId('toast-host')).toBeInTheDocument();
   });
+
+  it('the theme toggle exposes aria-pressed reflecting dark mode (D1)', async () => {
+    renderAt('/');
+    const btn = await screen.findByRole('button', { name: /theme/i });
+    expect(btn).toHaveAttribute('aria-pressed', 'true'); // ThemeProvider defaults to dark
+  });
 });

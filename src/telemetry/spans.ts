@@ -148,6 +148,9 @@ export const ATTR = {
   VOICE_AUDIO_SECONDS: 'voice.audio.seconds',
   VOICE_DURATION_MS: 'voice.duration.ms',
   VOICE_OUTCOME: 'voice.outcome',
+  VOICE_WORD_COUNT: 'voice.word.count',
+  VOICE_REAL_TIME_FACTOR: 'voice.real_time_factor',
+  VOICE_ENGINE: 'voice.engine',
   // Server / web BFF (Slice 30b)
   SERVER_ROUTE: 'server.route',
   SERVER_METHOD: 'http.request.method',
@@ -228,6 +231,30 @@ export function withRunSpan<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   return inSpan('agent.run', async (span) => {
+    span.setAttribute(ATTR.RUN_ID, runId);
+    span.setAttribute(
+      ATTR.CONTENT_POLICY,
+      contentPolicyLabel(uncensoredEnabled()),
+    );
+    if (recordIoEnabled()) span.setAttribute(ATTR.TASK, task);
+    return fn();
+  });
+}
+
+/**
+ * Root span for one CHAT turn (Slice 30b Phase 8, D9). A `chat.run`-naming
+ * sibling of `withRunSpan` with an identical body — chat turns stop borrowing
+ * the generic `agent.run` name so `deriveRunKind` classifies them as
+ * `RunKind.Chat` (and the web notifier never toasts a long chat turn). Kept
+ * separate rather than reusing `withRunSpan` so a future standalone-agent-run
+ * feature still owns the `agent.run` name.
+ */
+export function withChatRunSpan<T>(
+  runId: string,
+  task: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return inSpan('chat.run', async (span) => {
     span.setAttribute(ATTR.RUN_ID, runId);
     span.setAttribute(
       ATTR.CONTENT_POLICY,
@@ -1055,6 +1082,32 @@ export function withVoiceTranscribeSpan<T>(
     span.setAttribute(ATTR.VOICE_CAPTURE_SOURCE, info.source);
     span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
     return fn(span);
+  });
+}
+
+/**
+ * Fire-and-forget span for one BROWSER voice transcription (Slice 30b Phase 8,
+ * D10). Written server-side by `POST /api/telemetry` (`src/server/telemetry/`)
+ * from the client's `navigator.sendBeacon` call — distinct from the in-process
+ * CLI-side `voice.transcribe` span (`withVoiceTranscribeSpan` above): it carries
+ * the browser-only `wordCount`/`realTimeFactor`/`engine`, not capture-source /
+ * audio-seconds / outcome. No parent request span carries useful attributes here,
+ * so it opens its own root (mirrors `recordChatFeedback`).
+ */
+export function recordVoiceTranscribeWeb(info: {
+  modelTier: string;
+  durationMs: number;
+  wordCount: number;
+  realTimeFactor: number;
+  engine: string;
+}): Promise<void> {
+  return inSpan('voice.transcribe.web', async (span) => {
+    span.setAttribute(ATTR.VOICE_STT_MODEL, info.modelTier);
+    span.setAttribute(ATTR.VOICE_DURATION_MS, info.durationMs);
+    span.setAttribute(ATTR.VOICE_WORD_COUNT, info.wordCount);
+    span.setAttribute(ATTR.VOICE_REAL_TIME_FACTOR, info.realTimeFactor);
+    span.setAttribute(ATTR.VOICE_ENGINE, info.engine);
+    span.setAttribute(ATTR.INPUT_MODALITY, 'audio');
   });
 }
 

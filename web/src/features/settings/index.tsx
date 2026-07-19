@@ -64,6 +64,20 @@ export function isVoiceInputEnabled(): boolean {
   return storedVoiceEnabled();
 }
 
+/** Flips + persists the voice-input setting from anywhere (the ⌘K
+ *  toggle-voice-input action command, D8) — does NOT require `<SettingsArea>`
+ *  to be mounted, unlike the component's own `voiceEnabled` React state.
+ *  Returns the new value. */
+export function toggleVoiceInputEnabled(): boolean {
+  const next = !storedVoiceEnabled();
+  try {
+    localStorage.setItem(VOICE_ENABLED_KEY, String(next));
+  } catch {
+    // ignore persistence failure — reflects the toggle for this call only
+  }
+  return next;
+}
+
 /** Read by `mic-button.tsx`/`use-voice-input.ts` (Part B) to pick which
  *  Moonshine checkpoint `stt-engine.ts` loads. */
 export function voiceModelTier(): ModelTier {
@@ -136,6 +150,7 @@ export function SettingsArea() {
         <Button
           data-testid="notify-os-toggle"
           variant={enabled ? 'accent' : 'default'}
+          aria-pressed={enabled}
           onClick={handleToggle}
         >
           {enabled ? 'OS notifications: on' : 'Enable OS notifications'}
@@ -155,11 +170,16 @@ export function SettingsArea() {
         <Button
           data-testid="voice-input-toggle"
           variant={voiceEnabled ? 'accent' : 'default'}
+          aria-pressed={voiceEnabled}
           onClick={() => setVoiceEnabled((v) => !v)}
         >
           {voiceEnabled ? 'Voice input: on' : 'Enable voice input'}
         </Button>
+        <label htmlFor="voice-model-tier" className="sr-only">
+          Voice model tier
+        </label>
         <select
+          id="voice-model-tier"
           data-testid="voice-model-tier"
           value={modelTier}
           disabled={!voiceEnabled}

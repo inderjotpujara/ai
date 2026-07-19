@@ -1050,6 +1050,45 @@ either: every tick is just another `GET /api/runs` request under the
 existing `withServerRequestSpan` — the diff/dedup logic is pure client-side
 code with nothing to instrument server-side.
 
+**`chat.run` vs `agent.run` — the D9 split (Slice 30b Phase 8).** A chat
+turn now opens its own root span, `chat.run` (`withChatRunSpan`,
+`src/telemetry/spans.ts` — a byte-identical sibling of `withRunSpan`, only
+the span name differs), instead of borrowing the generic `agent.run` name
+`withRunSpan` still opens. `RUN_ROOT_NAMES` (`src/run/run-trace.ts`, shared
+by the web projection and the CLI) recognizes `chat.run` alongside the
+pre-existing roots, and `deriveRunKind` maps it to `RunKind.Chat` (checked
+last, after crew/workflow/agent/build/pull/mcp/memory, with the pre-existing
+"no recognized root" fallback also landing on `Chat`). Net effect: a long
+chat turn's `RunListItemDTO.kind` is `Chat`, not `Agent` — and since the web
+notifier's `NOTIFIABLE_KINDS` (`web/src/features/notifications/notify-diff.ts`)
+only contains `Crew`/`Workflow`/`Agent`, a long chat turn **no longer fires a
+completion toast** (closing the Phase-6-era `kind=agent` false-positive).
+`withRunSpan`'s `agent.run` name is deliberately kept, reserved for a future
+standalone-agent-run feature that isn't chat. One accepted one-time quirk:
+runs recorded to disk **before** this phase still carry `agent.run` and
+render as `Agent` in the CLI/web run list — not reclassified retroactively.
+
+Migrating the name introduced a **CLI blast-radius** the web-only fix didn't
+touch, caught by an adversarial re-verify against the live code rather than
+assumed clean: `src/run/run-trace.ts`'s `summarizeRun` and
+`src/cli/runs.ts`'s `--follow` stopper both used to hardcode a literal
+`=== 'agent.run'` check, which silently never matched a `chat.run` root (0
+duration / perpetual "running" in the CLI list, and a `--follow` tail that
+never noticed a chat run had ended). Both were migrated to the shared
+`RUN_ROOT_NAMES` set — which over-corrected: `RUN_ROOT_NAMES` also contains
+three **ephemeral sub-run roots** (`mcp.mount`/`memory.recall`/
+`memory.ingest`) that a chat/crew/workflow run opens and closes as an early
+precursor *before* its own body runs, and which flush to `spans.jsonl`
+immediately on their own end (`SimpleSpanProcessor`) — so gating on the full
+set fired at mount time, on the wrong (precursor) span. The fix is a second,
+narrower set, **`TERMINAL_RUN_ROOTS`** (`run-trace.ts`) — `RUN_ROOT_NAMES`
+minus those three ephemeral roots — which both the `--follow` stopper and
+`summarizeRun` now check **first** (falling back to any `RUN_ROOT_NAMES`
+match, then `spans[0]`, never throwing), correctly preferring a run's own
+top-level root over an early precursor's. This closes the run-trace.ts
+`summarizeRun` gap in full (chat/crew/workflow/build/pull runs all resolve
+correct duration/outcome in the CLI) — it is not a remaining forward-item.
+
 ---
 
 ## 8. Composition guardrails (Slice 9)
@@ -4797,24 +4836,61 @@ adversarial-verify, per the plan's HARD-task gate:
   "hot" mic indicator), and a model-load-failure degrade to text-only
   input — verified against the spec's (a)–(d) requirements.
 
+### D6/D7 — progressive-decode interim ASR + anti-alias downsample filter (Slice 30b Phase 8)
+
+Two additive Phase-8 changes to the pipeline above, neither touching the
+Phase-7 contracts or module boundaries:
+
+- **D6 — progressive-decode interim reveal.** `stt.worker.ts`'s
+  `transcribe()` now passes transformers.js a `TextStreamer` callback that
+  fires per decoded token; each callback posts a `transcribeInterim`
+  response variant carrying the accumulated text so far. A pure,
+  dependency-free `createInterimAccumulator` (delta → running full-text
+  concat, reset per request, id-correlated) turns the raw per-token deltas
+  into a monotonic string. `stt-engine.ts` relays each interim through a new
+  id-correlated `onInterim` callback map (registered per in-flight
+  `transcribe()` call, cleaned up on result/error/close), and
+  `use-voice-input.ts` paints it into the same `interim` return value that
+  previously only ever held the static `'…'` busy placeholder — superseding
+  it with real, growing text. **This is explicitly NOT real-time-during-speech
+  ASR**: interim words only appear as Moonshine decodes the *already-captured*
+  audio buffer after a segment closes (on `keyup`/`pointerup` for hold-to-talk,
+  or a VAD-detected silence boundary for tap-to-toggle) — there is no partial
+  transcription of audio still being spoken. Because a tap-to-toggle gesture
+  can close and re-open many segments, the guards correlate on a **per-segment
+  token** (minted in `onSegment`, not the segmenter object) — a per-segmenter
+  correlation was tried first and adversarially found to drop every 2nd+
+  segment of a multi-tap utterance; the per-segment-token fix and its
+  regression net are §7.1's re-verified hard part (below).
+- **D7 — anti-alias low-pass filter.** `downsampler.ts` gains a one-pole
+  low-pass filter (~7.5 kHz cutoff, warm-started) applied to each incoming
+  sample **before** the existing linear-interpolation resample step, cutting
+  aliasing energy above the 16kHz target's Nyquist frequency that the raw
+  interpolation alone let through. Filter state (`lastFiltered`) persists
+  across chunks the same way the interpolation carry already did, and is
+  reset in `flush()` so a new segment starts from a clean filter state. The
+  module remains zero-dependency (no DSP library).
+
 ### Telemetry
 
-No new span. The browser has no server-side span writer of its own for the
-transcription step in this phase; the transcript rides the normal
-`/api/chat` turn as ordinary composer text, already spanned end-to-end
-(`handleChat`'s existing instrumentation). A dedicated browser-emitted
-`voice.transcribe` beacon is a tracked forward-item — it would need a new
-ingestion route purely for telemetry, which this phase's
-zero-new-server-routes scope deliberately avoids.
+**Shipped in Phase 8** (superseding the Phase-7 "tracked forward-item" note
+below this paragraph originally carried): a dedicated browser-emitted
+`voice.transcribe.web` span now exists, written server-side from a
+`sendBeacon` POST. See the new **"Telemetry (web UI — Slice 30b Phase 8)"**
+section below for the route, auth, and span detail — it is a genuinely new
+ingestion route (`POST /api/telemetry`), not a reuse of `/api/chat`'s
+existing instrumentation.
 
 ### Two documented limitations, not bugs
 
-- **No live streaming interim transcript.** `SttEngine.transcribe()`
-  returns only a final string (no partial-result callback in this phase's
-  worker protocol); `useVoiceInput`'s `interim` return value surfaces a
-  transient "…" busy indicator (rendered by `mic-button.tsx` while
-  `status === 'transcribing'`) while a segment is transcribing, not a
-  word-by-word live partial. A true streaming ASR partial is a forward-item.
+- **No live-streaming-during-speech interim transcript.** (Superseded in
+  part by D6 above — Phase 7 shipped no interim at all, a static `'…'`
+  placeholder; Phase 8's `transcribeInterim`/`TextStreamer` progressive
+  decode now reveals real words as a closed segment's buffer decodes.) A
+  true partial transcript **while the user is still speaking** — before a
+  segment closes — remains a forward-item; that would require a
+  streaming-capable ASR model/protocol, not just a streamed decode callback
+  over an already-captured buffer.
 - **`mic-button.tsx` exposes hold-to-talk and tap-to-toggle as two
   separate buttons**, not one button that disambiguates a quick tap from a
   deliberate hold by press duration — the design docs left that
@@ -4823,6 +4899,120 @@ zero-new-server-routes scope deliberately avoids.
   Consolidating them into one smarter control is a forward-item if real
   usage shows the two-button layout is confusing.
 
-Note: this section deliberately does NOT flip the 30b capability marker
-anywhere else in the file — Phase 7 landing is a partial-slice landing
-(Phase 8 polish/a11y/live-verify remains).
+Phase 8 (§7.1/§7.2 re-verify above, D6/D7/D9/D10 across this file) is the
+**30b finale** — see the new "Telemetry" and "Accessibility" sections below,
+and the D9 `chat.run` note in §7 "Observability" above, for the remaining
+Phase-8 surface. The 30b capability marker flips 🟡→✅ across README/ROADMAP
+as of this phase; barge-in/voice-out and real-time-during-speech ASR stay
+explicit future scope, not debt (spec §9).
+
+---
+
+## Telemetry (web UI — Slice 30b Phase 8)
+
+The **first client-originated telemetry in the repo** (D10). Every span
+writer up to this phase runs server- or CLI-side, in the same process that
+opens the run; this phase adds a route whose entire purpose is to accept a
+span-worthy event **from the browser**, after the fact.
+
+- **`src/contracts/telemetry.ts` — `TelemetryEventSchema`.** A
+  `z.discriminatedUnion('kind', […])` with one variant today,
+  `kind: 'voice.transcribe.web'` (`durationMs`, `wordCount`, `modelTier`,
+  `realTimeFactor`, `engine`). The `kind` discriminant is chosen to equal the
+  span name it produces 1:1, so a second event kind can be added later
+  without a schema break. `VOICE_MODEL_TIERS = ['moonshine-base',
+  'moonshine-tiny']` is a **wire mirror** of web's `ModelTier` enum
+  (`web/src/features/voice/model-tier.ts`) rather than a shared import —
+  `src/contracts/` stays isomorphic (no web import), the same precedent
+  `CaptureSource` set in Phase 7 (D5) — guarded against drift by a parity
+  test asserting the two independently-defined arrays match.
+- **`POST /api/telemetry`** (`src/server/telemetry/handler.ts`,
+  `handleTelemetry`) — parses the body against `TelemetryEventSchema`
+  (`400` on failure), calls `recordVoiceTranscribeWeb`, and **always acks
+  `204`** with no body: the browser's `sendBeacon` never reads a response,
+  so a transient span-write failure is caught and swallowed rather than
+  surfaced as a `500` (the span writer is only *nominally* fire-and-forget —
+  `inSpan` sets `ERROR` status and re-throws on failure — the handler
+  isolates that from the beacon's ack).
+- **Auth: `sendBeacon` `?k=` query-token, scoped to this one route.**
+  `navigator.sendBeacon()` cannot set request headers, so the existing
+  header-based `TokenGuard` (`src/server/security/token.ts`) gains a second
+  check, `verifyQuery(url)`, reusing the same constant-time `matches()`
+  comparator (never `===`) against a `?k=<token>` query param.
+  `src/server/app.ts`'s auth gate accepts `guard.verify(req) ||
+  (isBeacon && guard.verifyQuery(url))`, where `isBeacon` is narrowly
+  `req.method === 'POST' && url.pathname === '/api/telemetry'` — every other
+  route still requires the header, so widening the auth surface stays
+  confined to this one beacon endpoint. The token itself is never logged or
+  spanned (only `url.pathname` is recorded).
+- **`recordVoiceTranscribeWeb`** (`src/telemetry/spans.ts`) opens a
+  **`voice.transcribe.web`** span with attributes `voice.stt.model`,
+  `voice.duration.ms`, `voice.word.count`, `voice.real_time_factor`,
+  `voice.engine`, plus `input.modality: 'audio'`. **This is a distinct span
+  from the pre-existing CLI-side `voice.transcribe`** (§23, Slice 29): a
+  different call site (server-side, triggered by a browser beacon rather
+  than a CLI transcription call), a different attribute set, and a
+  different name — chosen precisely so the two never conflate in a
+  `spans.jsonl` trace or a run-viewer render.
+- **Client emitter** — `web/src/shared/telemetry/beacon.ts`'s
+  `sendTelemetry(event)` calls `navigator.sendBeacon` in a `try/catch` that
+  swallows both a thrown call and a `false` return (best-effort; a dropped
+  beacon never blocks or errors the voice flow). It is called from
+  `use-voice-input.ts`'s `onFinal` branch — **only after** a segment's
+  transcript is accepted past the §7.1 per-segment-token validity guard (the
+  same guard D6 relies on), so a superseded/invalidated segment never emits
+  a beacon either.
+
+This closes the one forward-item the Phase-7 "Voice" section's original
+Telemetry note left open (a `voice.transcribe` browser beacon would need a
+new ingestion route — Phase 8 builds exactly that route).
+
+---
+
+## Accessibility (a11y, web UI — Slice 30b Phase 8)
+
+WCAG 2.1 AA coverage across the web UI (D1–D5), plus the regression net that
+keeps it from silently regressing.
+
+- **`:focus-visible` ring token + `.sr-only` utility**
+  (`web/src/shared/design/tokens.css`, D1). A dedicated
+  `--color-focus-ring` custom property backs one app-wide `:focus-visible`
+  rule (`outline: 2px solid var(--color-focus-ring)`), replacing ad-hoc
+  per-component focus styling (including a removed `focus:outline-none` on
+  the Composer). `:focus-visible` (not `:focus`) means the ring fires for
+  keyboard/programmatic focus only, never a mouse click. `.sr-only` is a
+  standard visually-hidden-but-screen-reader-visible utility class.
+- **Real `<label>` coverage** (D2) — the Composer's message textarea and the
+  Settings voice-model-tier `<select>` both gained a real `<label
+  htmlFor>` (visually hidden via `.sr-only` where a visible label isn't the
+  design), replacing placeholder-only or unlabeled inputs.
+- **`aria-pressed` + `aria-label`** (D3) — the theme toggle, the voice-input
+  toggle, and the OS-notify toggle all expose live-bound `aria-pressed`
+  (mirroring their actual on/off state, not just a static value); the three
+  `<aside>` landmarks (Sessions rail, Runs detail rail, etc.) each gained a
+  descriptive `aria-label` so a screen reader lists them by purpose, not as
+  three unlabeled "complementary" regions.
+- **Library/Builders tab keyboard pattern** (D2) — both tab widgets
+  implement the WAI-ARIA roving-tabindex pattern (`ArrowLeft`/`ArrowRight`
+  wraps, `Home`/`End` jumps to the ends) plus `tabpanel`/`aria-controls`
+  linkage, via one shared pure helper, `nextTabIndex`
+  (`web/src/shared/ui/tab-list.ts`) — imported by both areas rather than
+  duplicated, so the two widgets can't drift in behavior. Both use an
+  automatic-activation model (arrow-focus immediately activates the tab).
+- **`useReducedMotion`** (`web/src/shared/a11y/use-reduced-motion.ts`, D3) —
+  a `matchMedia('(prefers-reduced-motion: reduce)')` hook (SSR-guarded,
+  live-updating via `change` listener) for **JS-driven** motion that the
+  existing CSS `@media (prefers-reduced-motion: reduce)` rule in
+  `tokens.css` can't reach — namely `@xyflow/react`'s imperative `fitView`
+  pan/zoom in `DagView`, whose animation `duration` is now `0` when the user
+  has reduced motion enabled, `200`ms otherwise.
+- **`vitest-axe` regression net** (D4/D5) — an automated a11y test harness
+  (`web/src/app/a11y-baseline.test.tsx`) asserting **zero axe-core
+  violations, full default ruleset, no rules disabled** on six area
+  baselines: Chat, Sessions, Runs, Library, Builders, Settings — plus a
+  keyboard-navigation test for the roving-tabindex tab widget. This harness
+  is not just a rubber stamp: it **caught and fixed a real pre-existing
+  violation** — three unlabeled `<select>` filters on the `/runs` page,
+  which gained `aria-label`s in the same task, in-slice, with no deferred
+  debt. A `vitest-axe.d.ts` type shim (`web/src/test/`) covers a
+  Vitest-4 compatibility gap in `vitest-axe`'s own types.

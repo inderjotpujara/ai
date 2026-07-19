@@ -19,38 +19,30 @@ import type { DegradeEvent } from '../reliability/ledger.ts';
 import type { SpanRecord } from '../telemetry/jsonl-exporter.ts';
 import { ATTR } from '../telemetry/spans.ts';
 import { readRunArtifacts } from './artifacts.ts';
-import { buildTree, readSpans, type TraceNode } from './run-trace.ts';
+import {
+  buildTree,
+  RUN_ROOT_NAMES,
+  readSpans,
+  TERMINAL_RUN_ROOTS,
+  type TraceNode,
+} from './run-trace.ts';
+
+// Re-exported so the web projection and CLI (`src/cli/runs.ts`) share one
+// definition. Canonical home is run-trace.ts (the dependency-free base module)
+// to avoid a circular import back into this file. TERMINAL_RUN_ROOTS is the
+// precursor-excluding subset the CLI `--follow` stopper gates on.
+export { RUN_ROOT_NAMES, TERMINAL_RUN_ROOTS };
 
 const NANOS_PER_MS = 1e6;
 const OTEL_STATUS_ERROR = 2;
-
-/** Root span names that anchor a run: an agent/crew/workflow run, an
- *  agent/crew build (Phase 5), a model pull (Phase 5), a one-off MCP
- *  test-mount (`mcp.mount`, Phase 5 final review), or a memory recall/ingest
- *  (`memory.recall`/`memory.ingest`, Phase 5 final review). Recognizing every
- *  ephemeral-run root is what keeps a finished build/pull/test-mount/recall/
- *  ingest from reading as perpetually in-flight (spec §7.2): an unrecognized
- *  root leaves `runRootSummary` reporting lifecycle Running / durationMs 0
- *  forever, so the run leaves a ghost "running" row in `GET /api/runs` whose
- *  live-tail never stops. */
-const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
-  'agent.run',
-  'crew.run',
-  'workflow.run',
-  'agent.build',
-  'crew.build',
-  'model.pull',
-  'mcp.mount',
-  'memory.recall',
-  'memory.ingest',
-]);
 
 /** Derive what a run IS from the names of its root spans. A crew/workflow
  *  root wins over an agent root (a crew nests agent runs); a build/pull root
  *  is checked next (these never co-occur with a run root in the same
  *  process); the ephemeral test-mount (`mcp.mount`) and memory
- *  (`memory.recall`/`memory.ingest`) roots map to their own kinds; everything
- *  else (chat's ui.stream, or no recognized root) is Chat. */
+ *  (`memory.recall`/`memory.ingest`) roots map to their own kinds; a chat
+ *  turn's `chat.run` root (D9) maps to Chat explicitly; everything else
+ *  (chat's legacy ui.stream, or no recognized root) falls back to Chat. */
 export function deriveRunKind(rootSpanNames: string[]): RunKind {
   if (rootSpanNames.includes('crew.run')) return RunKind.Crew;
   if (rootSpanNames.includes('workflow.run')) return RunKind.Workflow;
@@ -61,6 +53,7 @@ export function deriveRunKind(rootSpanNames: string[]): RunKind {
   if (rootSpanNames.includes('mcp.mount')) return RunKind.Mcp;
   if (rootSpanNames.includes('memory.recall')) return RunKind.Memory;
   if (rootSpanNames.includes('memory.ingest')) return RunKind.Memory;
+  if (rootSpanNames.includes('chat.run')) return RunKind.Chat;
   return RunKind.Chat;
 }
 

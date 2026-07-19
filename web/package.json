@@ -31,20 +31,21 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "vite": "^8",
-    "@vitejs/plugin-react": "^6",
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4",
-    "vitest": "^4",
+    "@testing-library/jest-dom": "^6",
+    "@testing-library/react": "^16",
+    "@testing-library/user-event": "^14",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6",
     "@vitest/browser": "^4",
     "@vitest/browser-playwright": "^4",
-    "playwright": "^1.61.1",
     "happy-dom": "^15",
-    "@testing-library/react": "^16",
-    "@testing-library/jest-dom": "^6",
-    "@testing-library/user-event": "^14",
+    "playwright": "^1.61.1",
+    "tailwindcss": "^4",
     "typescript": "^5.9.0",
-    "@types/react": "^19",
-    "@types/react-dom": "^19"
+    "vite": "^8",
+    "vitest": "^4",
+    "vitest-axe": "^0.1.0"
   }
 }

@@ -23,4 +23,14 @@ describe('ai-elements', () => {
     screen.getByRole('button', { name: /send/i }).click();
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
+
+  it('the composer textarea no longer opts out of the browser focus ring (D1)', () => {
+    render(<PromptInput value="" onChange={() => {}} onSubmit={() => {}} />);
+    expect(screen.getByRole('textbox').className).not.toContain('outline-none');
+  });
+
+  it('associates a real (visually-hidden) label with the composer textarea (D1)', () => {
+    render(<PromptInput value="" onChange={() => {}} onSubmit={() => {}} />);
+    expect(screen.getByLabelText(/message/i)).toBe(screen.getByRole('textbox'));
+  });
 });

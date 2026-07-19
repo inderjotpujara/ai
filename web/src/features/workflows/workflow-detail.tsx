@@ -110,6 +110,7 @@ function WorkflowDetailView({ workflowId }: { workflowId: string }) {
               {selectedStep && (
                 <aside
                   data-testid="step-detail"
+                  aria-label="Selected step detail"
                   className="min-w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-fg)]"
                 >
                   <div className="text-sm">{selectedStep.id}</div>

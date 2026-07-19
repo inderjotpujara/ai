@@ -4,6 +4,7 @@ import { renderAt } from '../../test/render.tsx';
 import {
   isOsNotifyEnabled,
   isVoiceInputEnabled,
+  toggleVoiceInputEnabled,
   voiceModelTier,
 } from './index.tsx';
 
@@ -67,6 +68,16 @@ describe('SettingsArea', () => {
       await screen.findByText('Enable OS notifications'),
     ).toBeInTheDocument();
   });
+
+  it('exposes aria-pressed on the OS-notify toggle reflecting its state (D1)', async () => {
+    stubNotification('granted');
+    renderAt('/settings');
+    const btn = await screen.findByTestId('notify-os-toggle');
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(btn);
+    expect(await screen.findByText('OS notifications: on')).toBeInTheDocument();
+    expect(btn).toHaveAttribute('aria-pressed', 'true');
+  });
 });
 
 describe('SettingsArea — voice input', () => {
@@ -105,5 +116,28 @@ describe('SettingsArea — voice input', () => {
     const select = await screen.findByTestId('voice-model-tier');
     fireEvent.change(select, { target: { value: 'moonshine-tiny' } });
     expect(voiceModelTier()).toBe('moonshine-tiny');
+  });
+
+  it('associates a real (visually-hidden) label with the voice model-tier select (D1)', async () => {
+    renderAt('/settings');
+    expect(await screen.findByLabelText(/voice model tier/i)).toBe(
+      screen.getByTestId('voice-model-tier'),
+    );
+  });
+
+  it('exposes aria-pressed on the voice-input toggle reflecting its state (D1)', async () => {
+    renderAt('/settings');
+    const btn = await screen.findByTestId('voice-input-toggle');
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(btn);
+    expect(btn).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('toggleVoiceInputEnabled (D8 action command) flips + persists without mounting SettingsArea', () => {
+    expect(isVoiceInputEnabled()).toBe(false);
+    expect(toggleVoiceInputEnabled()).toBe(true);
+    expect(isVoiceInputEnabled()).toBe(true);
+    expect(toggleVoiceInputEnabled()).toBe(false);
+    expect(isVoiceInputEnabled()).toBe(false);
   });
 });

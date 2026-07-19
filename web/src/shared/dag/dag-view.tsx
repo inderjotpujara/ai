@@ -12,6 +12,7 @@ import {
 // default theme.
 import '@xyflow/react/dist/base.css';
 import { useMemo } from 'react';
+import { useReducedMotion } from '../a11y/use-reduced-motion.ts';
 import { layeredPositions } from './layout.ts';
 import { type DagModel, type DagNodeKind, DagStatus } from './types.ts';
 
@@ -82,6 +83,7 @@ export function DagView({
   statusById?: Record<string, DagStatus>;
   onNodeClick?: (nodeId: string) => void;
 }) {
+  const reducedMotion = useReducedMotion();
   const { nodes, edges } = useMemo(() => {
     const positions = layeredPositions(model);
     const rfNodes: Node<DagNodeData>[] = model.nodes.map((n) => ({
@@ -140,6 +142,7 @@ export function DagView({
         edges={edges}
         nodeTypes={nodeTypes}
         fitView
+        fitViewOptions={{ duration: reducedMotion ? 0 : 200 }}
         proOptions={{ hideAttribution: true }}
         onNodeClick={
           onNodeClick ? (_event, node) => onNodeClick(node.id) : undefined

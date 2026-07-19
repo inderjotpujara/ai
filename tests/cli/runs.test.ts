@@ -62,3 +62,21 @@ test('listRuns lists runs found under the root', async () => {
   const out = await listRuns(root);
   expect(out).toContain('run-1');
 });
+
+// D9 blast-radius: a chat turn's root is `chat.run`, not `agent.run`. The list
+// summary must report its real duration/outcome — before the summarizeRun fix
+// it fell through to 0ms / 'unknown' because only `agent.run` was recognized.
+test('listRuns reports real duration/outcome for a chat.run-rooted run', async () => {
+  await writeRun('chat-1', [
+    span({
+      name: 'chat.run',
+      spanId: 'a',
+      durationMs: 128,
+      attributes: { 'agent.outcome': 'answer' },
+    }),
+  ]);
+  const out = await listRuns(root);
+  expect(out).toContain('chat-1');
+  expect(out).toContain('answer');
+  expect(out).toContain('128ms');
+});

@@ -108,6 +108,7 @@ export function RunsArea() {
 
           <select
             data-testid="runs-outcome-filter"
+            aria-label="Filter by outcome"
             value={query.outcome}
             onChange={(e) => updateQuery({ outcome: e.target.value })}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-sm text-[var(--color-fg)]"
@@ -122,6 +123,7 @@ export function RunsArea() {
 
           <select
             data-testid="runs-degraded-filter"
+            aria-label="Filter by degraded status"
             value={query.degraded}
             onChange={(e) => updateQuery({ degraded: e.target.value })}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-sm text-[var(--color-fg)]"
@@ -135,6 +137,7 @@ export function RunsArea() {
 
           <select
             data-testid="runs-kind-filter"
+            aria-label="Filter by run kind"
             value={query.kind}
             onChange={(e) => updateQuery({ kind: e.target.value })}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 font-mono text-sm text-[var(--color-fg)]"

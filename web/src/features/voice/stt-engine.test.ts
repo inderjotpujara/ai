@@ -212,6 +212,96 @@ describe('createSttEngine', () => {
     expect(samples.byteLength).toBe(0); // detached by transfer
   });
 
+  it('transcribe() forwards transcribeInterim messages to an optional onInterim callback, id-correlated', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    const onInterim = vi.fn();
+    const resultPromise = engine.transcribe(
+      { samples: new Float32Array([0.1]), sampleRate: 16000 },
+      onInterim,
+    );
+    const posted = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    lastWorker?.emit({ kind: 'transcribeInterim', id: posted.id, text: 'Hel' });
+    lastWorker?.emit({
+      kind: 'transcribeInterim',
+      id: posted.id,
+      text: 'Hello',
+    });
+    lastWorker?.emit({
+      kind: 'transcribeResult',
+      id: posted.id,
+      text: 'Hello world',
+    });
+    expect(await resultPromise).toBe('Hello world');
+    expect(onInterim.mock.calls).toEqual([['Hel'], ['Hello']]);
+  });
+
+  it('does not cross-deliver transcribeInterim between two concurrent transcribe() calls (different ids)', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    const onInterimA = vi.fn();
+    const onInterimB = vi.fn();
+    const promiseA = engine.transcribe(
+      { samples: new Float32Array([0.1]), sampleRate: 16000 },
+      onInterimA,
+    );
+    const postedA = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    const promiseB = engine.transcribe(
+      { samples: new Float32Array([0.2]), sampleRate: 16000 },
+      onInterimB,
+    );
+    const postedB = lastWorker?.posted.at(-1) as { kind: string; id: number };
+
+    lastWorker?.emit({
+      kind: 'transcribeInterim',
+      id: postedA.id,
+      text: 'A-text',
+    });
+    lastWorker?.emit({
+      kind: 'transcribeInterim',
+      id: postedB.id,
+      text: 'B-text',
+    });
+    expect(onInterimA).toHaveBeenCalledWith('A-text');
+    expect(onInterimA).not.toHaveBeenCalledWith('B-text');
+    expect(onInterimB).toHaveBeenCalledWith('B-text');
+    expect(onInterimB).not.toHaveBeenCalledWith('A-text');
+
+    lastWorker?.emit({
+      kind: 'transcribeResult',
+      id: postedA.id,
+      text: 'A final',
+    });
+    lastWorker?.emit({
+      kind: 'transcribeResult',
+      id: postedB.id,
+      text: 'B final',
+    });
+    expect(await promiseA).toBe('A final');
+    expect(await promiseB).toBe('B final');
+  });
+
+  it('stops delivering to onInterim once its request has settled (no leaked listener)', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    const onInterim = vi.fn();
+    const resultPromise = engine.transcribe(
+      { samples: new Float32Array([0.1]), sampleRate: 16000 },
+      onInterim,
+    );
+    const posted = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    lastWorker?.emit({ kind: 'transcribeResult', id: posted.id, text: 'done' });
+    await resultPromise;
+
+    // A stray late transcribeInterim for the same, already-settled id must
+    // not throw and must not resurrect the callback via a stale map entry.
+    expect(() =>
+      lastWorker?.emit({
+        kind: 'transcribeInterim',
+        id: posted.id,
+        text: 'late',
+      }),
+    ).not.toThrow();
+    expect(onInterim).not.toHaveBeenCalledWith('late');
+  });
+
   it('close() terminates the worker', () => {
     const engine = createSttEngine({ model: ModelTier.Base });
     engine.close();

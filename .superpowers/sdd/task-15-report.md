@@ -1,43 +1,73 @@
-# Task 15 Report: Wire `MicButton` into `composer.tsx` (Slice 30b Phase 7)
+# Task 15 report — Widen `Command` for action commands + a `runCommand` dispatcher (D8)
 
-## Status: DONE
+## Status: Done
+
+## What was done
+Followed the brief's TDD steps verbatim (repo: `/Users/inderjotsingh/ai`, work under `web/`).
+
+1. **Step 1 (failing tests)** — updated `web/src/app/commands.test.ts` import to
+   `{ CommandKind, commands, runCommand }` (renamed from `navCommands`), and
+   appended the `runCommand (D8 — widened Command dispatch)` describe block
+   (2 new tests). Appended the new e2e test to
+   `web/src/app/command-palette.test.tsx` (selecting "settings" and hitting
+   Enter routes via `runCommand`).
+2. **Step 2 (verify red)** — ran `bun run test -- app/commands.test.ts
+   app/command-palette.test.tsx`: 7 failures (undefined `commands`/`CommandKind`/
+   `runCommand` — only `navCommands` + narrow `Command` existed), 5 pre-existing
+   passes, confirming the tests exercise the not-yet-built surface.
+3. **Step 3 (implementation)** — replaced `web/src/app/commands.ts` with the
+   brief's exact content: `export enum CommandKind { Nav = 'nav', Action =
+   'action' }`; `NavCommand`/`ActionCommand` types; `export type Command =
+   NavCommand | ActionCommand`; `export function runCommand(cmd, nav)` dispatching
+   `cmd.kind === CommandKind.Action ? cmd.run() : cmd.run(nav)`; renamed
+   `navCommands` → `export const commands: Command[]`, adding `kind:
+   CommandKind.Nav` to every existing entry (no new entries — dedupe/`go-agents`
+   is Task 17, jump-to-recent-run is Task 18). Updated
+   `web/src/app/command-palette.tsx`: import `{ type Command, commands,
+   runCommand }`; the `results` memo now filters/reads `commands`; both the
+   Enter-key handler and the option `onClick` now call `runCommand(cmd, navigate)`
+   / `runCommand(c, navigate)` instead of `.run(...)` directly.
+4. **Step 4 (verify green)** — targeted tests: 12/12 pass. Full web suite:
+   `bun run test` → **61 test files / 336 tests, all passed** (one unrelated
+   `ECONNREFUSED ::1:3000` stack trace printed mid-run belongs to an existing
+   test exercising a connection-failure path — not a failure, summary confirms
+   all green). `bun run typecheck` → clean, no errors.
+5. **Format guard** — `bunx biome check --write` on the 4 changed files (run
+   from repo root `/Users/inderjotsingh/ai`): "Checked 4 files in 40ms. Fixed 1
+   file" (`commands.ts` — reformatted long object literals across multiple
+   lines; purely cosmetic, re-verified typecheck + targeted tests still green
+   after the reformat).
+6. **Commit** — staged only the 4 files named in the brief (the working tree
+   had unrelated pre-existing modifications to `.superpowers/sdd/task-*.md`
+   files and `.remember/now.md` from earlier tasks in this sequence — left
+   untouched/uncommitted since they're out of this task's scope).
+
+## Verified
+- `cd web && bun run test -- app/commands.test.ts app/command-palette.test.tsx` → 12/12 pass.
+- `cd web && bun run test` (full suite) → 61 files / 336 tests pass.
+- `cd web && bun run typecheck` → clean.
+- `bunx biome check --write web/src/app/commands.ts web/src/app/command-palette.tsx web/src/app/commands.test.ts web/src/app/command-palette.test.tsx` → 4 checked, 1 fixed (formatting only).
+- `git commit` → pre-commit `docs-check` passed (no `docs/architecture.md` change needed — no new subsystem, just a type widening inside the existing `web/src/app` surface already documented).
+
+## Files changed
+- `/Users/inderjotsingh/ai/web/src/app/commands.ts`
+- `/Users/inderjotsingh/ai/web/src/app/command-palette.tsx`
+- `/Users/inderjotsingh/ai/web/src/app/commands.test.ts`
+- `/Users/inderjotsingh/ai/web/src/app/command-palette.test.tsx`
 
 ## Commit
-- `eabd2c3` — `feat(voice): wire MicButton into the Composer (D2 — value-only, submit path untouched)`
+- `f9688fc` — `feat(cmdk): widen Command to support action (no-nav) entries, via a runCommand dispatcher (D8)` on branch `slice-30b-phase8-polish-a11y`
 
-## What changed
-- `web/src/features/chat/composer.tsx`:
-  - Added `import { MicButton } from '../voice/mic-button.tsx';`
-  - Added `handleVoiceFinal(text)` next to `handleSubmit`: `setValue((v) => (v ? \`${v} ${text}\` : text))`
-  - Inserted `<div className="flex items-center gap-2 px-3 pt-2"><MicButton onFinal={handleVoiceFinal} /></div>` inside the `composer-dropzone` `<section>`, after the attachments block and before `<PromptInput>`.
-  - No other line changed. Confirmed via `git diff` before commit: only the import, the new handler, and the new `<div>` wrapper were added. `handleSubmit`, `onSend`, and all transport/submit code are byte-identical to before.
-- `web/src/features/chat/composer.test.tsx` (new): 3 tests per the brief, using a `vi.mock('../voice/mic-button.tsx', ...)` fixture that renders a `fixture-mic` button calling `onFinal('voice transcript')`.
-
-## TDD sequence
-1. Wrote the test file first, ran `cd web && bun run test -- composer.test.tsx` → RED (2/3 failed: `fixture-mic` not found, since `MicButton` wasn't mounted yet).
-2. Implemented the three edits above.
-3. Re-ran → GREEN (3/3 passed).
-
-## Test results
-- `cd web && bun run test -- composer.test.tsx` → 3/3 passed.
-- `cd web && bun run test` (full web suite) → 56 files / 282 tests passed (some expected `ECONNREFUSED` stderr noise from an unrelated pre-existing connection-refused-handling test, not a failure). `chat/index.test.tsx` (unmodified) continues to render the real `MicButton`, which renders `null` since voice is disabled by default in Settings — no regression.
-- `cd web && bun run typecheck` → clean.
-- `bun run lint:file -- web/src/features/chat/composer.tsx web/src/features/chat/composer.test.tsx` (root biome) → "Checked 2 files. No fixes applied."
-
-## Transport/submit path confirmation
-Verified by diff inspection and by test 3 ("leaves the existing Send/onSend submit path completely untouched"): `handleSubmit`, `onSend`, and `sendMessage` are untouched — voice only calls `setValue` via `handleVoiceFinal`; the user still presses Send to submit. `onSend` is asserted called with `('typed message', [])` and the textarea clears afterward, exactly as before this change.
-
-## Grouping region (optional, Task 14 reviewer note)
-Skipped. The brief's own reference edit doesn't include it, and adding a labelled `role="group"` wrapper around the mic buttons + attachment affordances would require restructuring beyond the minimal, byte-identical-elsewhere diff required for this final Increment-5 task. Not attempted to avoid scope creep.
-
-## Concerns
-None.
-
-## Gate commands run
-```
-cd web && bun run test -- composer.test.tsx
-cd web && bun run test
-cd web && bun run typecheck
-bun run lint:file -- web/src/features/chat/composer.tsx web/src/features/chat/composer.test.tsx
-```
-All green. Root `bun run check` deferred to the controller per task instructions (Increment 5 boundary gate).
+## Concerns / notes for Tasks 16–18
+- `commands` array and `runCommand` are exported exactly as the interface spec
+  requires; Task 16 can append `Action`-kind entries directly to the same
+  array without further type changes.
+- No `docs/architecture.md` edit was made — this is an internal type/dispatch
+  change to an already-documented module (`web/src/app` ⌘K palette), not a new
+  subsystem; `docs:check` confirmed no gap. If a later task (16-18) adds a
+  new subsystem-level concept (e.g. a distinct action-registry module), that
+  task should evaluate whether `architecture.md` needs an update at that
+  point.
+- Left unrelated pre-existing working-tree modifications (other `.superpowers/sdd/task-*`
+  briefs/reports, `.remember/now.md`, an untracked `.remember/today-2026-07-19.md`)
+  untouched and uncommitted — they predate this task and are outside its scope.

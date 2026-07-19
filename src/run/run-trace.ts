@@ -83,6 +83,49 @@ export function buildTree(spans: SpanRecord[]): TraceNode[] {
   return roots;
 }
 
+/** Root span names that anchor a run: a chat turn (`chat.run`, D9), an
+ *  agent/crew/workflow run, an agent/crew build (Phase 5), a model pull
+ *  (Phase 5), a one-off MCP test-mount (`mcp.mount`), or a memory
+ *  recall/ingest. This is the single source of truth for "which span names
+ *  count as a run root", shared by the web projection (`run-dto.ts`, which
+ *  re-exports it), the CLI `runs` list summary (`summarizeRun` below) and the
+ *  `--follow` stopper (`src/cli/runs.ts`). Defined here — the dependency-free
+ *  base module — so `run-dto.ts` (which imports from this file) can reuse it
+ *  without a circular import. An unrecognized root leaves a run reading as
+ *  perpetually in-flight (durationMs 0 / lifecycle Running), so every
+ *  ephemeral-run root must be listed. */
+export const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
+  'chat.run',
+  'agent.run',
+  'crew.run',
+  'workflow.run',
+  'agent.build',
+  'crew.build',
+  'model.pull',
+  'mcp.mount',
+  'memory.recall',
+  'memory.ingest',
+]);
+
+// Top-level run roots that signal a run's OWN completion — EXCLUDES the ephemeral
+// sub-run roots (mcp.mount / memory.recall / memory.ingest) that a chat/crew/workflow
+// run emits as EARLY precursors (via withMcpRun / injectRecall) before its body.
+// Those precursors land in spans.jsonl at run START (each span flushes on end), so
+// keying "run finished?" off the full RUN_ROOT_NAMES set fires prematurely (at mount
+// time) and mis-resolves the run root to whichever precursor ended first. The two CLI
+// consumers (`summarizeRun` below, and the `--follow` stopper in src/cli/runs.ts) gate
+// on THIS set instead. The web projection (run-dto.ts) keeps its own multi-root
+// semantics and is intentionally not switched.
+export const TERMINAL_RUN_ROOTS: ReadonlySet<string> = new Set([
+  'agent.run',
+  'chat.run',
+  'crew.run',
+  'workflow.run',
+  'agent.build',
+  'crew.build',
+  'model.pull',
+]);
+
 export type RunSummary = {
   id: string;
   startMs: number;
@@ -97,7 +140,17 @@ export async function summarizeRun(
 ): Promise<RunSummary | undefined> {
   const { spans } = await readSpans(join(runsRoot, id));
   if (spans.length === 0) return undefined;
-  const root = spans.find((s) => s.name === 'agent.run');
+  // Resolve the run root with PRECEDENCE. `spans` is in span-END order, so a
+  // chat/crew/workflow run's ephemeral precursors (mcp.mount / memory.recall,
+  // opened via withMcpRun / injectRecall BEFORE the body) end — and thus appear
+  // — first. A plain `RUN_ROOT_NAMES.has` find would return the precursor's
+  // durationMs/outcome, not the real root's. So prefer a TERMINAL_RUN_ROOTS
+  // match (the run's own top-level root: chat.run / crew.run / …); only if none
+  // is present fall back to any RUN_ROOT_NAMES root (a standalone pull / mcp /
+  // memory run), then to spans[0] (never throw).
+  const root =
+    spans.find((s) => TERMINAL_RUN_ROOTS.has(s.name)) ??
+    spans.find((s) => RUN_ROOT_NAMES.has(s.name));
   const models = new Set<string>();
   for (const s of spans) {
     const m = s.attributes[ATTR.MODEL_ID];

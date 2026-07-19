@@ -1,125 +1,31 @@
-# Task 7 report: `stt.worker.ts` — transformers.js Moonshine + Silero VAD worker
+# Task 7 Report: Builders tabs — reuse the same `nextTabIndex` helper (D2)
 
-## Status: DONE
+## Summary
+Applied the WAI-ARIA tabs keyboard pattern to `BuildersArea` (`web/src/features/builders/index.tsx`), reusing the pure `nextTabIndex` helper from `web/src/shared/ui/tab-list.ts` extracted in Task 6 (no duplicate helper code). Matches Library's automatic-activation model: arrow keys move focus and immediately switch mode.
 
-## What was built
-- `web/src/features/voice/stt.worker.ts` — dedicated Web Worker exposing the
-  `load` / `detectSpeech` / `transcribe` postMessage protocol
-  (`SttWorkerRequest`/`SttWorkerResponse`), lazy-loading Moonshine ASR
-  (`onnx-community/moonshine-{tiny,base}-ONNX`) + Silero VAD
-  (`onnx-community/silero-vad`) via `@huggingface/transformers`.
-  - WebGPU-detect → WASM fallback, extracted as an exported, unit-tested
-    pure function `detectWebGpuDevice()`.
-  - Cache-API persistence via `env.useBrowserCache = true`.
-  - `ModelTier` is now canonically defined in this file (per the brief's
-    interface note); Task 8 will import it from here and Task 4's temporary
-    local copy in `web/src/features/settings/index.tsx` gets superseded then,
-    not in this task.
-- `web/src/features/voice/stt.worker.test.ts` — 4 tests covering
-  `detectWebGpuDevice`'s branches (no `navigator.gpu`; adapter granted;
-  adapter resolves `null`; `requestAdapter` rejects → D9 never-crash
-  fallback), each via `vi.stubGlobal('navigator', ...)`.
+## TDD steps followed
+1. Appended the new test to `web/src/features/builders/index.test.tsx` (verbatim from brief).
+2. Ran `bun run test -- features/builders/index.test.tsx` — confirmed the new test FAILED (`tabIndex` attribute was `null`), pre-existing test still passed. 1 passed / 1 failed as expected.
+3. Replaced `web/src/features/builders/index.tsx` with the brief's full new content: added `TABS` array, `tabRefs`, `onTabKeyDown` (delegates to `nextTabIndex`), roving `tabIndex`, `id`/`aria-controls` linkage, and wrapped each wizard in a `role="tabpanel"` div with matching `id`/`aria-labelledby`.
+4. Ran the test file again — both tests passed (2/2).
+5. Ran `bun run typecheck` — clean (`tsc --noEmit`, no errors).
+6. Ran full `bun run test` — 59 test files / 307 tests, all passed.
+7. Committed.
 
-## D10 spike — controller decision carried forward, NOT run by me
-Per this task's explicit instruction, I did **not** run the manual Step-1
-browser spike myself. The header comment records the controller's decision
-verbatim:
-```
-// D10: built on Rung 1 (require-corp + CDN CORS fetch); empirically confirmed
-// at Task 17 live-verify. Fallback ladder if CDN blocked: (2) COEP
-// credentialless, (3) self-host models via env.localModelPath. See spec D10.
-```
-No COEP/header changes were made in this task (`web/vite.config.ts`'s
-`isolation` object and `src/server/isolation-headers.ts` are untouched).
-Empirical confirmation is deferred to Task 17 live-verify, as directed.
+## Files changed
+- `web/src/features/builders/index.tsx` — full replacement per brief (roving tabindex, tabpanel roles, aria-controls linkage).
+- `web/src/features/builders/index.test.tsx` — appended the new keyboard-nav test.
 
-## Deviations from the brief's sample code (type-correctness fixes)
-The brief's code is "the artifact the spike proves or requires correcting" —
-I made the following adjustments to satisfy `@huggingface/transformers`
-v4.2.0's actual `.d.ts` shapes (checked directly against
-`node_modules/@huggingface/transformers/types/`), since `bun run typecheck`
-must pass:
-1. **`ProgressInfo` is a 5-member discriminated union** (`initiate` /
-   `download` / `progress` / `progress_total` / `done`), not always
-   `{loaded, total}` — only two members carry those fields. Replaced the
-   brief's `(info: {loaded:number; total:number}) => ...` callback type with
-   `(info: ProgressInfo) => ...` plus a `progressOf()` narrowing helper
-   (`'loaded' in info && 'total' in info`) that only posts a progress message
-   when the fields are present.
-2. **`AutoProcessor.from_pretrained` return type is already `Processor`** —
-   dropped the brief's redundant `as Processor` cast; it typechecks without
-   it.
-3. **`generate()` returns `Promise<ModelOutput | Tensor>`**; `batch_decode`
-   expects `number[][] | Tensor`. Added an explicit `as Tensor` cast on the
-   `generate()` result (the brief's code omitted this and would not
-   typecheck as written).
-
-All changes are narrow type-correctness fixes; the functional shape (device
-detect → load ASR+processor+VAD → post `ready`; `detectSpeech`/`transcribe`
-request→result round trips; uniform `error` message on any rejection) matches
-the brief exactly.
-
-## Dependency reconciliation
-**Did NOT need to pull Task 9's dep-add forward.** `@huggingface/transformers`
-is already a root dependency (`package.json:43`, `^4.2.0`), the root repo is a
-bun workspace (`"workspaces": ["web"]`), and `bun run typecheck` in `web/`
-resolved the import cleanly via the hoisted root `node_modules` with zero
-changes to `web/package.json`. Left `web/package.json` untouched — Task 9 can
-still add the explicit dependency entry + Vite worker/`optimizeDeps` config +
-isolation-headers comment as originally scoped; nothing about that work was
-pulled forward.
-
-## Testing — what IS and ISN'T unit-tested
-- **IS tested:** `detectWebGpuDevice()` — all 4 branches (no GPU / adapter
-  granted / adapter null / `requestAdapter` throws), 4 passing tests in
-  `stt.worker.test.ts`.
-- **IS NOT tested (by design, per the brief and controller's testing-reality
-  note):** the real `load()`/`detectSpeech()`/`transcribe()` model-loading and
-  inference paths — these require a real WASM/ONNX runtime that cannot run
-  under happy-dom/Vitest. No fake/mocked model call was fabricated to pretend
-  otherwise. This is validated at Task 17/18 live-verify. The `postMessage`
-  message-protocol handling on the **main-thread** side (the part that IS
-  meaningfully unit-testable against a mocked `Worker` global) is Task 8's
-  `stt-engine.ts`, per the brief's Files note.
-
-## Gate results (all green)
-- `cd web && bun run typecheck` — PASS (repo-root `bun run typecheck` also
-  PASS).
-- `cd web && bun run test` — 50 test files, 223 tests, all PASS (includes the
-  4 new `stt.worker.test.ts` tests). Pre-existing unrelated `ECONNREFUSED`
-  console noise from another test's reconnect-logging path is expected/
-  pre-existing, not caused by this change.
-- `bun run lint:file -- web/src/features/voice/stt.worker.ts
-  web/src/features/voice/stt.worker.test.ts` — PASS after one `biome
-  check --write` formatting pass (line-width wraps only, no logic changes).
-- `bun run docs:check` (pre-commit hook) — PASS; no `docs/architecture.md`
-  update required since no `src/**` file changed (this is a `web/**`-only
-  change).
+## Verification evidence
+- `cd web && bun run test -- features/builders/index.test.tsx` → Test Files 1 passed (1), Tests 2 passed (2).
+- `cd web && bun run typecheck` → clean, no errors.
+- `cd web && bun run test` (full suite) → Test Files 59 passed (59), Tests 307 passed (307).
+- Pre-existing `data-testid`s (`builders-mode-agent`, `builders-mode-crew`) preserved; `BuildersArea` export signature unchanged.
 
 ## Commit
-`3a60ca6` — `feat(voice): stt.worker.ts — transformers.js Moonshine+Silero
-worker, D10 spike outcome recorded`
-(2 files changed: `web/src/features/voice/stt.worker.ts`,
-`web/src/features/voice/stt.worker.test.ts`)
+`2c1176c` — `feat(a11y): Builders tabs reuse the shared roving-tabindex helper (D2)` on branch `slice-30b-phase8-polish-a11y`.
 
-## Concerns / notes for the controller
-- The three type-correctness deviations above are real and should be
-  reviewed — they don't change the runtime call shape but they do change
-  exactly what gets read off transformers.js's return values
-  (`progressOf()` narrowing, the `as Tensor` cast). If Task 17 live-verify
-  finds the actual runtime shapes differ (e.g. `generate()` genuinely returns
-  something not `Tensor`-compatible, or Moonshine's processor/generate call
-  signature differs from Whisper-style), this file is the one to revisit
-  first.
-- `asrProcessor(samples)` and `vadModel({ input: chunk })` are both typed
-  loosely (`Processor`'s call signature is `(...args: any[]): any`, and the
-  VAD result is hand-cast) — this is inherent to transformers.js's own types,
-  not something tighter without the real spike data.
-- No `docs/architecture.md` change was made — correctly out of scope for a
-  `web/**`-only task with no new subsystem.
-- A large batch of already-modified `.superpowers/sdd/*.md` / `.remember/*`
-  files from other tasks in this session were present in `git status` before
-  I started and were deliberately left unstaged/uncommitted by me (not part
-  of this task's scope). `task-7-report.md` itself was found pre-populated
-  with stale content from an unrelated earlier task (Phase 6 `appendMessage`/
-  `getMessages`) and has been overwritten with this report.
+## Concerns / notes
+- An unrelated `ECONNREFUSED 127.0.0.1:3000` / `::1:3000` AggregateError appears in test stderr output during every run (pre-existing, unrelated to this change — some background process/test attempting a network connection). It does not affect test pass/fail counts and was present before this task's changes.
+- No new helper code was added; `nextTabIndex` was imported as-is from Task 6's `web/src/shared/ui/tab-list.ts`, consistent with the "don't duplicate" instruction.
+- This report file (`task-7-report.md`) was found pre-populated with stale content from an unrelated earlier task (Phase 7 `stt.worker.ts` voice work, task-number reused across phases) and has been overwritten with this report.

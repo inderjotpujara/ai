@@ -66,4 +66,19 @@ describe('WorkflowDetail', () => {
     );
     vi.unstubAllGlobals();
   });
+
+  it('labels the step-detail landmark for assistive tech (D1)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(detail)),
+    );
+    renderAt('/workflows/fetch-then-summarize');
+    fireEvent.click(await screen.findByTestId('dag-node-fetch'));
+    expect(
+      await screen.findByRole('complementary', {
+        name: /selected step detail/i,
+      }),
+    ).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
 });

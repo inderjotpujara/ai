@@ -79,7 +79,11 @@ function AppShellInner() {
           <kbd className="rounded border border-[var(--color-border)] px-1.5 text-xs text-[var(--color-muted)]">
             ⌘K
           </kbd>
-          <Button onClick={toggle} aria-label={`theme: ${theme}`}>
+          <Button
+            onClick={toggle}
+            aria-label={`theme: ${theme}`}
+            aria-pressed={theme === 'dark'}
+          >
             {theme === 'dark' ? '☾' : '☀'}
           </Button>
         </div>

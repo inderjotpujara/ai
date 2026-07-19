@@ -156,6 +156,22 @@ test('memoizes on unchanged spans.jsonl mtime, recomputes when it changes', asyn
   expect(item?.spanCount).toBe(2);
 });
 
+test('a chat.run-rooted run resolves a real lifecycle/durationMs, not a ghost Running (D9, §7.2a)', async () => {
+  await write('rc', [
+    span({
+      name: 'chat.run',
+      spanId: 'c',
+      durationMs: 42,
+      attributes: { 'agent.outcome': 'answer' },
+    }),
+  ]);
+  const item = await summarizeRunListItem(root, 'rc');
+  expect(item?.lifecycle).toBe(RunLifecycle.Done);
+  expect(item?.lifecycle).not.toBe(RunLifecycle.Running);
+  expect(item?.durationMs).toBe(42);
+  expect(item?.outcome).toBe('answer');
+});
+
 test('undefined for a run with no spans', async () => {
   expect(await summarizeRunListItem(root, 'nope')).toBeUndefined();
 });

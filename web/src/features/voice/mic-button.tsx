@@ -67,7 +67,12 @@ export function MicButton({ onFinal }: MicButtonProps) {
   const disabled = busy || broken;
 
   return (
-    <div data-testid="mic-button" className="flex items-center gap-2">
+    <div
+      data-testid="mic-button"
+      aria-live="polite"
+      aria-atomic="true"
+      className="flex items-center gap-2"
+    >
       <button
         type="button"
         data-testid="mic-hold-button"

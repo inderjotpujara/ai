@@ -1,66 +1,31 @@
-# Task 2 report — Mirror `CaptureSource` into `src/contracts/enums.ts` with a parity test
+# Task 2 Report: Real `<label>`/`htmlFor` for composer textarea + Settings model-tier `<select>` (D1)
 
-**Status:** DONE
+## Status: DONE — TDD followed exactly per brief, gate green, committed.
 
-**Commit:** `8689aa7` — `feat(voice): mirror CaptureSource into contracts with a parity test (D5)`
+## What was done
+1. **Step 1 (failing tests)**: Appended the two brief-specified tests verbatim to
+   `web/src/shared/ai-elements/smoke.test.tsx` and
+   `web/src/features/settings/index.test.tsx` (inside the existing
+   `describe('SettingsArea — voice input', ...)` block).
+2. **Step 2 (verify red)**: Ran `cd web && bun run test -- ai-elements/smoke.test.tsx settings/index.test.tsx` — both new tests failed with `getByLabelText` finding no matching element, as expected (2 failed / 11 passed).
+3. **Step 3 (implementation)**: Added a `.sr-only` `<label htmlFor="composer-input">Message</label>` immediately before the `<textarea>` in `web/src/shared/ai-elements/prompt-input.tsx` (gave the textarea `id="composer-input"`), and a `.sr-only` `<label htmlFor="voice-model-tier">Voice model tier</label>` immediately before the `<select>` in `web/src/features/settings/index.tsx` (gave the select `id="voice-model-tier"`, alongside its existing `data-testid`). Both changes matched the brief's code verbatim — no prop/signature changes to either component.
+4. **Step 4 (verify green)**:
+   - `bun run test -- ai-elements/smoke.test.tsx settings/index.test.tsx` → 2 files passed, 13/13 tests passed.
+   - `bun run typecheck` → clean, no errors.
+   - Ran the **full** web suite as an extra check: 56 files / 289 tests passed.
+   - Ran `bun run lint:file` (root-level biome, since `web/` has no local lint script) on all 4 touched files. It caught a pre-existing formatting violation in `smoke.test.tsx` (a multi-line `render(...)` call that biome wants collapsed to one line — present before this task, on the pre-existing "focus ring" test at old line 27) surfaced because biome now scans the whole file; reformatted both the pre-existing test and the new one to single-line `render(...)` calls to keep the file lint-clean. Re-ran typecheck + the two test files afterward — still fully green (13/13).
+5. **Step 5 (commit)**: Staged exactly the 4 intended files and committed.
 
-## What changed
-- `src/contracts/enums.ts` — appended `CaptureSource` enum (`Mic = 'mic'`, `File = 'file'`), with
-  a doc comment matching the file's existing "wire mirror" convention (see `RuntimeKind` etc.).
-  Values are byte-identical to the pre-existing `src/voice/types.ts` definition — this is a
-  pure source relocation, not a rename.
-- `src/voice/types.ts` — removed the local `CaptureSource` enum definition; replaced with
-  `export { CaptureSource } from '../contracts/enums.ts';`, placed immediately after the
-  `VoiceFrames` re-export from Task 1 (and ordered ahead of `export type { VoiceFrames }` to
-  satisfy biome's `assist/source/organizeImports` export-sort rule).
-- `tests/contracts/capture-source-parity.test.ts` (new) — asserts
-  `Object.values(ContractCaptureSource).sort()` equals `Object.values(VoiceCaptureSource).sort()`,
-  mirroring `tests/contracts/runtime-kind-parity.test.ts`.
-- `src/contracts/index.ts` needed no change — it already does `export * from './enums.ts'`, so
-  `CaptureSource` is automatically importable from `src/contracts` too.
-- `tests/voice/types.test.ts` — untouched, as required (still asserts `CaptureSource.Mic === 'mic'`,
-  passes unmodified since the underlying value didn't change; confirmed via `git log` that its
-  last touch predates this commit).
+## Commit
+`b445372` — `feat(a11y): real labels for the composer textarea + voice model-tier select (D1)`
+(4 files changed, 21 insertions, 3 deletions; branch `slice-30b-phase8-polish-a11y`)
 
-## TDD sequence followed
-1. Wrote the parity test first → ran it → RED (`Export named 'CaptureSource' not found in module
-   '.../src/contracts/enums.ts'`).
-2. Added the enum to contracts + re-export in `src/voice/types.ts` → ran it → GREEN.
-3. Ran `bun run lint` and hit one real error (biome wanted the two exports reordered in
-   `src/voice/types.ts`); fixed by moving `export { CaptureSource } from ...` above
-   `export type { VoiceFrames };`. Re-ran lint on the touched files — clean.
-
-## Gate results
-- `bun run typecheck` — PASS (`tsc --noEmit`, no output/errors).
-- `bun run lint` — PASS: 0 errors; 18 pre-existing warnings, confirmed via `git stash` against the
-  base commit `7bc0ad5` (identical warning count/content before my changes, all in unrelated files
-  e.g. `tests/models/pull...` unused `root` var). Nothing introduced by this task.
-- `bun test tests/contracts/capture-source-parity.test.ts tests/voice/` — PASS: 39 pass, 0 fail,
-  69 expect() calls across 11 files (includes the new parity test + all pre-existing voice tests
-  unchanged).
-
-## Casing correction applied
-Per the controller's explicit correction, `CaptureSource` values were kept as `Mic = 'mic'`,
-`File = 'file'` (lowercase) — NOT changed to `'Mic'/'File'`. Verified the `voice.transcribe`
-telemetry span's `voice.capture.source` attribute path (`src/telemetry/spans.ts`) is unaffected
-since it reads `CaptureSource.Mic`/`.File` member references, not raw strings, and those members'
-runtime values are unchanged.
-
-## Commit contents
-`8689aa7` — 3 files changed, 26 insertions(+), 5 deletions(-):
-`src/contracts/enums.ts`, `src/voice/types.ts`,
-`tests/contracts/capture-source-parity.test.ts` (new). Pre-commit `docs-check` passed
-automatically ("✔ docs-check: living docs present + linked; every src subsystem documented.") —
-no `architecture.md` update required (pure addition inside the already-documented
-`src/contracts` subsystem, per the task's "no docs/architecture.md change" instruction).
-
-## Self-review
-- Diff reviewed post-commit (`git show HEAD`) — confirms values preserved exactly, no stray edits
-  to `tests/voice/types.test.ts` or other consumers (`src/voice/transcribe.ts`,
-  `src/telemetry/spans.ts` needed zero changes since they still import `CaptureSource` by the
-  same name from `src/voice/types.ts`).
-- Only the 3 intended files were staged/committed — verified `git status --short` before commit
-  showed unrelated working-tree changes (`.remember/*`, `.superpowers/sdd/*`) as untouched/unstaged.
+## Test summary
+- Targeted: `ai-elements/smoke.test.tsx` + `settings/index.test.tsx` → 2 files, 13/13 passed.
+- Full web suite: 56 files, 289/289 passed.
+- `bun run typecheck`: clean.
+- `bun run lint:file` (root biome) on the 4 touched files: clean (after the incidental format fix above).
 
 ## Concerns
-None.
+- None functional. The only deviation from the brief's literal patch is a formatting-only tweak (collapsing a pre-existing multi-line `render(...)` call in `smoke.test.tsx` to one line) required to satisfy the repo's biome format rule once biome re-scanned the file; no behavior or assertions changed.
+- Did not run the project's pre-push slice-landing gate (README/ROADMAP/SDD-ledger doc updates) — that's expected to be handled at the phase/slice level, not per-task, per the brief's scope (Files list covers only the 4 test/impl files).

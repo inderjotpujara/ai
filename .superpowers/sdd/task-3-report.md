@@ -1,46 +1,42 @@
-# Task 3 Report: `AGENT_WEB_VOICE_*` config entries + `renderIndexHtml` window globals (Phase 7)
+# Task 3 Report: aria-pressed on toggles + aria-label on unnamed aside landmarks (D1)
 
-## Status: DONE
+## Status: Complete
 
-## Reconciliation
-The brief's exact file locations, line numbers, signatures, and call site all matched the real code — no deviations were needed. Implemented verbatim per the brief.
+## Summary
+Followed the task brief verbatim, TDD-style:
 
-## What was implemented
-- `src/config/schema.ts`: appended two `CONFIG_SPEC` entries immediately after `AGENT_WEB_NOTIFY_MIN_DURATION_MS` (same zod-style/doc-comment convention):
-  - `AGENT_WEB_VOICE_DEFAULT_MODEL` (string, default `'moonshine-base'`)
-  - `AGENT_WEB_VOICE_VAD_SILENCE_MS` (number, default `800`)
-- `src/server/main.ts`:
-  - Added `VoiceWindowConfig` type + `DEFAULT_VOICE_CONFIG` next to `NotifyConfig`/`DEFAULT_NOTIFY_CONFIG`.
-  - `renderIndexHtml` gained a 4th param `voice: VoiceWindowConfig = DEFAULT_VOICE_CONFIG`; `tokenScript` now also injects `window.__AGENT_VOICE_DEFAULT_MODEL__` and `window.__AGENT_VOICE_VAD_SILENCE_MS__`, using the same `JSON.stringify` + `<`→`<` escaping already applied to the token.
-  - `startWebServer`'s `renderIndexHtml(...)` call site threads `cfg.AGENT_WEB_VOICE_DEFAULT_MODEL` / `cfg.AGENT_WEB_VOICE_VAD_SILENCE_MS` through as the 4th arg.
-- `tests/config/schema.test.ts`: appended the 2 tests from the brief verbatim.
-- `tests/server/main.test.ts`: appended the 2 tests from the brief verbatim (Biome auto-reformatted one `toContain(...)` call's line-wrap for length; no behavior change).
+1. **Wrote failing tests** (Step 1) appended to the five test files named in the brief:
+   - `web/src/app/app-shell.test.tsx` — theme toggle `aria-pressed`
+   - `web/src/features/settings/index.test.tsx` — OS-notify toggle `aria-pressed` (in `describe('SettingsArea', ...)`) and voice-input toggle `aria-pressed` (in `describe('SettingsArea — voice input', ...)`)
+   - `web/src/features/sessions/index.test.tsx` — sidebar `aria-label` via `getByRole('complementary', { name: /recent sessions/i })`
+   - `web/src/features/workflows/workflow-detail.test.tsx` — step-detail `aria-label`
+   - `web/src/features/runs/waterfall.test.tsx` — span-detail `aria-label`
 
-## TDD evidence
-**RED** (`bun test tests/config/schema.test.ts tests/server/main.test.ts`, before implementation): 4 new tests failed — `values.AGENT_WEB_VOICE_DEFAULT_MODEL`/`AGENT_WEB_VOICE_VAD_SILENCE_MS` were `undefined`; the two `renderIndexHtml` voice-injection assertions failed (globals absent from rendered HTML). 15 pass / 4 fail overall.
+2. **Verified fail** (Step 2): ran the five targeted test files — 6 new assertions failed, 23 pre-existing tests passed, confirming the tests exercise the not-yet-implemented behavior.
 
-**GREEN** (same command, after implementation): 19 pass / 0 fail, 190 expect() calls — includes all pre-existing notify-config tests, unaffected.
+3. **Implemented** (Step 3), exactly per brief:
+   - `web/src/app/app-shell.tsx:82` — added `aria-pressed={theme === 'dark'}` to the theme toggle `<Button>`.
+   - `web/src/features/settings/index.tsx` — added `aria-pressed={enabled}` to the OS-notify toggle and `aria-pressed={voiceEnabled}` to the voice-input toggle.
+   - `web/src/features/sessions/index.tsx:38` — added `aria-label="Recent sessions"` to the sidebar `<aside>`.
+   - `web/src/features/workflows/workflow-detail.tsx:111` — added `aria-label="Selected step detail"` to the step-detail `<aside>`.
+   - `web/src/features/runs/waterfall.tsx:53` — added `aria-label="Selected span detail"` to the span-detail `<aside>`.
+   No structural rewrites; `Button` (`web/src/shared/ui/button.tsx`) already forwards `aria-*` via its `...rest` spread, so no changes there were needed.
 
-## Gate (all three, before commit)
-- `bun run typecheck` — clean.
-- `bun run lint:file -- src/config/schema.ts src/server/main.ts tests/config/schema.test.ts tests/server/main.test.ts` — one auto-fix applied (`--write`) to a test line-wrap in `tests/server/main.test.ts`; re-ran, clean.
-- Focused tests: `bun test tests/config/schema.test.ts tests/server/main.test.ts` — 19 pass, 0 fail (190 expect calls).
+4. **Verified pass** (Step 4):
+   - Targeted suite: `bun run test -- app-shell.test.tsx settings/index.test.tsx sessions/index.test.tsx workflows/workflow-detail.test.tsx runs/waterfall.test.tsx` → 5 files, 29 tests, all passed.
+   - `bun run typecheck` → clean (`tsc --noEmit`, no errors).
+   - Full web suite: `bun run test` → 56 files, 295 tests, all passed (no regressions).
+   - `bun run lint:file` (biome, run from repo root) on all 10 changed files → found one formatting issue (a too-long line in the new `workflow-detail.test.tsx` test) and fixed it to biome's expected wrap; re-run was clean.
+
+5. **Committed** (Step 5) on branch `slice-30b-phase8-polish-a11y`:
+   - `b9c0f10` — `feat(a11y): aria-pressed on toggle buttons + aria-label on unnamed aside landmarks (D1)` (10 files changed, 69 insertions, 1 deletion). Pre-commit hook (`docs:check`) passed — no `docs/architecture.md` update needed since this is an accessibility-attribute-only change within already-documented components, not a new/renamed subsystem.
 
 ## Files changed
-- `src/config/schema.ts` (+2 `CONFIG_SPEC` entries)
-- `src/server/main.ts` (`VoiceWindowConfig`/`DEFAULT_VOICE_CONFIG`, `renderIndexHtml` 4th param + injection, `startWebServer` call site)
-- `tests/config/schema.test.ts` (+2 tests)
-- `tests/server/main.test.ts` (+2 tests)
-
-## Commit
-`d891e93 feat(voice): add AGENT_WEB_VOICE_* config + renderIndexHtml window globals (D7)` — 4 files changed, 64 insertions(+), 5 deletions(-).
-
-Pre-commit hook (`docs-check`) passed: "living docs present + linked; every src subsystem documented." This is an in-progress slice commit (not a landing), so `docs/architecture.md` was intentionally not touched — no push was performed. Only the four intended files were staged/committed (verified via `git status --short` before commit).
-
-## Self-review
-- New config entries mirror the `AGENT_WEB_NOTIFY_*` precedent exactly in shape and doc-comment style, including forward-references to the not-yet-built consumers (`web/src/features/voice/stt-engine.ts`, `web/src/features/voice/vad.ts`) — consistent with how the notify entries referenced `use-run-notifications.ts` ahead of that consumer landing.
-- `renderIndexHtml`'s new 4th parameter is additive and defaulted, so all existing call sites and tests (including the 2-arg and 3-arg forms) continue to work unchanged — verified by the full focused-test run showing pre-existing notify tests still green.
-- Token/global escaping mechanism was reused verbatim (`JSON.stringify(...)`) rather than re-implemented, keeping the hostile-token XSS-escaping test's coverage intact for the new globals' code path (same `tokenScript` string-builder, same escape applied only to `token` — appropriate since the two new values are server-controlled config, not user input).
+- `web/src/app/app-shell.tsx`, `web/src/app/app-shell.test.tsx`
+- `web/src/features/settings/index.tsx`, `web/src/features/settings/index.test.tsx`
+- `web/src/features/sessions/index.tsx`, `web/src/features/sessions/index.test.tsx`
+- `web/src/features/workflows/workflow-detail.tsx`, `web/src/features/workflows/workflow-detail.test.tsx`
+- `web/src/features/runs/waterfall.tsx`, `web/src/features/runs/waterfall.test.tsx`
 
 ## Concerns
-None. Scope was exactly the two config knobs + the one `renderIndexHtml` extension point specified in the brief; no scope creep.
+None. Scope was accessibility attributes only — no behavior or prop-shape changes, matching the brief's "Produces" note. All five gate criteria (targeted tests, typecheck, full suite, lint, commit) are green.

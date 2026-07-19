@@ -117,4 +117,34 @@ describe('MicButton', () => {
     expect(screen.getByText('(CPU mode)')).toBeInTheDocument();
     vi.unstubAllGlobals();
   });
+
+  it('the status region is an aria-live="polite" announcer (D5) covering loading/listening/transcribing', () => {
+    useVoiceInputMock.mockReturnValue(
+      baseVoice({ status: 'listening', level: 0.3 }),
+    );
+    render(<MicButton onFinal={vi.fn()} />);
+    const region = screen.getByTestId('mic-button');
+    expect(region).toHaveAttribute('aria-live', 'polite');
+    expect(region).toHaveTextContent('● Listening');
+  });
+
+  it('the same polite region announces the loading and transcribing status text across a rerender', () => {
+    useVoiceInputMock.mockReturnValue(baseVoice({ status: 'loading' }));
+    const { rerender } = render(<MicButton onFinal={vi.fn()} />);
+    expect(screen.getByTestId('mic-button')).toHaveAttribute(
+      'aria-live',
+      'polite',
+    );
+    expect(screen.getByText('Loading voice model…')).toBeInTheDocument();
+
+    useVoiceInputMock.mockReturnValue(
+      baseVoice({ status: 'transcribing', interim: 'Hello' }),
+    );
+    rerender(<MicButton onFinal={vi.fn()} />);
+    expect(screen.getByTestId('mic-interim')).toHaveTextContent('Hello');
+    expect(screen.getByTestId('mic-button')).toHaveAttribute(
+      'aria-live',
+      'polite',
+    );
+  });
 });

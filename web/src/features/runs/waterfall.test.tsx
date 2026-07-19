@@ -52,4 +52,12 @@ describe('Waterfall', () => {
     fireEvent.click(screen.getByTestId('bar-a'));
     expect(screen.getByTestId('span-detail')).toHaveTextContent('agent.run');
   });
+
+  it('labels the span-detail landmark for assistive tech (D1)', () => {
+    render(<Waterfall spans={[span({ spanId: 'a' })]} />);
+    fireEvent.click(screen.getByTestId('bar-a'));
+    expect(
+      screen.getByRole('complementary', { name: /selected span detail/i }),
+    ).toBeInTheDocument();
+  });
 });

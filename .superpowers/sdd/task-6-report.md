@@ -1,83 +1,48 @@
-# Task 6 Report: createAudioCapture + downsample-worklet + setup.ts stubs
+# Task 6 report — Library tabs: real keyboard pattern + shared `nextTabIndex` helper (D2)
 
 ## Status: DONE
 
-## What was built
-- `web/src/test/setup.ts`: appended `FakeMediaStreamTrack`, `FakeMediaStream`,
-  `FakeAudioWorklet` (internal), `FakeAudioWorkletNode`, `FakeAudioContext`,
-  plus getters `getLastAudioWorkletNode`/`getLastAudioContext`/
-  `getLastGetUserMediaConstraints`/`getLastMediaStream`, and a `beforeEach`
-  that resets the "last" refs and stubs `navigator.mediaDevices.getUserMedia`,
-  `AudioContext`, `AudioWorkletNode` globals — verbatim per the brief.
-- `web/src/features/voice/audio-capture.ts`: appended `AudioCapture` type,
-  `rms()` helper, and `createAudioCapture()`. `start()` calls
-  `getUserMedia({audio:{echoCancellation,noiseSuppression,autoGainControl}})`,
-  opens an `AudioContext`, loads the worklet module
-  (`new URL('./downsample-worklet.ts', import.meta.url)`), creates the
-  `MediaStreamAudioSourceNode`, constructs the `AudioWorkletNode` (passing
-  `ctx.sampleRate` via `processorOptions.inputRate`), wires `port.onmessage`
-  to fan out chunks to `onChunk` subscribers and a computed RMS to `onLevel`
-  subscribers, then connects source→node. `stop()` stops every track on the
-  captured `MediaStream`, disconnects source/node, awaits `ctx.close()`, then
-  clears all internal refs and flips `active` false. `onChunk`/`onLevel`
-  return unsubscribe closures backed by `Set.delete`.
-- `web/src/features/voice/downsample-worklet.ts` (new): ambient
-  `AudioWorkletProcessor`/`registerProcessor` declarations (not in the `dom`
-  lib), a `DownsampleProcessor` class wrapping Task 5's `createDownsampler`
-  (reused, not reimplemented) keyed off `processorOptions.inputRate`, whose
-  `process()` forwards each render quantum's channel-0 samples through
-  `downsampler.process()` and posts non-empty 16 kHz chunks back via
-  `port.postMessage` (transferring the buffer). Registered as
-  `'downsample-processor'`.
-- `web/src/features/voice/audio-capture.test.ts`: merged the setup.ts fixture
-  import with the existing `createDownsampler` import, appended
-  `describe('createAudioCapture', ...)` with the 4 tests specified in the
-  brief (start/getUserMedia-shape/active, chunk+level fan-out via simulated
-  `port.onmessage`, unsubscribe, and full stop()-teardown assertions).
+## Summary
+Implemented exactly per brief, TDD (red → green):
+
+1. Wrote failing tests first: `web/src/shared/ui/tab-list.test.ts` (new, 4 cases for the pure
+   helper) and appended 2 new tests to `web/src/features/library/index.test.tsx` (roving
+   tabindex + wrap-around focus, and aria-controls/id/role="tabpanel" linkage). Confirmed both
+   files failed for the expected reasons (`tab-list.ts` missing; `LibraryArea` had no
+   `tabIndex`/`aria-controls`/`role="tabpanel"`).
+2. Created `web/src/shared/ui/tab-list.ts` exporting `nextTabIndex(key, activeIndex, count):
+   number | undefined` — ArrowRight/ArrowLeft roving with wrap, Home/End jump-to-ends, `undefined`
+   for any other key. Pure, no DOM dependency, independently unit-tested.
+3. Replaced `web/src/features/library/index.tsx` with the brief's full content: tabs now carry
+   `id`, `aria-controls`, roving `tabIndex` (0 for active, -1 otherwise), an `onKeyDown` handler
+   that calls the shared helper and moves both React state (`setTab`) and DOM focus
+   (`tabRefs.current[next]?.focus()`); each panel gained `role="tabpanel"` + `aria-labelledby`
+   linked to its tab's `id`. Public interface unchanged (`export function LibraryArea()`).
+4. Ran the target tests — all passed; ran `bun run typecheck` — clean; ran the full `bun run
+   test` suite — all passed (no regressions).
+5. Committed the 4 target files only (left the SDD ledger/report files for the controller).
+
+## Files touched
+- `/Users/inderjotsingh/ai/web/src/shared/ui/tab-list.ts` (new)
+- `/Users/inderjotsingh/ai/web/src/shared/ui/tab-list.test.ts` (new)
+- `/Users/inderjotsingh/ai/web/src/features/library/index.tsx` (modified — full rewrite per brief)
+- `/Users/inderjotsingh/ai/web/src/features/library/index.test.tsx` (modified — appended 2 tests)
+
+## Test results
+- Target scope (`shared/ui/tab-list.test.ts` + `features/library/index.test.tsx`): 7/7 passed
+  (4 `nextTabIndex` cases + 1 pre-existing `LibraryArea` test + 2 new D2 tests).
+- Full web suite: 306/306 tests passed across 59 files.
+- `bun run typecheck`: clean (`tsc --noEmit`, no errors).
+- Note: test runs print `ECONNREFUSED ::1:3000 / 127.0.0.1:3000` stack traces — this is
+  unrelated pre-existing noise from a component's backend-fetch logging in the jsdom test env
+  (no backend running during `bun run test`), not a test failure; all reported tests pass.
 
 ## Commit
-- `37ef3ed` — `feat(voice): createAudioCapture (getUserMedia+AudioWorklet) + downsample-worklet processor (D3/D4)`
-  (4 files changed: audio-capture.ts, audio-capture.test.ts, downsample-worklet.ts [new], test/setup.ts)
+- `2098c72` — `feat(a11y): Library tabs get real keyboard roving + tabpanel linkage, via a shared helper (D2)`
+  (branch `slice-30b-phase8-polish-a11y`, 4 files changed, 128 insertions, 6 deletions)
 
-## Gate results
-- `cd web && bun run test -- features/voice/audio-capture.test.ts`: RED first
-  (`createAudioCapture is not a function`, 4 failing / 7 passing from Task 5),
-  then GREEN after implementation — 11/11 passed.
-- `cd web && bun run typecheck`: clean (confirms the worklet's ambient
-  declarations, `override process()`, and the DOM-lib `AudioContext`/
-  `AudioWorkletNode`/`MediaStreamAudioSourceNode` usage in
-  `createAudioCapture` all typecheck).
-- Full `cd web && bun run test`: 49 files / 219 tests passed (pre-existing
-  unrelated `ECONNREFUSED` stderr noise from an unrelated networked test
-  that expects a closed connection — not a failure, exit code 0).
-- `bun run lint:file -- <4 touched files>` (root, biome): 1 formatting nit on
-  first pass (a wrapped type signature in `downsample-worklet.ts`), fixed via
-  `bunx biome check --write`, re-ran clean.
-
-## Self-review — teardown correctness (this task's stated real risk)
-- `stop()` iterates `stream?.getTracks() ?? []` and calls `.stop()` on
-  **every** track (not just track 0) — verified by the `FakeMediaStream`
-  fixture, which the test asserts each track's `readyState === 'ended'`
-  after `stop()`.
-- `ctx?.close()` is awaited and asserted `toHaveBeenCalledTimes(1)`.
-- `source?.disconnect()` and `node?.disconnect()` are also called (belt and
-  suspenders beyond what the brief's tests assert, but correct Web Audio
-  hygiene — a disconnected graph plus a closed context plus stopped tracks
-  is the full teardown, not just one of the three).
-- All internal refs (`stream`, `ctx`, `source`, `node`) are cleared to
-  `undefined` after stop, and `active` flips false — a stale reference can't
-  leak into a subsequent `start()` call on the same `AudioCapture` instance.
-- Reused `createDownsampler` only inside `downsample-worklet.ts` (imported,
-  not duplicated) — matches the "no duplicated resample math" constraint.
-
-## Concerns / notes
-- None blocking. `downsample-worklet.ts` cannot be exercised under
-  happy-dom/Vitest by design (no real AudioWorkletGlobalScope) — per the
-  brief, its correctness rides on Task 5's direct `createDownsampler` unit
-  tests plus the Part B live-verify increment (Task 18) that will run it in
-  a real browser.
-- No `docs/architecture.md` change made (task brief says none needed for
-  this internal wiring task); `bun run docs:check` passed as part of the
-  pre-commit hook.
+## Concerns
+None. Implementation follows the brief verbatim; helper is DOM-free and directly reusable by
+Task 7 (`BuildersArea`) as designed.
 
 Report path: /Users/inderjotsingh/ai/.superpowers/sdd/task-6-report.md

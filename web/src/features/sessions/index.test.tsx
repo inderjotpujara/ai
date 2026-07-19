@@ -69,4 +69,16 @@ describe('SessionsSidebar', () => {
     expect(link).toHaveAttribute('href', '/sessions/sess-2');
     vi.unstubAllGlobals();
   });
+
+  it('labels the sidebar landmark for assistive tech (D1)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ items: [], total: 0 })),
+    );
+    renderAt('/');
+    expect(
+      await screen.findByRole('complementary', { name: /recent sessions/i }),
+    ).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
 });

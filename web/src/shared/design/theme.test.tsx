@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Theme, ThemeProvider, useTheme } from './theme.tsx';
+import { Theme, ThemeProvider, toggleThemeGlobal, useTheme } from './theme.tsx';
 
 function Probe() {
   const { theme, toggle } = useTheme();
@@ -49,6 +49,21 @@ describe('ThemeProvider', () => {
         <Probe />
       </ThemeProvider>,
     );
+    expect(screen.getByRole('button')).toHaveTextContent('theme:light');
+  });
+
+  it('toggleThemeGlobal (D8 action command) flips DOM class + storage and resyncs a mounted ThemeProvider without a direct hook call', () => {
+    render(
+      <ThemeProvider>
+        <Probe />
+      </ThemeProvider>,
+    );
+    expect(screen.getByRole('button')).toHaveTextContent('theme:dark');
+
+    toggleThemeGlobal();
+
+    expect(document.documentElement).toHaveClass('light');
+    expect(localStorage.getItem('agent-theme')).toBe(Theme.Light);
     expect(screen.getByRole('button')).toHaveTextContent('theme:light');
   });
 });

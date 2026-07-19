@@ -1,93 +1,195 @@
-# Task 12 Report: `use-voice-input.ts` — orchestrator hook
+# Task 12 report — §7.1 adversarial correctness (D6 progressive-decode-reveal)
 
-## Status: DONE
+## Summary
+Closed the deliberately-deferred correctness hole in Task 11's naive `onInterim`
+wiring. The `onSegment` interim closure in
+`web/src/features/voice/use-voice-input.ts` now carries three guards, in order:
+`finalized` (§7.1 c) → `validSegmentersRef.current.has(segmenter)` (§7.1 a) →
+`latestSegmentRef.current !== segmenter` (§7.1 d). Three failing-first adversarial
+tests added to `web/src/features/voice/use-voice-input.test.ts`.
 
-## Files
-- Created `web/src/features/voice/use-voice-input.ts`
-- Created `web/src/features/voice/use-voice-input.test.ts`
+Final: **web full suite 326/326 pass (61 files)**, voice file **23/23**, typecheck
+clean, biome clean.
 
-## Approach (TDD)
-1. Read the task brief (`.superpowers/sdd/task-12-brief.md`) end to end; confirmed the exact
-   consumed interfaces (`AudioCapture`/`createAudioCapture`, `SttEngine`/`ModelTier`/
-   `createSttEngine`, `createSegmenter`/`Segmenter`) match what Tasks 5/6/8/9/10/11 actually
-   shipped by reading `audio-capture.ts`, `stt-engine.ts`, `vad.ts`, `model-tier.ts` directly.
-2. Wrote the test file verbatim from the brief (11 `it` blocks covering ready-gating,
-   concurrent-gesture guard, both gestures, teardown on disable/unmount, and error
-   degradation). Confirmed RED: `Cannot find module './use-voice-input.ts'`.
-3. Wrote the implementation verbatim from the brief's Step 3 sample.
-4. Ran the tests — 2 of 11 failed. Both were genuine bugs in the brief's own sample code
-   (not test bugs), fixed as follows:
-   - **Bug A (stopHold flush race):** the `onChunk` handler routed every chunk through an
-     async `engine.detectSpeech(chunk).then(isSpeech => segmenter.pushFrame(...))` before
-     buffering it, even in hold-to-talk mode. `vad.ts`'s `gated:false` path ignores
-     `isSpeech` entirely — the gesture itself is the boundary — so that async hop served no
-     purpose there, and a synchronous `stopHold()` → `segmenter.flush()` could run before the
-     microtask landed, flushing an empty buffer and silently dropping the last chunk (no
-     `transcribe()` call at all). Fixed: hold-mode chunks now call `segmenter.pushFrame(chunk,
-     true)` synchronously; tap mode (which genuinely needs the speech/silence classification)
-     still goes through `detectSpeech`.
-   - **Bug B (mic-permission-denied silently downgraded to 'ready'):** the `capture.start()`
-     `.catch()` computed the next status as `readyRef.current ? 'ready' : 'error'`. Since the
-     STT engine stays "ready" across a failed capture start, this always resolved to `'ready'`
-     — a permission-denied mic left the UI reporting the mic as available. Fixed: always
-     `endGesture('error')` on a capture-start rejection.
-5. Re-ran — 11/11 pass.
-6. Typecheck caught a third, pre-existing issue: `ModelTier` (Task 8/9) is a real string
-   *enum*, not a string-literal union, so the brief's `const MODEL: ModelTier =
-   'moonshine-base'` doesn't typecheck. Fixed the test to import and use `ModelTier.Base`.
-7. Lint (biome) flagged import ordering/formatting and two genuine
-   `useExhaustiveDependencies` gaps:
-   - `startGesture`'s `useCallback` was missing `deps.createCapture` — added to the deps
-     array (no behavior change; deps default to a stable module-level `DEFAULT_DEPS` in
-     production).
-   - The worker-lifecycle `useEffect` was missing `deps.createEngine`/`opts.model` —
-     deliberately NOT added, since the design (stated in the existing code comment) is that a
-     model-tier change while `enabled` requires a disable/enable round-trip (Task 15,
-     Settings), not a live in-place respawn. Suppressed with a `// biome-ignore
-     lint/correctness/useExhaustiveDependencies: ...` comment (matches the project's existing
-     convention, e.g. `sessions/index.tsx`), explaining why widening it would be a regression,
-     not a fix.
+## IMPORTANT DEVIATION FROM THE BRIEF (needs review sign-off)
+The brief's prescribed guard for (d) was `segmenterRef.current !== segmenter`.
+**That guard is flawed and I did not use it** — it is empirically wrong, not a
+judgement call:
 
-## Gate results
-- `cd web && bun run typecheck` — clean.
-- `bun run lint:file -- web/src/features/voice/use-voice-input.ts
-  web/src/features/voice/use-voice-input.test.ts` (repo-root biome) — clean.
-- `cd web && bun run test` — **53 test files / 260 tests passed** (full web suite, not just
-  this file — confirms no regression in Tasks 1–11's tests).
+- On a graceful stop (`stopHold`/`toggleTap`), `endGesture` nulls
+  `segmenterRef.current`. `flush()` starts `engine.transcribe(...)`
+  synchronously *inside* `stopHold`, but the `onInterim` callback fires LATER —
+  by which point `segmenterRef.current` is already `null`. So
+  `segmenterRef.current !== segmenter` is `true` for the **legitimate current
+  transcription's own interim**, dropping it.
+- Applying the brief's guard verbatim turned the whole file RED: it broke THREE
+  already-passing tests — both D6 interim-streaming tests (hold-to-talk + VAD
+  tap) and the §7.1 (b) monotonic-replace test — and blocked the first
+  legitimate interim in the new (c)/(d) tests. That directly violates the "do
+  not weaken existing tests" constraint. (Evidence below: 5 failed.)
 
-## §7.2 requirement -> test mapping (all genuine, not fire-count)
-- **(a) Ready-gating:** "a mic press before the engine reports ready is a no-op" — asserts
-  `startMock` (AudioCapture.start) is never called while `status === 'loading'`; a real
-  no-op, not a buffered/replayed capture (no capture object is even created before
-  `readyRef.current` flips).
-- **(b) Concurrent-gesture guard:** "rejects an overlapping gesture: a hold press while a
-  tap-toggle session is already listening starts no second capture" — asserts
-  `startMock` stays at 1 call after the second gesture attempt (not 2). Companion test "a
-  second toggleTap() while already listening stops the session instead of starting another"
-  asserts `stopMock` fires and `startMock` stays at 1 — proves the guard is a real state
-  machine (`gestureRef`), not just an early-return on one code path.
-- **(c) Teardown (privacy footgun):** two tests — disabling (`rerender({enabled:false})`)
-  asserts `stopMock`/`closeMock` each called exactly once AND `chunkListenerCount() === 0`
-  AND a post-teardown `emitChunk` never reaches `onFinal`; a second test asserts the same
-  `stopMock`/`closeMock` pair on `unmount()`. Both exercise the real unsubscribe path
-  (`unsubRef`), not just a flag flip.
-- **(d) Model-load failure:** asserts `readyGate.reject(...)` flips `status` to `'error'`
-  with the exact error message, never leaving `status: 'loading'` stuck. A second test
-  (capture-start rejection, mic permission denied) is the sibling failure mode and is the one
-  that caught Bug B above — genuinely adversarial, not decorative.
+The brief's *intent* for (d) is correct — **segmenter-identity / no cross-bleed**.
+Only the *ref it consulted* was wrong. The fix introduces `latestSegmentRef`, set
+to `segmenter` at the moment its `'…'` placeholder is painted in `onSegment`
+(i.e. "the latest segment to BEGIN transcribing"), and gates interim display on
+that. This is still a strict segmenter-identity check — it keeps the current
+transcription's interim (survives the graceful-stop null) while dropping an OLD,
+superseded segment's late interim during a back-to-back gesture. This is a
+traced correction, not a guess (full case analysis below); I proceeded rather
+than hard-blocking because the correction is minimal, provably correct against
+all four requirements, and preserves every existing test — but I am flagging it
+prominently so the ultracode verify stage can veto.
 
-## Concerns
-- `ready: readyRef.current` is read from a ref during render rather than being its own piece
-  of state; it happens to stay consistent because every write to the ref is paired with a
-  `setStatus` call in the same tick (forcing a re-render), but a future edit that updates
-  `readyRef.current` without also triggering a re-render would silently desync `ready` from
-  the rendered value. Low risk today, worth a comment or derivation from `status` if touched
-  again.
-- Interim text is a fixed `'…'` placeholder (per spec: "busy signal, not word-streaming") —
-  confirmed intentional from the task description, not tested explicitly beyond the two
-  gesture-flow tests exercising `onFinal`; no dedicated `onInterim` assertion in this test
-  file (brief didn't include one). Flagging for Task 13's adversarial pass in case it wants
-  one.
+## RED → GREEN evidence
+
+### (a) invalidated segmenter's interim dropped
+- RED (before any guard): `expected 'should-not-appear' to be '…'` — Received
+  `"should-not-appear"` (unconditional `setInterim` painted the stale text).
+- GREEN (after `validSegmentersRef` guard): 1 passed.
+
+### (d) back-to-back gesture isolation
+- RED (before guards): `expected 'A-partial-late' to be '…'` — old segment A's
+  late interim stomped B's placeholder.
+- RED (with brief's `segmenterRef` guard): regressed EARLIER —
+  `expected 'A-partial' to be '…'` (first legit interim blocked). This is the
+  flaw above.
+- GREEN (after `latestSegmentRef` guard): 1 passed.
+
+### (c) final wins over late interim (same request id)
+- RED (before guards): `expected 'late-after-final' to be ''` — late interim
+  resurrected the cleared, finalized composer.
+- RED (with brief's `segmenterRef` guard): regressed earlier —
+  `expected 'partial' to be ''` (first legit interim blocked).
+- GREEN (after `finalized` guard): 1 passed.
+
+### Full-file RED under the brief's verbatim guard (proof of the flaw)
+```
+Tests  5 failed | 18 passed (23)
+ × streams real interim text from engine.transcribe (hold-to-talk) (D6)
+ × streams real interim text via VAD tap-to-toggle too (D6)
+ × interim text is always a monotonic replace (§7.1 b)
+ × §7.1 (d) ...
+ × §7.1 (c) ...
+```
+
+### Final GREEN
+```
+web voice file: Tests 23 passed (23)
+web full suite:  Test Files 61 passed (61) | Tests 326 passed (326)
+typecheck: tsc --noEmit (clean)
+biome check --write (2 files): No fixes applied
+```
+
+## Guard-independence audit (reviewer note)
+Empirically probed by disabling each guard in isolation and running (a)/(d)/(c):
+
+| Guard | Disabled → regresses | Independently necessary? |
+|-------|----------------------|--------------------------|
+| `validSegmentersRef` (a) | only (a) fails | YES |
+| `latestSegmentRef` (d)   | only (d) fails | YES |
+| `finalized` (c)          | nothing regresses | NO — defense-in-depth |
+
+**Concern:** the `finalized` guard is NOT strictly independent under the current
+code. The `.finally` block deletes the segmenter from `validSegmentersRef` on
+every settle, so a late-after-final interim is already caught by the (a) guard —
+(c)'s test still passes with `finalized` removed. I kept `finalized` deliberately:
+(1) it matches the brief's explicit Step-3c prescription; (2) it expresses the
+"final wins for THIS request id" intent locally and is robust to any future
+change in the bounded-growth `.finally`-delete strategy; (3) it is harmless and
+correctly ordered first (a settled request short-circuits before consulting refs
+a later gesture may reuse). If the verify stage prefers strict minimality, it can
+be dropped with no test impact — flagging for the decision.
+
+## Case analysis for `latestSegmentRef` (why it is correct, not a guess)
+- Single hold-to-talk (existing D6 + §7.1 b): `latest = S` at onSegment; interim
+  `latest === S` → displayed. ✓
+- (a): S1 transcribes (`latest = S1`); a 2nd gesture starts but never flushes, so
+  `latest` stays S1; `cancel()` clears `validSegmentersRef` → S1's late interim
+  dropped by the (a) guard (latest alone wouldn't catch it — confirms (a) does
+  the work here). ✓
+- (d): A transcribes (`latest = A`) → A-partial shown; B flushes
+  (`latest = B`, `'…'`); A's late interim: `latest (B) !== A` → dropped; B's
+  interim shown; A even-later → dropped. Both A and B remain in
+  `validSegmentersRef` (graceful stops), so ONLY `latestSegmentRef` distinguishes
+  them — confirms (d) is independently necessary. ✓
+- (c): single segment; `finalized`/`.finally`-delete handle the late interim. ✓
+
+## Files changed
+- `web/src/features/voice/use-voice-input.ts` — added `latestSegmentRef`; three
+  guards + `finalized` flag in the `onSegment`/`onInterim` closure; `finalized`
+  also set in `.then`/`.catch`.
+- `web/src/features/voice/use-voice-input.test.ts` — appended §7.1 (a), (d), (c)
+  adversarial tests.
 
 ## Commit
-`a3b3b6d feat(voice): add useVoiceInput orchestrator hook (both gestures, ready-gating, teardown)`
+Subject:
+`fix(voice): §7.1 adversarial guards — drop invalidated interim, isolate back-to-back gestures, final wins over late interim (D6)`
+
+---
+
+# Follow-up fix — §7.1 guards were per-SEGMENTER; VAD tap-toggle needs per-SEGMENT (commit 5e44f88)
+
+## The defect (adversarial review, verified against ef4675c)
+The three §7.1 guards correlated on the **segmenter object**
+(`validSegmentersRef` + `latestSegmentRef` both held the segmenter). Correct for
+hold-to-talk (one segmenter → one segment → one transcribe), but BROKEN for the
+VAD **tap-toggle** gesture, whose single `gated:true` segmenter emits **many
+segments** (one per speech→silence cycle), each with its own `engine.transcribe`.
+
+- **Critical #1 (multi-segment tap):** segment 1's transcribe `.finally` ran
+  `validSegmentersRef.delete(segmenter)`, deleting the ONE shared segmenter from
+  the validity set. Segment 2 of the SAME still-active tap gesture then failed
+  `has(segmenter)` → its interim dropped AND its `.then` early-returned →
+  **`onFinal` never fired**. Hands-free, only the FIRST utterance was ever
+  delivered; every later utterance silently lost.
+- **Critical #2 (same-segmenter overlap):** `latestSegmentRef !== segmenter`
+  could not tell two segments of the SAME segmenter apart (both `=== segmenter`),
+  so an older segment's late interim painted over a newer segment's display
+  (cross-bleed + non-monotonic).
+
+## The fix (correlate per-SEGMENT)
+Mint a fresh per-segment token (`const segToken: object = {}`) INSIDE the
+`onSegment` callback. `validSegmentersRef` → `validSegmentTokensRef:
+Set<object>` (add the token when the segment begins transcribing, delete the
+TOKEN in `.finally`, so siblings of one gesture stay valid). `latestSegmentRef`
+→ `latestSegmentTokenRef: object|null` (holds the latest TOKEN). All three
+guards (finalized / validity-has / latest-is-me) key on the per-segment token.
+`onFinal` is always delivered (append semantics); the shared interim/status
+display is only touched when `latestSegmentTokenRef === segToken`, so a
+superseded older segment's resolve never wipes a newer segment's live interim
+(also closes the latent non-monotonic-`.then` case).
+
+**stt-engine.ts:** left unchanged. Its `transcribe` uses an internal numeric
+`id` for interim correlation but does NOT expose it; the engine already isolates
+interim by id worker-side. The hook-level per-segmenter correlation was the sole
+defect, so a hook-minted per-segment token is the right, minimal fix — no engine
+API change needed.
+
+## Preserved (existing passing behaviors, all still green)
+(i) destructive teardown (`cancel`/disable/unmount) `clear()`s ALL tokens;
+(ii) a graceful stop keeps the gesture's in-flight segment tokens valid so their
+finals land; (iii) back-to-back separate gestures stay isolated;
+(iv) the per-request `finalized` flag kept.
+
+## TDD RED→GREEN evidence
+- **Test 1 (Critical #1, multi-segment tap):** RED on ef4675c —
+  `expected '…' to be 'seg2-partial'` (segment 2 interim dropped); segment 2
+  `onFinal('two')` also never fired. GREEN after.
+- **Test 2 (Critical #2, same-segmenter overlap):** RED on ef4675c —
+  `expected 'A-partial-late' to be '…'` (older segment's late interim bled over
+  the newer's). GREEN after.
+- **Test 3 (tap variants of (a) invalidated-drop + (d) back-to-back):** added
+  (Verifier-2 flagged the adversarial tests were hold-only). GREEN.
+- Existing suite: `use-voice-input.test.ts` **27/27 green** (D6 streaming,
+  hold-to-talk §7.1 a/b/c/d, Fix 1–4, back-to-back). Full web suite **330/330**
+  across 61 files. `tsc --noEmit` clean; `biome check` clean.
+
+## Files changed
+- `web/src/features/voice/use-voice-input.ts` — segmenter-keyed refs → per-segment
+  token (`validSegmentTokensRef`, `latestSegmentTokenRef`); token minted in
+  `onSegment`; interim/status side effects gated on latest-token.
+- `web/src/features/voice/use-voice-input.test.ts` — 4 new §7.1 tap-toggle tests
+  (Critical #1, Critical #2, (a) tap variant, (d) tap variant).
+
+## Commit
+`5e44f88` — `fix(voice): correlate §7.1 progressive-decode guards per-SEGMENT, not per-segmenter`

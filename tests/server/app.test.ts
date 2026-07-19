@@ -137,6 +137,52 @@ test('/api/health requires the bearer token', async () => {
   expect(await ok.json()).toEqual({ ok: true });
 });
 
+test('POST /api/telemetry authorizes via the ?k= query token (sendBeacon path, no Authorization header)', async () => {
+  const body = JSON.stringify({
+    kind: 'voice.transcribe.web',
+    durationMs: 1200,
+    wordCount: 8,
+    modelTier: 'moonshine-tiny',
+    realTimeFactor: 0.5,
+    engine: 'transformers.js',
+  });
+  const ok = await fetch(`${base}/api/telemetry?k=${TOKEN}`, {
+    method: 'POST',
+    body,
+    headers: { 'content-type': 'application/json' },
+  });
+  expect(ok.status).toBe(204);
+});
+
+test('POST /api/telemetry with a wrong/missing ?k= token is unauthorized (401)', async () => {
+  const wrong = await fetch(`${base}/api/telemetry?k=${'b'.repeat(64)}`, {
+    method: 'POST',
+    body: '{}',
+    headers: { 'content-type': 'application/json' },
+  });
+  expect(wrong.status).toBe(401);
+  const missing = await fetch(`${base}/api/telemetry`, {
+    method: 'POST',
+    body: '{}',
+    headers: { 'content-type': 'application/json' },
+  });
+  expect(missing.status).toBe(401);
+});
+
+test('the ?k= query token does NOT authorize any other route (scoped to the beacon only)', async () => {
+  // The beacon exception must not weaken the shared header guard: a valid
+  // ?k= on a non-telemetry route stays 401.
+  const health = await fetch(`${base}/api/health?k=${TOKEN}`);
+  expect(health.status).toBe(401);
+  // Even POSTing the ?k= to another /api route is rejected.
+  const feedback = await fetch(`${base}/api/feedback?k=${TOKEN}`, {
+    method: 'POST',
+    body: '{}',
+    headers: { 'content-type': 'application/json' },
+  });
+  expect(feedback.status).toBe(401);
+});
+
 test('a cross-origin request is rejected at the perimeter (403) before auth', async () => {
   const res = await fetch(`${base}/api/health`, {
     headers: {

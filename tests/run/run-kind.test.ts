@@ -21,3 +21,9 @@ test('deriveRunKind maps mcp.mount/memory.* roots to RunKind.Mcp/RunKind.Memory 
   expect(deriveRunKind(['memory.recall'])).toBe(RunKind.Memory);
   expect(deriveRunKind(['memory.ingest'])).toBe(RunKind.Memory);
 });
+
+test('deriveRunKind maps chat.run → Chat and still maps agent.run → Agent (D9, §7.2b)', () => {
+  expect(deriveRunKind(['chat.run'])).toBe(RunKind.Chat);
+  // The generic agent.run capability is intact for a future standalone-agent run.
+  expect(deriveRunKind(['agent.run'])).toBe(RunKind.Agent);
+});
