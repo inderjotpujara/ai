@@ -5,6 +5,7 @@ import {
   ModelPullRequestSchema,
 } from '../../contracts/index.ts';
 import type { ProviderKind, RuntimeKind } from '../../core/types.ts';
+import { recordJobEnqueue } from '../../daemon/spans.ts';
 import { readCatalog } from '../../discovery/catalog-cache.ts';
 import type { JobStore } from '../../queue/store.ts';
 import type { JobKind, JobPriority } from '../../queue/types.ts';
@@ -96,5 +97,6 @@ export async function handleJobEnqueue(
     priority: body.priority as unknown as JobPriority | undefined,
     runId,
   });
+  recordJobEnqueue(job);
   return json(JobLaunchResponseSchema.parse({ jobId: job.id, runId }), 202);
 }

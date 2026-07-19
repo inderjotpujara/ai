@@ -180,6 +180,18 @@ export const ATTR = {
   MODEL_PULL_BYTES_COMPLETED: 'model.pull.progress.bytes_completed',
   MODEL_PULL_BYTES_TOTAL: 'model.pull.progress.bytes_total',
   MODEL_PULL_SPEED_BPS: 'model.pull.progress.speed_bytes_per_sec',
+  // Daemon + queue lifecycle (Slice 24 Increment 4, item 18). Promoted here
+  // from daemon/spans.ts's own module-local constant (T27) now that the full
+  // job span set lands alongside it.
+  DAEMON_PID: 'daemon.pid',
+  JOB_ID: 'job.id',
+  JOB_KIND: 'job.kind',
+  JOB_PRIORITY: 'job.priority',
+  JOB_ATTEMPT: 'job.attempt',
+  /** Provenance marker mirroring `RunOrigin` (`contracts/enums.ts`) so a
+   *  daemon/queue-dispatched job's spans are distinguishable from a directly
+   *  launched run's, independent of `readRunOrigin`'s file-based marker. */
+  JOB_ORIGIN: 'job.origin',
 } as const;
 
 export type ModelSelectInfo = {
@@ -206,7 +218,12 @@ export type ModelLoadInfo = {
 
 const tracer = () => trace.getTracer('agent');
 
-async function inSpan<T>(
+/** Shared span-emission mechanism: opens `name` as the active span, runs `fn`,
+ *  records an ERROR status if it throws, and always ends the span. Exported so
+ *  other subsystems (e.g. `daemon/spans.ts`'s `withJobRunSpan`) reuse the SAME
+ *  mechanism instead of hand-rolling a parallel try/catch/finally around
+ *  `startActiveSpan`. */
+export async function inSpan<T>(
   name: string,
   fn: (span: Span) => Promise<T>,
 ): Promise<T> {

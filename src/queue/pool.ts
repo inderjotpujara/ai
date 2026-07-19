@@ -1,3 +1,8 @@
+import {
+  recordJobCancel,
+  recordJobRetry,
+  withJobRunSpan,
+} from '../daemon/spans.ts';
 import { explain } from '../errors/boundary.ts';
 import { abortableSleep } from '../reliability/retry.ts';
 import { jobRetryDecision } from './retry-policy.ts';
@@ -39,7 +44,9 @@ export function createWorkerPool(opts: {
     controllers.set(job.id, controller);
     try {
       const executor = opts.dispatch(job.kind);
-      const result = await executor(job, controller.signal);
+      const result = await withJobRunSpan(job, () =>
+        executor(job, controller.signal),
+      );
       // A cancel() already flipped the row to Canceled — don't overwrite it.
       // NB: the aborted guard and the terminal write below are synchronous with
       // NO await between them — that is what preserves the single-terminal-
@@ -62,6 +69,12 @@ export function createWorkerPool(opts: {
       const { retryable } = jobRetryDecision(err);
       try {
         opts.store.markFailed(job.id, explain(err).title, retryable);
+        // A re-queue (vs. terminal Failed) is a distinct lifecycle event from
+        // job.run's own ERROR status — record it as `job.retry` so "how often
+        // does this job kind retry" is answerable straight from the trace.
+        // Re-read so job.attempt reflects the attempt that just failed.
+        const after = opts.store.getJob(job.id);
+        if (after?.status === JobStatus.Queued) recordJobRetry(after);
       } catch {
         // Same as markDone above: a terminal-write failure must NOT escape
         // runOne. Left Running → reconciled to Interrupted later.
@@ -137,7 +150,11 @@ export function createWorkerPool(opts: {
       const c = controllers.get(jobId);
       if (!c) return false;
       c.abort();
+      // Read BEFORE markCanceled so job.cancel carries the job's kind/
+      // priority/runId (markCanceled only touches status/finished_at).
+      const job = opts.store.getJob(jobId);
       opts.store.markCanceled(jobId);
+      if (job) recordJobCancel(job);
       return true;
     },
     activeCount: (): number => controllers.size,
