@@ -61,3 +61,28 @@ test('the redaction marker appears in the returned lines (secret never leaves ra
   const body = (await res.json()) as DaemonLogsResponse;
   expect(body.lines.join('\n')).toContain('‹redacted›');
 });
+
+// §7.3 adversarial-review regression: the read must be BOUNDED to a tail of
+// the file, not a whole-file read, so a rotation-less always-on daemon's
+// multi-GB log can't block the event loop / OOM the host. This test writes a
+// file well past the 1 MiB read cap and asserts the bounded reader still
+// returns the correct last-N lines.
+test('a log file larger than the read cap still returns the correct last-N lines (bounded tail read)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'logs-big-'));
+  const padLine = 'x'.repeat(200); // ~200 bytes/line
+  const lineCount = 10_000; // ~2 MiB total, comfortably past the 1 MiB cap
+  const bodyLines: string[] = [];
+  for (let i = 0; i < lineCount; i++) bodyLines.push(`${padLine}-${i}`);
+  const content = `${bodyLines.join('\n')}\n`;
+  writeFileSync(join(dir, 'agent.out.log'), content);
+
+  const res = handleDaemonLogs(new URLSearchParams('tail=3&stream=out'), {
+    daemonLogDir: dir,
+  });
+  const body = (await res.json()) as DaemonLogsResponse;
+  expect(body.lines).toEqual([
+    `${padLine}-${lineCount - 3}`,
+    `${padLine}-${lineCount - 2}`,
+    `${padLine}-${lineCount - 1}`,
+  ]);
+});
