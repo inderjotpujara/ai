@@ -559,6 +559,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 26_214_400,
     doc: 'Max HTTP request body bytes Bun.serve accepts (server/main.ts maxRequestBodySize). Over-cap requests get 413 at the runtime layer before the handler runs. Default 25 MiB — allows chat media uploads (MAX_UPLOAD_BYTES 20 MiB, server/upload.ts) plus framing overhead while bounding abuse. Env-override.',
   },
+  {
+    env: 'AGENT_WEB_TELEMETRY_MAX_BYTES',
+    kind: 'number',
+    def: 65_536,
+    doc: 'Max /api/telemetry request-body bytes, checked from Content-Length BEFORE req.json() (server/telemetry/handler.ts). The beacon is header-guard-exempt (app.ts), so cap it pre-parse. Over-limit or missing Content-Length → 413. Env-override.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in
