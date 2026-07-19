@@ -1,5 +1,7 @@
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
+import type { WorkerPool } from '../queue/pool.ts';
+import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
@@ -18,6 +20,10 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleJobCancel } from './jobs/cancel.ts';
+import { handleJobDetail } from './jobs/detail.ts';
+import { handleJobEnqueue } from './jobs/enqueue.ts';
+import { handleJobList } from './jobs/list.ts';
 import { handleMcpAdd } from './mcp/add.ts';
 import { handleMcpList } from './mcp/list.ts';
 import type { McpMountOne } from './mcp/mount-one.ts';
@@ -34,7 +40,12 @@ import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
-import { createTokenGuard, type TokenGuard } from './security/token.ts';
+import type { SessionTokenStore } from './security/session-token.ts';
+import {
+  createSessionGuard,
+  createTokenGuard,
+  type SessionGuard,
+} from './security/token.ts';
 import { handleSessionDelete } from './sessions/delete.ts';
 import { handleSessionDetail } from './sessions/detail.ts';
 import { handleSessionExport } from './sessions/export.ts';
@@ -53,7 +64,18 @@ import { handleWorkflowRun } from './workflows/run.ts';
  * wiring (chat/runs/crews/…) attaches in later phases.
  */
 export type ServerDeps = {
+  /** The injected browser bearer — a durable-backed per-device SESSION token
+   *  (deviceId `'local'`) when `sessionTokens` is wired at boot, or a legacy
+   *  raw constant for older test fixtures. Also injected into the served HTML
+   *  as `window.__AGENT_TOKEN__`. Never the root token. */
   token: string;
+  /** The SINGLE live per-device session-token store the guard verifies against
+   *  (Slice 24 Incr 5, D4). When present, `buildFetch` builds the durable
+   *  `createSessionGuard` over it; when absent (legacy fixtures that only set
+   *  `token`), it falls back to the constant-token `createTokenGuard` — the
+   *  same timing-safe guard, not a weakened one. Production/daemon boot always
+   *  wires this so revoke/rotate on this instance take effect immediately. */
+  sessionTokens?: SessionTokenStore;
   policy: OriginPolicy;
   staticDir?: string;
   recordIo: boolean;
@@ -91,6 +113,23 @@ export type ServerDeps = {
   /** The session/chat-history store chat persistence + the Sessions UI read
    *  and write through (Slice 30b Phase 6). */
   sessionStore: SessionStore;
+  /** The durable job-queue store the async-launch routes enqueue into and the
+   *  Jobs UI reads (Slice 24 Incr 3, T17). In standalone mode `startWebServer`
+   *  self-hosts it; in injected mode the daemon owns it (T27). Routes land in
+   *  T18-20. */
+  jobStore: JobStore;
+  /** The worker pool draining `jobStore` — `POST /api/jobs/:id/cancel` (T20)
+   *  fires its per-job `AbortController` for a Running job. Same standalone-
+   *  vs-injected duality as `jobStore` above. */
+  pool: WorkerPool;
+  /** Process-shared run-dir creation rate limiter (Slice 24 Incr 5, item 2):
+   *  ONE instance (`server/run-rate.ts createProcessRunLimiter`, built by
+   *  `main.ts`) gates every run-launch route (`/api/jobs`, `/api/crews/:n/run`,
+   *  `/api/workflows/:n/run`, `/api/models/pull`) so a client can't reset the
+   *  cap by hitting a different route. Absent (test fixtures that predate
+   *  this knob) — each handler's own `Deps.runLimiter` falls back to
+   *  `ALWAYS_ALLOW`, so an unset limiter never blocks. */
+  runLimiter?: { allow(): boolean };
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -106,7 +145,12 @@ export function json(body: unknown, status = 200): Response {
 export function buildFetch(
   deps: ServerDeps,
 ): (req: Request) => Promise<Response> {
-  const guard = createTokenGuard(deps.token);
+  // The durable per-device session guard when a store is wired (production /
+  // daemon boot); the legacy constant-token guard only as a fallback for test
+  // fixtures that construct ServerDeps with a raw `token` and no store.
+  const guard: SessionGuard = deps.sessionTokens
+    ? createSessionGuard(deps.sessionTokens)
+    : createTokenGuard(deps.token);
   return async (req) => {
     // Top-level backstop: ANY throw anywhere below (perimeter, static serving,
     // URL parsing, ...) degrades to a JSON 500, never crashes the process.
@@ -142,10 +186,14 @@ async function handleApi(
   req: Request,
   url: URL,
   deps: ServerDeps,
-  guard: TokenGuard,
+  guard: SessionGuard,
 ): Promise<Response> {
   return withServerRequestSpan(
-    { route: url.pathname, method: req.method },
+    {
+      route: url.pathname,
+      method: req.method,
+      principal: guard.principal(req),
+    },
     async (rec) => {
       try {
         if (url.pathname === '/api/health') {
@@ -229,11 +277,39 @@ async function handleApi(
           return handleModelList({ freeDiskBytes: deps.freeDiskBytes });
         }
         if (req.method === 'POST' && url.pathname === '/api/models/pull') {
-          rec.status(200);
-          return handleModelPull(req, {
+          const res = await handleModelPull(req, {
             runsRoot: deps.runsRoot,
-            runModelPull: deps.runModelPull,
+            jobStore: deps.jobStore,
+            runLimiter: deps.runLimiter,
           });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/jobs') {
+          const res = await handleJobEnqueue(req, deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/jobs') {
+          rec.status(200);
+          return handleJobList(new URLSearchParams(url.search), deps);
+        }
+        // Action sub-path match MUST precede the bare-:id detail match below
+        // — same stream/action-before-detail discipline as
+        // `/api/runs/:id/stream` vs `/api/runs/:id` above.
+        const cancelMatch = url.pathname.match(
+          /^\/api\/jobs\/([^/]+)\/cancel$/,
+        );
+        if (req.method === 'POST' && cancelMatch?.[1]) {
+          const res = handleJobCancel(cancelMatch[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        const jobDetail = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+        if (req.method === 'GET' && jobDetail?.[1]) {
+          const res = handleJobDetail(jobDetail[1], deps);
+          rec.status(res.status);
+          return res;
         }
         // /run sub-path matches MUST precede the bare-:name/:id detail
         // matches below — same ordering discipline as the stream-before-

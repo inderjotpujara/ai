@@ -1,124 +1,56 @@
-### Task 4: `use-reduced-motion.ts` — the `matchMedia` hook gating JS-driven motion (D3)
+## Task 4: Queue types — `JobStatus` / `JobPriority` / `JobKind` enums + `JobRecord` / `JobInput`
 
 **Files:**
-- Create: `web/src/shared/a11y/use-reduced-motion.ts`
-- Create: `web/src/shared/a11y/use-reduced-motion.test.ts`
+- Create: `src/queue/types.ts`
+- Create: `tests/queue/types.test.ts`
 
 **Interfaces:**
-- Consumes: `matchMedia` (global, already faked in `web/src/test/setup.ts`'s default `beforeEach` — this task's own tests override that default stub locally).
-- Produces: `export function useReducedMotion(): boolean`. Consumed by `DagView` (Task 5).
+- Consumes: `RunKind` (`src/contracts/enums.ts:116`) — test-only, to assert `JobKind` values are a subset.
+- Produces: the **Shared contracts** `JobStatus`, `JobPriority`, `JobKind`, `JobRecord`, `JobInput` (verbatim from the top of this plan). `JobStoreDeps = Record<string, never>` (parity seam, mirroring `SessionStoreDeps` at `src/session/store.ts:102`).
 
 - [ ] **Step 1: Write the failing test**
 
-Create `web/src/shared/a11y/use-reduced-motion.test.ts`:
+`tests/queue/types.test.ts`:
+```typescript
+import { test, expect } from 'bun:test';
+import { RunKind } from '../../src/contracts/enums.ts';
+import { JobKind, JobPriority, JobStatus } from '../../src/queue/types.ts';
 
-```ts
-import { act, renderHook } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useReducedMotion } from './use-reduced-motion.ts';
+test('JobStatus has the six lifecycle states', () => {
+  expect(Object.values(JobStatus).sort()).toEqual(
+    ['canceled', 'done', 'failed', 'interrupted', 'queued', 'running'].sort(),
+  );
+});
 
-const QUERY = '(prefers-reduced-motion: reduce)';
+test('JobPriority has two lanes', () => {
+  expect(Object.values(JobPriority)).toEqual(['high', 'normal']);
+});
 
-function stubMatchMedia(initialMatches: boolean) {
-  let changeListener: (() => void) | undefined;
-  const mql = {
-    matches: initialMatches,
-    media: QUERY,
-    addEventListener: vi.fn((event: string, cb: () => void) => {
-      if (event === 'change') changeListener = cb;
-    }),
-    removeEventListener: vi.fn(),
-  };
-  vi.stubGlobal('matchMedia', vi.fn().mockReturnValue(mql));
-  return {
-    fireChange(nextMatches: boolean) {
-      mql.matches = nextMatches;
-      changeListener?.();
-    },
-  };
-}
-
-describe('useReducedMotion (D3)', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('reads prefers-reduced-motion: true on mount', () => {
-    stubMatchMedia(true);
-    const { result } = renderHook(() => useReducedMotion());
-    expect(result.current).toBe(true);
-  });
-
-  it('defaults to false when the OS does not request reduced motion', () => {
-    stubMatchMedia(false);
-    const { result } = renderHook(() => useReducedMotion());
-    expect(result.current).toBe(false);
-  });
-
-  it('updates when the media query change event fires', () => {
-    const { fireChange } = stubMatchMedia(false);
-    const { result } = renderHook(() => useReducedMotion());
-    expect(result.current).toBe(false);
-    act(() => fireChange(true));
-    expect(result.current).toBe(true);
-  });
+test('every JobKind value is a valid RunKind value (subset invariant)', () => {
+  const runKinds = new Set<string>(Object.values(RunKind));
+  for (const k of Object.values(JobKind)) {
+    expect(runKinds.has(k)).toBe(true);
+  }
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run — verify it fails**
 
-Run: `cd web && bun run test -- a11y/use-reduced-motion.test.ts`
-Expected: FAIL — `error: Cannot find module './use-reduced-motion.ts'` (the file doesn't exist yet).
+`bun test tests/queue/types.test.ts` → FAIL (`src/queue/types.ts` does not exist).
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement `src/queue/types.ts`**
 
-Create `web/src/shared/a11y/use-reduced-motion.ts`:
+Write the three enums + `JobRecord` + `JobInput` + `JobStoreDeps` EXACTLY as in the Shared-contracts block at the top of this plan. (Copy it verbatim; do not re-derive field names or enum values.)
 
-```ts
-import { useEffect, useState } from 'react';
+- [ ] **Step 4: Run — verify it passes**
 
-const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+`bun test tests/queue/types.test.ts` → PASS (3 tests).
 
-/**
- * True when the OS/browser requests reduced motion. `tokens.css`'s
- * `@media (prefers-reduced-motion: reduce)` rule only zeroes CSS
- * animation/transition durations — it has no effect on JS-driven motion like
- * `@xyflow/react`'s imperative `fitView` pan/zoom (D3). Consumers that drive
- * their own animation read this hook instead.
- */
-export function useReducedMotion(): boolean {
-  const [reduced, setReduced] = useState<boolean>(() =>
-    typeof matchMedia === 'function'
-      ? matchMedia(REDUCED_MOTION_QUERY).matches
-      : false,
-  );
-
-  useEffect(() => {
-    if (typeof matchMedia !== 'function') return;
-    const mql = matchMedia(REDUCED_MOTION_QUERY);
-    const onChange = () => setReduced(mql.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-
-  return reduced;
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd web && bun run test -- a11y/use-reduced-motion.test.ts`
-Expected: PASS (3 tests).
-
-Run: `cd web && bun run typecheck`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-git add web/src/shared/a11y/use-reduced-motion.ts web/src/shared/a11y/use-reduced-motion.test.ts
-git commit -m "feat(a11y): matchMedia-backed useReducedMotion hook (D3)"
+bun run typecheck && bun run lint:file -- src/queue/types.ts tests/queue/types.test.ts
+git add src/queue/types.ts tests/queue/types.test.ts
+git commit -m "feat(queue): JobStatus/JobPriority/JobKind + JobRecord types (Slice 24 Incr 2)"
 ```
-
----
 

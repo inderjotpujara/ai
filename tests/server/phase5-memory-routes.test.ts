@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MemoryStore } from '../../src/memory/store.ts';
+import type { JobStore } from '../../src/queue/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
@@ -11,6 +12,7 @@ import type { RunCrewTurn } from '../../src/server/crews/run.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 import type { SessionStore } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
 
 const TOKEN = 'a'.repeat(64);
 const uploadsDir = mkdtempSync(join(tmpdir(), 'phase5-memory-uploads-'));
@@ -90,6 +92,8 @@ function deps(): ServerDeps {
     mountOne: async () => ({ outcome: 'mounted' }),
     memoryStore: fakeMemoryStore,
     sessionStore: unusedSessionStore,
+    jobStore: {} as unknown as JobStore,
+    pool: makeFakePool(),
   };
 }
 

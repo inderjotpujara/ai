@@ -48,6 +48,30 @@ describe('buildHttpTransportConfig', () => {
     expect(transport.headers).toEqual({ Authorization: 'Bearer static-pat' });
     expect(transport.authProvider).toBeUndefined();
   });
+
+  it('locks the redirect:"error" SSRF guard explicitly (never "follow") — Slice 24 Incr 5 item 14', async () => {
+    const transport = buildHttpTransportConfig({
+      type: 'http',
+      url: 'https://example.test/mcp',
+    });
+    expect(transport.redirect).toBe('error');
+    // The wired `fetch` also rejects a redirect itself (defense-in-depth,
+    // independent of the SDK's own `redirect: 'error'` handling above).
+    const fake = async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://169.254.169.254/' },
+      });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fake as unknown as typeof fetch;
+    try {
+      await expect(
+        transport.fetch('https://example.test/mcp'),
+      ).rejects.toThrow();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 /** Fake `LiveOAuthClientProvider` — adds `waitForRedirect` on top of the

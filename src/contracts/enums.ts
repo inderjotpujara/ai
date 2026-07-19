@@ -4,9 +4,13 @@
  * discriminated unions elsewhere take their discriminant from `StatusEventType`.
  */
 
-/** Run provenance (reserved; Slice 25 sets the non-`manual` values). */
+/** Run provenance (reserved; Slice 25 sets the remaining non-`manual` values).
+ *  `Daemon` (Slice 24 Incr 3, item 17) marks a run dispatched through the
+ *  queue/daemon worker pool, distinguishing it from a directly-launched
+ *  (`Manual`) run in the same runs list/detail view. */
 export enum RunOrigin {
   Manual = 'manual',
+  Daemon = 'daemon',
   Schedule = 'schedule',
   Webhook = 'webhook',
   Api = 'api',
@@ -209,4 +213,31 @@ export enum BuilderKind {
 export enum CaptureSource {
   Mic = 'mic',
   File = 'file',
+}
+
+/** Wire mirror of `src/queue/types.ts` JobStatus (isomorphic — no engine
+ *  import). `tests/contracts/job-kind-parity.test.ts` guards value parity,
+ *  same precedent as the `RuntimeKind` mirror above. Slice 24. */
+export enum JobStatusWire {
+  Queued = 'queued',
+  Running = 'running',
+  Done = 'done',
+  Failed = 'failed',
+  Interrupted = 'interrupted',
+  Canceled = 'canceled',
+}
+
+/** Wire mirror of `src/queue/types.ts` JobPriority. Slice 24. */
+export enum JobPriorityWire {
+  High = 'high',
+  Normal = 'normal',
+}
+
+/** Wire mirror of `src/queue/types.ts` JobKind. Slice 24. */
+export enum JobKindWire {
+  Chat = 'chat',
+  Crew = 'crew',
+  Workflow = 'workflow',
+  Pull = 'pull',
+  Build = 'build',
 }

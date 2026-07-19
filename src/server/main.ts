@@ -1,18 +1,25 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { getCrew } from '../../crews/index.ts';
+import { getWorkflow } from '../../workflows/index.ts';
 import { loadConfig } from '../config/schema.ts';
 import { RuntimeKind } from '../core/types.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
 import { createMemoryStore } from '../memory/store.ts';
+import { onShutdown } from '../process/lifecycle.ts';
 import { freeDiskBytes } from '../provisioning/cli-deps.ts';
+import { computeConcurrency } from '../queue/concurrency.ts';
+import { createWorkerPool, type WorkerPool } from '../queue/pool.ts';
+import { createJobStore, type JobStore } from '../queue/store.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { createSessionStore } from '../session/store.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
-import { createConsentRegistry } from './consent/registry.ts';
+import { createDurableConsentRegistry } from './consent/durable-registry.ts';
+import { createJobDispatch } from './jobs/dispatch.ts';
 import {
   createRealRunBuilderTurn,
   createRealRunCrewTurn,
@@ -21,7 +28,16 @@ import {
 } from './launch-turns.ts';
 import { createRealMcpMountOne } from './mcp/mount-one.ts';
 import { createMcpMountStatus } from './mcp/mount-status.ts';
-import { mintSessionToken } from './security/token.ts';
+import { createProcessRunLimiter } from './run-rate.ts';
+import {
+  createRootTokenStore,
+  defaultRootTokenPath,
+} from './security/root-token.ts';
+import {
+  createSessionTokenStore,
+  defaultRevocationPath,
+  type SessionTokenStore,
+} from './security/session-token.ts';
 
 // The built web/ SPA (`cd web && bun run build`) lands at web/dist/, two
 // directories up from this file (src/server/ -> src/ -> repo root).
@@ -117,10 +133,44 @@ export function renderIndexHtml(
 
 export type StartOptions = {
   port?: number;
+  /** Hostname/interface Bun.serve binds (Slice 24 Incr 5, item 5). Defaults to
+   *  `AGENT_WEB_BIND` (127.0.0.1, loopback-only — no implicit 0.0.0.0). The
+   *  Tailscale tunnel recipe overrides this to the 100.x tailnet interface. */
+  bind?: string;
   allowedOrigins?: string[];
+  /** Extra Host-header hostnames allowed past the DNS-rebinding Host check
+   *  beyond loopback (Slice 24 Incr 5, item 5/12/13). Defaults to the bind
+   *  interface + `AGENT_WEB_ALLOWED_HOSTS` (the tunnel host). Empty =
+   *  loopback-only (default-safe). */
+  allowedHosts?: string[];
   recordIo?: boolean;
   staticDir?: string;
+  /** LEGACY escape hatch: a raw constant bearer. When set, the durable
+   *  root→session auth is bypassed and the server uses the constant-token
+   *  guard. Production/daemon boot never sets it (durable auth is built below);
+   *  it exists only for narrow fixtures that still want a fixed token. */
   token?: string;
+  /** Path of the durable daemon root token (security/root-token.ts). Defaults
+   *  to `~/.agent/daemon-token`; overridable so tests stay hermetic. */
+  rootTokenPath?: string;
+  /** Path of the per-device revocation set (security/session-token.ts).
+   *  Defaults to `~/.agent/revoked-devices.json`; overridable for tests. */
+  sessionRevocationPath?: string;
+  /** TTL (ms) of the local-browser session token. Defaults to
+   *  `AGENT_WEB_SESSION_TTL_MS`. */
+  sessionTtlMs?: number;
+  /** Inject a pre-built session-token store (e.g. the daemon's single live
+   *  instance, so revoke/rotate operate on the SAME store the guard verifies).
+   *  Absent = build one from the root store below. */
+  sessionTokens?: SessionTokenStore;
+  /** Injected, pre-reconciled queue owned by the caller (the daemon, T27). When
+   *  present, startWebServer does NOT construct or start/stop a pool — the
+   *  caller already ran reconcileOrphans() then pool.start() in the correct
+   *  §7.3 order and owns the drain. Absent = standalone: startWebServer
+   *  self-hosts one pool (`bun run web` / all-in-one tests). Running a second
+   *  pool on the same AGENT_QUEUE_PATH DB would double concurrency and bypass
+   *  the reconcile-before-claim guarantee — the bug this dual mode closes. */
+  queue?: { jobStore: JobStore; pool: WorkerPool };
 };
 
 /** Boot the local web BFF. Returns the server handle for tests/shutdown. */
@@ -128,6 +178,8 @@ export function startWebServer(opts: StartOptions = {}): {
   server: ReturnType<typeof Bun.serve>;
   token: string;
   port: number;
+  jobStore: JobStore;
+  pool: WorkerPool;
 } {
   const cfg = loadConfig().values;
   const port = opts.port ?? (cfg.AGENT_WEB_PORT as number);
@@ -137,11 +189,61 @@ export function startWebServer(opts: StartOptions = {}): {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+  // The interface Bun.serve binds; also always allowed as a Host so a request
+  // to the bound interface (e.g. a 100.x tailnet IP) passes the perimeter.
+  const bind = opts.bind ?? String(cfg.AGENT_WEB_BIND);
+  // Extra Host-header hosts past the loopback DNS-rebinding check (item 5/12/13):
+  // the bind interface + the configured tunnel host(s). Empty (default) keeps
+  // today's localhost-only perimeter — remote reach is an explicit opt-in.
+  const allowedHosts =
+    opts.allowedHosts ??
+    [bind, ...String(cfg.AGENT_WEB_ALLOWED_HOSTS).split(',')]
+      .map((s) => s.trim())
+      .filter(Boolean);
   const recordIo = opts.recordIo ?? (cfg.AGENT_WEB_RECORD_IO as boolean);
-  const token = opts.token ?? mintSessionToken();
 
-  const policy = { port, allowedOrigins };
-  const runsRoot = 'runs';
+  // Durable auth (Slice 24 Incr 5, D4): ONE root + ONE live session-token store
+  // per server. The root is minted-once + persisted (~/.agent/daemon-token), so
+  // auth survives restarts; a reconnecting device stays authorized without a
+  // re-pair. The session store is the SINGLE instance the guard verifies
+  // against, so an in-process revoke/rotate takes effect immediately (nit #2).
+  // For the localhost browser we mint a SESSION token for the `'local'` device
+  // (short TTL) and inject THAT as window.__AGENT_TOKEN__ — the root NEVER
+  // leaves the server (nit #6). `opts.token` is a legacy bypass only.
+  let sessionTokens: SessionTokenStore | undefined;
+  let token: string;
+  if (opts.token !== undefined) {
+    token = opts.token; // legacy constant-token fixture path
+  } else if (opts.sessionTokens) {
+    sessionTokens = opts.sessionTokens; // caller (daemon) owns the live store
+    token = sessionTokens.mintSessionToken({
+      deviceId: 'local',
+      ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
+    });
+  } else {
+    const rootStore = createRootTokenStore({
+      path: opts.rootTokenPath ?? defaultRootTokenPath(),
+    });
+    sessionTokens = createSessionTokenStore({
+      path: opts.sessionRevocationPath ?? defaultRevocationPath(),
+      rootToken: rootStore.getOrCreateRoot(),
+    });
+    token = sessionTokens.mintSessionToken({
+      deviceId: 'local',
+      ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
+    });
+  }
+
+  const policy = { port, allowedOrigins, allowedHosts };
+  // Honor AGENT_RUNS_ROOT (same expression as the CLI runs/usage/archive
+  // readers, src/cli/{runs,usage,archive}.ts) so the server writer and those
+  // readers agree — never hardcode the path (repo no-hardcode rule).
+  const runsRoot = process.env.AGENT_RUNS_ROOT ?? 'runs';
+  // ONE process-shared limiter (Slice 24 Incr 5, item 2): gates run-dir
+  // creation across ALL FOUR run-launch routes (jobs/crews/workflows/pull) so
+  // a client (now potentially remote) can't spam createRun — see
+  // server/run-rate.ts. Built once here so the routes share one window/count.
+  const runLimiter = createProcessRunLimiter();
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
@@ -149,7 +251,13 @@ export function startWebServer(opts: StartOptions = {}): {
   const mcpConfigPath = defaultConfigPath();
   const mcpMountStatus = createMcpMountStatus();
   const mountOne = createRealMcpMountOne();
-  const consent = createConsentRegistry();
+  // Durable consent (Task 42): pending approval prompts persist under the runs
+  // root (OUTSIDE any per-run dir, like `_uploads` below) so a prompt awaiting
+  // an answer survives a daemon restart — `POST /api/runs/:id/respond` can still
+  // resolve it after a crash+restart, instead of it being lost with the process.
+  const consent = createDurableConsentRegistry({
+    path: join(runsRoot, '_consent', 'consent.json'),
+  });
   // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
   // across the per-request `/api/chat` run lifecycle since the upload and
   // the chat turn that references it are two separate HTTP requests.
@@ -201,6 +309,43 @@ export function startWebServer(opts: StartOptions = {}): {
     createLazyEngine(runsRoot),
     memoryStore,
   );
+  // §7.3 double-pool fix (T17 C1 seam): inject the caller's reconciled queue
+  // when given; otherwise self-host one. NEVER run two pools on the same
+  // AGENT_QUEUE_PATH DB. In injected mode the daemon (T27) already ran
+  // reconcileOrphans() -> pool.start() in order and owns stop()/close(), so we
+  // must NOT start/stop/close here. In standalone mode we own the full
+  // lifecycle: construct, start, and tear down on shutdown.
+  const injected = opts.queue;
+  const jobStore =
+    injected?.jobStore ??
+    createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
+  let pool: WorkerPool;
+  if (injected) {
+    // Caller (daemon) owns lifecycle: do NOT start/stop or close here.
+    pool = injected.pool;
+  } else {
+    const dispatch = createJobDispatch({
+      runCrewTurn,
+      getCrew,
+      runWorkflowTurn,
+      getWorkflow,
+      runModelPull,
+      runChatTurn,
+      runBuilderTurn,
+      runsRoot,
+    });
+    pool = createWorkerPool({
+      store: jobStore,
+      concurrency: computeConcurrency(),
+      dispatch,
+      pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
+    });
+    pool.start();
+    onShutdown(async () => {
+      await pool.stop();
+      jobStore.close();
+    });
+  }
   // Serve the real built app when it exists (`cd web && bun run build`);
   // fall back to the Phase-1 stub otherwise (unbuilt/Ollama-free dev + tests).
   const distIndexHtml = readWebDistIndexHtml();
@@ -209,6 +354,7 @@ export function startWebServer(opts: StartOptions = {}): {
 
   const deps: ServerDeps = {
     token,
+    sessionTokens,
     policy,
     recordIo,
     staticDir,
@@ -238,9 +384,28 @@ export function startWebServer(opts: StartOptions = {}): {
     mountOne,
     memoryStore,
     sessionStore,
+    jobStore,
+    pool,
+    runLimiter,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
-  const server = Bun.serve({ port, fetch: buildFetch(deps), idleTimeout: 0 });
+  // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB
+  // process-wide; tighten it via config so an over-cap body is rejected with
+  // 413 at the runtime layer, before the fetch handler (and any parsing) ever
+  // runs. The per-route upload cap (MAX_UPLOAD_BYTES, upload.ts) is unchanged
+  // and stricter still — this is the outer, global backstop.
+  // hostname (Slice 24 Incr 5, item 5): with no hostname, Bun.serve binds the
+  // implicit 0.0.0.0 (all interfaces) — "localhost is not a trust boundary".
+  // Thread the configured bind address through instead, defaulting to
+  // AGENT_WEB_BIND (127.0.0.1, loopback-only); the Tailscale tunnel recipe
+  // opts in to a wider interface explicitly via `opts.bind`/the env override.
+  const server = Bun.serve({
+    port,
+    hostname: bind,
+    fetch: buildFetch(deps),
+    idleTimeout: 0,
+    maxRequestBodySize: cfg.AGENT_WEB_MAX_BODY_BYTES as number,
+  });
   // .port is `number | undefined` under the installed bun-types; guard with a
   // real runtime check (never `!` or a cast) before reconciling the ephemeral
   // port (port: 0) back into the perimeter policy and the return value.
@@ -249,7 +414,7 @@ export function startWebServer(opts: StartOptions = {}): {
     throw new Error('Bun.serve() did not report a bound port');
   }
   policy.port = boundPort; // reconcile when port === 0 (ephemeral)
-  return { server, token, port: boundPort };
+  return { server, token, port: boundPort, jobStore, pool };
 }
 
 if (import.meta.main) {

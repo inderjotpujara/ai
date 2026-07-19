@@ -10,6 +10,7 @@ import {
 test('RunOrigin carries the reserved provenance values', () => {
   expect(Object.values(RunOrigin) as string[]).toEqual([
     'manual',
+    'daemon',
     'schedule',
     'webhook',
     'api',

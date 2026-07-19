@@ -1,178 +1,123 @@
-### Task 9: `stt.worker.ts` — `transcribeInterim` response variant + `TextStreamer` callback in `transcribe()`
+## Task 9: `listJobs` — keyset page + status filter
 
 **Files:**
-- Modify: `web/src/features/voice/stt.worker.ts` (`SttWorkerResponse` union lines 35–40; `transcribe()` lines 162–175; `self.onmessage`'s `transcribe` branch lines 202–211; header comment lines 1–13)
-- Test: `web/src/features/voice/stt.worker.test.ts` (append)
+- Modify: `src/queue/store.ts`
+- Create: `tests/queue/store-list.test.ts`
 
 **Interfaces:**
-- Consumes: `TextStreamer` from `@huggingface/transformers` (verified export — `transformers.js:45` does `export * from './generation/streamers.js'`; constructor `new TextStreamer(tokenizer: PreTrainedTokenizer, { skip_prompt?: boolean; skip_special_tokens?: boolean; callback_function?: (text: string) => void })` — `callback_function` receives only the newly-finalized **delta** substring per call, per `streamers.js`'s `on_finalized_text`, NOT the full accumulated text); `asrProcessor.tokenizer` (a `Processor` getter, typed `PreTrainedTokenizer | undefined`); `asrModel.generate({ ...inputs, max_new_tokens: 256, streamer })` (verified `streamer` is a real generate-option — `modeling_utils.js:842` destructures `streamer = null` and calls `streamer.put(...)`/`streamer.end()` during generation, lines 944–945/1013–1014/1030–1031).
-- Produces: new `SttWorkerResponse` variant `{ kind: 'transcribeInterim'; id: number; text: string }` — `text` is always the **full accumulated** interim string so far (not a delta), so every consumer downstream can treat each message as a monotonic **replace** (spec §7.1 (b)) instead of an append. Also produces an exported pure helper `createInterimAccumulator(): { push(chunk: string): string }`, isolated and unit-tested the same way `detectWebGpuDevice` already is in this file (real model/generate behavior stays live-verify-only, per the file's own header comment).
+- Consumes: Task 6 store + `encodeJobCursor`/`decodeJobCursor`.
+- Produces: `listJobs({ status?, cursor?, limit }): { items: JobRecord[]; nextCursor?: string; total: number }` — newest-first (`created_at DESC, id ASC`), optional `status` filter, base64url keyset cursor, fetch-one-extra to detect `nextCursor`, malformed cursor treated as page 1 (mirrors `listSessions`, `src/session/store.ts:218`).
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `web/src/features/voice/stt.worker.test.ts`:
+`tests/queue/store-list.test.ts`:
+```typescript
+import { test, expect } from 'bun:test';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createJobStore } from '../../src/queue/store.ts';
+import { JobKind, JobStatus } from '../../src/queue/types.ts';
 
-```ts
-import { createInterimAccumulator, detectWebGpuDevice } from './stt.worker.ts';
-```
+async function seed(n: number) {
+  const store = createJobStore({ path: mkdtempSync(join(tmpdir(), 'jobs-')) }, {});
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) {
+    ids.push(store.enqueue({ kind: JobKind.Crew, payload: i }).id);
+    await Bun.sleep(1);
+  }
+  return { store, ids };
+}
 
-(replace the existing single-symbol import line with the two-symbol one above), then append a new `describe` block at the bottom of the file:
+test('listJobs pages newest-first with a working keyset cursor', async () => {
+  const { store, ids } = await seed(5);
+  const p1 = store.listJobs({ limit: 2 });
+  expect(p1.items.map((j) => j.id)).toEqual([ids[4], ids[3]]);
+  expect(p1.total).toBe(5);
+  expect(p1.nextCursor).toBeDefined();
+  const p2 = store.listJobs({ limit: 2, cursor: p1.nextCursor });
+  expect(p2.items.map((j) => j.id)).toEqual([ids[2], ids[1]]);
+  const p3 = store.listJobs({ limit: 2, cursor: p2.nextCursor });
+  expect(p3.items.map((j) => j.id)).toEqual([ids[0]]);
+  expect(p3.nextCursor).toBeUndefined();
+  store.close();
+});
 
-```ts
-// The pure accumulation logic behind the new `transcribeInterim` response
-// variant (D6) — isolated exactly like `detectWebGpuDevice` above, because
-// `TextStreamer`'s `callback_function` only ever hands back the newly
-// finalized DELTA substring per call (see `streamers.js`'s
-// `on_finalized_text`); everything downstream of a real streamer wired to a
-// real `generate()` call is live-verify-only, same as the rest of this file.
-describe('createInterimAccumulator', () => {
-  it('accumulates incremental TextStreamer chunks into the full running text (never a delta)', () => {
-    const acc = createInterimAccumulator();
-    expect(acc.push('Hello ')).toBe('Hello ');
-    expect(acc.push('world')).toBe('Hello world');
-    expect(acc.push('!')).toBe('Hello world!');
-  });
+test('listJobs filters by status', async () => {
+  const { store } = await seed(3);
+  store.claimNext();
+  store.markDone(store.claimNext()!.id, null);
+  const running = store.listJobs({ status: JobStatus.Running, limit: 10 });
+  expect(running.items.every((j) => j.status === JobStatus.Running)).toBe(true);
+  const done = store.listJobs({ status: JobStatus.Done, limit: 10 });
+  expect(done.items).toHaveLength(1);
+  store.close();
+});
 
-  it('starts empty and handles an immediate empty-string chunk without changing the running text', () => {
-    const acc = createInterimAccumulator();
-    expect(acc.push('')).toBe('');
-    expect(acc.push('ok')).toBe('ok');
-  });
+test('a malformed cursor degrades to page 1', async () => {
+  const { store, ids } = await seed(2);
+  const page = store.listJobs({ limit: 10, cursor: 'not-base64-!!' });
+  expect(page.items.map((j) => j.id)).toEqual([ids[1], ids[0]]);
+  store.close();
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run — verify it fails**
 
-Run: `cd web && bun run test -- features/voice/stt.worker.test.ts`
-Expected: FAIL — `createInterimAccumulator` is not exported from `./stt.worker.ts`.
+`bun test tests/queue/store-list.test.ts` → FAIL.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement `listJobs`**
 
-In `web/src/features/voice/stt.worker.ts`, update the import line (add `TextStreamer`):
+```typescript
+  function listJobs(q: {
+    status?: JobStatus;
+    cursor?: string;
+    limit: number;
+  }): { items: JobRecord[]; nextCursor?: string; total: number } {
+    const statusClause = q.status ? 'AND status = ?' : '';
+    const statusArgs: (string | number)[] = q.status ? [q.status] : [];
 
-```ts
-import {
-  AutoModel,
-  AutoProcessor,
-  env,
-  type PreTrainedModel,
-  type PretrainedConfig,
-  type Processor,
-  type ProgressInfo,
-  Tensor,
-  TextStreamer,
-} from '@huggingface/transformers';
-```
+    const totalRow = db
+      .query(`SELECT COUNT(*) as n FROM jobs WHERE 1 = 1 ${statusClause}`)
+      .get(...statusArgs) as { n: number };
 
-Add the new response variant to `SttWorkerResponse` (lines 35–40):
+    const cursor = q.cursor ? decodeJobCursor(q.cursor) : undefined;
+    const cursorClause = cursor
+      ? 'AND (created_at < ? OR (created_at = ? AND id > ?))'
+      : '';
+    const cursorArgs: (string | number)[] = cursor
+      ? [cursor.createdAt, cursor.createdAt, cursor.id]
+      : [];
 
-```ts
-export type SttWorkerResponse =
-  | { kind: 'progress'; loaded: number; total: number }
-  | { kind: 'ready' }
-  | { kind: 'detectSpeechResult'; id: number; isSpeech: boolean }
-  | { kind: 'transcribeInterim'; id: number; text: string }
-  | { kind: 'transcribeResult'; id: number; text: string }
-  | { kind: 'error'; id?: number; message: string };
-```
+    const rows = db
+      .query(
+        `SELECT * FROM jobs WHERE 1 = 1 ${statusClause} ${cursorClause}
+         ORDER BY created_at DESC, id ASC LIMIT ?`,
+      )
+      .all(...statusArgs, ...cursorArgs, q.limit + 1) as JobRowRaw[];
 
-Add the pure accumulator (place just above `transcribe()`, near the other small pure helpers):
-
-```ts
-/** Pure accumulation for `TextStreamer`'s incremental `callback_function`
- * calls — each call hands back only the newly finalized DELTA substring
- * since the last call (see `@huggingface/transformers`'s
- * `TextStreamer.on_finalized_text`). Returning the FULL running text on
- * every `push()` is what lets `use-voice-input.ts` treat every
- * `transcribeInterim` message as a monotonic REPLACE of its displayed
- * interim text (spec §7.1 (b)), never an append. Isolated and unit-tested
- * the same way `detectWebGpuDevice` above is — everything downstream (a real
- * streamer wired to a real `generate()` call) is live-verify-only. */
-export function createInterimAccumulator(): { push(chunk: string): string } {
-  let text = '';
-  return {
-    push(chunk: string): string {
-      text += chunk;
-      return text;
-    },
-  };
-}
-```
-
-Replace `transcribe()` (lines 162–175):
-
-```ts
-async function transcribe(samples: Float32Array, id: number): Promise<string> {
-  const tokenizer = asrProcessor?.tokenizer;
-  if (!asrModel || !asrProcessor || !tokenizer) {
-    throw new Error('ASR model not loaded — call load() first');
-  }
-  const inputs = await asrProcessor(samples);
-  const accumulator = createInterimAccumulator();
-  // D6: emits `transcribeInterim` as Moonshine decodes the already-captured
-  // buffer — progressive reveal AFTER capture, never real-time-during-speech
-  // (spec D6/§9). `skip_prompt` drops the encoder-decoder's initial
-  // decoder-start token from the stream (it is not user-meaningful text).
-  const streamer = new TextStreamer(tokenizer, {
-    skip_prompt: true,
-    skip_special_tokens: true,
-    callback_function: (chunk: string) => {
-      post({ kind: 'transcribeInterim', id, text: accumulator.push(chunk) });
-    },
-  });
-  const output = (await asrModel.generate({
-    ...inputs,
-    max_new_tokens: 256,
-    streamer,
-  })) as Tensor;
-  const [text] = asrProcessor.batch_decode(output, {
-    skip_special_tokens: true,
-  });
-  return text ?? '';
-}
-```
-
-Update the `transcribe` branch of `self.onmessage` (lines 202–211) to pass `msg.id` through:
-
-```ts
-  if (msg.kind === 'transcribe') {
-    transcribe(msg.samples, msg.id)
-      .then((text) => post({ kind: 'transcribeResult', id: msg.id, text }))
-      .catch((err: unknown) => {
-        post({
-          kind: 'error',
-          id: msg.id,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      });
+    const hasMore = rows.length > q.limit;
+    const page = rows.slice(0, q.limit);
+    const items = page.map(toJobRecord);
+    const lastRaw = page[page.length - 1];
+    const nextCursor =
+      hasMore && lastRaw
+        ? encodeJobCursor(lastRaw.created_at, lastRaw.id)
+        : undefined;
+    return { items, nextCursor, total: totalRow.n };
   }
 ```
+Add `listJobs,` to the returned object.
 
-Update the file's header comment (lines 1–13) — append one clause to the existing sentence about what's unit-tested:
+- [ ] **Step 4: Run — verify it passes**
 
-```
- * ... The one piece of pure logic worth isolating — WebGPU device detection,
- * and (Phase 8, D6) the TextStreamer callback-accumulation logic — IS
- * exported and unit tested here (see stt.worker.test.ts); everything past
- * that boundary (actual model load/inference, including the real streamer
- * wired to a real generate() call) is validated at live-verify, not by an
- * automated test.
-```
+`bun test tests/queue/store-list.test.ts` → PASS (3 tests).
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd web && bun run test -- features/voice/stt.worker.test.ts`
-Expected: PASS (6 tests: 4 pre-existing `detectWebGpuDevice` + 2 new `createInterimAccumulator`).
-
-Run: `cd web && bun run typecheck`
-Expected: PASS (confirms `tokenizer` narrowing via the local `const tokenizer = asrProcessor?.tokenizer;` guard, and the `streamer` option compiles against `generate()`'s real signature).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-git add web/src/features/voice/stt.worker.ts web/src/features/voice/stt.worker.test.ts
-git commit -m "feat(voice): stream transcribeInterim via a TextStreamer callback in stt.worker.ts (D6)"
+bun run typecheck && bun run lint:file -- src/queue/store.ts tests/queue/store-list.test.ts
+git add src/queue/store.ts tests/queue/store-list.test.ts
+git commit -m "feat(queue): listJobs keyset page + status filter (Slice 24 Incr 2)"
 ```
-
----
 

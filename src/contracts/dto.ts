@@ -4,6 +4,9 @@ import {
   ChatRole,
   CrewProcess,
   DegradeKind,
+  JobKindWire,
+  JobPriorityWire,
+  JobStatusWire,
   McpAuthKind,
   McpServerStatus,
   McpTransportKind,
@@ -120,6 +123,28 @@ export const RunListItemDtoSchema = z.object({
   tokens: TokensSchema,
 });
 export type RunListItemDTO = z.infer<typeof RunListItemDtoSchema>;
+
+/** One queued job's durable record on the wire — projects `JobRecord`
+ *  (`src/queue/types.ts`) with the wire enums. `payload`/`result` are opaque
+ *  JSON (`unknown`); the optional epoch-ms + `runId`/`error` fields are
+ *  populated as the job advances through its lifecycle. Slice 24 Incr 3. */
+export const JobDtoSchema = z.object({
+  id: z.string(),
+  kind: z.enum(JobKindWire),
+  payload: z.unknown(),
+  priority: z.enum(JobPriorityWire),
+  status: z.enum(JobStatusWire),
+  attempts: z.number(),
+  maxAttempts: z.number(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  startedAt: z.number().optional(),
+  finishedAt: z.number().optional(),
+  runId: z.string().optional(),
+  result: z.unknown().optional(),
+  error: z.string().optional(),
+});
+export type JobDTO = z.infer<typeof JobDtoSchema>;
 
 export const ChatMessageDtoSchema = z.object({
   id: z.string(),

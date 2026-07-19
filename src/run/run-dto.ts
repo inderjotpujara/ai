@@ -133,6 +133,23 @@ function runRootSummary(tree: TraceNode[]): RunRootSummary {
   };
 }
 
+const RUN_ORIGIN_VALUES = new Set<string>(Object.values(RunOrigin));
+
+/** Read a run's provenance marker (`runs/<id>/origin`, plain text, written by
+ *  `server/jobs/dispatch.ts` for a daemon/queue-dispatched job). Missing file,
+ *  empty content, or an unrecognized value all fall back to `RunOrigin.Manual`
+ *  — a directly-launched run never gets one written, and an unknown/corrupt
+ *  marker should degrade rather than surface a bogus origin. */
+export async function readRunOrigin(runDir: string): Promise<RunOrigin> {
+  let raw: string;
+  try {
+    raw = (await readFile(join(runDir, 'origin'), 'utf8')).trim();
+  } catch {
+    return RunOrigin.Manual;
+  }
+  return RUN_ORIGIN_VALUES.has(raw) ? (raw as RunOrigin) : RunOrigin.Manual;
+}
+
 /** Read degradation.jsonl (one DegradeEvent per line) → DegradeDTO[]. Missing → []. */
 export async function readDegrades(runDir: string): Promise<DegradeDTO[]> {
   let raw: string;
@@ -290,11 +307,12 @@ export async function mapRunToDto(
   const outcome = earlyFailed ? 'error' : rootOutcome;
 
   const degrades = await readDegrades(runDir);
+  const origin = await readRunOrigin(runDir);
 
   const dto: RunDTO = {
     id,
     owner: 'local',
-    origin: RunOrigin.Manual,
+    origin,
     kind: deriveRunKind(tree.map((n) => n.span.name)),
     lifecycle,
     startMs,
@@ -333,14 +351,14 @@ async function hasErrorArtifact(runDir: string): Promise<boolean> {
  *  `mapRunToDto` rescues it in detail, so list and detail would disagree
  *  (visible ⇔ invisible) for the same run. Mirrors mapRunToDto's projection for
  *  this case (deriveRunKind([]) === Chat, no spans/models/tokens). */
-function earlyFailedListItem(id: string): RunListItemDTO {
+function earlyFailedListItem(id: string, origin: RunOrigin): RunListItemDTO {
   return RunListItemDtoSchema.parse({
     id,
     startMs: 0,
     durationMs: 0,
     outcome: 'error',
     lifecycle: RunLifecycle.Failed,
-    origin: RunOrigin.Manual,
+    origin,
     kind: deriveRunKind([]),
     models: [],
     degraded: false,
@@ -390,7 +408,9 @@ export async function summarizeRunListItem(
     // error.json before any span ever flushed. mapRunToDto rescues that as a
     // Failed run; the list must too, or the run is invisible here while the
     // detail view shows it (list/detail divergence).
-    if (await hasErrorArtifact(runDir)) return earlyFailedListItem(id);
+    if (await hasErrorArtifact(runDir)) {
+      return earlyFailedListItem(id, await readRunOrigin(runDir));
+    }
     return undefined; // genuinely not a started/completed run
   }
   const cached = summaryCache.get(runDir);
@@ -449,13 +469,14 @@ export async function summarizeRunListItem(
     if (s.events.some((e) => e.name === 'reliability.degrade')) degraded = true;
   }
 
+  const origin = await readRunOrigin(runDir);
   const item = RunListItemDtoSchema.parse({
     id,
     startMs,
     durationMs,
     outcome,
     lifecycle,
-    origin: RunOrigin.Manual,
+    origin,
     kind: deriveRunKind(tree.map((n) => n.span.name)),
     models: [...models],
     degraded,

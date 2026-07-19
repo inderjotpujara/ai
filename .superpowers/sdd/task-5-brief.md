@@ -1,136 +1,109 @@
-### Task 5: Gate `DagView`'s `fitView` animation via `useReducedMotion` (D3)
+## Task 5: Jobs migration — `'init-jobs'`
 
 **Files:**
-- Modify: `web/src/shared/dag/dag-view.tsx` (import the hook; add `fitViewOptions` to the `<ReactFlow>` element at line 138)
-- Create: `web/src/shared/dag/dag-view.reduced-motion.test.tsx` (a separate file from the existing `dag-view.test.tsx` — mocks `@xyflow/react`'s `ReactFlow` export to capture props, which the existing full-render tests must NOT be affected by)
+- Create: `src/queue/migrations.ts`
+- Create: `tests/queue/migrations.test.ts`
 
 **Interfaces:**
-- Consumes: `useReducedMotion` (Task 4).
-- Produces: no change to `DagView`'s public props (`model`/`statusById`/`onNodeClick` unchanged) — internal only: `<ReactFlow fitViewOptions={{ duration: reducedMotion ? 0 : 200 }}>`.
+- Consumes: `Migration` (`src/db/migrate.ts:3`), `migrate` (`src/db/migrate.ts:6`), `Database` (`bun:sqlite`).
+- Produces: `JOB_MIGRATIONS: Migration[]` — one migration `'init-jobs'` creating the `jobs` table + a claim index. Mirrors `SESSION_MIGRATIONS` (`src/session/migrations.ts:18`).
 
 - [ ] **Step 1: Write the failing test**
 
-Create `web/src/shared/dag/dag-view.reduced-motion.test.tsx`:
+`tests/queue/migrations.test.ts`:
+```typescript
+import { test, expect } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { migrate } from '../../src/db/migrate.ts';
+import { JOB_MIGRATIONS } from '../../src/queue/migrations.ts';
 
-```tsx
-import { StepKind } from '@contracts';
-import { render } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+test('init-jobs creates the jobs table with the JobRecord columns', () => {
+  const db = new Database(':memory:');
+  const version = migrate(db, JOB_MIGRATIONS);
+  expect(version).toBe(1);
+  const cols = (
+    db.query('PRAGMA table_info(jobs)').all() as { name: string }[]
+  ).map((c) => c.name);
+  expect(cols).toEqual([
+    'id', 'kind', 'payload', 'priority', 'status', 'attempts', 'max_attempts',
+    'created_at', 'updated_at', 'started_at', 'finished_at', 'available_at',
+    'run_id', 'result', 'error',
+  ]);
+});
 
-let lastProps: Record<string, unknown> | undefined;
+test('init-jobs is idempotent (re-migrate is a no-op)', () => {
+  const db = new Database(':memory:');
+  migrate(db, JOB_MIGRATIONS);
+  expect(migrate(db, JOB_MIGRATIONS)).toBe(1);
+});
+```
 
-vi.mock('@xyflow/react', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@xyflow/react')>();
-  return {
-    ...actual,
-    ReactFlow: (props: Record<string, unknown>) => {
-      lastProps = props;
-      return <div data-testid="mock-reactflow" />;
+- [ ] **Step 2: Run — verify it fails**
+
+`bun test tests/queue/migrations.test.ts` → FAIL (module missing).
+
+- [ ] **Step 3: Implement `src/queue/migrations.ts`**
+
+```typescript
+import type { Database } from 'bun:sqlite';
+import type { Migration } from '../db/migrate.ts';
+
+/**
+ * One migration for `jobs.db`: the durable task queue (spec D6). Mirrors
+ * `src/session/migrations.ts`'s shape. `payload`/`result` are JSON TEXT.
+ * `status`/`kind`/`priority` are TEXT holding the enum VALUES. The composite
+ * index backs `claimNext`'s priority-then-FIFO scan (High before Normal, then
+ * oldest created_at first) over Queued rows only.
+ */
+export const JOB_MIGRATIONS: Migration[] = [
+  {
+    name: 'init-jobs',
+    up: (db: Database) => {
+      db.run(`CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'normal',
+        status TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER,
+        available_at INTEGER NOT NULL DEFAULT 0,
+        run_id TEXT,
+        result TEXT,
+        error TEXT
+      )`);
+      // `available_at` is the epoch-ms floor before which a Queued row is NOT
+      // claimable (0 = immediately). Retry backoff (markFailed, Task 8) sets it
+      // forward so claimNext (Task 7) actually spaces re-claims under
+      // concurrency — the delay is enforced durably in the DB, not by a worker
+      // sleeping on a held slot.
+      // Claim scan: filter status='queued' AND available_at<=now, order
+      // High-priority first then oldest created_at. Priority is stored as its
+      // enum text; 'high' < 'normal' lexically, so a plain ASC on
+      // (priority, created_at) already yields High-before-Normal, oldest-first
+      // — no CASE needed. `available_at` is a residual filter on the same scan.
+      db.run(
+        `CREATE INDEX IF NOT EXISTS idx_jobs_claim
+         ON jobs(status, priority, created_at)`,
+      );
     },
-  };
-});
-
-import { DagView } from './dag-view.tsx';
-import type { DagModel } from './types.ts';
-
-const model: DagModel = {
-  nodes: [{ id: 'a', label: 'a', kind: StepKind.Tool }],
-  edges: [],
-};
-
-describe('DagView — reduced motion (D3)', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    lastProps = undefined;
-  });
-
-  it('passes a zero fitViewOptions.duration when prefers-reduced-motion is set', () => {
-    vi.stubGlobal(
-      'matchMedia',
-      vi.fn().mockImplementation((query: string) => ({
-        matches: query === '(prefers-reduced-motion: reduce)',
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    );
-    render(<DagView model={model} />);
-    expect(lastProps?.fitViewOptions).toEqual({ duration: 0 });
-  });
-
-  it('passes a non-zero fitViewOptions.duration when reduced motion is off', () => {
-    vi.stubGlobal(
-      'matchMedia',
-      vi.fn().mockImplementation((query: string) => ({
-        matches: false,
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    );
-    render(<DagView model={model} />);
-    expect(
-      (lastProps?.fitViewOptions as { duration: number }).duration,
-    ).toBeGreaterThan(0);
-  });
-});
+  },
+];
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 4: Run — verify it passes**
 
-Run: `cd web && bun run test -- dag/dag-view.reduced-motion.test.tsx`
-Expected: FAIL — `DagView` doesn't pass a `fitViewOptions` prop yet (`lastProps?.fitViewOptions` is `undefined`).
+`bun test tests/queue/migrations.test.ts` → PASS. (Note the deliberate reliance on `'high' < 'normal'` lexical order — the test in Task 7 pins the ordering behaviourally so this cleverness can never silently regress.)
 
-- [ ] **Step 3: Write minimal implementation**
-
-Modify `web/src/shared/dag/dag-view.tsx` — add the import and use the hook:
-
-```tsx
-import { useReducedMotion } from '../a11y/use-reduced-motion.ts';
-```
-
-```tsx
-export function DagView({
-  model,
-  statusById,
-  onNodeClick,
-}: {
-  model: DagModel;
-  statusById?: Record<string, DagStatus>;
-  onNodeClick?: (nodeId: string) => void;
-}) {
-  const reducedMotion = useReducedMotion();
-  const { nodes, edges } = useMemo(() => {
-```
-
-```tsx
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        fitView
-        fitViewOptions={{ duration: reducedMotion ? 0 : 200 }}
-        proOptions={{ hideAttribution: true }}
-        onNodeClick={
-          onNodeClick ? (_event, node) => onNodeClick(node.id) : undefined
-        }
-      >
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd web && bun run test -- dag/dag-view.reduced-motion.test.tsx dag/dag-view.test.tsx`
-Expected: PASS on both files — the pre-existing `dag-view.test.tsx` is unaffected since its `vi.mock` scope is per-file, not global.
-
-Run: `cd web && bun run typecheck`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-git add web/src/shared/dag/dag-view.tsx web/src/shared/dag/dag-view.reduced-motion.test.tsx
-git commit -m "feat(a11y): gate DagView's fitView animation via useReducedMotion (D3)"
+bun run typecheck && bun run lint:file -- src/queue/migrations.ts tests/queue/migrations.test.ts
+git add src/queue/migrations.ts tests/queue/migrations.test.ts
+git commit -m "feat(queue): init-jobs migration (Slice 24 Incr 2)"
 ```
-
----
 

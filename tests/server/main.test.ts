@@ -1,7 +1,18 @@
 import { expect, test } from 'bun:test';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderIndexHtml, startWebServer } from '../../src/server/main.ts';
+
+// Hermetic durable-auth paths so booting a server here never reads/writes the
+// real ~/.agent daemon token (Slice 24 Incr 5).
+function authPaths(): { rootTokenPath: string; sessionRevocationPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'main-auth-'));
+  return {
+    rootTokenPath: join(dir, 'daemon-token'),
+    sessionRevocationPath: join(dir, 'revoked-devices.json'),
+  };
+}
 
 test('renderIndexHtml injects the session token into the served page', () => {
   const html = renderIndexHtml('tok-123');
@@ -50,10 +61,13 @@ test('renderIndexHtml with a built dist index injects the token script before th
   );
 });
 
-test('startWebServer boots on an ephemeral port, mints a token, and serves it', async () => {
-  const { server, token, port } = startWebServer({ port: 0 });
+test('startWebServer boots on an ephemeral port, mints a durable-backed SESSION token, and serves it', async () => {
+  const { server, token, port } = startWebServer({ port: 0, ...authPaths() });
   try {
-    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    // A durable session token is `base64url(payload).hexsig` (NOT the old
+    // 64-char-hex per-process token) — it carries a `.` separating the two.
+    expect(token).toContain('.');
+    expect(token).not.toMatch(/^[0-9a-f]{64}$/);
     expect(port).toBeGreaterThan(0);
 
     const index = await fetch(`http://localhost:${port}/`);
@@ -76,7 +90,7 @@ test("startWebServer mkdirs the uploads dir at boot, so a chat request with a bo
   // Simulate "no upload has ever happened yet": the dir doesn't exist.
   rmSync(uploadsDir, { recursive: true, force: true });
 
-  const { server, token, port } = startWebServer({ port: 0 });
+  const { server, token, port } = startWebServer({ port: 0, ...authPaths() });
   try {
     // The fix: startWebServer creates it up front, before any request lands.
     expect(existsSync(uploadsDir)).toBe(true);

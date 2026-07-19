@@ -1,7 +1,12 @@
+import { loadConfig } from '../../config/schema.ts';
 import { TelemetryEventSchema } from '../../contracts/telemetry.ts';
 import { recordVoiceTranscribeWeb } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
-import type { TokenGuard } from '../security/token.ts';
+
+/** Only the body-token check is needed here — both the legacy `TokenGuard` and
+ *  the durable `SessionGuard` (Slice 24 Incr 5) satisfy this shape, so the
+ *  beacon path verifies against whichever the server booted with. */
+type BeaconTokenVerifier = { verifyToken(raw: string): boolean };
 
 function jsonError(message: string, status: number): Response {
   return new Response(JSON.stringify({ error: message }), {
@@ -29,8 +34,20 @@ function jsonError(message: string, status: number): Response {
  */
 export async function handleTelemetry(
   req: Request,
-  guard: TokenGuard,
+  guard: BeaconTokenVerifier,
 ): Promise<Response> {
+  // Pre-parse body-size guard (Slice 24 Incr 5, item 4): this route is the
+  // ONE beacon let past the perimeter's shared header guard (app.ts), so an
+  // attacker could otherwise POST an arbitrarily large body pre-auth and force
+  // a large JSON parse before the token check below ever runs. A real beacon
+  // is tiny and always sets Content-Length; reject a missing/oversize one
+  // BEFORE `req.json()` touches the body at all. Only a within-limit body
+  // reaches the parse + existing token check.
+  const cap = loadConfig().values.AGENT_WEB_TELEMETRY_MAX_BYTES as number;
+  const len = Number(req.headers.get('content-length'));
+  if (!Number.isFinite(len) || len > cap) {
+    return jsonError('payload too large', 413);
+  }
   // Parse the body once; a non-JSON body simply yields no token → 401 below.
   let body: unknown;
   try {

@@ -1,96 +1,83 @@
-# Task 13 report — `downsampler.ts` one-pole anti-alias LPF (D7)
+# Task 13 report — `createWorkerPool` (bounded, cancellable worker pool)
 
-## Status: COMPLETE
+**Commit:** `b98cc9d` — feat(queue): bounded worker pool with cancel + retry (Slice 24 Incr 2)
+**Files added:** `src/queue/pool.ts`, `tests/queue/pool.test.ts`
+**Branch:** `slice-24-daemon-queue-remote`
 
-## What was done
+> Note: this path previously held a stale report titled "downsampler.ts" from an
+> earlier slice reusing the `task-13` filename; overwritten with this slice's
+> Task 13 (worker pool). Prior content remains in git history.
 
-Followed the brief (`task-13-brief.md`) via TDD:
+## Async structure
 
-1. **Failing tests first** — updated `web/src/features/voice/audio-capture.test.ts`
-   per the brief: added `CUTOFF_HZ` import, the `naiveOnePoleFilter` /
-   `naiveFilteredResample` / `unfilteredReferenceDownsample` / `goertzelMagnitude`
-   reference helpers, swapped the pre-D7 bit-exact `toEqual([...])` literal-array
-   assertions for `naiveFilteredResample`-computed expectations, and added the new
-   aliasing-energy test. Confirmed the suite failed pre-implementation (7/12 failing:
-   `CUTOFF_HZ` resolving to `undefined` → `NaN` cutoff math, plus the aliasing test
-   showing no measurable difference between the filtered/unfiltered paths since
-   neither existed yet).
+- **Claim loops:** `start()` spins `max(1, concurrency)` concurrent `loop()` promises. Each
+  loop: `store.claimNext()` → if `null`, `await abortableSleep(pollMs)` and continue (idle
+  backoff, no hot-spin); if a job, `runOne(job)`, tracked in an `inFlight` Set, awaited, then
+  removed. Loop exits when `running` flips false.
+- **Per-job `runOne`:** builds a fresh `AbortController`, registers it in
+  `controllers: Map<jobId, AbortController>`, calls `dispatch(job.kind)(job, signal)`. On
+  success (and only if not aborted) `store.markDone`; on throw (and only if not aborted)
+  `store.markFailed(id, explain(err).title, jobRetryDecision(err).retryable)`. `finally`
+  always deletes the controller from the map — a throwing executor can never wedge a loop.
+- **No worker-side backoff sleep:** on a retryable failure the worker does NOT sleep. Per the
+  Increment-2 design, `markFailed` persists the backoff as the row's `available_at` and
+  `claimNext`'s `available_at <= now` gate enforces spacing — so a failing job never holds a
+  concurrency slot while it waits.
+- **`stop()` (drain):** sets `running=false`, aborts every live controller, `await
+  Promise.allSettled(inFlight)` then `await Promise.allSettled(loops)`, then sweeps any row
+  still `Running` → `markInterrupted` (the same state `reconcileOrphans` assigns). Terminates
+  cleanly — a loop mid-`abortableSleep` finishes its (small) poll wait then sees `running=false`
+  and exits; no hung loop.
+- **`cancel(jobId)`:** looks up the controller; if absent returns `false`; else `abort()` +
+  `store.markCanceled(jobId)` and returns `true`. The aborted-signal guard in `runOne` makes
+  the executor's subsequent throw/resolve a no-op so the cancel transition is never overwritten.
+- **`activeCount()`:** `controllers.size`.
 
-2. **Implementation** — replaced `web/src/features/voice/downsampler.ts` per the
-   brief verbatim: `export const CUTOFF_HZ = 7500`, and a one-pole IIR
-   (`y[n] = y[n-1] + alpha*(x[n]-y[n-1])`, warm-started on the first raw sample seen)
-   run over each quantum into a `filtered` buffer *before* the existing carry-state
-   linear-interpolation loop, which now reads `filtered` instead of the raw
-   `quantum`. Added `lastFiltered` as a third piece of carried state, reset in
-   `flush()` alongside the pre-existing `nextP`/`globalOffsetSoFar`/`prevLast`.
+## TDD
 
-3. **Two issues found and fixed during the green phase** (both in the test file
-   only — `downsampler.ts` was implemented verbatim from the brief and needed no
-   changes):
+- **RED:** wrote `tests/queue/pool.test.ts` first → `bun test` failed with
+  `Cannot find module '../../src/queue/pool.ts'`.
+- **GREEN:** implemented `pool.ts` (verbatim to the brief) → 8/8 pass. Full `tests/queue/`
+  suite 42/42. Ran the pool test 3× — stable, no flakiness (this is the concurrent piece).
 
-   - **Float64-vs-Float32 double-rounding mismatch.** `process()` returns
-     `Float32Array` (as it always has), so its output only ever holds float32-rounded
-     values. `naiveFilteredResample`'s `naiveResample(filtered, ratio, k)` returned a
-     raw float64 with no such rounding, so on non-zero-`frac` positions (the 1.5:1 and
-     1.25:1 ratio tests) the last bit differed from production
-     (e.g. `1.1056279838085175` vs `1.1056280136108398`) — a false failure caused by
-     comparing against a reference more precise than the typed-array return type can
-     ever actually hold, not a real implementation defect. Fixed by rounding
-     `naiveFilteredResample`'s return through `Math.fround(...)`, verified
-     bit-identical to a `new Float32Array([...])` roundtrip via a standalone script
-     before applying. (The ratio-3 tests were unaffected — `frac` is always exactly
-     0 there, so no interpolation arithmetic occurs and the mismatch never surfaces.)
-   - **Aliasing-energy threshold too tight for a one-pole filter's real rolloff.**
-     The brief's `unfilteredAliasEnergy * 0.5` threshold assumes more attenuation than
-     a genuine one-pole (6dB/octave, no brick wall) filter delivers at 9500Hz against
-     a 7500Hz cutoff — verified empirically (and cross-checked against the closed-form
-     digital single-pole frequency response) at ~0.51x, i.e. barely *failing* `< 0.5x`.
-     Kept `CUTOFF_HZ=7500` (the D7 spec value) and the 9500Hz/6500Hz-alias tone
-     framing (the brief's "classic fold-back case") untouched, and instead raised the
-     threshold multiplier to `0.6` — comfortable, non-flaky margin over the verified
-     ~0.51x ratio while still proving a substantial (~40%), real reduction in fold-back
-     energy from the anti-alias stage. Added an inline comment explaining the rolloff
-     shape so a future reader isn't surprised by the non-`0.5` number.
+## Contract bullet → test
 
-4. Verified green: `bun run test -- features/voice/audio-capture.test.ts` → 12/12
-   pass. `bun run typecheck` → clean. Full `bun run test` → 61 files / 331 tests
-   pass (some pre-existing unrelated `ECONNREFUSED` stderr noise from an
-   integration test hitting `localhost:3000`, not a failure).
+| Contract | Test |
+|---|---|
+| claim → dispatch → markDone with result | "the pool claims, dispatches, and marks a job Done with its result" |
+| **bounded concurrency (peak ≤ N)** | "concurrency bounds the number of jobs in flight at once" — dispatch records peak concurrent invocations; concurrency=2, 4 slow jobs, `expect(peak).toBeLessThanOrEqual(2)` |
+| throwing job → markFailed, correct retryability | "a throwing (terminal) job is marked Failed…" (plain Error → Terminal → not retryable → Failed) + "a transient (retryable) failure re-queues…" (ECONNRESET → Transient → retryable → back to Queued, proving the flag threads through) |
+| **cancel → abort + markCanceled** | "cancel aborts an in-flight job and marks it Canceled" — signal fires (executor rejects on `abort`), job ends Canceled, `cancel()` returns true |
+| **drain (stop awaits in-flight then resolves)** | "stop() drains: awaits an in-flight non-abortable job then marks the straggler Interrupted" — a signal-ignoring 50ms executor; stop() awaits it then reconciles the still-Running row → Interrupted; proves stop resolves (no hang) |
+| activeCount accuracy | "activeCount reflects the number of executing jobs" — 0 before start, 2 while both gated executors run, 0 after drain |
+| empty-queue no-busy-spin | "an empty queue does not busy-spin claimNext" — wraps `store.claimNext` with a counter; over 260ms at pollMs=50, `expect(claims).toBeLessThan(20)` (a busy loop = thousands) |
 
-5. `bunx biome check --write web/src/features/voice/downsampler.ts
-   web/src/features/voice/audio-capture.test.ts` (run from repo root) → "Checked 2
-   files. No fixes applied."
+## Proofs of the two hard properties
 
-6. Committed only the two intended files (`3a486dc`, staged and diffed explicitly
-   — other working-tree changes present from concurrent in-flight phase tasks
-   were left untouched). Docs were intentionally NOT touched: per the phase's own
-   increment plan (`.superpowers/sdd/progress.md`), architecture/README/ROADMAP
-   updates are batched into the phase's dedicated docs+land increment (T25–29),
-   not per-task; this task's brief also does not include a docs step. Working
-   branch is `slice-30b-phase8-polish-a11y` (not `main`), so the pre-push
-   slice-landing gate does not apply here.
+- **Bounded concurrency:** the dispatch increments a shared `inFlight` counter, records
+  `peak = max(peak, inFlight)`, sleeps, decrements. Peak can only reach the number of loops
+  executing simultaneously; asserting `peak ≤ concurrency` with more jobs than slots proves the
+  loops never exceed the bound.
+- **No busy-spin:** replacing `store.claimNext` with a counting wrapper and bounding the call
+  count over a fixed wall-clock window directly measures the idle-poll rate — the
+  `abortableSleep(pollMs)` on the empty-queue path keeps it to ~5-6 calls, not thousands.
 
-## Files touched
+## Gate
 
-- `web/src/features/voice/downsampler.ts` — full rewrite adding the D7 one-pole LPF
-  stage + `CUTOFF_HZ` export + `lastFiltered` carry state.
-- `web/src/features/voice/audio-capture.test.ts` — reference helpers added,
-  bit-exact literal assertions replaced with `naiveFilteredResample`-computed
-  expectations, new aliasing-energy test added.
+- `bun test tests/queue/` → 42 pass / 0 fail.
+- `bun run typecheck` → clean.
+- `bun run lint:file -- src/queue/pool.ts tests/queue/pool.test.ts` → clean (Biome
+  organize-imports/format + an unused-param rename `_j` in the brief's cancel test were applied;
+  cosmetic only, behavior unchanged).
 
-## Concerns for reviewer
+## Concerns
 
-- The two test-file deviations from the brief's exact text (both in
-  `audio-capture.test.ts`; `downsampler.ts` is verbatim) are called out above with
-  the verification math; worth a second look but both are test-authoring precision
-  fixes, not weakened assertions — the `Math.fround` fix makes the comparison
-  *more* correct (matches the real `Float32Array` precision), and the `0.6`
-  threshold still requires a real, substantial, empirically-verified reduction.
-- `flush()` correctly resets `lastFiltered` — verified via the "flush() returns
-  empty and resets state (including the LPF carry) for reuse" test, which asserts a
-  post-flush `process()` call matches a brand-new instance's output bit-for-bit.
-- Note: a *different*, unrelated "Task 13" report from an earlier phase (Phase 5,
-  `postSseStream`/`use-build-events.ts`, commit `e70754f`) previously occupied this
-  file path — task numbers are apparently reused across SDD phases. This report
-  overwrites that stale content per the explicit report path given in this task's
-  instructions.
+- `abortableSleep(pollMs)` in the idle path is called without a signal, so `stop()` does not
+  wake a mid-sleep loop early — it waits out the remaining poll interval (≤ pollMs, small).
+  Acceptable: termination guaranteed, just not instantaneous. A future task wanting instant
+  drain on an idle pool could thread a pool-level AbortSignal into that sleep.
+- No HTTP / real executors here by design — `dispatch` is injected; real executors wire in
+  Increment 3.
+- The retryable-re-queue test relies on the ~500–1000ms `available_at` backoff window
+  (retryBaseMs default 1000) to observe the Queued state; robust given current config but
+  coupled to that default.

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   CrewListItemDtoSchema,
+  JobDtoSchema,
   McpServerDtoSchema,
   ModelInventoryDtoSchema,
   RunListItemDtoSchema,
@@ -11,6 +12,9 @@ import {
   BuilderKind,
   ChatRole,
   FeedbackRating,
+  JobKindWire,
+  JobPriorityWire,
+  JobStatusWire,
   RunKind,
   RuntimeKind,
 } from './enums.ts';
@@ -263,3 +267,60 @@ export const SessionRenameRequestSchema = z.object({
   title: z.string().min(1).max(200),
 });
 export type SessionRenameRequest = z.infer<typeof SessionRenameRequestSchema>;
+
+/** `POST /api/jobs` body — enqueue a durable job. `payload` is the per-kind
+ *  launch input validated again at dispatch (`src/server/jobs/dispatch.ts`);
+ *  `priority` defaults to Normal store-side when omitted. Slice 24 Incr 3. */
+export const JobEnqueueRequestSchema = z.object({
+  kind: z.enum(JobKindWire),
+  payload: z.unknown(),
+  priority: z.enum(JobPriorityWire).optional(),
+  /** Re-enqueue an EXISTING run to resume it (Slice 24 Incr 6, Task 41). When
+   *  present, the enqueue reuses this runId (no fresh run dir is created) and
+   *  stamps `resumeRunId` into the persisted payload, so dispatch runs the
+   *  crew/workflow turn against the existing run dir — whose checkpoint skips
+   *  the already-completed DAG nodes.
+   *
+   *  SECURITY (HIGH finding, path traversal / IDOR): `resume` is a
+   *  client-controlled value that the handler resolves into a filesystem path
+   *  under `runsRoot` (`runs/<resume>/`) and stamps as `resumeRunId`. The
+   *  format is pinned to the exact shape `newRunId()` mints
+   *  (`src/run/run-id.ts`: `run-<base36 ms>-<base36 rand>`) and FORBIDS `/`
+   *  and `.` entirely, so no `../` traversal sequence can even reach the
+   *  handler — the schema rejects it as a 400 before `handleJobEnqueue` runs.
+   *  The handler additionally re-confines the resolved path via
+   *  `confineToDir` (defense-in-depth, in case this regex is ever loosened)
+   *  and requires the run dir to already exist. */
+  resume: z
+    .string()
+    .regex(/^run-[A-Za-z0-9-]{1,80}$/)
+    .optional(),
+});
+export type JobEnqueueRequest = z.infer<typeof JobEnqueueRequestSchema>;
+
+/** `POST /api/jobs` response — the minted jobId plus the runId its execution
+ *  will write to (pre-minted at enqueue so the browser can open the watch
+ *  stream immediately, same idiom as `RunLaunchResponseSchema`). */
+export const JobLaunchResponseSchema = z.object({
+  jobId: z.string(),
+  runId: z.string(),
+});
+export type JobLaunchResponse = z.infer<typeof JobLaunchResponseSchema>;
+
+/** `GET /api/jobs?status=&cursor=&limit=` query — mirrors
+ *  `SessionListQuerySchema`'s keyset-page shape with a `status` facet. */
+export const JobListQuerySchema = z.object({
+  status: z.enum(JobStatusWire).optional(),
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().positive().max(200).default(25),
+});
+export type JobListQuery = z.infer<typeof JobListQuerySchema>;
+
+/** `GET /api/jobs` response — a page of job records + cursor when more remain,
+ *  byte-for-byte `RunListResponseSchema`'s shape. */
+export const JobListResponseSchema = z.object({
+  items: z.array(JobDtoSchema),
+  nextCursor: z.string().optional(),
+  total: z.number(),
+});
+export type JobListResponse = z.infer<typeof JobListResponseSchema>;

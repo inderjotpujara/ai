@@ -4,6 +4,7 @@ import { withRunStreamSpan } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 import { confineToDir, MediaPathError } from '../security/media-path.ts';
 import type { RunsDeps } from './detail.ts';
+import { acquireStreamSlot, releaseStreamSlot } from './stream-limit.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -69,6 +70,16 @@ export async function handleRunStream(
     throw err;
   }
 
+  if (!acquireStreamSlot()) {
+    return new Response(JSON.stringify({ error: 'too many streams' }), {
+      status: 503,
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        ...ISOLATION_HEADERS,
+      },
+    });
+  }
+
   const pollMs = opts.pollMs ?? 250;
   const maxWaitMs = opts.maxWaitMs ?? 600_000;
   const encoder = new TextEncoder();
@@ -78,6 +89,18 @@ export async function handleRunStream(
   // reading disk for an abandoned run until maxWaitMs. The loop stops on
   // EITHER the caller's signal or this one.
   const internal = new AbortController();
+
+  // Released exactly once: the loop's normal/aborted exit (finally, below)
+  // and a reader-initiated cancel() both want to free the slot, but they can
+  // race (cancel() aborts the same signal the loop is already exiting on) —
+  // guard so a double-fire never under-counts openStreamCount() and lets
+  // more streams than the cap through.
+  let slotReleased = false;
+  function releaseSlotOnce(): void {
+    if (slotReleased) return;
+    slotReleased = true;
+    releaseStreamSlot();
+  }
 
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -107,14 +130,36 @@ export async function handleRunStream(
                 if (!seededResume && opts.lastEventId) {
                   seededResume = true;
                   rec.resume();
-                  const cursorPresent = dto.spans.some(
+                  // Seed by WIRE order, not DTO-index order. Spans flush to the
+                  // journal when they END, so a client received them in
+                  // end-time order — and a nested run's root (`agent.run`)
+                  // ends LAST yet sorts FIRST in the depth-first DTO (it is
+                  // depth-0). Reseeding by DTO index would mark that
+                  // late-written root as already-seen whenever the cursor is an
+                  // earlier-ending child, silently DROPPING the terminal frame
+                  // on reconnect (§7.1 gap). End time isn't on the DTO, but
+                  // `offsetMs + durationMs` (start-from-root + duration) is a
+                  // monotonic proxy for it; ties (same end) break on DTO order,
+                  // which is the within-poll wire order. Mark every span that
+                  // ended at or before the cursor; everything newer replays. A
+                  // stale/unknown cursor (not present) degrades to a fresh
+                  // connection — replay the full snapshot rather than emit
+                  // nothing.
+                  const cursor = dto.spans.find(
                     (s) => s.spanId === opts.lastEventId,
                   );
-                  if (cursorPresent) {
-                    for (const s of dto.spans) {
-                      emitted.add(s.spanId);
-                      if (s.spanId === opts.lastEventId) break;
-                    }
+                  if (cursor) {
+                    const cursorIdx = dto.spans.indexOf(cursor);
+                    const cursorEnd = cursor.offsetMs + cursor.durationMs;
+                    dto.spans.forEach((s, i) => {
+                      const end = s.offsetMs + s.durationMs;
+                      if (
+                        end < cursorEnd ||
+                        (end === cursorEnd && i <= cursorIdx)
+                      ) {
+                        emitted.add(s.spanId);
+                      }
+                    });
                   }
                 }
                 for (const s of dto.spans) {
@@ -148,12 +193,14 @@ export async function handleRunStream(
             } catch {
               // already closed/cancelled — nothing to do
             }
+            releaseSlotOnce();
           }
         },
       );
     },
     cancel() {
       internal.abort();
+      releaseSlotOnce();
     },
   });
 

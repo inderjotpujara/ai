@@ -163,6 +163,26 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     doc: 'Directory for the session/chat-history SQLite store (session/store.ts createSessionStore), mirroring AGENT_MEMORY_PATH.',
   },
 
+  // --- Daemon / queue (Slice 24) ---
+  {
+    env: 'AGENT_QUEUE_CONCURRENCY',
+    kind: 'number',
+    def: 0,
+    doc: 'Max concurrent jobs the worker pool runs (queue/pool.ts). 0/unset = computed from hardware (queue/concurrency.ts, half of logical cores, floored at 1); a positive integer overrides. Never hardcode N.',
+  },
+  {
+    env: 'AGENT_QUEUE_PATH',
+    kind: 'string',
+    def: 'jobs',
+    doc: 'Directory for the durable job-queue SQLite store (queue/store.ts createJobStore), mirroring AGENT_SESSIONS_PATH.',
+  },
+  {
+    env: 'AGENT_QUEUE_POLL_MS',
+    kind: 'number',
+    def: 250,
+    doc: 'How often an idle worker re-checks the queue for claimable jobs (queue/pool.ts). Fallback-only override.',
+  },
+
   // --- Verification / anti-hallucination (src/verification/config.ts) ---
   {
     env: 'AGENT_VERIFY_MODEL',
@@ -520,6 +540,48 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     kind: 'number',
     def: 800,
     doc: 'Sustained silence (ms) that closes a tap-to-toggle voice segment (web/src/features/voice/vad.ts Segmenter). Injected into the served page as window.__AGENT_VOICE_VAD_SILENCE_MS__ (server/main.ts renderIndexHtml). Slice 30b Phase 7.',
+  },
+  {
+    env: 'AGENT_WEB_MAX_STREAMS',
+    kind: 'number',
+    def: 0,
+    doc: 'Max simultaneously-open run SSE streams (server/runs/stream-limit.ts). 0/unset = computed from worker concurrency (×8 headroom); a positive integer overrides. Over the cap, GET /api/runs/:id/stream returns 503. Never hardcode.',
+  },
+  {
+    env: 'AGENT_WEB_SESSION_TTL_MS',
+    kind: 'number',
+    def: 43_200_000,
+    doc: 'TTL (ms) of the per-device SESSION token the server mints for the local browser at boot and injects as window.__AGENT_TOKEN__ (server/main.ts; signed by the durable daemon root, security/session-token.ts). Default 12h — long enough to span a working session, short enough to bound a leaked browser token. A reload re-mints. Fallback-only override; never hardcode elsewhere.',
+  },
+  {
+    env: 'AGENT_WEB_MAX_BODY_BYTES',
+    kind: 'number',
+    def: 26_214_400,
+    doc: 'Max HTTP request body bytes Bun.serve accepts (server/main.ts maxRequestBodySize). Over-cap requests get 413 at the runtime layer before the handler runs. Default 25 MiB — allows chat media uploads (MAX_UPLOAD_BYTES 20 MiB, server/upload.ts) plus framing overhead while bounding abuse. Env-override.',
+  },
+  {
+    env: 'AGENT_WEB_TELEMETRY_MAX_BYTES',
+    kind: 'number',
+    def: 65_536,
+    doc: 'Max /api/telemetry request-body bytes, checked from Content-Length BEFORE req.json() (server/telemetry/handler.ts). The beacon is header-guard-exempt (app.ts), so cap it pre-parse. Over-limit or missing Content-Length → 413. Env-override.',
+  },
+  {
+    env: 'AGENT_WEB_BIND',
+    kind: 'string',
+    def: '127.0.0.1',
+    doc: 'Hostname/interface Bun.serve binds (server/main.ts). Default 127.0.0.1 = loopback-only — no implicit 0.0.0.0 ("localhost is not a trust boundary"). Tailscale recipe: set to the 100.x tailnet interface AND keep localhost; auth (Tasks 32-34) still gates every request.',
+  },
+  {
+    env: 'AGENT_WEB_ALLOWED_HOSTS',
+    kind: 'string',
+    def: '',
+    doc: 'Comma-separated extra Host-header hostnames allowed past the DNS-rebinding Host check beyond localhost/127.0.0.1/[::1] (server/security/origin.ts hostAllowed). Empty = loopback-only (default-safe); a Slice-24 Tailscale/Cloudflare tunnel adds its MagicDNS/hostname here (paired with its origin in AGENT_WEB_ORIGIN_ALLOWLIST) so remote requests pass the perimeter — the durable session-token guard (Tasks 32-34) still gates every request (§7.4: the network is not the trust boundary). Matched with or without the configured port. The AGENT_WEB_BIND interface is always included automatically.',
+  },
+  {
+    env: 'AGENT_WEB_RUN_RATE',
+    kind: 'number',
+    def: 0,
+    doc: 'Max run-dir creations per fixed 60s window (server/run-rate.ts maxRunsPerWindow, gating createRun in jobs/enqueue.ts, crews/run.ts, workflows/run.ts, models/pull.ts). 0/unset = computed from worker concurrency (×10 headroom); a positive integer overrides. Over the rate → 429. Slice 24 Incr 5 item 2 (remote access can now spam run-dir creation — never hardcode).',
   },
 ];
 

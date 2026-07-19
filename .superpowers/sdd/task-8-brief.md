@@ -1,177 +1,178 @@
-### Task 8: `vitest-axe` harness + baseline no-violations assertions + dedicated tab-widget keyboard-nav test (D4)
+## Task 8: Terminal transitions — `markDone` / `markFailed` / `markInterrupted` / `markCanceled`
 
 **Files:**
-- Modify: `web/package.json` (new devDependency, via `bun add -D`)
-- Modify: `web/src/test/setup.ts` (wire the `toHaveNoViolations` matcher globally)
-- Create: `web/src/app/a11y-baseline.test.tsx`
-- Create: `web/src/app/tab-widget-keyboard.test.tsx`
+- Modify: `src/queue/store.ts`
+- Create: `tests/queue/store-transitions.test.ts`
 
 **Interfaces:**
-- Consumes: `renderAt` (`web/src/test/render.tsx`); `axe`/`vitest-axe/matchers` (new dependency).
-- Produces: the `toHaveNoViolations` matcher becomes available to every `.test.tsx` file in `web/` from this task forward (the D4 regression net) — no runtime/production code changes.
+- Consumes: Task 6/7 store.
+- Produces: `markDone(id, result)` (→ Done, sets `result` JSON + `finished_at`), `markFailed(id, error, retryable)` (retryable AND `attempts < maxAttempts` → back to `Queued` for another claim **with `available_at = now + backoffDelay(attempts)`** so the re-claim is spaced by a persisted, full-jitter exponential backoff — NOT immediately re-claimable; else → `Failed` with `error` + `finished_at`), `markInterrupted(id)` (→ Interrupted + `finished_at`), `markCanceled(id)` (→ Canceled + `finished_at`). All bump `updated_at`. `backoffDelay` reuses `retryBaseMs`/`retryCapMs` (`src/reliability/config.ts:32,36`) — the SAME knobs as `src/reliability/retry.ts`'s `withRetry`, so queue retries and in-run retries share one backoff policy. This moves the delay COMPUTATION into the store (persisted in `available_at`) so the worker pool never sleeps holding a slot (Task 13).
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
-Create `web/src/app/a11y-baseline.test.tsx`:
+`tests/queue/store-transitions.test.ts`:
+```typescript
+import { test, expect } from 'bun:test';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createJobStore } from '../../src/queue/store.ts';
+import { JobKind, JobStatus } from '../../src/queue/types.ts';
 
-```tsx
-import { screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { axe } from 'vitest-axe';
-import { renderAt } from '../test/render.tsx';
-
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
+function tempStore() {
+  return createJobStore({ path: mkdtempSync(join(tmpdir(), 'jobs-')) }, {});
 }
 
-const emptyList = { items: [], total: 0 };
+test('markDone stores the result and terminal status', () => {
+  const store = tempStore();
+  const job = store.enqueue({ kind: JobKind.Crew, payload: 'x' });
+  store.claimNext();
+  store.markDone(job.id, { ok: true, count: 3 });
+  const done = store.getJob(job.id);
+  expect(done?.status).toBe(JobStatus.Done);
+  expect(done?.result).toEqual({ ok: true, count: 3 });
+  expect(done?.finishedAt).toBeGreaterThan(0);
+  store.close();
+});
 
-vi.mock('@ai-sdk/react', () => ({
-  useChat: () => ({
-    messages: [],
-    sendMessage: vi.fn(),
-    status: 'ready',
-    stop: vi.fn(),
-  }),
-}));
+test('markFailed with retryable + attempts<max re-queues with a backoff floor', () => {
+  const store = tempStore();
+  const job = store.enqueue({ kind: JobKind.Crew, payload: 'x', maxAttempts: 2 });
+  store.claimNext(); // attempts -> 1
+  const before = Date.now();
+  store.markFailed(job.id, 'boom', true);
+  const requeued = store.getJob(job.id);
+  expect(requeued?.status).toBe(JobStatus.Queued); // 1 < 2, retry
+  // The backoff is persisted as a future available_at, so claimNext will NOT
+  // immediately re-claim it — this is what actually spaces re-claims.
+  expect(requeued?.availableAt).toBeGreaterThan(before);
+  expect(store.claimNext()).toBeNull(); // gated by the backoff floor
+  store.close();
+});
 
-describe("a11y baseline (vitest-axe, D4) — no violations on the app's key screens", () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(emptyList)));
-  });
+test('markFailed fails terminally once attempts reach maxAttempts', () => {
+  const store = tempStore();
+  const job = store.enqueue({ kind: JobKind.Crew, payload: 'x', maxAttempts: 1 });
+  store.claimNext(); // attempts -> 1 == max
+  store.markFailed(job.id, 'boom again', true); // retryable but no attempts left
+  const failed = store.getJob(job.id);
+  expect(failed?.status).toBe(JobStatus.Failed); // 1 == max, terminal
+  expect(failed?.error).toBe('boom again');
+  store.close();
+});
 
-  it('Chat (/)', async () => {
-    const { container } = renderAt('/');
-    await waitFor(() => screen.getByTestId('area-chat'));
-    expect(await axe(container)).toHaveNoViolations();
-  });
+test('markFailed with retryable=false fails terminally on the first attempt', () => {
+  const store = tempStore();
+  const job = store.enqueue({ kind: JobKind.Crew, payload: 'x', maxAttempts: 5 });
+  store.claimNext();
+  store.markFailed(job.id, 'fatal', false);
+  expect(store.getJob(job.id)?.status).toBe(JobStatus.Failed);
+  store.close();
+});
 
-  it('Sessions (/sessions)', async () => {
-    const { container } = renderAt('/sessions');
-    await waitFor(() => screen.getByTestId('area-sessions'));
-    expect(await axe(container)).toHaveNoViolations();
-  });
-
-  it('Runs (/runs)', async () => {
-    const { container } = renderAt('/runs');
-    await waitFor(() => screen.getByTestId('area-runs'));
-    expect(await axe(container)).toHaveNoViolations();
-  });
-
-  it('Library (/library)', async () => {
-    const { container } = renderAt('/library');
-    await waitFor(() => screen.getByTestId('area-library'));
-    expect(await axe(container)).toHaveNoViolations();
-  });
-
-  it('Builders (/builders)', async () => {
-    const { container } = renderAt('/builders');
-    await waitFor(() => screen.getByTestId('area-builders'));
-    expect(await axe(container)).toHaveNoViolations();
-  });
-
-  it('Settings (/settings)', async () => {
-    const { container } = renderAt('/settings');
-    await waitFor(() => screen.getByTestId('area-settings'));
-    expect(await axe(container)).toHaveNoViolations();
-  });
+test('markInterrupted and markCanceled set their terminal statuses', () => {
+  const store = tempStore();
+  const a = store.enqueue({ kind: JobKind.Chat, payload: 1 });
+  const b = store.enqueue({ kind: JobKind.Chat, payload: 2 });
+  store.claimNext();
+  store.markInterrupted(a.id);
+  store.markCanceled(b.id);
+  expect(store.getJob(a.id)?.status).toBe(JobStatus.Interrupted);
+  expect(store.getJob(b.id)?.status).toBe(JobStatus.Canceled);
+  store.close();
 });
 ```
 
-Create `web/src/app/tab-widget-keyboard.test.tsx` (the §6-mandated *dedicated* keyboard-nav test — a cross-cutting characterization test locking in Task 6/7's already-shipped behavior, not new functionality; see Step 2's note):
+- [ ] **Step 2: Run — verify it fails**
 
-```tsx
-import { fireEvent, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import { renderAt } from '../test/render.tsx';
+`bun test tests/queue/store-transitions.test.ts` → FAIL.
 
-describe('tab widget keyboard pattern (D2, §6) — dedicated arrow-roving + tabpanel-linkage check', () => {
-  it('Library: ArrowRight/ArrowLeft rove focus and each tab links to its panel', async () => {
-    renderAt('/library');
-    const models = await screen.findByTestId('library-tab-models');
-    const memory = screen.getByTestId('library-tab-memory');
-    const mcp = screen.getByTestId('library-tab-mcp');
+- [ ] **Step 3: Implement the four transitions**
 
-    expect(models).toHaveAttribute('aria-controls', 'library-panel-models');
-    expect(memory).toHaveAttribute('aria-controls', 'library-panel-memory');
-    expect(mcp).toHaveAttribute('aria-controls', 'library-panel-mcp');
-    expect(screen.getByTestId('library-panel-models')).toHaveAttribute(
-      'role',
-      'tabpanel',
+First widen the top-of-file reliability import (added in Task 6) so `markFailed` can compute a persisted backoff:
+```typescript
+import {
+  maxAttempts as defaultMaxAttempts,
+  retryBaseMs,
+  retryCapMs,
+} from '../reliability/config.ts';
+```
+Add this module-scope helper next to `newJobId` (it mirrors `withRetry`'s full-jitter exponential backoff, `src/reliability/retry.ts:74-76`, using the SAME `retryBaseMs`/`retryCapMs` knobs so queue + in-run retries share one policy):
+```typescript
+/** Full-jitter exponential backoff (ms) for a re-queued job's `available_at`.
+ *  `attempt` is tries USED (claimNext already bumped it). Reuses the reliability
+ *  backoff knobs — never a hardcoded delay. */
+function backoffDelay(attempt: number, rand: () => number = Math.random): number {
+  const exp = Math.min(retryCapMs(), retryBaseMs() * 2 ** Math.max(0, attempt - 1));
+  const jitter = 0.5 + rand() / 2;
+  return Math.floor(jitter * exp);
+}
+```
+Then add inside `createJobStore` and to the returned object:
+```typescript
+  function markDone(id: string, result: unknown): void {
+    const at = Date.now();
+    db.run(
+      `UPDATE jobs SET status = 'done', result = ?, finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [JSON.stringify(result ?? null), at, at, id],
     );
+  }
 
-    models.focus();
-    fireEvent.keyDown(models, { key: 'ArrowRight' });
-    expect(memory).toHaveFocus();
-    fireEvent.keyDown(memory, { key: 'ArrowLeft' });
-    expect(models).toHaveFocus();
-  });
+  function markFailed(id: string, error: string, retryable: boolean): void {
+    const at = Date.now();
+    const row = getJob(id);
+    // Retry if the caller says the error is retryable AND we have attempts left.
+    // `attempts` was already bumped by claimNext, so it reflects tries USED.
+    const canRetry = retryable && row !== undefined && row.attempts < row.maxAttempts;
+    if (canRetry) {
+      // Persist the backoff as an `available_at` floor so claimNext won't
+      // re-claim this row until it matures — the delay is enforced durably in
+      // the DB, not by a worker sleeping on a held slot (Task 13).
+      const availableAt = at + backoffDelay(row.attempts);
+      db.run(
+        `UPDATE jobs SET status = 'queued', error = ?, updated_at = ?,
+         started_at = NULL, available_at = ? WHERE id = ?`,
+        [error, at, availableAt, id],
+      );
+      return;
+    }
+    db.run(
+      `UPDATE jobs SET status = 'failed', error = ?, finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [error, at, at, id],
+    );
+  }
 
-  it('Builders: ArrowRight/ArrowLeft rove focus and each tab links to its panel', async () => {
-    renderAt('/builders');
-    const agent = await screen.findByTestId('builders-mode-agent');
-    const crew = screen.getByTestId('builders-mode-crew');
+  function markInterrupted(id: string): void {
+    const at = Date.now();
+    db.run(
+      `UPDATE jobs SET status = 'interrupted', finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [at, at, id],
+    );
+  }
 
-    expect(agent).toHaveAttribute('aria-controls', 'builders-panel-agent');
-    expect(crew).toHaveAttribute('aria-controls', 'builders-panel-crew');
-
-    agent.focus();
-    fireEvent.keyDown(agent, { key: 'ArrowRight' });
-    expect(crew).toHaveFocus();
-    fireEvent.keyDown(crew, { key: 'ArrowRight' });
-    expect(agent).toHaveFocus(); // wraps — only 2 tabs
-  });
-});
+  function markCanceled(id: string): void {
+    const at = Date.now();
+    db.run(
+      `UPDATE jobs SET status = 'canceled', finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [at, at, id],
+    );
+  }
 ```
+Add `markDone, markFailed, markInterrupted, markCanceled,` to the returned object.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 4: Run — verify it passes**
 
-Run: `cd web && bun run test -- app/a11y-baseline.test.tsx app/tab-widget-keyboard.test.tsx`
-Expected: `a11y-baseline.test.tsx` FAILS at the module-resolution step — `error: Cannot find package 'vitest-axe'` (not installed yet). `tab-widget-keyboard.test.tsx` **passes immediately** — Tasks 6-7 already shipped the underlying roving-tabindex/tabpanel-linkage behavior; this file is a dedicated regression-locking characterization test the spec's §6 explicitly calls for, not a red→green cycle for new functionality. Note this honestly rather than staging a contrived failure.
+`bun test tests/queue/store-transitions.test.ts` → PASS (5 tests).
 
-- [ ] **Step 3: Write minimal implementation**
-
-Run: `cd web && bun add -D vitest-axe`
-(Resolves and pins the current version in `web/package.json`/`bun.lock` — do not hand-edit a version number.)
-
-Modify `web/src/test/setup.ts` — add the matcher wiring at the top of the file:
-
-```ts
-import '@testing-library/jest-dom/vitest';
-import { beforeEach, expect, vi } from 'vitest';
-import * as axeMatchers from 'vitest-axe/matchers';
-
-// vitest-axe's `toHaveNoViolations` matcher (D4) — registered once, globally,
-// alongside jest-dom's matchers, so every `.test.tsx` file in `web/` can call
-// `expect(await axe(container)).toHaveNoViolations()` without per-file setup.
-expect.extend(axeMatchers);
-```
-
-(The rest of `setup.ts` — the `matchMedia`/`localStorage`/`ResizeObserver`/`confirm`/Web-Audio `beforeEach` fixtures — is unchanged.)
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cd web && bun run test -- app/a11y-baseline.test.tsx app/tab-widget-keyboard.test.tsx`
-Expected: PASS (6 baseline screens + 2 keyboard-nav checks).
-
-Run: `cd web && bun run test`
-Expected: PASS — the full web suite, confirming the new global `expect.extend` doesn't collide with any existing matcher usage.
-
-Run: `cd web && bun run typecheck`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Gate + commit**
 
 ```bash
-git add web/package.json web/bun.lock web/src/test/setup.ts web/src/app/a11y-baseline.test.tsx web/src/app/tab-widget-keyboard.test.tsx
-git commit -m "test(a11y): vitest-axe harness + baseline no-violations + dedicated tab keyboard-nav test (D4)"
+bun run typecheck && bun run lint:file -- src/queue/store.ts tests/queue/store-transitions.test.ts
+git add src/queue/store.ts tests/queue/store-transitions.test.ts
+git commit -m "feat(queue): markDone/Failed/Interrupted/Canceled transitions (Slice 24 Incr 2)"
 ```
-
----
-
-
-## Increment 2 — Voice a11y + interim ASR + downsampler LPF (Tasks 9–14)
 

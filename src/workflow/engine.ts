@@ -48,6 +48,21 @@ export async function runWorkflow(
   const done = new Set<string>();
   const skipped = new Set<string>();
 
+  // Resume: seed already-checkpointed nodes into `done`/`ctx` so they are never
+  // re-executed and their outputs are visible to downstream deps. A completed
+  // Branch also re-applies its dead-arm skip so the not-taken arm stays skipped.
+  if (deps.checkpoint) {
+    for (const id of deps.checkpoint.completed()) {
+      ctx[id] = deps.checkpoint.resultOf(id);
+      done.add(id);
+      const step = steps.find((s) => s.id === id);
+      if (step?.kind === StepKind.Branch) {
+        const taken = (ctx[id] as { taken: string }).taken;
+        skipped.add(taken === 'whenTrue' ? step.whenFalse : step.whenTrue);
+      }
+    }
+  }
+
   const isReady = (step: Step, i: number): boolean => {
     if (done.has(step.id) || skipped.has(step.id)) return false;
     const d = effectiveDeps(step, i, steps);
@@ -107,11 +122,16 @@ export async function runWorkflow(
         } else {
           ctx[r.step.id] = policy.fallback;
           done.add(r.step.id);
+          // Checkpoint the fallback resolution too — it's a completed node.
+          deps.checkpoint?.record(r.step.id, policy.fallback);
         }
         continue;
       }
       ctx[r.step.id] = r.value;
       done.add(r.step.id);
+      // Persist the completed node BEFORE the loop schedules the next batch, so
+      // a crash after this point resumes past this node with no re-execution.
+      deps.checkpoint?.record(r.step.id, r.value);
       if (r.step.kind === StepKind.Branch) {
         const taken = (r.value as { taken: string }).taken;
         const dead = taken === 'whenTrue' ? r.step.whenFalse : r.step.whenTrue;

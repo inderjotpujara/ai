@@ -1,41 +1,45 @@
-# Task 10 Report — stt-engine.ts forwards transcribeInterim via id-correlated onInterim (D6)
+# Task 10 report — `reconcileOrphans` boot recovery (§7.3, Slice 24 Incr 2)
 
-## Status: Complete
+**Status:** DONE. Commit `774095e` — `feat(queue): reconcileOrphans boot recovery (Slice 24 Incr 2, §7.3)`.
 
-## What was done
-Followed TDD per the brief exactly:
+## What shipped
+- `src/queue/store.ts`: added `reconcileOrphans(): { interrupted: number; requeued: number }`; deleted the `_db` / `_decodeJobCursor` / `_encodeJobCursor` drafting seams from the returned object (confirmed no external references via grep before removal — `encode/decodeJobCursor` remain used internally by `listJobs`).
+- `tests/queue/store-reconcile.test.ts`: new (4 tests).
 
-1. Appended the 3 brief-specified tests to `web/src/features/voice/stt-engine.test.ts`
-   (after "transcribe() resolves with the matching response by request id"):
-   - `transcribe() forwards transcribeInterim messages to an optional onInterim callback, id-correlated`
-   - `does not cross-deliver transcribeInterim between two concurrent transcribe() calls (different ids)`
-   - `stops delivering to onInterim once its request has settled (no leaked listener)`
-2. Ran the suite — 2 of the 3 new tests failed as expected (mock never invoked because the
-   second `onInterim` argument was silently ignored and `transcribeInterim` was unhandled by
-   `worker.onmessage`); the "no leak" test trivially passed since `onInterim` was never called at all yet.
-3. Implemented in `web/src/features/voice/stt-engine.ts` exactly per the brief:
-   - Widened `SttEngine.transcribe` type to `transcribe(frames, onInterim?: (text: string) => void): Promise<string>`.
-   - Added `interimListeners = new Map<number, (text: string) => void>()` next to `pendingTranscribe`, with the doc comment from the brief explaining the Map (not Set) choice and the no-cross-talk requirement.
-   - Added a `transcribeInterim` branch in `worker.onmessage` (between `detectSpeechResult` and `transcribeResult`) that looks up the listener by `msg.id` and invokes it with `msg.text`.
-   - Cleared `interimListeners.delete(msg.id)` in both the `transcribeResult` and the id-scoped `error` branches.
-   - Updated `transcribe()` to accept the optional `onInterim` param and `interimListeners.set(id, onInterim)` when provided.
-   - Updated `close()` to `interimListeners.clear()` alongside the other maps.
-4. Re-ran the target test file — all 16 tests (13 pre-existing + 3 new) passed.
-5. Ran `bun run typecheck` — clean.
-6. Ran the full web test suite (`bun run test`) — 320/320 passed (61 files); one unrelated `ECONNREFUSED` stack trace appeared in the output from an unrelated live/e2e check (not a test failure, unrelated to this change).
-7. Ran `bunx biome check --write` on the two changed files from `/Users/inderjotsingh/ai` — reformatted `stt-engine.test.ts` (line-wrapped the new long test lines to fit biome's width); re-ran the target test + typecheck after the reformat to confirm nothing broke.
-8. Committed only the two target files (`web/src/features/voice/stt-engine.ts`, `web/src/features/voice/stt-engine.test.ts`) — other unrelated modified/untracked files in the repo (from concurrent task work on other Task N files) were left untouched/unstaged.
+## The implementation (SQL + transaction)
+One atomic unit via `db.transaction(fn).immediate()` — BEGIN IMMEDIATE takes the write lock at BEGIN (same hardening as `claimNext`), so a starting worker pool can never observe a `running` row mid-reconcile:
 
-## Commit
-`d0708be` — `feat(voice): stt-engine.ts forwards id-correlated transcribeInterim via onInterim (D6)`
+```sql
+UPDATE jobs SET status = 'interrupted', finished_at = ?, updated_at = ?
+WHERE status = 'running'
+```
+Returns `{ interrupted: info.changes, requeued: 0 }`. `WHERE status='running'` means ONLY running rows are touched; every other state is inherently excluded. Count comes straight from the UPDATE's `.changes`.
 
-## Test summary
-- `stt-engine.test.ts`: 16/16 passed (3 new: interim forwarding, no cross-talk between concurrent ids, no listener leak after settle).
-- Full web suite: 320/320 passed, typecheck clean.
+## Count semantics
+`interrupted` = number of rows the single UPDATE actually changed (running orphans flipped). `requeued` = always `0` this increment.
 
-## Files touched
-- `/Users/inderjotsingh/ai/web/src/features/voice/stt-engine.ts`
-- `/Users/inderjotsingh/ai/web/src/features/voice/stt-engine.test.ts`
+## Signature-evolution note (Increment 6 / Task 41)
+The return shape `{ interrupted, requeued }` is forward-declared for the durable-resume variant. In Increment 6, once the checkpoint layer exists, a `durableKinds` predicate is threaded in so checkpoint-resumable orphans (crew/workflow) go `running -> queued` (counted as `requeued`, re-claimed and resumed from last checkpoint) instead of `interrupted`. Until then ALL orphans -> `interrupted` and `requeued` stays 0. This is documented inline in the function body as a seam. (The brief framed the future capability as a threaded predicate rather than an optional arg on this signature, so the zero-arg form ships as-is; no optional param was added.)
 
-## Concerns
-None. Implementation matches the brief verbatim (type widening, Map-based per-id correlation, cleanup on settle/error/close, no cross-talk). Biome's auto-format only touched line-wrapping in the test file, no semantic change. Note: this path previously held a stale report for an unrelated earlier "Task 10" (vad.ts, from a prior renumbering pass) — it has been overwritten with this task's actual content.
+## TDD RED -> GREEN
+- RED: `store.reconcileOrphans is not a function` (all tests errored before implementation).
+- GREEN: 29/29 `tests/queue/` pass, stable across 5 consecutive runs.
+
+## §7.3 contract — each bullet has a test
+1. **Running orphan -> Interrupted w/ finished_at set** — test "reconciled orphan carries finished_at and is not re-claimable" (asserts status Interrupted + `finishedAt > 0`); also the multi-job test.
+2. **Non-running rows untouched (queued/done/failed/interrupted/canceled)** — test "leaves failed and canceled rows untouched" drives one row into each of Failed / Canceled / pre-existing Interrupted + one live Running, asserts only the Running flips; the main test also asserts a Done row is untouched.
+3. **Returns correct COUNT** — main test asserts `interrupted === 2` (two claimed orphans); finished_at test asserts `=== 1`; the untouched-states test asserts `=== 1` (only the single live Running).
+4. **No double-exec: interrupted job not re-claimed** — finished_at test asserts `store.claimNext()` returns `null` after reconcile (interrupted is neither queued nor running).
+5. **Empty / no-running -> returns 0, no error** — verbatim brief test "reconcileOrphans is a no-op when nothing is Running" asserts `{ interrupted: 0, requeued: 0 }`.
+
+## Concern — the brief's verbatim first test was FLAKY (fixed)
+The brief's exact sample test assumed `claimNext` claims jobs in insertion order (`running` then `queued`). It does NOT: three enqueues land in the same millisecond so they tie on `created_at`, and `claimNext`'s `ORDER BY created_at ASC, id ASC` tiebreak then falls to the id's **random** suffix (`job-<ms>-<rand>`). Verified empirically — claim order varied run-to-run (`1 3`, `3 2`, `2 3`, `1 2`). The verbatim test passed only ~1/3 of the time (when `done` happened to hold the largest id). This is a sample-code defect (cf. the "plan-sample-code ships defects" lesson), not an implementation bug — my UPDATE is correct.
+
+**Fix:** rewrote that test to be deterministic — it CAPTURES the two jobs `claimNext` actually returns, marks the remaining unclaimed one Done, then asserts both captured orphans -> Interrupted, the unclaimed -> Done, and `interrupted === 2`. Same contract, no order assumption. (Import order alphabetized and non-null assertions replaced with narrowing guards to satisfy biome.) The no-op test was kept verbatim.
+
+## Gate
+`bun test tests/queue/` 29 pass / 0 fail (x5 stable) · `bun run typecheck` OK · `bun run lint:file` OK (0 errors/warnings on both files) · pre-commit docs-check passed.
+
+## Files changed
+- `src/queue/store.ts`
+- `tests/queue/store-reconcile.test.ts` (new)

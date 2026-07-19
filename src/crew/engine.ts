@@ -13,6 +13,7 @@ import {
   type UnverifiedMarker,
 } from '../verification/expand.ts';
 import type { VerifyDeps } from '../verification/types.ts';
+import type { CheckpointStore } from '../workflow/checkpoint.ts';
 import {
   defaultRunAgentStep,
   runWorkflow,
@@ -52,6 +53,11 @@ export type CrewDeps = {
    *  (sequential agent steps and the hierarchical orchestrator's delegate
    *  tools) so a dropped member is recorded. */
   ledger?: DegradationLedger;
+  /** Optional per-run checkpoint store (Slice 24 Incr 6, D5 fallback). Forwarded
+   *  to the sequential path's workflow engine so a re-enqueue of the same runId
+   *  resumes at the first incomplete task with no re-execution. The hierarchical
+   *  (orchestrator) path is not step-resumable and ignores it. */
+  checkpoint?: CheckpointStore;
 };
 
 /** Scan a finished workflow context for an abstain marker (a verified task whose
@@ -125,6 +131,7 @@ export function runCrew(
         persistMemory: deps.persistMemory ?? def.persistMemory,
         recall: deps.recall,
         ledger: deps.ledger,
+        checkpoint: deps.checkpoint,
       });
       if (outcome.kind === 'done') {
         const unverified = findUnverified(

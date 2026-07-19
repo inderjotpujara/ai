@@ -3,11 +3,13 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MemoryStore } from '../../src/memory/store.ts';
+import { createJobStore } from '../../src/queue/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
 import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
 import type { SessionStore } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
 
 // None of these tests exercise a memory route, so a throwing fake keeps the
 // fixture honest about what's actually under test here.
@@ -90,6 +92,11 @@ function deps(): ServerDeps {
     mountOne: async () => ({ outcome: 'mounted' }),
     memoryStore: unusedMemoryStore,
     sessionStore: unusedSessionStore,
+    jobStore: createJobStore(
+      { path: mkdtempSync(join(tmpdir(), 'phase4-jobs-')) },
+      {},
+    ),
+    pool: makeFakePool(),
   };
 }
 
