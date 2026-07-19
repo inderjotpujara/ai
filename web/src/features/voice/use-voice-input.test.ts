@@ -933,6 +933,52 @@ describe('useVoiceInput', () => {
     expect(event.realTimeFactor).toBeGreaterThanOrEqual(0);
   });
 
+  it('D10 telemetry realTimeFactor survives engine.transcribe detaching frames.samples (I1: stt-engine.ts transfers the buffer, synchronously zeroing it)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    engine.transcribe = vi.fn(async (frames) => {
+      // Simulate the REAL stt-engine.ts behavior: `transcribe()` posts
+      // `frames.samples.buffer` to the worker via the postMessage transfer
+      // list, which SYNCHRONOUSLY detaches the Float32Array at call time —
+      // long before this promise resolves. Mutating the shared `frames`
+      // object here reproduces that: by the time the hook's `.then()` runs,
+      // `frames.samples` reads back as zero-length.
+      frames.samples = new Float32Array(0);
+      return 'hello there world';
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const emitTelemetry = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        {
+          createCapture: () => capture,
+          createEngine: () => engine,
+          emitTelemetry,
+        },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    // 16000 samples at the contract's 16kHz rate = exactly 1000ms of audio.
+    act(() => emitChunk(new Float32Array(16000)));
+    act(() => result.current.stopHold());
+    await waitFor(() =>
+      expect(onFinal).toHaveBeenCalledWith('hello there world'),
+    );
+    await waitFor(() => expect(emitTelemetry).toHaveBeenCalledTimes(1));
+    // biome-ignore lint/style/noNonNullAssertion: emitTelemetry is guaranteed called — we just asserted it above
+    const event = emitTelemetry.mock.calls[0]![0];
+    // Pre-fix: frames.samples.length is read from inside `.then()`, AFTER
+    // transcribe() detached it above, so audioMs === 0 and realTimeFactor
+    // is unconditionally 0 no matter how much real audio was transcribed.
+    // Post-fix: the sample count/rate are captured before transcribe() is
+    // called, so realTimeFactor reflects the real (non-zero) audio duration.
+    expect(event.realTimeFactor).toBeGreaterThan(0);
+  });
+
   it('when enabled is false from the start, status is disabled and no engine/capture is ever created', () => {
     const createEngine = vi.fn();
     const createCapture = vi.fn();

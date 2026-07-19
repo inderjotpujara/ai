@@ -198,6 +198,15 @@ export function useVoiceInput(
         // segment may already have reused.
         let finalized = false;
         const startedAt = performance.now();
+        // Capture the sample count/rate BEFORE handing `frames` to
+        // engine.transcribe(): stt-engine.ts posts `frames.samples.buffer`
+        // to the worker via the postMessage transfer list, which
+        // SYNCHRONOUSLY detaches the Float32Array at call time. Reading
+        // `frames.samples.length` from inside the `.then()` below (after
+        // the await) would see a detached, zero-length view — silently
+        // zeroing the D10 `realTimeFactor` beacon in production (I1).
+        const audioSampleCount = frames.samples.length;
+        const audioSampleRate = frames.sampleRate;
         engine
           .transcribe(frames, (text) => {
             // D6: real streamed interim text replaces the static '…'
@@ -224,7 +233,7 @@ export function useVoiceInput(
             if (text) {
               opts.onFinal(text);
               const durationMs = performance.now() - startedAt;
-              const audioMs = (frames.samples.length / 16000) * 1000;
+              const audioMs = (audioSampleCount / audioSampleRate) * 1000;
               deps.emitTelemetry?.({
                 kind: 'voice.transcribe.web',
                 durationMs,
