@@ -41,6 +41,7 @@
     "@ai-sdk/openai-compatible": "^3.0.12",
     "@ai-sdk/otel": "^1.0.31",
     "@ai-sdk/provider-utils": "^5.0.11",
+    "@ai-sdk/workflow": "^1.0.31",
     "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "0.30.0",
     "@lmstudio/sdk": "^1.5.0",
