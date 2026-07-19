@@ -4,6 +4,7 @@ import { withRunStreamSpan } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 import { confineToDir, MediaPathError } from '../security/media-path.ts';
 import type { RunsDeps } from './detail.ts';
+import { acquireStreamSlot, releaseStreamSlot } from './stream-limit.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -69,6 +70,16 @@ export async function handleRunStream(
     throw err;
   }
 
+  if (!acquireStreamSlot()) {
+    return new Response(JSON.stringify({ error: 'too many streams' }), {
+      status: 503,
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        ...ISOLATION_HEADERS,
+      },
+    });
+  }
+
   const pollMs = opts.pollMs ?? 250;
   const maxWaitMs = opts.maxWaitMs ?? 600_000;
   const encoder = new TextEncoder();
@@ -78,6 +89,18 @@ export async function handleRunStream(
   // reading disk for an abandoned run until maxWaitMs. The loop stops on
   // EITHER the caller's signal or this one.
   const internal = new AbortController();
+
+  // Released exactly once: the loop's normal/aborted exit (finally, below)
+  // and a reader-initiated cancel() both want to free the slot, but they can
+  // race (cancel() aborts the same signal the loop is already exiting on) —
+  // guard so a double-fire never under-counts openStreamCount() and lets
+  // more streams than the cap through.
+  let slotReleased = false;
+  function releaseSlotOnce(): void {
+    if (slotReleased) return;
+    slotReleased = true;
+    releaseStreamSlot();
+  }
 
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -170,12 +193,14 @@ export async function handleRunStream(
             } catch {
               // already closed/cancelled — nothing to do
             }
+            releaseSlotOnce();
           }
         },
       );
     },
     cancel() {
       internal.abort();
+      releaseSlotOnce();
     },
   });
 

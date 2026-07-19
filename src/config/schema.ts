@@ -541,6 +541,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 800,
     doc: 'Sustained silence (ms) that closes a tap-to-toggle voice segment (web/src/features/voice/vad.ts Segmenter). Injected into the served page as window.__AGENT_VOICE_VAD_SILENCE_MS__ (server/main.ts renderIndexHtml). Slice 30b Phase 7.',
   },
+  {
+    env: 'AGENT_WEB_MAX_STREAMS',
+    kind: 'number',
+    def: 0,
+    doc: 'Max simultaneously-open run SSE streams (server/runs/stream-limit.ts). 0/unset = computed from worker concurrency (×8 headroom); a positive integer overrides. Over the cap, GET /api/runs/:id/stream returns 503. Never hardcode.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in
