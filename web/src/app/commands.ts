@@ -92,6 +92,35 @@ export const commands: Command[] = [
     kind: CommandKind.Nav,
     run: (n) => n({ to: '/ops' }),
   },
+  // Task 24 (Slice 25b): per-tab deep links into the Ops console, mirroring
+  // `go-ops` but carrying the `?tab=` search param the `/ops` route's
+  // `validateSearch` already understands (see `router.tsx`'s `opsRoute`).
+  // `go-ops` above stays the bare "jump to Ops" entry; these four make each
+  // tab individually ⌘K-reachable without an extra click once inside Ops.
+  {
+    id: 'go-ops-overview',
+    label: 'Go to Ops · Overview',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/ops', search: { tab: 'overview' } }),
+  },
+  {
+    id: 'go-ops-jobs',
+    label: 'Go to Ops · Jobs',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/ops', search: { tab: 'jobs' } }),
+  },
+  {
+    id: 'go-ops-triggers',
+    label: 'Go to Ops · Triggers',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/ops', search: { tab: 'triggers' } }),
+  },
+  {
+    id: 'go-ops-devices',
+    label: 'Go to Ops · Devices & Access',
+    kind: CommandKind.Nav,
+    run: (n) => n({ to: '/ops', search: { tab: 'devices' } }),
+  },
   {
     id: 'go-library',
     label: 'Go to Library',
