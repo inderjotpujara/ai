@@ -413,6 +413,41 @@ test('[FINAL-REVIEW] completed mcp.mount (test-mount) run → Done + Mcp kind', 
   expect(dto?.kind).toBe(RunKind.Mcp);
 });
 
+// D9 (§7.2): a real chat turn now opens a `chat.run` root (T23's
+// withChatRunSpan). It must map to a terminal Done run of kind Chat — the
+// post-fix reality — NOT a Chat-by-accident-of-fallback ghost that reads
+// Running forever (which is what an unrecognized root would produce).
+test('mapRunToDto classifies a real chat.run trace as RunKind.Chat (D9)', async () => {
+  await writeRun('run-chat', [
+    span({
+      name: 'chat.run',
+      spanId: 'c',
+      startUnixNano: 8_000_000_000,
+      durationMs: 42,
+      attributes: { 'agent.outcome': 'answer' },
+    }),
+    span({
+      name: 'ai.generateText',
+      spanId: 'g',
+      parentSpanId: 'c',
+      startUnixNano: 8_001_000_000,
+      durationMs: 30,
+      attributes: {
+        'gen_ai.request.model': 'qwen3.5:9b',
+        'gen_ai.usage.input_tokens': 12,
+        'gen_ai.usage.output_tokens': 8,
+      },
+    }),
+  ]);
+  const dto = await mapRunToDto(root, 'run-chat');
+  expect(dto?.kind).toBe(RunKind.Chat);
+  expect(dto?.lifecycle).toBe(RunLifecycle.Done);
+  expect(dto?.lifecycle).not.toBe(RunLifecycle.Running);
+  expect(dto?.durationMs).toBe(42);
+  expect(dto?.outcome).toBe('answer');
+  RunDtoSchema.parse(dto);
+});
+
 test('run tokens sum across multiple gen spans; token-less spans omit tokens', async () => {
   await writeRun('run-7', [
     span({ name: 'agent.run', spanId: 'a', startUnixNano: 0 }),

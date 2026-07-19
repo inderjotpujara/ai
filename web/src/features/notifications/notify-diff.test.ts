@@ -63,7 +63,14 @@ describe('diffRunNotifications', () => {
     expect(toNotify).toEqual([]);
   });
 
-  it('(d) never fires for a non-notifiable kind (Chat), even past the duration threshold', () => {
+  it('(d) never fires for a real post-fix chat run (kind=Chat), even past the duration threshold', () => {
+    // Post-fix reality: a chat turn opens a `chat.run` root, which
+    // `deriveRunKind(['chat.run'])` genuinely classifies as `RunKind.Chat`
+    // (proven engine-side by the run-kind / run-dto tests). This is NOT the
+    // pre-fix accident where chat rooted an `agent.run` span and only escaped
+    // notification because its kind happened not to match — chat now simply
+    // is not a notifiable kind. Seed Running, poll Done over-threshold, assert
+    // no toast queued.
     const seen = new Map([['r1', RunLifecycle.Running]]);
     const { toNotify } = diffRunNotifications(
       seen,
@@ -78,6 +85,51 @@ describe('diffRunNotifications', () => {
       { baseline: false, minDurationMs: MIN_DURATION_MS },
     );
     expect(toNotify).toEqual([]);
+  });
+
+  it('(c) pins the notifiable-kind set: Crew/Workflow/Agent queue a Running->Done over-threshold run, Chat/Build/Pull/Mcp/Memory never do — any edit to NOTIFIABLE_KINDS trips this', () => {
+    const notifiable = [RunKind.Crew, RunKind.Workflow, RunKind.Agent];
+    const nonNotifiable = [
+      RunKind.Chat,
+      RunKind.Build,
+      RunKind.Pull,
+      RunKind.Mcp,
+      RunKind.Memory,
+    ];
+    // Every kind currently in NOTIFIABLE_KINDS must queue.
+    for (const kind of notifiable) {
+      const { toNotify } = diffRunNotifications(
+        new Map([['r1', RunLifecycle.Running]]),
+        [
+          runItem({
+            id: 'r1',
+            kind,
+            lifecycle: RunLifecycle.Done,
+            durationMs: 999_999,
+          }),
+        ],
+        { baseline: false, minDurationMs: MIN_DURATION_MS },
+      );
+      expect(toNotify).toEqual([{ runId: 'r1', kind, durationMs: 999_999 }]);
+    }
+    // Every other kind — Chat foremost — must NOT queue, byte-for-byte pinning
+    // the set to {Crew, Workflow, Agent}. Adding/removing a kind flips one of
+    // these assertions.
+    for (const kind of nonNotifiable) {
+      const { toNotify } = diffRunNotifications(
+        new Map([['r1', RunLifecycle.Running]]),
+        [
+          runItem({
+            id: 'r1',
+            kind,
+            lifecycle: RunLifecycle.Done,
+            durationMs: 999_999,
+          }),
+        ],
+        { baseline: false, minDurationMs: MIN_DURATION_MS },
+      );
+      expect(toNotify).toEqual([]);
+    }
   });
 
   it('(b) a run already terminal at baseline never fires later — the check is Running->terminal specifically, not "terminal now"', () => {
