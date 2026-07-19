@@ -106,7 +106,7 @@ test('uses the model override returned by onBeforeDelegate', async () => {
   }));
   const out = await t.execute?.(
     { task: 'hi' },
-    { toolCallId: 't', messages: [] },
+    { toolCallId: 't', messages: [], context: {} },
   );
   expect(out).toEqual({ text: 'OVERRIDE MODEL' });
 });
@@ -123,7 +123,7 @@ test('abort short-circuits: agent never runs, returns soft error', async () => {
   const t = asDelegateTool(a, async () => ({ abort: 'no fit' }));
   const out = await t.execute?.(
     { task: 'hi' },
-    { toolCallId: 't', messages: [] },
+    { toolCallId: 't', messages: [], context: {} },
   );
   expect(out).toEqual({ error: 'no fit' });
   expect(ran).toBe(false);
@@ -169,7 +169,10 @@ test('asDelegateTool opens an agent.delegation span tagged with the target', asy
     tools: {},
   };
   const tool = asDelegateTool(delegateAgent);
-  await tool.execute?.({ task: 'go' }, { toolCallId: 't', messages: [] });
+  await tool.execute?.(
+    { task: 'go' },
+    { toolCallId: 't', messages: [], context: {} },
+  );
   const del = spanExporter
     .getFinishedSpans()
     .find((s) => s.name === 'agent.delegation');
@@ -186,7 +189,10 @@ test('over-depth delegation returns a soft error and records a guardrail event',
     'parent',
     8192,
     async () =>
-      await t.execute?.({ task: 'go' }, { toolCallId: 'c', messages: [] }),
+      await t.execute?.(
+        { task: 'go' },
+        { toolCallId: 'c', messages: [], context: {} },
+      ),
   );
   expect(result).toEqual({ error: expect.stringContaining('depth limit') });
 });
@@ -198,7 +204,10 @@ test('long delegated return is truncated to the caller live cap', async () => {
   const result = await withRootDelegationContext(
     8192,
     async () =>
-      await t.execute?.({ task: 'go' }, { toolCallId: 'c', messages: [] }),
+      await t.execute?.(
+        { task: 'go' },
+        { toolCallId: 'c', messages: [], context: {} },
+      ),
   );
   if (
     result == null ||
@@ -229,7 +238,10 @@ test('within-depth recursive re-entry of the same agent name is allowed', async 
     'rec',
     8192,
     async () =>
-      await t.execute?.({ task: 'again' }, { toolCallId: 'c', messages: [] }),
+      await t.execute?.(
+        { task: 'again' },
+        { toolCallId: 'c', messages: [], context: {} },
+      ),
   );
   expect(result).toEqual({ text: 'ok' }); // same name 'rec' re-entered, not rejected
 });

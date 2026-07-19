@@ -191,7 +191,7 @@ suite('Slice 27 Phase A — multimodal analysis (live)', () => {
     const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-fit-img-')));
     const result = await createGenerateTools(store).generate_image?.execute?.(
       { prompt: 'a red cube on a wooden table' },
-      { toolCallId: 'test-image', messages: [] },
+      { toolCallId: 'test-image', messages: [], context: undefined },
     );
     const text = String(result);
     if (chosen) {
@@ -213,7 +213,7 @@ suite('Slice 27 Phase A — multimodal analysis (live)', () => {
     const store = createMediaStore(mkdtempSync(join(tmpdir(), 'mm-fit-tts-')));
     const result = await createGenerateTools(store).generate_speech?.execute?.(
       { prompt: 'hello from the local agent' },
-      { toolCallId: 'test-speech', messages: [] },
+      { toolCallId: 'test-speech', messages: [], context: undefined },
     );
     const text = String(result);
     expect(text).toContain('file://');
@@ -237,7 +237,7 @@ describe('Slice 28 — gen-fit graceful degradation (deterministic)', () => {
       selectModel: async () => undefined,
     }).generate_video?.execute?.(
       { prompt: 'x' },
-      { toolCallId: 'test-video-nofit', messages: [] },
+      { toolCallId: 'test-video-nofit', messages: [], context: undefined },
     );
     const text = String(result).toLowerCase();
     expect(text).toContain('no video');
