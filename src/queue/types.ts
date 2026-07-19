@@ -44,6 +44,7 @@ export type JobRecord = {
   runId: string | undefined; // the runs/<id> this job's execution wrote to
   result: unknown; // terminal success payload (JSON), undefined until Done
   error: string | undefined; // terminal failure title, undefined unless Failed
+  retriedFrom: string | null; // id of the job this one re-runs, null for an original (non-retry) job
 };
 
 export type JobInput = {
@@ -53,6 +54,7 @@ export type JobInput = {
   maxAttempts?: number; // defaults to computed maxAttempts() (reliability/config.ts)
   availableAt?: number; // epoch-ms floor; defaults to 0 (immediately claimable). A caller may schedule a delayed job; retry backoff sets it forward internally.
   runId?: string; // caller may pre-mint (newRunId()); store mints if absent
+  retriedFrom?: string; // set when this enqueue is a retry of an earlier job (lineage)
 };
 
 /** Reserved second constructor arg — parity seam mirroring `SessionStoreDeps`

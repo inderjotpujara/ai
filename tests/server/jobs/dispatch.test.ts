@@ -23,6 +23,7 @@ const fakeJob = (kind: JobKind, payload: unknown): JobRecord => ({
   runId: 'run-xyz',
   result: undefined,
   error: undefined,
+  retriedFrom: null,
 });
 
 const baseDeps = () => ({

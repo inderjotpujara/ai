@@ -45,4 +45,13 @@ export const JOB_MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    name: 'add-retried-from',
+    up: (db: Database) => {
+      // §11 lineage: a retried job records the id of the job it re-runs, so the
+      // Jobs drawer can show "retry of job X" and back-link. Nullable — original
+      // (non-retry) jobs have no lineage.
+      db.run(`ALTER TABLE jobs ADD COLUMN retried_from TEXT`);
+    },
+  },
 ];

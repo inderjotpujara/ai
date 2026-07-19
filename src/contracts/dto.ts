@@ -143,6 +143,8 @@ export const JobDtoSchema = z.object({
   runId: z.string().optional(),
   result: z.unknown().optional(),
   error: z.string().optional(),
+  availableAt: z.number(),
+  retriedFrom: z.string().nullable(),
 });
 export type JobDTO = z.infer<typeof JobDtoSchema>;
 

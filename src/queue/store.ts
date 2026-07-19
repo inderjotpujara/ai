@@ -34,6 +34,7 @@ type JobRowRaw = {
   run_id: string | null;
   result: string | null;
   error: string | null;
+  retried_from: string | null;
 };
 
 function toJobRecord(r: JobRowRaw): JobRecord {
@@ -53,6 +54,7 @@ function toJobRecord(r: JobRowRaw): JobRecord {
     runId: r.run_id ?? undefined,
     result: r.result === null ? undefined : (JSON.parse(r.result) as unknown),
     error: r.error ?? undefined,
+    retriedFrom: r.retried_from,
   };
 }
 
@@ -131,8 +133,8 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
       `INSERT OR IGNORE INTO jobs
        (id, kind, payload, priority, status, attempts, max_attempts,
         created_at, updated_at, started_at, finished_at, available_at,
-        run_id, result, error)
-       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL)`,
+        run_id, result, error, retried_from)
+       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?)`,
       [
         id,
         input.kind,
@@ -143,6 +145,7 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
         at,
         availableAt,
         runId,
+        input.retriedFrom ?? null,
       ],
     );
     const row = getJob(id);

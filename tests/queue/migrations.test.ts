@@ -6,7 +6,7 @@ import { JOB_MIGRATIONS } from '../../src/queue/migrations.ts';
 test('init-jobs creates the jobs table with the JobRecord columns', () => {
   const db = new Database(':memory:');
   const version = migrate(db, JOB_MIGRATIONS);
-  expect(version).toBe(1);
+  expect(version).toBe(2);
   const cols = (
     db.query('PRAGMA table_info(jobs)').all() as { name: string }[]
   ).map((c) => c.name);
@@ -26,11 +26,17 @@ test('init-jobs creates the jobs table with the JobRecord columns', () => {
     'run_id',
     'result',
     'error',
+    'retried_from',
   ]);
 });
 
 test('init-jobs is idempotent (re-migrate is a no-op)', () => {
   const db = new Database(':memory:');
   migrate(db, JOB_MIGRATIONS);
-  expect(migrate(db, JOB_MIGRATIONS)).toBe(1);
+  expect(migrate(db, JOB_MIGRATIONS)).toBe(2);
+});
+
+test('add-retried-from advances user_version to 2', () => {
+  const db = new Database(':memory:');
+  expect(migrate(db, JOB_MIGRATIONS)).toBe(2);
 });
