@@ -193,6 +193,25 @@ test('GET /api/devices requires the bearer token and degrades to 503 when unwire
   });
 });
 
+test('POST /api/devices/:id/revoke requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the GET /api/devices 503 test above: this fixture never
+  // wires the OPTIONAL deviceRegistry/sessionTokens, so the shared `need()`
+  // guard trips a clean 503 (not a crash) — AND the action-sub-path route stays
+  // behind the session guard (401 with no token) like every other /api route.
+  const unauth = await fetch(`${base}/api/devices/d1/revoke`, {
+    method: 'POST',
+  });
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/devices/d1/revoke`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: deviceRegistry',
+  });
+});
+
 const validEvent = {
   kind: 'voice.transcribe.web',
   durationMs: 1200,

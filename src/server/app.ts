@@ -22,6 +22,7 @@ import { handleDaemonLogs } from './daemon/logs.ts';
 import { handleDaemonStatus } from './daemon/status.ts';
 import { handleDeviceList } from './devices/list.ts';
 import { handleDevicePair } from './devices/pair.ts';
+import { handleDeviceRevoke } from './devices/revoke.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleJobCancel } from './jobs/cancel.ts';
@@ -359,9 +360,6 @@ async function handleApi(
           rec.status(res.status);
           return res;
         }
-        // /api/devices/:id/revoke (T18) lands beside these later — remember the
-        // action-sub-path-before-bare-:id ordering discipline (same as
-        // /api/runs/:id/stream above) when that route is added.
         if (req.method === 'GET' && url.pathname === '/api/devices') {
           const res = handleDeviceList({
             deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
@@ -377,6 +375,26 @@ async function handleApi(
               sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
               publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
               bindInfo: need(deps.bindInfo, 'bindInfo'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action sub-path match MUST precede any future bare `/api/devices/:id`
+        // detail route (there is none yet) — same action-before-detail
+        // discipline as `/api/jobs/:id/cancel` and `/api/runs/:id/stream`.
+        const deviceRevoke = url.pathname.match(
+          /^\/api\/devices\/([^/]+)\/revoke$/,
+        );
+        if (req.method === 'POST' && deviceRevoke?.[1]) {
+          const res = handleDeviceRevoke(
+            deviceRevoke[1],
+            req,
+            {
+              deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
+              sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
               policy: deps.policy,
             },
             guard,
