@@ -24,7 +24,7 @@ test('stats() reports every JobStatus with zero-defaults and total=sum', () => {
   store.close();
 });
 
-test('sum(counts) === total on EVERY read while a pool churns rows (§7.2)', async () => {
+test('stats() self-consistency (sum(counts) === total) holds on every read under live pool churn', async () => {
   const store = tempStore();
   for (let i = 0; i < 40; i++)
     store.enqueue({ kind: JobKind.Chat, payload: i });
@@ -35,7 +35,8 @@ test('sum(counts) === total on EVERY read while a pool churns rows (§7.2)', asy
     dispatch: () => async () => ({ ok: true }),
   });
   pool.start();
-  // Hammer stats() while the pool transitions rows underneath it.
+  // Hammer stats() while the pool transitions rows underneath it, asserting
+  // the sum(counts) === total invariant holds on every single read.
   for (let i = 0; i < 200; i++) {
     const s = store.stats();
     const sum = Object.values(s.counts).reduce((a, b) => a + b, 0);

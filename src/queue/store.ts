@@ -347,11 +347,11 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
   }
 
   function stats(): { counts: Record<JobStatus, number>; total: number } {
-    // ONE read, ONE consistent snapshot: a single GROUP BY over the whole
-    // table, so the six per-status counts are all taken at the SAME instant.
-    // Six separate COUNT(*) reads would each see a different mid-transition
-    // moment (§7.2), breaking sum(counts) === total. bun:sqlite is synchronous,
-    // so this query is atomic w.r.t. any interleaved claimNext/markDone write.
+    // Race-safety comes from this being a single synchronous, yield-free
+    // bun:sqlite read (no `await` in this body) — no pool write can interleave
+    // mid-read regardless of query shape. The single GROUP BY is chosen for
+    // single-statement clarity and to future-proof against a later move to
+    // async reads, where a multi-statement version genuinely could race.
     const rows = db
       .query(`SELECT status, COUNT(*) AS n FROM jobs GROUP BY status`)
       .all() as { status: string; n: number }[];
@@ -362,9 +362,13 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     ) as Record<JobStatus, number>;
     let total = 0;
     for (const r of rows) {
-      // Guard an unknown status value defensively (never NaN the sum).
-      if (r.status in counts) counts[r.status as JobStatus] = r.n;
-      total += r.n;
+      // Guard an unknown status value defensively: only known buckets count
+      // toward total, so total === sum(counts) holds by construction even if
+      // a stray/unknown status row ever existed.
+      if (r.status in counts) {
+        counts[r.status as JobStatus] = r.n;
+        total += r.n;
+      }
     }
     return { counts, total };
   }
