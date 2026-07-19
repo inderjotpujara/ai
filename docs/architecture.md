@@ -241,6 +241,64 @@ graph TD
         voicecliio["cli-io.ts · createCliVoiceDeps (real ffmpeg MicIo + raw-TTY keys)"]
         voicescript["scripts/setup-voice.ts · setup:voice (moonshine model download + ffmpeg check)"]
     end
+    subgraph QUEUE["Queue · src/queue (Slice 24)"]
+        qtypes["types.ts · JobStatus/JobPriority/JobKind enums + JobRecord"]
+        qmig["migrations.ts · 'init-jobs' (jobs table + idx_jobs_claim)"]
+        qstore["store.ts · createJobStore · enqueue/claimNext/mark*/reconcileOrphans"]
+        qpool["pool.ts · createWorkerPool (bounded, per-job AbortController, drain)"]
+        qconc["concurrency.ts · computeConcurrency (hardware-derived)"]
+        qretry["retry-policy.ts · jobRetryDecision (reuses reliability/classify)"]
+    end
+    subgraph DAEMON["Daemon · src/daemon (Slice 24)"]
+        dpid["pid.ts · PID file 0600 · readLivePid (stale-clear)"]
+        dcore["core.ts · createDaemon · start() boot-ordering + SIGTERM drain"]
+        dlaunchd["launchd.ts · renderLaunchdPlist (KeepAlive/RunAtLoad)"]
+        dspans["spans.ts · daemon.start/stop + job.* span helpers"]
+        dcli["cli/daemon.ts · agent daemon install/start/stop/status/logs"]
+    end
+    subgraph SRVJOBS["Job API + durable auth · src/server (Slice 24)"]
+        sjenqueue["jobs/enqueue.ts · POST /api/jobs → 202 (+resume, path-confined)"]
+        sjdispatch["jobs/dispatch.ts · createJobDispatch (JobKind→JobExecutor)"]
+        sjlist["jobs/{list,detail,cancel}.ts · GET list/detail + cancel"]
+        sroot["security/root-token.ts · durable ~/.agent/daemon-token 0600"]
+        ssession["security/session-token.ts · HMAC per-device session tokens"]
+        sconsent["consent/durable-registry.ts · restart-surviving approvals"]
+        sredirect["mcp/http-redirect.ts · redirect:'error' SSRF guard"]
+        srate["run-rate.ts · fixed-window run-dir rate limit"]
+        schkpt["workflow/checkpoint.ts · per-node runs/<id>/checkpoint.json"]
+    end
+
+    %% Slice 24 data flow: an HTTP call (or a Slice-25 trigger) ENQUEUES a job and
+    %% returns 202; the daemon owns ONE worker pool that claims + dispatches jobs
+    %% back through the EXISTING run turns, so a run outlives its request. Boot
+    %% reconciles orphaned Running rows before the pool starts (no double-exec);
+    %% durable crew/workflow jobs resume from their per-node checkpoint. Auth is a
+    %% durable root token minting per-device HMAC session tokens.
+    sjenqueue --> qstore
+    sjenqueue --> srate
+    sjenqueue --> schkpt
+    sjlist --> qstore
+    sjdispatch --> qstore
+    qpool --> qstore
+    qpool --> qconc
+    qpool --> qretry
+    qpool --> sjdispatch
+    qpool --> dspans
+    qretry --> relclassify
+    qstore --> qmig
+    qstore --> qtypes
+    qstore --> relconf
+    dcore --> qstore
+    dcore --> qpool
+    dcore --> dpid
+    dcore --> dspans
+    dcli --> dcore
+    dcli --> dlaunchd
+    dspans --> spans
+    sjenqueue --> spans
+    schkpt --> wfengine
+    sroot --> ssession
+    sredirect --> mcpclient
 
     %% Reliability data flow (Slice 21): classify feeds retry/breaker/degrade;
     %% delegation/workflow/crew/mcp/selector wrap cross-boundary ops through it;
@@ -539,8 +597,8 @@ graph TD
 | **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`) — **plus (Phase 4, full narrative below)** real `features/crews/` and `features/workflows/` list+detail screens with a **▶ Run** launch button, a generic `shared/dag/` `@xyflow/react` `DagView` (+ deterministic `layeredPositions` layout, no `dagre`) fed by `workflow-graph.ts`/`crew-graph.ts` (D7a's process-aware crew split), a run-detail live DAG overlay (D8, `features/runs/run-dag.ts`) with a Graph/Waterfall toggle, a Runs kind facet, and `jump-to-crew`/`jump-to-workflow` ⌘K commands — **plus (Phase 5, full narrative below)** real `features/builders/` (Agent/Crew/Workflow mode toggle, streamed narration + proposal `DagView` + mid-flow consent) and a real 3-tab `features/library/` (Models — inventory + live-progress pull; Memory — spaces/stats + upload→ingest + recall; MCP — browse/status + add-server + test-mount). Settings remains a stub; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
 | **Session / Chat history** | `src/session/` | Cross-invocation persistence for web chat conversations (Slice 30b Phase 6, complete — full narrative in §3g above): `migrations.ts`'s `SESSION_MIGRATIONS` (one migration; the DDL lives here, schema-versioning run by `db/migrate.ts`, mirrors `memory/sqlite-store.ts`'s `MEMORY_MIGRATIONS` idiom) creates `sessions` (`id` PK, `title`, `owner` default `'local'`, `created_at`/`updated_at`, nullable `last_message_at`/`run_id`) and `messages` (`id` PK, `session_id` FK→`sessions(id)`, nullable `parent_message_id`, `role`, `parts` JSON text, `created_at`, nullable `degraded`) plus `idx_messages_session(session_id, created_at)`. `parent_message_id` is written but unused this phase (reserved for Slice 41's edit-in-place threading); `degraded` flags an assistant turn that saw a `StatusEventType.Degrade` event. `store.ts`'s `createSessionStore` (mirrors `createMemoryStore`'s factory-returns-closure shape, reuses the WAL/busy_timeout/foreign_keys pragma trio from `memory/sqlite-store.ts`) exposes `upsertSession`/`getSession`/`renameSession`/`deleteSession`/`listSessions`/`appendMessage`/`getMessages` — every write is `INSERT OR IGNORE` on the row/message id, so a retried request for the same `sessionId`/message is a safe no-op, never a constraint-violation throw. Two consumers: `server/chat/handler.ts`'s `handleChat` calls `upsertSession` + `appendMessage` at both turn boundaries (user message before any engine work, assistant message only after `runChatTurn` resolves); `server/sessions/{list,detail,rename,delete,export}.ts` read/mutate/export the store for the browser's Sessions surface (`GET/PATCH/DELETE /api/sessions(/:id)`, `GET /api/sessions/:id/export` → Markdown) | `db/migrate.ts` |
-| **Queue** | `src/queue/` | Durable SQLite job queue: jobs table + bounded worker pool (Slice 24; full Queue section in Increment 7). The queue→execution seam is `src/server/jobs/dispatch.ts` (`createJobDispatch`): maps each `JobKind` to a `JobExecutor` that validates the job payload per-kind, resolves the crew/workflow def, then invokes the EXISTING run turn (`launch-turns.ts`) with the job's `runId` + pool `AbortSignal` — no execution logic duplicated. Job DTOs + wire enums live in `src/contracts/` (`JobDtoSchema`, `Job{Kind,Status,Priority}Wire`, `Job{Enqueue,List}*` schemas) | `db/migrate.ts`, `contracts/`, `server/launch-turns.ts` |
-| **Daemon** | `src/daemon/` | Daemon lifecycle for Slice 24 Increment 4+ (stub — full Daemon section lands in Increment 7). `pid.ts` owns the PID-file contract the daemon uses to guard against a double-start and back `daemon status`: `defaultPidPath()` (`~/.agent/daemon.pid`), `writePid(path, pid)` (0700 parent dir, 0600 file), `readPid(path)` (parsed pid or `undefined` — absent/malformed file never throws), `isPidAlive(pid)` (`process.kill(pid, 0)` existence probe — `ESRCH`→false, `EPERM`→true since the process exists but isn't ours to signal), `readLivePid(path)` (stale-pid-file detection: returns the pid only if it's actually alive, else clears the stale file and returns `undefined`), `clearPid(path)` (idempotent remove, on graceful stop) | `node:fs`, `node:os`, `node:path` |
+| **Queue** | `src/queue/` | Durable SQLite job queue — the heart of the always-on daemon (Slice 24, full narrative in §24). `store.ts`'s `createJobStore` (mirrors `createSessionStore`: WAL + `busy_timeout` + `foreign_keys`, `db/migrate.ts` `'init-jobs'` migration, `INSERT OR IGNORE` idempotency, keyset pagination, snake↔camel mappers): `enqueue`, atomic **`claimNext`** (`BEGIN IMMEDIATE`, `status='queued' AND available_at<=now` gated, `ORDER BY priority ASC, created_at ASC, id ASC` — priority-then-FIFO), `markDone/Failed/Interrupted/Canceled` (`markFailed` re-queues with a full-jitter `available_at` backoff, terminal at `max_attempts`), `listJobs`, `reconcileOrphans` (boot recovery). `pool.ts`'s `createWorkerPool` runs ≤`computeConcurrency()` claim loops with per-job `AbortController` cancel + bounded `drain`, error-isolated so a store throw can never wedge a loop (degrade-never-crash). `types.ts` = `enum JobStatus{Queued/Running/Done/Failed/Interrupted/Canceled}`, `enum JobPriority{High/Normal}`, `JobKind⊂RunKind`, `JobRecord`. The queue→execution seam is `src/server/jobs/dispatch.ts` (`createJobDispatch`): maps each `JobKind` to a `JobExecutor` that invokes the EXISTING run turn (`launch-turns.ts`) with the job's `runId` + pool `AbortSignal` — no execution logic duplicated. Job DTOs + wire enums live in `src/contracts/` | `db/migrate.ts`, `reliability/` (classify + backoff config), `contracts/`, `server/launch-turns.ts` |
+| **Daemon** | `src/daemon/` | Always-on daemon lifecycle (Slice 24, full narrative in §24). `core.ts`'s `createDaemon().start()` runs the §7.3 boot-ordering whose ORDER is the correctness core: double-start guard (`readLivePid`) → **`reconcileOrphans()` FIRST** (before the pool can claim) → `writePid` → `pool.start()` → `startWebServer({queue})` in **injected mode** (the daemon owns the single pool; the server never spins up a second on the same DB) → `SIGTERM`/`SIGINT` drain via `onShutdown`. `stop()` drains the pool (bounded), stops the server, clears the pid (idempotent). `pid.ts` = the PID-file contract (`~/.agent/daemon.pid`, 0600 in a 0700 dir; `readLivePid` auto-clears a stale file via a `process.kill(pid,0)` liveness probe). `launchd.ts` renders the macOS plist (`KeepAlive`/`RunAtLoad`, `daemon start-foreground` entrypoint); `spans.ts` emits `daemon.start`/`daemon.stop` + the `job.*` span helpers. `cli/daemon.ts` (`agent daemon install/start/stop/status/logs`) drives `launchctl` (macOS-only `install`; prints systemd guidance elsewhere) | `process/lifecycle.ts`, `queue/`, `server/main.ts`, `telemetry/spans.ts`, `node:fs`/`os`/`path` |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
 | **Resource** | `src/resource/` | Live RAM budget, footprint, dynamic `num_ctx`, KV sizing/risk, warm/unload, selector | Ollama HTTP + `os` |
@@ -1093,6 +1151,17 @@ match, then `spans[0]`, never throwing), correctly preferring a run's own
 top-level root over an early precursor's. This closes the run-trace.ts
 `summarizeRun` gap in full (chat/crew/workflow/build/pull runs all resolve
 correct duration/outcome in the CLI) — it is not a remaining forward-item.
+
+**Daemon + job spans + populated provenance (Slice 24, §24.7).** The always-on
+daemon adds `daemon.start`/`daemon.stop` (`src/daemon/spans.ts`) and the queue
+adds `job.enqueue`/`job.run`/`job.retry`/`job.cancel` (`queue/pool.ts` +
+`server/jobs/enqueue.ts`), all through the same `inSpan`/`ATTR` helpers — the job
+spans nest under each job's `agent.run` root via `withRunContext`. This is also
+where the long-reserved provenance attributes finally fill in: `RunOrigin.Daemon`
+(a daemon-dispatched run, stamped once for all kinds in `dispatch.ts` and read by
+`mapRunToDto`) and `server.principal` (the authorizing device's session
+`deviceId`, from `TokenGuard.principal()`), so a daemon/remote run is
+distinguishable from a `Manual` one in the same trace and Runs list.
 
 ---
 
@@ -3539,6 +3608,255 @@ path.
 
 ---
 
+## 24. Always-on daemon + task queue + resumable jobs + secure remote access (Slice 24, Phase E)
+
+Through Slice 23 the BFF was a **foreground** `Bun.serve` whose runs were
+**request-scoped**: `POST /api/chat` awaited the turn inline, and if the HTTP
+connection dropped the run aborted; the "fire-and-watch" crew/workflow launches
+(§ "Crews & Workflows") minted a `runId` and `void`-detached the promise with
+**no registry, no concurrency cap, no persistence** — process death lost every
+in-flight run. The per-process token died on restart. Slice 24 turns that into a
+**long-lived daemon with a persistent job queue at its heart**: an HTTP call (or
+a future Slice-25 trigger) **enqueues** a job and returns `202 {jobId, runId}`;
+a bounded worker pool inside the daemon runs it independently of any connection;
+jobs and their status persist in SQLite and survive restart; long crew/workflow
+runs resume at DAG-node granularity; and the daemon is reachable from anywhere
+via a pluggable tunnel authenticated by a durable root token that mints
+per-device session tokens. Four capabilities ship as **one slice** (§2 module
+map gained the `QUEUE`, `DAEMON`, and job-API/durable-auth subgraphs).
+
+### 24.1 The task queue (`src/queue/`) — the heart
+
+`store.ts`'s `createJobStore` mirrors `src/session/store.ts` verbatim (`bun:sqlite`,
+WAL + `busy_timeout` + `foreign_keys=ON`, `db/migrate.ts` `'init-jobs'` migration,
+`INSERT OR IGNORE`, base64url keyset pagination, snake↔camel mappers). The `jobs`
+row carries `id, kind, payload (JSON), priority, status, attempts, max_attempts,
+created_at/updated_at/started_at/finished_at, available_at, run_id, result, error`,
+indexed by `idx_jobs_claim(status, priority, created_at)`.
+
+- **`claimNext(now)` — atomic priority-then-FIFO.** The claim runs in a
+  `db.transaction().immediate()` (**`BEGIN IMMEDIATE`** takes the write lock at
+  BEGIN, so two workers can never both read the same `queued` row), selects
+  `WHERE status='queued' AND available_at<=now ORDER BY priority ASC, created_at
+  ASC, id ASC LIMIT 1`, and flips it to `running` (`started_at`, `attempts+1`,
+  `updated_at`), guarded by a `res.changes===1` check that closes the last
+  double-claim window. `ORDER BY priority ASC` relies on the `JobPriority` enum's
+  TEXT values sorting `High` before `Normal` (asserted at module load). The
+  **`available_at<=now` gate** is what makes retry backoff work: a re-queued job
+  with a future `available_at` is simply not eligible until its floor passes.
+- **Transitions.** `markDone`/`markInterrupted`/`markCanceled` are terminal
+  writes. `markFailed` is the retry branch: below `max_attempts` it sets
+  `status='queued', started_at=NULL, available_at=now+backoff(attempts)`
+  (full-jitter exponential, reusing `reliability/config.ts`'s `retryBaseMs`/
+  `retryCapMs`) — it does **not** re-increment `attempts` (already bumped on
+  claim); at `max_attempts` it is terminal `Failed`. A circuit breaker was
+  deliberately **not** wired — jobs share no failure domain, so a per-dependency
+  breaker would be meaningless here.
+- **`reconcileOrphans({durable?})` — boot recovery (§7.3).** In its own
+  `.immediate()` transaction it atomically transitions every `status='running'`
+  row left by a crash: without a predicate, all → `Interrupted`; with a `durable`
+  predicate (crew/workflow), a matching orphan → `Queued` with `available_at=0`
+  so the pool re-claims it and resumes it from its checkpoint (§24.4). Running
+  before the pool starts means no row is ever picked up in an ambiguous state.
+
+**The bounded worker pool (`pool.ts`).** `createWorkerPool` runs
+`computeConcurrency()` concurrent claim loops. `concurrency.ts` derives N =
+`max(1, floor(os.availableParallelism()/2))` (`AGENT_QUEUE_CONCURRENCY`
+overrides, never hardcoded). Each loop `claimNext`s, dispatches by `kind`, and on
+resolution calls `markDone`/`markFailed(jobRetryDecision(...))`; a per-job
+`AbortController` map wires cancel. `retry-policy.ts`'s `jobRetryDecision` reuses
+`reliability/classify` (only `Lane.Transient` retries) — no reinvented
+classification, no worker-side sleep (the `available_at` gate spaces retries).
+`drain(timeoutMs?)` stops claiming, awaits in-flight, and marks stragglers
+`Interrupted`. An adversarial-verify caught a **daemon-crash Critical** here: the
+claim loop had no error isolation, so a `store` throw (SQLITE_BUSY past timeout,
+DB-closed-on-shutdown, disk-full) escaped the fire-and-forget loop and could kill
+the daemon — fixed with try/catch around every store call plus `.catch` on each
+loop promise (degrade-never-crash).
+
+### 24.2 Detaching execution from the request — jobs + SSE reconcile (§7.1)
+
+`src/server/jobs/enqueue.ts` (`POST /api/jobs`) validates the body, resolves the
+`kind`-specific payload (a model **pull's** provider is resolved **server-side**,
+never client-trusted), `createRun`s a run dir, `enqueue`s, and returns
+`202 {jobId, runId}` — the run's dir **is** `job.runId`, so `GET
+/api/runs/:id/stream` resolves immediately. `GET /api/jobs` (list + status filter
++ keyset page), `GET /api/jobs/:id` (status + result), and `POST
+/api/jobs/:id/cancel` (fires the pool's `AbortController`) complete the control
+plane. The chat/crew/workflow/pull/build handlers changed from inline-await /
+`void`-detach to **enqueue** — the old `void deps.run*Turn().catch()` is fully
+removed, so there is no double-execution; response shapes are unchanged.
+`dispatch.ts`'s `createJobDispatch` is the single queue→execution seam
+(`JobKind`→`JobExecutor` over the real `launch-turns.ts` run-turns, threading
+`job.runId` + the pool `AbortSignal`).
+
+Because a run now outlives its request, the **SSE live-stream must tail a run the
+pool owns**. `src/server/runs/stream.ts`'s existing Last-Event-ID replay is the
+reconcile point: a client can submit, disconnect, and reconnect later to collect
+output. The §7.1 integration test caught a **real gap** — reseed was marking
+frames seen by DTO-index order, but a nested run's `agent.run` root ends **last**
+on the wire yet sorts **first** (depth-0) in the flattened DTO, so a reconnect
+with a child cursor silently dropped the terminal root frame; fixed to reseed by
+**wire/end-time order** (`offsetMs+durationMs`), so late-subscribe gets a
+no-gap `[c1..c4,root]` and reconnect-from-`c2` gets exactly `{c3,c4,root}`. A
+concurrent-open-stream cap (`runs/stream-limit.ts`, `AGENT_WEB_MAX_STREAMS`,
+`503` over the cap) and a fixed-window **run-dir rate limit** (`run-rate.ts`,
+`AGENT_WEB_RUN_RATE`, `429`, gating `createRun` in all four launch routes)
+bound abuse now that the surface is remote-reachable.
+
+### 24.3 The daemon lifecycle (`src/daemon/`)
+
+`core.ts`'s `createDaemon().start()` runs a fixed sequence whose **order is the
+correctness core** (§7.3): (1) double-start guard via `readLivePid` (which clears
+a crashed daemon's stale pid so a restart is never wrongly blocked); (2)
+**`reconcileOrphans()` FIRST**, before the pool can claim anything; (3)
+`writePid`; (4) `pool.start()`; (5) `startWebServer({queue:{jobStore, pool}})` in
+**injected mode** — the server reuses this already-reconciled, already-started
+pool and does **not** construct a second one on the same DB (the "double-pool"
+defect the plan audit caught and fixed via `StartOptions.queue?`); (6)
+`onShutdown(stop)` + install signal handlers. `stop()` drains the pool (bounded
+by `drainTimeoutMs`), stops the server, and clears the pid — idempotent, so a
+SIGTERM-plus-explicit double-stop is safe. `pid.ts` owns the PID-file contract
+(`~/.agent/daemon.pid`, `writePid` 0600 in a 0700 dir; `isPidAlive` uses
+`process.kill(pid,0)` — `ESRCH`→dead, `EPERM`→alive-but-not-ours). `launchd.ts`
+renders the macOS plist (`Label ai.agent.daemon`, `KeepAlive=true`,
+`RunAtLoad=true`, `ProgramArguments=[bun, entry, daemon, start-foreground]`,
+escaped stdout/err paths). `src/cli/daemon.ts` (`agent daemon
+install|start|start-foreground|stop|status|logs`) drives `launchctl` through an
+injectable seam (never shells out in tests); `install` is macOS-only and prints
+**systemd** guidance on other platforms rather than failing.
+
+### 24.4 Resumable jobs — a custom per-node checkpoint store (D5, spike-gated)
+
+Increment 1 spiked adopting **`@ai-sdk/workflow`**'s `WorkflowAgent` as the
+durable substrate (D5c). **Verdict: not viable → custom fallback.**
+`@ai-sdk/workflow@1.0.31` exports only `WorkflowAgent` (an LLM agent needing a
+model) + transport/stream helpers — **no filesystem store, no DAG/step builder,
+no resume**. The durable substrate (`'use workflow'`/`'use step'` event-sourced
+replay) is the **separate Vercel Workflow DevKit**, which needs a build-time
+esbuild step + a dev-server and is not importable by a standalone Bun cold-resume.
+The spike proved it empirically: killed after node `a`, resume **re-executed** `a`
+(`nodes.log = a,a,b,c`) — durability refuted. An independent verify confirmed the
+negative verdict against the package's `index.d.ts` export set. The dep was
+therefore unused by `src/` and is **removed in the docs/cleanup increment**.
+
+The custom substrate is `src/workflow/checkpoint.ts`'s `createCheckpointStore(runDir)`,
+backing a single `runs/<runId>/checkpoint.json` (`{completed: string[],
+nodeResults: Record}`) with an **atomic temp-write+rename** (a crash mid-write
+never leaves a half-written checkpoint). The DAG loop (`engine.ts` `runWorkflow`,
+`crew/engine.ts`) calls `completed()` at start to seed done-nodes + re-apply
+branch dead-arms from `resultOf()`, and `record(nodeId, result)` after each node.
+A **`--resume <run-id>`** (or `POST /api/jobs {resume: runId}`, or a `durable`
+boot re-enqueue) reuses the existing run dir, so dispatch runs the crew/workflow
+turn against the same `runId` and the checkpoint **skips completed nodes with no
+re-execution** (proven: a 3-node `a→b→c`, `b` throwing on pass 1, resumes to done
+with `counts.a===1` across both passes). Only **sequential** crew DAGs are
+step-resumable; hierarchical/orchestrator crews are not (they have no static task
+graph — documented, not a bug). Durable consent survives restart too:
+`src/server/consent/durable-registry.ts` writes a pending approval to
+`runs/_consent/consent.json` (0600) **before** emitting it, and a fresh registry
+over the same file post-restart re-lists and resolves it once (subsuming the old
+in-memory consent map lost on restart).
+
+### 24.5 Durable auth + the §7.4 threat model
+
+The process-ephemeral token (dead on restart — the always-on blocker) is replaced
+by a durable **root → per-device session** model:
+
+- **`security/root-token.ts`** — the root is the daemon's disaster-if-leaked
+  secret: the HMAC key every session token is signed with, minted **once** and
+  persisted to `~/.agent/daemon-token` (`0600` in a `0700` dir, `{flag:'wx'}`
+  + EEXIST-reread so a concurrent start can't diverge), so it **survives
+  restarts** — a reconnecting device stays authorized without re-pairing. It
+  **never** leaves the host. `rotate()` is break-glass: replacing the root
+  invalidates every outstanding session at once (their sigs stop verifying).
+- **`security/session-token.ts`** — a session token is what a browser/remote
+  device actually holds: a stateless HMAC grant `payload=base64url({deviceId,exp})`,
+  `sig=HMAC-SHA256(root, payload)`, `token=payload.sig`. No session DB is needed
+  to verify one; the only server state is a small persisted **revocation set**
+  (`0600` JSON) so a single device can be revoked without rotating root.
+  `verifySessionToken` verifies the **signature before parsing** the payload,
+  compares constant-time (`timingSafeEqual` + length-guard, never a `===`
+  short-circuit), checks `Number.isFinite(exp)` and expiry, and returns `null`
+  on any failure. A Fable adversarial security audit rated it **sound** (no
+  forge/bypass/replay/side-channel by a network attacker with one device token
+  and no root): the HMAC binds the exact bytes that get parsed (no
+  canonicalization gap), the algorithm is hardcoded (no alg-confusion), the
+  revocation file **fails closed** on corruption. `src/server/main.ts` mints a
+  short-TTL (`AGENT_WEB_SESSION_TTL_MS`, default 12h) session token for the local
+  browser at boot and injects **that** as `window.__AGENT_TOKEN__` — never the
+  root; a reload re-mints.
+- **§7.4 threat model (`tests/server/threat-model.test.ts`, real server boot).**
+  The daemon binds **loopback by default** (`AGENT_WEB_BIND`=`127.0.0.1` — no
+  implicit `0.0.0.0`; "localhost is not a trust boundary"). A tunnel host is
+  added via `AGENT_WEB_ALLOWED_HOSTS` (its origin paired in
+  `AGENT_WEB_ORIGIN_ALLOWLIST`), matched with or without the configured port for
+  TLS-terminating tunnels. The layered result: a wrong `Host` → `403` **at the
+  perimeter before the token is even checked** (a valid token still 403s); a
+  tunnel request **without/with an invalid token** → `401` (**the network is not
+  the trust boundary**); a valid tunnel+token → `200`; cross-origin → `403`.
+  Hardening in the same increment: a `Bun.serve` **body cap**
+  (`AGENT_WEB_MAX_BODY_BYTES`, `413` at the runtime layer), a `/api/telemetry`
+  **pre-parse** size guard (`AGENT_WEB_TELEMETRY_MAX_BYTES`, checked from
+  `Content-Length` before `req.json()` since the beacon is header-guard-exempt),
+  the run-dir rate limit (§24.2), an MCP `redirect:'error'` **SSRF** guard made
+  explicit (`mcp/http-redirect.ts` + defense-in-depth no-redirect fetch), and a
+  path-confined **resume runId** (a HIGH path-traversal/IDOR finding fixed with a
+  schema regex `^run-[A-Za-z0-9-]{1,80}$` + `confineToDir` + an existence-404 —
+  cross-principal IDOR is out of scope on a single-owner daemon, documented for a
+  future multi-user slice). TLS is **delegated to the transport** (D7) — the app
+  stays plain HTTP behind the perimeter; encryption is the tunnel's job.
+
+### 24.6 Pluggable remote transport (D2)
+
+The daemon owns only a **bind-address + token auth** and is otherwise
+tunnel-agnostic (provider-agnostic per the repo rule — no transport is
+special-cased in code). **Tailscale is the default documented recipe** (bind the
+`100.x` tailnet interface + `localhost`, add its MagicDNS name to
+`AGENT_WEB_ALLOWED_HOSTS`); **Cloudflare Tunnel** and a **reverse proxy**
+(Caddy/nginx) are documented alternatives. Each carries the TLS: Tailscale
+WireGuard (automatic) / Cloudflare edge TLS / the proxy's cert.
+
+### 24.7 Telemetry + provenance
+
+New spans through the shared `telemetry/spans.ts` helpers: `daemon.start`/
+`daemon.stop` (carrying `daemon.pid`, `src/daemon/spans.ts`), `job.enqueue`
+(`server/jobs/enqueue.ts`, `+server.principal=local`), and `job.run`/`job.retry`/
+`job.cancel` (`queue/pool.ts`, `withRunContext`-nested). Each job span carries
+`job.id`/`job.kind`/`job.priority`/`job.attempt` + the `agent.run.id` and
+`job.origin=RunOrigin.Daemon`. The reserved **provenance** attributes are now
+populated: `dispatch.ts` stamps a run-dir `origin` marker (one seam, all kinds)
+that `run-dto.ts`'s `mapRunToDto` reads as `RunOrigin.Daemon` (vs the `Manual`
+fallback), and `TokenGuard.principal()` (the authorizing device's session
+`deviceId`) threads into `server.request`. No change to the per-run span routing
+(§7) beyond the daemon owning the tracer lifetime; queue spans nest under each
+job's run root. (A `queued`-job cancel via `server/jobs/cancel.ts` bypasses the
+pool and so emits no `job.cancel` span — out of brief scope.)
+
+### 24.8 Configuration knobs (env fallback-only, per the repo rule — never hardcoded)
+
+All registered in `config/schema.ts` (`bun run config` dumps the effective table):
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `AGENT_QUEUE_CONCURRENCY` | `0` | Max concurrent jobs the worker pool runs. `0`/unset = `computeConcurrency()` (half the logical cores, floored at 1); a positive int overrides. |
+| `AGENT_QUEUE_PATH` | `jobs` | Directory for the durable job-queue SQLite store (mirrors `AGENT_SESSIONS_PATH`). |
+| `AGENT_QUEUE_POLL_MS` | `250` | How often an idle worker re-checks the queue for claimable jobs. |
+| `AGENT_WEB_MAX_STREAMS` | `0` | Max simultaneously-open run-SSE streams. `0`/unset = worker-concurrency ×8; over the cap `GET /api/runs/:id/stream` → `503`. |
+| `AGENT_WEB_SESSION_TTL_MS` | `43_200_000` (12h) | TTL of the per-device session token minted for the local browser at boot (`window.__AGENT_TOKEN__`). A reload re-mints. |
+| `AGENT_WEB_MAX_BODY_BYTES` | `26_214_400` (25 MiB) | Max HTTP request body `Bun.serve` accepts (`maxRequestBodySize`); over → `413` before the handler. |
+| `AGENT_WEB_TELEMETRY_MAX_BYTES` | `65_536` (64 KiB) | Max `/api/telemetry` body, checked from `Content-Length` **before** `req.json()`; over/missing → `413`. |
+| `AGENT_WEB_BIND` | `127.0.0.1` | Interface `Bun.serve` binds. Loopback-only default (no implicit `0.0.0.0`); always auto-allowed as a Host. |
+| `AGENT_WEB_ALLOWED_HOSTS` | *(empty)* | Comma-separated extra Host-header hostnames past the DNS-rebinding check (the tunnel's MagicDNS/hostname); matched with or without the port. Empty = loopback-only. |
+| `AGENT_WEB_RUN_RATE` | `0` | Max run-dir creations per fixed 60s window. `0`/unset = worker-concurrency ×10; over → `429`. |
+
+Plus the daemon's fixed paths: root token `~/.agent/daemon-token`, revocation set
+`~/.agent/revoked-devices.json`, PID `~/.agent/daemon.pid` (all `0600` in a
+`0700` dir; not env-tunable knobs, but overridable through the injected store
+options for tests).
+
+---
+
 ## Contracts (web wire protocol — `src/contracts/`, Slice 30b Phase 1)
 
 **Feature.** `src/contracts/` is the single source of truth for the local web
@@ -3599,6 +3917,17 @@ owns **no business logic** — it adapts the engine to HTTP and enforces the
 localhost security perimeter (D17). Phase 1 ships the perimeter, `/api/health`,
 static serving, and the `bun run web` entry; the streaming chat handler, DTO
 mappers, and remaining endpoints attach in later phases.
+
+> **Slice 24 changes this section materially** (full narrative in **§24**):
+> execution is now **detached onto the job queue** — the chat/crew/workflow/pull
+> handlers **enqueue** (`POST /api/jobs` → `202`, `src/server/jobs/`) instead of
+> awaiting or `void`-detaching, so a run outlives its request and the SSE stream
+> tails a pool-owned run; the per-process bearer token is replaced by the
+> **durable root→session** model (`security/{root-token,session-token}.ts`,
+> §24.5); `main.ts` gains **injected-pool mode** (`StartOptions.queue?`) so the
+> daemon owns the single worker pool; and the perimeter gains the tunnel host
+> (`AGENT_WEB_ALLOWED_HOSTS`), a loopback-default bind (`AGENT_WEB_BIND`), body
+> caps, a run-dir rate limit, and the MCP SSRF guard (§7.4 threat model).
 
 **Mechanism.** `main.ts` (`bun run web`) reads the `AGENT_WEB_*` config, mints a
 per-session bearer token, injects it into the served HTML, and boots
