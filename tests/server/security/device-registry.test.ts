@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDeviceRegistry } from '../../../src/server/security/device-registry.ts';
@@ -87,6 +87,26 @@ test('remove drops one device; clear drops all', () => {
   expect(reg.list().map((d) => d.deviceId)).toEqual(['d2']);
   reg.clear();
   expect(reg.list()).toEqual([]);
+});
+
+test('append strips extra properties (e.g. a token) at runtime, never persisting them', () => {
+  const path = tempPath();
+  const reg = createDeviceRegistry({ path });
+  reg.append({
+    deviceId: 'd1',
+    label: 'x',
+    createdAt: 1,
+    exp: Date.now() + 100_000,
+    token: 'SUPER_SECRET',
+    foo: 1,
+  } as unknown as Parameters<typeof reg.append>[0]);
+
+  const item = reg.list()[0] as object;
+  expect('token' in item).toBe(false);
+  expect('foo' in item).toBe(false);
+
+  const raw = readFileSync(path, 'utf8');
+  expect(raw.includes('SUPER_SECRET')).toBe(false);
 });
 
 test('a corrupt registry file fails closed (throws at construction)', () => {

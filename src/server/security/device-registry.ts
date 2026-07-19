@@ -83,7 +83,20 @@ export function createDeviceRegistry(config: {
   return {
     list,
     append(rec: DeviceRecord): void {
-      devices = [...devices.filter((d) => d.deviceId !== rec.deviceId), rec];
+      // Runtime field-strip (defense-in-depth, T13 review): `DeviceRecord`'s
+      // type already forbids a `token`, but that's compile-time only — an
+      // `as any`/spread caller could still smuggle one through. Pick exactly
+      // the four persisted fields so an extra property can never reach disk.
+      const clean: DeviceRecord = {
+        deviceId: rec.deviceId,
+        label: rec.label,
+        createdAt: rec.createdAt,
+        exp: rec.exp,
+      };
+      devices = [
+        ...devices.filter((d) => d.deviceId !== clean.deviceId),
+        clean,
+      ];
       persist();
     },
     remove(deviceId: string): void {
@@ -127,13 +140,22 @@ function load(path: string): DeviceRecord[] {
         `to start with an unreadable device store (fail closed).`,
     );
   }
-  return parsed.filter(
-    (d): d is DeviceRecord =>
-      typeof d === 'object' &&
-      d !== null &&
-      typeof (d as DeviceRecord).deviceId === 'string' &&
-      typeof (d as DeviceRecord).label === 'string' &&
-      typeof (d as DeviceRecord).createdAt === 'number' &&
-      typeof (d as DeviceRecord).exp === 'number',
-  );
+  return parsed
+    .filter(
+      (d): d is DeviceRecord =>
+        typeof d === 'object' &&
+        d !== null &&
+        typeof (d as DeviceRecord).deviceId === 'string' &&
+        typeof (d as DeviceRecord).label === 'string' &&
+        typeof (d as DeviceRecord).createdAt === 'number' &&
+        typeof (d as DeviceRecord).exp === 'number',
+    )
+    .map(
+      (d): DeviceRecord => ({
+        deviceId: d.deviceId,
+        label: d.label,
+        createdAt: d.createdAt,
+        exp: d.exp,
+      }),
+    );
 }
