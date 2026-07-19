@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
 import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
+import { PairDeviceDialog } from './pair-device-dialog.tsx';
 import { useDaemonStatus } from './use-daemon-status.ts';
 import { useDevices } from './use-devices.ts';
 
@@ -31,10 +32,10 @@ AGENT_WEB_ALLOWED_HOSTS=<your-tunnel>.trycloudflare.com`;
  *  reading `useDaemonStatus().status?.bind` plus static Tailscale/Cloudflare
  *  copy-paste recipes (spec D4 — text only, no live remote-access wiring
  *  here), (b) the device-session list from `useDevices()` with a wired
- *  Revoke button per row, and (c) "Pair a device" / "Rotate root token"
- *  buttons that open LOCAL-STATE placeholders — the real
- *  `<PairDeviceDialog>` (T38) and rotate-confirm dialog (T39/T40) mount in
- *  their own later tasks.
+ *  Revoke button per row, and (c) a "Pair a device" button that mounts
+ *  `<PairDeviceDialog>` (T38, self-contained bundled-QR pairing) and a
+ *  "Rotate root token" button that opens a LOCAL-STATE placeholder — the
+ *  real rotate-confirm dialog (T39/T40) mounts in a later task.
  *
  *  SECURITY (mandatory, Fable T17 finding): `DeviceDTO.label` is stored
  *  unsanitized server-side by design. It is rendered below via plain React
@@ -43,7 +44,7 @@ AGENT_WEB_ALLOWED_HOSTS=<your-tunnel>.trycloudflare.com`;
  *  contains. See `devices-tab.test.tsx`'s XSS-escape test. */
 export function DevicesTab() {
   const { status } = useDaemonStatus();
-  const { devices, error, revoke } = useDevices();
+  const { devices, error, revoke, refresh } = useDevices();
   const [pairOpen, setPairOpen] = useState(false);
   const [rotateOpen, setRotateOpen] = useState(false);
 
@@ -136,15 +137,11 @@ export function DevicesTab() {
             </ul>
           )}
 
-          {pairOpen && (
-            // The real QR/token pairing dialog mounts here — Task 38.
-            <p
-              data-testid="ops-devices-pair-placeholder"
-              className="mt-2 text-sm text-[var(--color-muted)]"
-            >
-              Pair-device dialog — coming in Task 38.
-            </p>
-          )}
+          <PairDeviceDialog
+            open={pairOpen}
+            onOpenChange={setPairOpen}
+            onPaired={refresh}
+          />
         </div>
       </RegionErrorBoundary>
 
