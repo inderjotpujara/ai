@@ -47,6 +47,12 @@ describe("a11y baseline (vitest-axe, D4) — no violations on the app's key scre
     expect(await axe(container)).toHaveNoViolations();
   });
 
+  it('Ops (/ops)', async () => {
+    const { container } = renderAt('/ops');
+    await waitFor(() => screen.getByTestId('area-ops'));
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('Library (/library)', async () => {
     const { container } = renderAt('/library');
     await waitFor(() => screen.getByTestId('area-library'));
