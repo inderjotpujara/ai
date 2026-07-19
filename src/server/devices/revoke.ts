@@ -49,6 +49,12 @@ export function handleDeviceRevoke(
   const forbidden = requireTrustedLocal(req, guard, deps.policy);
   if (forbidden) return forbidden;
 
+  // 'local' is sacrosanct: pairing never mints it, and revoke must not remove
+  // it either — self-locking-out the local operator is never the intent.
+  if (id === 'local') {
+    return json({ error: 'cannot revoke the local session' }, 400);
+  }
+
   // Close the token (negative set) AND prune the registry row (positive list).
   // Both are required: skipping the negative set would leave the revoked
   // device's still-valid HMAC token verifying forever.

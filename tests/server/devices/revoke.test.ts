@@ -119,13 +119,11 @@ test('a traversal-shaped id cannot escape — it is a plain opaque set key', () 
   expect(c.sessionTokens.verifySessionToken(c.token)?.deviceId).toBe('d1');
 });
 
-test("self-revoke of 'local' is permitted and revokes the local session (FLAGGED footgun)", () => {
-  // Security bar #4 / brief is SILENT on self-revoke. Per the brief we do NOT
-  // special-case 'local': it is reachable only by the already-authenticated
-  // local operator (a remote/tunnel caller is 403'd first), so it is a self
-  // AVAILABILITY footgun, not an attacker capability. This test PINS the
-  // current behavior — revoking 'local' adds it to the negative set, so the
-  // local session token stops verifying (self-lockout). See task report.
+test("self-revoke of 'local' is rejected with 400 (sacrosanct id)", () => {
+  // 'local' is sacrosanct: pairing never mints it, and revoke must not remove
+  // it either. The trusted-local gate runs FIRST (so a remote/tunnel caller
+  // still gets 403, not this 400), but a trusted local caller revoking
+  // 'local' now gets a 400 instead of locking itself out.
   const c = ctx();
   const localToken = c.sessionTokens.mintSessionToken({
     deviceId: 'local',
@@ -135,8 +133,14 @@ test("self-revoke of 'local' is permitted and revokes the local session (FLAGGED
     'local',
   );
   const res = handleDeviceRevoke('local', req, c, localGuard);
-  expect(res.status).toBe(200);
-  expect(c.sessionTokens.verifySessionToken(localToken)).toBeNull(); // locked out
-  // Other devices (d1) are unaffected by the self-revoke.
+  expect(res.status).toBe(400);
+  expect(res.json()).resolves.toEqual({
+    error: 'cannot revoke the local session',
+  });
+  // 'local' still verifies — NOT added to the negative set.
+  expect(c.sessionTokens.verifySessionToken(localToken)?.deviceId).toBe(
+    'local',
+  );
+  // Other devices (d1) are unaffected.
   expect(c.sessionTokens.verifySessionToken(c.token)?.deviceId).toBe('d1');
 });
