@@ -40,7 +40,7 @@ function matchesSearch(item: RunListItemDTO, search: string): boolean {
 
 /**
  * `GET /api/runs` — filtered/sorted/paginated list of run summaries.
- * Filters (search/outcome/degraded/kind) are applied over the cache-fronted
+ * Filters (search/outcome/degraded/kind/origin) are applied over the cache-fronted
  * `summarizeRunListItem` projection, then the result is sorted newest-first
  * by `startMs` and paginated via an opaque `base64url(startMs:id)` cursor:
  * `total` reflects the post-filter count (not the page size), and
@@ -60,6 +60,7 @@ export async function handleRunList(
       outcome: params.get('outcome') ?? undefined,
       degraded: params.get('degraded') ?? undefined,
       kind: params.get('kind') ?? undefined,
+      origin: params.get('origin') ?? undefined,
       limit: params.get('limit') ?? undefined,
       cursor: params.get('cursor') ?? undefined,
     });
@@ -99,6 +100,7 @@ export async function handleRunList(
       query.degraded === undefined ? true : s.degraded === query.degraded,
     )
     .filter((s) => (query.kind ? s.kind === query.kind : true))
+    .filter((s) => (query.origin ? s.origin === query.origin : true))
     // Stable secondary key: equal startMs must not fall back to the unstable
     // readdir order, or cursor pagination flakes (a tie could reorder between
     // requests and skip/repeat a page).

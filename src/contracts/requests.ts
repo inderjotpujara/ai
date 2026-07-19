@@ -16,6 +16,7 @@ import {
   JobPriorityWire,
   JobStatusWire,
   RunKind,
+  RunOrigin,
   RuntimeKind,
 } from './enums.ts';
 
@@ -75,8 +76,9 @@ export const FeedbackRequestSchema = z.object({
 });
 export type FeedbackRequest = z.infer<typeof FeedbackRequestSchema>;
 
-/** `GET /api/runs?search=&outcome=&degraded=&limit=&cursor=` query. Values are
- *  raw query strings, so `limit`/`degraded` coerce; `limit` carries a default. */
+/** `GET /api/runs?search=&outcome=&degraded=&kind=&origin=&limit=&cursor=`
+ *  query. Values are raw query strings, so `limit`/`degraded` coerce; `limit`
+ *  carries a default. */
 export const RunListQuerySchema = z.object({
   search: z.string().optional(),
   outcome: z.string().optional(),
@@ -85,6 +87,9 @@ export const RunListQuerySchema = z.object({
     .optional()
     .transform((v) => (v === undefined ? undefined : v === 'true')),
   kind: z.enum(RunKind).optional(),
+  /** Daemon-run filter (Slice 25b Incr 1) — the Jobs-tab `runId` deep-link
+   *  filter narrows to `?origin=daemon`. */
+  origin: z.enum(RunOrigin).optional(),
   limit: z.coerce.number().int().positive().max(200).default(25),
   cursor: z.string().optional(),
 });
