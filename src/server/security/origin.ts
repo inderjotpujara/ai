@@ -30,6 +30,22 @@ export function hostAllowed(
   return extraHosts.some((h) => host === h || host === `${h}:${port}`);
 }
 
+/** True when the request's Host header names a LOOPBACK interface — `127.0.0.1`
+ *  / `[::1]` / `localhost`, with or without the `:PORT` suffix — as opposed to
+ *  an allowlisted tunnel/LAN host (which `hostAllowed` also admits). The
+ *  privileged-write gate (`requireTrustedLocal`) and the local-token injection
+ *  (main.ts/serveStatic) key on THIS: a request arriving over an allowed tunnel
+ *  is not loopback, so it can never be treated as the physically-local browser
+ *  even if it presents the `'local'` session token. An absent/empty Host, a
+ *  loopback-lookalike (`127.0.0.1.evil.com`), and the bind wildcard `0.0.0.0`
+ *  are all NOT loopback. */
+export function isLoopbackHost(req: Request): boolean {
+  const host = req.headers.get('host');
+  if (host === null || host === '') return false;
+  const bare = host.replace(/:\d+$/, ''); // strip an optional :PORT ([::1] keeps its brackets)
+  return LOCAL_HOSTS.includes(bare);
+}
+
 /**
  * A cross-origin Origin is rejected (CSRF / 0.0.0.0-day defense). An absent
  * Origin (same-origin navigation / non-CORS GET) is allowed. Loopback origins
