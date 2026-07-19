@@ -494,3 +494,19 @@ export const QueueStatsDtoSchema = z.object({
   concurrency: z.number(),
 });
 export type QueueStatsDTO = z.infer<typeof QueueStatsDtoSchema>;
+
+/** A paired device row — the registry's persisted shape, never the token
+ *  itself (that is transmitted exactly once, in `DevicePairResponseSchema`).
+ *  `exp` is the device's session-token expiry (epoch-ms). Slice 25b Incr 1 (T4). */
+export const DeviceDtoSchema = z.object({
+  deviceId: z.string(),
+  label: z.string(),
+  createdAt: z.number(),
+  exp: z.number(),
+});
+export type DeviceDTO = z.infer<typeof DeviceDtoSchema>;
+
+export const DeviceListResponseSchema = z.object({
+  items: z.array(DeviceDtoSchema),
+});
+export type DeviceListResponse = z.infer<typeof DeviceListResponseSchema>;

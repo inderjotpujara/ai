@@ -329,3 +329,27 @@ export const JobListResponseSchema = z.object({
   total: z.number(),
 });
 export type JobListResponse = z.infer<typeof JobListResponseSchema>;
+
+/** `POST /api/devices` body — pairs a new device from the trusted local
+ *  browser. `label` is user-supplied display text (Slice 25b Incr 1, T4). */
+export const DevicePairRequestSchema = z.object({
+  label: z.string().min(1).max(120),
+});
+export type DevicePairRequest = z.infer<typeof DevicePairRequestSchema>;
+
+/** `POST /api/devices` response — the minted deviceId + session token +
+ *  phone-openable pairing URL. `token` is transmitted EXACTLY ONCE here;
+ *  the registry never persists or re-lists it (only `DeviceDtoSchema`'s
+ *  `{deviceId,label,createdAt,exp}` is durable). */
+export const DevicePairResponseSchema = z.object({
+  deviceId: z.string(),
+  token: z.string(),
+  pairingUrl: z.string(),
+});
+export type DevicePairResponse = z.infer<typeof DevicePairResponseSchema>;
+
+/** `POST /api/security/rotate-root` body — re-confirms possession of the
+ *  root secret (constant-time-compared server-side) before mass-invalidating
+ *  every non-local session + clearing the device registry. Slice 25b Incr 1 (T4). */
+export const RotateRootRequestSchema = z.object({ rootSecret: z.string() });
+export type RotateRootRequest = z.infer<typeof RotateRootRequestSchema>;
