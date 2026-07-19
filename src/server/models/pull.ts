@@ -4,11 +4,15 @@ import {
 } from '../../contracts/index.ts';
 import type { ProviderKind, RuntimeKind } from '../../core/types.ts';
 import { readCatalog } from '../../discovery/catalog-cache.ts';
-import { explain } from '../../errors/boundary.ts';
+import type { JobStore } from '../../queue/store.ts';
+import { JobKind } from '../../queue/types.ts';
 import { newRunId } from '../../run/run-id.ts';
-import { createRun, writeArtifact } from '../../run/run-store.ts';
+import { createRun } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 
+/** Downloads a model's weights to completion. No longer called by the route —
+ *  the worker pool's dispatch invokes it for a `JobKind.Pull` job, reading the
+ *  `provider` the route resolved server-side and persisted into the payload. */
 export type RunModelPullTurn = (input: {
   runtime: RuntimeKind;
   provider: ProviderKind;
@@ -18,7 +22,7 @@ export type RunModelPullTurn = (input: {
 
 export type ModelPullDeps = {
   runsRoot: string;
-  runModelPull: RunModelPullTurn;
+  jobStore: JobStore;
   /** Injectable for tests; the real server wires the cached-catalog lookup
    *  below. Never trusts a client-supplied provider (D2/§4.2 item 4). */
   resolveProvider?: (
@@ -52,10 +56,12 @@ function defaultResolveProvider(
 /**
  * `POST /api/models/pull` (spec §4.2.4) — fire-and-watch (D2), the exact
  * shape `handleCrewRun` established (Phase 4): validate, resolve the
- * `ProviderKind` server-side, mint a runId, PRE-CREATE the run dir, start the
- * pull DETACHED, return `{ runId }` at once. A throw in the detached pull is
- * caught + written to error.json. The browser opens the EXISTING
- * `/api/runs/:runId/stream` — no new stream code (D2).
+ * `ProviderKind` SERVER-SIDE (never client-trusted), mint a runId, PRE-CREATE
+ * the run dir, then ENQUEUE a durable `JobKind.Pull` job whose payload embeds
+ * the resolved provider (so dispatch never re-resolves or trusts the client),
+ * and return `{ runId }` at once. The worker pool executes the pull, so it
+ * survives restart and is cancellable via `/api/jobs/:id/cancel`. The browser
+ * opens the EXISTING `/api/runs/:runId/stream` — no new stream code (D2).
  */
 export async function handleModelPull(
   req: Request,
@@ -72,24 +78,11 @@ export async function handleModelPull(
   if (!provider) return json({ error: 'unknown model' }, 404);
 
   const runId = newRunId();
-  const run = await createRun(deps.runsRoot, runId);
-  void deps
-    .runModelPull({
-      runtime: body.runtime,
-      provider,
-      modelRef: body.modelRef,
-      runId,
-    })
-    .catch(async (err: unknown) => {
-      try {
-        await writeArtifact(
-          run,
-          'error.json',
-          JSON.stringify({ error: explain(err).title }),
-        );
-      } catch {
-        // best-effort: the run dir may already be gone; nothing else to do.
-      }
-    });
+  await createRun(deps.runsRoot, runId);
+  deps.jobStore.enqueue({
+    kind: JobKind.Pull,
+    payload: { runtime: body.runtime, modelRef: body.modelRef, provider },
+    runId,
+  });
   return json(RunLaunchResponseSchema.parse({ runId }), 200);
 }

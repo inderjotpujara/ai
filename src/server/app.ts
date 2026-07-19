@@ -247,7 +247,7 @@ async function handleApi(
           rec.status(200);
           return handleModelPull(req, {
             runsRoot: deps.runsRoot,
-            runModelPull: deps.runModelPull,
+            jobStore: deps.jobStore,
           });
         }
         if (req.method === 'POST' && url.pathname === '/api/jobs') {

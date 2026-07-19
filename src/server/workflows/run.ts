@@ -3,27 +3,24 @@ import {
   RunLaunchResponseSchema,
   WorkflowRunRequestSchema,
 } from '../../contracts/index.ts';
-import { explain } from '../../errors/boundary.ts';
+import type { JobStore } from '../../queue/store.ts';
+import { JobKind } from '../../queue/types.ts';
 import { newRunId } from '../../run/run-id.ts';
-import { createRun, writeArtifact } from '../../run/run-store.ts';
+import { createRun } from '../../run/run-store.ts';
 import type { WorkflowDef } from '../../workflow/types.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 
-/** Starts a workflow run to completion, detached by the handler (see
- *  `RunCrewTurn` in `server/crews/run.ts` for the full contract). Implementations
- *  MUST be `async` (always return a Promise): the handler's `.catch` below only
- *  attaches to a Promise — a synchronously-throwing impl escapes it and crashes
- *  the request instead of degrading to error.json. */
+/** Runs a workflow to completion (see `RunCrewTurn` in `server/crews/run.ts` for
+ *  the full contract). No longer called by the route — the worker pool's
+ *  dispatch invokes it for a `JobKind.Workflow` job. Implementations MUST be
+ *  `async` (always return a Promise). */
 export type RunWorkflowTurn = (input: {
   def: WorkflowDef;
   input: string;
   runId: string;
 }) => Promise<unknown>;
 
-export type WorkflowRunDeps = {
-  runsRoot: string;
-  runWorkflowTurn: RunWorkflowTurn;
-};
+export type WorkflowRunDeps = { runsRoot: string; jobStore: JobStore };
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -35,7 +32,9 @@ function json(body: unknown, status: number): Response {
   });
 }
 
-/** `POST /api/workflows/:id/run` — fire-and-watch (see handleCrewRun for the contract). */
+/** `POST /api/workflows/:id/run` — fire-and-watch (see handleCrewRun for the
+ *  contract). Enqueues a durable `JobKind.Workflow` job (the pool executes it),
+ *  keeping the same `{ runId }` response shape. */
 export async function handleWorkflowRun(
   req: Request,
   deps: WorkflowRunDeps,
@@ -50,19 +49,11 @@ export async function handleWorkflowRun(
     return json({ error: 'bad request' }, 400);
   }
   const runId = newRunId();
-  const run = await createRun(deps.runsRoot, runId);
-  void deps
-    .runWorkflowTurn({ def, input, runId })
-    .catch(async (err: unknown) => {
-      try {
-        await writeArtifact(
-          run,
-          'error.json',
-          JSON.stringify({ error: explain(err).title }),
-        );
-      } catch {
-        // best-effort
-      }
-    });
+  await createRun(deps.runsRoot, runId);
+  deps.jobStore.enqueue({
+    kind: JobKind.Workflow,
+    payload: { name: id, input },
+    runId,
+  });
   return json(RunLaunchResponseSchema.parse({ runId }), 200);
 }

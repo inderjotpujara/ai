@@ -4,23 +4,24 @@ import {
   RunLaunchResponseSchema,
 } from '../../contracts/index.ts';
 import type { CrewDef } from '../../crew/types.ts';
-import { explain } from '../../errors/boundary.ts';
+import type { JobStore } from '../../queue/store.ts';
+import { JobKind } from '../../queue/types.ts';
 import { newRunId } from '../../run/run-id.ts';
-import { createRun, writeArtifact } from '../../run/run-store.ts';
+import { createRun } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 
-/** Starts a crew run to completion under its own `withMcpRun` scope. Detached by
- *  the handler; may reject (its rejection is caught + persisted to error.json).
- *  Implementations MUST be `async` (always return a Promise): the handler's
- *  `.catch` below only attaches to a Promise — a synchronously-throwing impl
- *  escapes it and crashes the request instead of degrading to error.json. */
+/** Runs a crew to completion under its own `withMcpRun` scope. No longer called
+ *  by the route — the worker pool's dispatch (`server/jobs/dispatch.ts`) invokes
+ *  it for a `JobKind.Crew` job, with the job's pre-minted `runId` and the pool's
+ *  `AbortSignal`. Its rejection is captured by the pool as the job's terminal
+ *  `Failed`. Implementations MUST be `async` (always return a Promise). */
 export type RunCrewTurn = (input: {
   def: CrewDef;
   input: string;
   runId: string;
 }) => Promise<unknown>;
 
-export type CrewRunDeps = { runsRoot: string; runCrewTurn: RunCrewTurn };
+export type CrewRunDeps = { runsRoot: string; jobStore: JobStore };
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -35,8 +36,10 @@ function json(body: unknown, status: number): Response {
 /**
  * `POST /api/crews/:name/run` — fire-and-watch. Validates the body, looks up the
  * crew, mints a runId, PRE-CREATES the run dir (so the browser's immediate
- * `/api/runs/:id/stream` never 404s), starts the run DETACHED, and returns the
- * runId at once. A throw in the detached run is caught + written to error.json.
+ * `/api/runs/:id/stream` never 404s), ENQUEUES a durable `JobKind.Crew` job
+ * (executed by the worker pool, so it survives restart and is cancellable via
+ * `/api/jobs/:id/cancel`), and returns the runId at once. `job.runId` IS the run
+ * dir id, so the stream the browser opens resolves to the pool-run's journal.
  */
 export async function handleCrewRun(
   req: Request,
@@ -52,17 +55,11 @@ export async function handleCrewRun(
     return json({ error: 'bad request' }, 400);
   }
   const runId = newRunId();
-  const run = await createRun(deps.runsRoot, runId);
-  void deps.runCrewTurn({ def, input, runId }).catch(async (err: unknown) => {
-    try {
-      await writeArtifact(
-        run,
-        'error.json',
-        JSON.stringify({ error: explain(err).title }),
-      );
-    } catch {
-      // best-effort: the run dir may already be gone; nothing else to do.
-    }
+  await createRun(deps.runsRoot, runId);
+  deps.jobStore.enqueue({
+    kind: JobKind.Crew,
+    payload: { name, input },
+    runId,
   });
   return json(RunLaunchResponseSchema.parse({ runId }), 200);
 }
