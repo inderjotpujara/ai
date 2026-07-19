@@ -275,6 +275,12 @@ export const JobEnqueueRequestSchema = z.object({
   kind: z.enum(JobKindWire),
   payload: z.unknown(),
   priority: z.enum(JobPriorityWire).optional(),
+  /** Re-enqueue an EXISTING run to resume it (Slice 24 Incr 6, Task 41). When
+   *  present, the enqueue reuses this runId (no fresh run dir is created) and
+   *  stamps `resumeRunId` into the persisted payload, so dispatch runs the
+   *  crew/workflow turn against the existing run dir — whose checkpoint skips
+   *  the already-completed DAG nodes. */
+  resume: z.string().min(1).optional(),
 });
 export type JobEnqueueRequest = z.infer<typeof JobEnqueueRequestSchema>;
 

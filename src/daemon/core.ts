@@ -50,8 +50,11 @@ export type CreateDaemonOptions = {
    *  real process SIGINT/SIGTERM handlers. Defaults to the process-wide
    *  `installSignalHandlers`. */
   installSignals?: () => void;
-  /** Reserved for Increment 6 (Task 41): reconcile predicate for durable-orphan
-   *  requeue. Unused here — Increment 4 reconciles zero-arg (all-Interrupted). */
+  /** Reconcile predicate for durable-orphan requeue (Increment 6, Task 41):
+   *  a Running orphan matching this predicate (crew/workflow) is re-queued at
+   *  boot so the pool re-claims and resumes it from its checkpoint, instead of
+   *  being Interrupted. Absent (Increments 4-5), reconcile is zero-arg and every
+   *  orphan is Interrupted. */
   durable?: (job: JobRecord) => boolean;
 };
 
@@ -89,7 +92,10 @@ export function createDaemon(opts: CreateDaemonOptions): Daemon {
       }
       // 2. §7.3: reconcile orphaned Running rows BEFORE the pool can claim, in
       //    the store's own transaction, so no row is ever picked up mid-flight.
-      opts.queue.reconcileOrphans();
+      //    A `durable` predicate (Task 41) re-queues checkpoint-resumable
+      //    orphans (crew/workflow) so they auto-resume; without it every orphan
+      //    is Interrupted.
+      opts.queue.reconcileOrphans({ durable: opts.durable });
       // 3. Record this process as the running daemon.
       writePid(pidPath, process.pid);
       // 4. Only now may workers begin claiming.

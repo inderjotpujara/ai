@@ -95,8 +95,20 @@ export async function handleJobEnqueue(
   const limiter = deps.runLimiter ?? ALWAYS_ALLOW;
   if (!limiter.allow()) return json({ error: 'rate limited' }, 429);
 
-  const runId = newRunId();
-  await createRun(deps.runsRoot, runId);
+  // Resume path (Task 41): re-enqueue an EXISTING run instead of minting a
+  // fresh one. The run dir (and its checkpoint.json) already exist, so we do
+  // NOT createRun; dispatch runs the crew/workflow turn against this runId and
+  // the engine's per-node checkpoint skips already-completed nodes. A
+  // `resumeRunId` marker is stamped into the persisted payload so dispatch can
+  // recognise a resumed run without re-deriving it.
+  let runId: string;
+  if (body.resume) {
+    runId = body.resume;
+    payload = { ...(payload as Record<string, unknown>), resumeRunId: runId };
+  } else {
+    runId = newRunId();
+    await createRun(deps.runsRoot, runId);
+  }
   const job = deps.jobStore.enqueue({
     // JobKindWire/JobPriorityWire (wire) <-> JobKind/JobPriority (queue) are
     // isomorphic string enums guarded by job-kind-parity.test.ts; distinct

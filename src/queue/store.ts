@@ -255,25 +255,52 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     );
   }
 
-  function reconcileOrphans(): { interrupted: number; requeued: number } {
+  function reconcileOrphans(opts?: { durable?: (job: JobRecord) => boolean }): {
+    interrupted: number;
+    requeued: number;
+  } {
     // ONE transaction so no Running row is ever observed by a starting pool in
     // an ambiguous mid-flight state (§7.3). Runs ONCE at boot BEFORE the worker
-    // pool accepts work. Increment 2 has no checkpoint layer yet, so EVERY
-    // Running orphan -> Interrupted (re-runnable on explicit re-enqueue only).
-    // SIGNATURE EVOLVES (Increment 6, Task 41): a `durableKinds` predicate is
-    // threaded in then to send checkpoint-resumable rows (crew/workflow) ->
-    // Queued instead, counted as `requeued`. Until then this returns
-    // requeued: 0 and the durable-requeue is a documented seam. Uses
-    // .immediate() (BEGIN IMMEDIATE) to take the write lock at BEGIN, same as
-    // the hardened claimNext.
+    // pool accepts work. Uses .immediate() (BEGIN IMMEDIATE) to take the write
+    // lock at BEGIN, same as the hardened claimNext.
+    //
+    // SIGNATURE EVOLVED (Increment 6, Task 41): the optional `durable` predicate
+    // sends checkpoint-resumable rows (crew/workflow) -> Queued (counted as
+    // `requeued`) so the pool re-claims and dispatch resumes from the last
+    // completed node; everything else -> Interrupted. Called with NO predicate
+    // (Increments 2-5, and any non-durable caller) the behaviour is unchanged:
+    // EVERY Running orphan -> Interrupted, requeued: 0.
+    const isDurable = opts?.durable;
     const tx = db.transaction((): { interrupted: number; requeued: number } => {
       const at = Date.now();
-      const info = db.run(
-        `UPDATE jobs SET status = 'interrupted', finished_at = ?, updated_at = ?
-         WHERE status = 'running'`,
-        [at, at],
-      );
-      return { interrupted: info.changes, requeued: 0 };
+      const running = db
+        .query(`SELECT * FROM jobs WHERE status = 'running'`)
+        .all() as JobRowRaw[];
+      let interrupted = 0;
+      let requeued = 0;
+      for (const raw of running) {
+        const job = toJobRecord(raw);
+        if (isDurable?.(job)) {
+          // Checkpoint-resumable (crew/workflow): re-queue so the pool re-claims
+          // and the dispatch resumes from the last completed node. Reset
+          // available_at to 0 so it is immediately claimable at boot, and clear
+          // started_at (it's no longer running).
+          db.run(
+            `UPDATE jobs SET status = 'queued', started_at = NULL,
+             available_at = 0, updated_at = ? WHERE id = ?`,
+            [at, job.id],
+          );
+          requeued++;
+        } else {
+          db.run(
+            `UPDATE jobs SET status = 'interrupted', finished_at = ?, updated_at = ?
+             WHERE id = ?`,
+            [at, at, job.id],
+          );
+          interrupted++;
+        }
+      }
+      return { interrupted, requeued };
     });
     return tx.immediate();
   }

@@ -33,6 +33,7 @@ import { createMemoryStore } from '../memory/store.ts';
 import { computeConcurrency } from '../queue/concurrency.ts';
 import { createWorkerPool } from '../queue/pool.ts';
 import { createJobStore } from '../queue/store.ts';
+import { JobKind } from '../queue/types.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import {
@@ -158,7 +159,15 @@ function buildRealDaemon() {
     dispatch,
     pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
   });
-  return createDaemon({ startWebServer, queue: jobStore, pool });
+  return createDaemon({
+    startWebServer,
+    queue: jobStore,
+    pool,
+    // Crew/workflow orphans are checkpoint-resumable (per-node checkpoint.json)
+    // → re-queue them at boot so the pool re-claims and resumes from the last
+    // completed node, instead of Interrupting them (Task 41).
+    durable: (j) => j.kind === JobKind.Crew || j.kind === JobKind.Workflow,
+  });
 }
 
 function defaultLogDir(): string {

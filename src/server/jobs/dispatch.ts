@@ -42,12 +42,19 @@ export type JobDispatchDeps = {
 };
 
 /** A crew/workflow job payload = the run's `{ input }` (validated by the same
- *  `*RunRequestSchema` the route uses) plus the `name` of the registered def. */
+ *  `*RunRequestSchema` the route uses) plus the `name` of the registered def.
+ *  An optional `resumeRunId` marks a re-enqueued run (Task 41): the executor
+ *  runs the turn against the job's existing runId, whose per-node checkpoint
+ *  (`runs/<runId>/checkpoint.json`, seeded in the engine loop) skips the
+ *  already-completed DAG nodes — so resume is achieved by runId reuse, no
+ *  separate hydration step. */
 const CrewJobPayloadSchema = CrewRunRequestSchema.extend({
   name: z.string().min(1),
+  resumeRunId: z.string().min(1).optional(),
 });
 const WorkflowJobPayloadSchema = WorkflowRunRequestSchema.extend({
   name: z.string().min(1),
+  resumeRunId: z.string().min(1).optional(),
 });
 
 /** A pull job payload = the client-facing pull request (`runtime`+`modelRef`,
