@@ -1439,7 +1439,12 @@ Base `5cac606` · branch `slice-25b-ops-console` · spec+diagram `cd25cb9` · pl
 **Shared contracts (Task 1-6):** JobDto+availableAt+retriedFrom + retried_from col; RunListQuery.origin; DaemonStatusDto/DaemonBindDto/QueueStatsDto; DeviceDto{deviceId,label,createdAt,exp}+list; DevicePairRequest{label}/Response{deviceId,token,pairingUrl}; RotateRootRequest{rootSecret}; DaemonLogsQuery/Response.
 **Model tiering:** Sonnet floor (contracts/DTO/routes/web/docs); Opus for device-registry/trusted-local/rotate/queue-stats-race + shared-seam reviews; ultracode/Fable adversarial-verify §7.1 T17-21 + §7.2 T7 + Task 20b + Task 49 capstone. Per-task gate typecheck+lint+focused tests; full `bun run check` at increment boundaries (T6/T12/T22/T26/T31/T35/T40/T42/T48). Live-verify §10 before land (real daemon+Ollama+Chrome: jobs lifecycle+resume, pair/revoke device, daemon status+logs, rotate-root). 🔔 NOTIFY USER on land.
 **EXEC (resume at first task not [x]):**
-- [ ] INCREMENT 1 — Contracts + DTO deltas (T1–T6)
+- [x] INCREMENT 1 — Contracts + DTO deltas (T1–T6) ✅ BOUNDARY GATE GREEN: `bun run check` 1776 pass/0 fail/1812 tests/428 files (208s)
+  - [x] T1 complete (676fbdb, review clean: Spec ✅ / Quality approved; JobDto.availableAt+retriedFrom + retried_from migration + store lineage; 200 tests pass)
+  - [x] T2 complete (6ffd9da, review clean: Spec ✅ / Quality approved, 0 findings; RunListQuery.origin facet + list.ts mapper filter; 119 contract + 12 runs-list pass)
+  - [x] T3 complete (2e1daee, review clean: Spec ✅ / Quality approved; DaemonStatus/DaemonBind/QueueStats DTOs; 121 contract pass). DEVIATION (correct, reviewer-confirmed): counts = `z.partialRecord` not plan's `z.record` (Zod v4 z.record(enum) is EXHAUSTIVE). ⚠️ CARRY→T8: `toQueueStatsDto` emits ONLY present statuses (partial map); UI consumers must `counts[status] ?? 0`. Plan sample line ~69 annotated.
+  - [x] T4 complete (c8caf6a, review clean: Spec ✅ / Quality approved; Device DTOs + DevicePair req/resp + RotateRoot req; token absent from DeviceDto confirmed; 123 contract pass)
+  - [x] T5 complete (4077cf0, review clean: Spec ✅ / Quality approved, 0 findings; DaemonLogsQuery(tail coerce/clamp2000/default200, stream out|err) + Response{lines[]}; 126 contract pass)
 - [ ] INCREMENT 2 — Read endpoints: queue/stats, daemon/status, daemon/logs (T7–T12)
 - [ ] INCREMENT 3 — Device registry + pairing security + lineage retry + loopback injection (T13–T22, incl T20b) [SECURITY]
 - [ ] INCREMENT 4 — Web Ops shell (T23–T26)

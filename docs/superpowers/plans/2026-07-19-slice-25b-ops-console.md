@@ -66,7 +66,7 @@ export type DaemonStatusDTO = z.infer<typeof DaemonStatusDtoSchema>;
 **Queue stats DTO** (`src/contracts/dto.ts`, T3):
 ```typescript
 export const QueueStatsDtoSchema = z.object({
-  counts: z.record(z.enum(JobStatusWire), z.number()), // per-status row counts (one snapshot)
+  counts: z.partialRecord(z.enum(JobStatusWire), z.number()), // per-status row counts (one snapshot). NOTE: partialRecord not record — Zod v4 z.record(enum,…) is EXHAUSTIVE (all 6 keys required); a GROUP BY yields only present statuses, so counts is Partial<Record<JobStatusWire,number>>; T8 producer emits present-only, UI consumers use `counts[status] ?? 0`.
   total: z.number(),                 // sum(counts) — invariant: equals sum every read (§7.2)
   activeCount: z.number(),           // pool.activeCount() — in-flight controllers (distinct field)
   concurrency: z.number(),           // computeConcurrency()
