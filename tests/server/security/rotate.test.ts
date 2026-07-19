@@ -154,14 +154,20 @@ test('never leaks the root secret in the 200 body or the 401 error body', async 
   expect(Object.keys(okBody)).toEqual(['token']);
   expect(JSON.stringify(okBody)).not.toContain(c.rootSecret);
 
+  // Control: a valid rotate → 200, and its body still carries ONLY the
+  // re-minted token — never an echo of the root secret it authenticated with.
   const d = ctx();
-  const bad = await handleRotateRoot(req({ rootSecret: d.rootSecret }), d, {
+  const okAgain = await handleRotateRoot(req({ rootSecret: d.rootSecret }), d, {
     verify: () => true,
     verifyToken: () => true,
     principal: () => 'local',
   });
-  // (control: valid → 200; now prove the wrong-secret error body is clean)
-  await bad.json();
+  expect(okAgain.status).toBe(200);
+  const okAgainBody = (await okAgain.json()) as Record<string, unknown>;
+  expect(Object.keys(okAgainBody)).toEqual(['token']);
+  expect(JSON.stringify(okAgainBody)).not.toContain(d.rootSecret);
+
+  // Now prove the wrong-secret error body is clean too.
   const wrong = await handleRotateRoot(
     req({ rootSecret: 'guessing-the-root' }),
     ctx(),
