@@ -2,7 +2,11 @@ import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { migrate } from '../db/migrate.ts';
-import { maxAttempts as defaultMaxAttempts } from '../reliability/config.ts';
+import {
+  maxAttempts as defaultMaxAttempts,
+  retryBaseMs,
+  retryCapMs,
+} from '../reliability/config.ts';
 import { newRunId } from '../run/run-id.ts';
 import { JOB_MIGRATIONS } from './migrations.ts';
 import {
@@ -78,6 +82,21 @@ function newJobId(now = Date.now(), rand: () => number = Math.random): string {
     .toString(36)
     .padStart(6, '0');
   return `job-${ms}-${r}`;
+}
+
+/** Full-jitter exponential backoff (ms) for a re-queued job's `available_at`.
+ *  `attempt` is tries USED (claimNext already bumped it). Reuses the reliability
+ *  backoff knobs — never a hardcoded delay. */
+function backoffDelay(
+  attempt: number,
+  rand: () => number = Math.random,
+): number {
+  const exp = Math.min(
+    retryCapMs(),
+    retryBaseMs() * 2 ** Math.max(0, attempt - 1),
+  );
+  const jitter = 0.5 + rand() / 2;
+  return Math.floor(jitter * exp);
 }
 
 // The claim scan orders by `priority ASC` and relies on the JobPriority enum's
@@ -183,12 +202,69 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     return claim.immediate();
   }
 
+  function markDone(id: string, result: unknown): void {
+    const at = Date.now();
+    db.run(
+      `UPDATE jobs SET status = 'done', result = ?, finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [JSON.stringify(result ?? null), at, at, id],
+    );
+  }
+
+  function markFailed(id: string, error: string, retryable: boolean): void {
+    const at = Date.now();
+    const row = getJob(id);
+    // Retry if the caller says the error is retryable AND we have attempts left.
+    // `attempts` was already bumped by claimNext, so it reflects tries USED.
+    const canRetry =
+      retryable && row !== undefined && row.attempts < row.maxAttempts;
+    if (canRetry) {
+      // Persist the backoff as an `available_at` floor so claimNext won't
+      // re-claim this row until it matures — the delay is enforced durably in
+      // the DB, not by a worker sleeping on a held slot (Task 13).
+      const availableAt = at + backoffDelay(row.attempts);
+      db.run(
+        `UPDATE jobs SET status = 'queued', error = ?, updated_at = ?,
+         started_at = NULL, available_at = ? WHERE id = ?`,
+        [error, at, availableAt, id],
+      );
+      return;
+    }
+    db.run(
+      `UPDATE jobs SET status = 'failed', error = ?, finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [error, at, at, id],
+    );
+  }
+
+  function markInterrupted(id: string): void {
+    const at = Date.now();
+    db.run(
+      `UPDATE jobs SET status = 'interrupted', finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [at, at, id],
+    );
+  }
+
+  function markCanceled(id: string): void {
+    const at = Date.now();
+    db.run(
+      `UPDATE jobs SET status = 'canceled', finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [at, at, id],
+    );
+  }
+
   return {
     enqueue,
     getJob,
     claimNext,
+    markDone,
+    markFailed,
+    markInterrupted,
+    markCanceled,
     close: (): void => db.close(),
-    // claimNext / mark* / listJobs / reconcileOrphans added in Tasks 7-10.
+    // listJobs / reconcileOrphans added in Tasks 9-10.
     _db: db,
     _decodeJobCursor: decodeJobCursor,
     _encodeJobCursor: encodeJobCursor,
