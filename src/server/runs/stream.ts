@@ -107,14 +107,36 @@ export async function handleRunStream(
                 if (!seededResume && opts.lastEventId) {
                   seededResume = true;
                   rec.resume();
-                  const cursorPresent = dto.spans.some(
+                  // Seed by WIRE order, not DTO-index order. Spans flush to the
+                  // journal when they END, so a client received them in
+                  // end-time order — and a nested run's root (`agent.run`)
+                  // ends LAST yet sorts FIRST in the depth-first DTO (it is
+                  // depth-0). Reseeding by DTO index would mark that
+                  // late-written root as already-seen whenever the cursor is an
+                  // earlier-ending child, silently DROPPING the terminal frame
+                  // on reconnect (§7.1 gap). End time isn't on the DTO, but
+                  // `offsetMs + durationMs` (start-from-root + duration) is a
+                  // monotonic proxy for it; ties (same end) break on DTO order,
+                  // which is the within-poll wire order. Mark every span that
+                  // ended at or before the cursor; everything newer replays. A
+                  // stale/unknown cursor (not present) degrades to a fresh
+                  // connection — replay the full snapshot rather than emit
+                  // nothing.
+                  const cursor = dto.spans.find(
                     (s) => s.spanId === opts.lastEventId,
                   );
-                  if (cursorPresent) {
-                    for (const s of dto.spans) {
-                      emitted.add(s.spanId);
-                      if (s.spanId === opts.lastEventId) break;
-                    }
+                  if (cursor) {
+                    const cursorIdx = dto.spans.indexOf(cursor);
+                    const cursorEnd = cursor.offsetMs + cursor.durationMs;
+                    dto.spans.forEach((s, i) => {
+                      const end = s.offsetMs + s.durationMs;
+                      if (
+                        end < cursorEnd ||
+                        (end === cursorEnd && i <= cursorIdx)
+                      ) {
+                        emitted.add(s.spanId);
+                      }
+                    });
                   }
                 }
                 for (const s of dto.spans) {
