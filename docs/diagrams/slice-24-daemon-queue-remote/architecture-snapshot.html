@@ -1,0 +1,1033 @@
+<style>
+  :root{
+    --paper:#f3f5f7; --paper-2:#fbfcfd; --ink:#1b2733; --body:#46535f; --muted:#8a97a1;
+    --hair:#d9dee3; --hair-soft:#e7ebef; --node:#ffffff; --node-bd:#ccd4db;
+    --accent:#d6543a; --accent-soft:#f4d9d2; --accent-ink:#a83a26; --spine:#324a5e;
+    --term-bg:#141f29; --term-2:#1f2c38; --term-ink:#e7eef3; --term-mut:#8ea0ad; --term-glow:#f0a594;
+    --ok:#4f9d69; --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --surface-dark:#1b2733; --bar-bg:rgba(243,245,247,.93);
+  }
+  .wrap[data-theme="dark"]{
+    --paper:#111820; --paper-2:#18212a; --ink:#eef2f6; --body:#b7c2cc; --muted:#7d8b96;
+    --hair:#2b3a46; --hair-soft:#212d37; --node:#1a242d; --node-bd:#35454f;
+    --accent:#e56a50; --accent-soft:#3a241e; --accent-ink:#f2a996; --spine:#6f93b0;
+    --bar-bg:rgba(17,24,32,.93); color-scheme:dark;
+  }
+  *{box-sizing:border-box;}
+  .wrap{background:var(--paper);color:var(--body);font-family:var(--sans);min-height:100%;
+    background-image:radial-gradient(var(--hair-soft) 1px,transparent 1px);background-size:22px 22px;}
+  .bar{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem 1rem;
+    padding:1.05rem clamp(1rem,3vw,2rem);border-bottom:1px solid var(--hair);background:var(--bar-bg);
+    position:sticky;top:0;z-index:6;backdrop-filter:blur(6px);}
+  .eyebrow{font-family:var(--mono);font-size:.68rem;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);}
+  .bar h1{font-size:1.18rem;color:var(--ink);margin:0;font-weight:640;letter-spacing:-.01em;}
+  .bar .sub{font-size:.82rem;color:var(--muted);}
+  .bar .spacer{flex:1;}
+  .modes{display:inline-flex;border:1px solid var(--hair);border-radius:8px;overflow:hidden;background:var(--paper-2);}
+  .modes button{font-family:var(--sans);font-size:.8rem;font-weight:560;color:var(--body);background:none;border:none;
+    padding:.4rem .8rem;cursor:pointer;display:inline-flex;align-items:center;gap:.35rem;}
+  .modes button.on{background:var(--spine);color:#fff;}
+  .modes button:not(.on):hover{color:var(--accent);}
+  .theme-btn{font-size:.95rem;line-height:1;border:1px solid var(--hair);background:var(--paper-2);border-radius:8px;
+    padding:.36rem .5rem;cursor:pointer;color:var(--body);}
+  .theme-btn:hover{border-color:var(--accent);}
+  .trace-btn{font-family:var(--sans);font-size:.82rem;font-weight:600;color:#fff;background:var(--accent);
+    border:none;border-radius:7px;padding:.45rem .85rem;cursor:pointer;display:inline-flex;align-items:center;gap:.4rem;}
+  .trace-btn:hover{background:var(--accent-ink);}
+  .legend{display:flex;gap:.9rem;font-size:.72rem;color:var(--muted);font-family:var(--mono);}
+  .legend span{display:inline-flex;align-items:center;gap:.35rem;}
+  .lz{width:18px;height:0;border-top:2px solid var(--muted);display:inline-block;}
+  .lz.dash{border-top-style:dashed;}
+  .hint{font-size:.78rem;color:var(--muted);padding:.5rem clamp(1rem,3vw,2rem);border-bottom:1px solid var(--hair-soft);}
+  .hint b{color:var(--body);font-weight:600;}
+  [hidden]{display:none!important;}
+
+  .stage{position:relative;width:100%;height:min(70vh,720px);overflow:hidden;cursor:grab;touch-action:none;}
+  .stage.drag{cursor:grabbing;}
+  .canvas{position:absolute;top:0;left:0;width:1060px;height:820px;transform-origin:0 0;}
+  .edges{position:absolute;inset:0;width:1060px;height:820px;overflow:visible;}
+  .edges .edge{fill:none;stroke:var(--hair);stroke-width:1.6;transition:stroke .18s,stroke-width .18s,opacity .18s;}
+  .edges .edge.emit{stroke-dasharray:5 4;}
+  .edges .edge.hot{stroke:var(--accent);stroke-width:2.6;}
+  .edges .edge.dim{opacity:.16;}
+  .edges .hit{fill:none;stroke:transparent;stroke-width:16;cursor:help;}
+
+  .node{position:absolute;transform:translate(-50%,-50%);width:166px;background:var(--node);
+    border:1px solid var(--node-bd);border-radius:9px;padding:.55rem .7rem;text-align:left;cursor:pointer;
+    box-shadow:0 1px 2px rgba(27,39,51,.05);transition:box-shadow .18s,border-color .18s,opacity .18s;
+    font-family:inherit;color:var(--body);display:flex;flex-direction:column;gap:.12rem;}
+  .node:hover,.node:focus-visible{border-color:var(--accent);box-shadow:0 4px 14px rgba(214,84,58,.16);outline:none;}
+  .node .nm{font-weight:640;color:var(--ink);font-size:.92rem;letter-spacing:-.01em;}
+  .node .pt{font-family:var(--mono);font-size:.64rem;color:var(--muted);}
+  .node .tier{position:absolute;top:-7px;left:10px;width:8px;height:8px;border-radius:2px;background:var(--spine);}
+  .node.support .tier{background:var(--muted);}
+  .node.sel{border-color:var(--accent);box-shadow:0 6px 20px rgba(214,84,58,.22);}
+  .node.sel .nm{color:var(--accent);}
+  .node.neighbor,.node.tour{border-color:var(--accent);}
+  .node.dim{opacity:.3;}
+
+  .controls{position:absolute;right:14px;bottom:14px;display:flex;gap:.35rem;z-index:4;}
+  .controls button{width:34px;height:34px;border:1px solid var(--hair);background:var(--paper-2);border-radius:7px;
+    color:var(--ink);font-size:1rem;cursor:pointer;font-family:var(--mono);line-height:1;}
+  .controls button:hover{border-color:var(--accent);color:var(--accent);}
+
+  .panel{position:absolute;left:14px;top:14px;width:min(320px,74vw);background:var(--paper-2);
+    border:1px solid var(--hair);border-radius:11px;padding:1rem 1.05rem 1.1rem;z-index:4;
+    box-shadow:0 8px 30px rgba(27,39,51,.10);display:flex;flex-direction:column;gap:.5rem;max-height:calc(100% - 28px);overflow:auto;}
+  .panel .pclose{position:absolute;right:.55rem;top:.45rem;border:none;background:none;color:var(--muted);font-size:1.15rem;cursor:pointer;line-height:1;}
+  .panel .pkind{font-family:var(--mono);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);}
+  .panel h2{margin:0;font-size:1.15rem;color:var(--ink);font-weight:660;letter-spacing:-.01em;}
+  .panel .ppath{font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-top:-.25rem;}
+  .panel .pwhat{font-size:.86rem;color:var(--body);line-height:1.55;}
+  .panel .mech{font-family:var(--mono);font-size:.72rem;color:var(--accent-ink);background:var(--accent-soft);
+    border-radius:6px;padding:.4rem .55rem;overflow-x:auto;}
+  .panel .lbl{font-size:.64rem;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-top:.3rem;}
+  .panel .files{display:flex;flex-wrap:wrap;gap:.3rem;}
+  .panel .f{font-family:var(--mono);font-size:.7rem;color:var(--body);background:var(--paper);border:1px solid var(--hair-soft);border-radius:5px;padding:.13rem .4rem;}
+  .panel .f.hl{color:var(--accent);border-color:var(--accent-soft);}
+  .panel .rel{display:flex;flex-direction:column;gap:.15rem;}
+  .panel .rel button{text-align:left;border:none;background:none;cursor:pointer;font-family:var(--sans);
+    font-size:.8rem;color:var(--body);padding:.12rem .2rem;border-radius:5px;}
+  .panel .rel button:hover{background:var(--accent-soft);color:var(--ink);}
+  .panel .rel .ar{color:var(--accent);font-family:var(--mono);}
+  .panel .rel .why{color:var(--muted);font-size:.92em;}
+  .panel .empty{font-size:.78rem;color:var(--muted);font-style:italic;}
+
+  .etip{position:fixed;z-index:20;pointer-events:none;background:var(--surface-dark);color:#eef2f5;font-size:.74rem;
+    padding:.3rem .55rem;border-radius:6px;max-width:230px;line-height:1.4;opacity:0;transition:opacity .12s;box-shadow:0 4px 14px rgba(0,0,0,.2);}
+  .etip .ef{font-family:var(--mono);color:#f0a594;}
+
+  /* tour banner */
+  .tour-bar{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);width:min(620px,calc(100% - 28px));
+    background:var(--surface-dark);color:#eaeff3;border-radius:12px;padding:.85rem 1rem;z-index:7;display:none;
+    box-shadow:0 10px 34px rgba(27,39,51,.28);}
+  .tour-bar.on{display:block;}
+  .tour-bar .tnum{font-family:var(--mono);font-size:.64rem;letter-spacing:.16em;text-transform:uppercase;color:#f0a594;}
+  .tour-bar .ttext{font-size:.92rem;line-height:1.5;margin:.25rem 0 .65rem;}
+  .tour-bar .ttext b{color:#fff;}
+  .tour-bar .trow{display:flex;align-items:center;gap:.5rem;}
+  .tour-bar .trow .tprog{flex:1;font-family:var(--mono);font-size:.72rem;color:#9fb0bd;font-variant-numeric:tabular-nums;}
+  .tour-bar button{font-family:var(--sans);font-size:.8rem;border-radius:7px;padding:.35rem .7rem;cursor:pointer;border:1px solid #3a4856;background:#26323d;color:#eaeff3;}
+  .tour-bar button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  .tour-bar button:disabled{opacity:.4;cursor:default;}
+
+  .concepts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.8rem;padding:1.1rem clamp(1rem,3vw,2rem);border-top:1px solid var(--hair);}
+  .ccard{background:var(--paper-2);border:1px solid var(--hair);border-radius:10px;padding:.9rem 1rem 1rem;display:flex;flex-direction:column;gap:.4rem;}
+  .ccard .ct{font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);}
+  .ccard h3{margin:0;font-size:1rem;color:var(--ink);font-weight:640;letter-spacing:-.01em;}
+  .ccard p{margin:0;font-size:.83rem;color:var(--muted);line-height:1.5;}
+  .ccard .formula{font-family:var(--mono);font-size:.74rem;color:var(--accent-ink);background:var(--accent-soft);border-radius:6px;padding:.4rem .55rem;margin-top:auto;overflow-x:auto;}
+
+  /* ── Terminal mode ── */
+  .term-view{padding:1rem clamp(1rem,3vw,2rem) 0;}
+  .cmdbar{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin-bottom:.85rem;}
+  .cmdbar .cl{font-family:var(--mono);font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-right:.2rem;}
+  .chip{font-family:var(--mono);font-size:.76rem;color:var(--body);background:var(--paper-2);border:1px solid var(--hair);
+    border-radius:999px;padding:.32rem .7rem;cursor:pointer;transition:border-color .15s,color .15s,background .15s;}
+  .chip:hover{border-color:var(--accent);color:var(--accent);}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .cmdbar .run-ctl{margin-left:auto;display:flex;gap:.4rem;}
+  .run-ctl button{font-family:var(--sans);font-size:.8rem;font-weight:600;border-radius:7px;padding:.4rem .8rem;cursor:pointer;border:1px solid var(--hair);background:var(--paper-2);color:var(--ink);}
+  .run-ctl button.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .run-ctl button.primary:hover{background:var(--accent-ink);}
+  .run-ctl button:not(.primary):hover{border-color:var(--accent);color:var(--accent);}
+  .run-ctl button:disabled{opacity:.4;cursor:default;}
+
+  .term-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:1rem;align-items:stretch;}
+  @media(max-width:820px){.term-grid{grid-template-columns:1fr;}}
+  .term{background:var(--term-bg);border-radius:12px;padding:1rem 1.1rem 1.15rem;min-height:340px;max-height:min(56vh,520px);
+    overflow-y:auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 10px 34px rgba(20,31,41,.28);
+    border:1px solid #26323d;font-family:var(--mono);font-size:.8rem;line-height:1.65;color:var(--term-ink);}
+  .term .titlebar{display:flex;align-items:center;gap:.45rem;margin:-.2rem 0 .7rem;}
+  .term .titlebar i{width:11px;height:11px;border-radius:50%;background:#3a4856;display:inline-block;}
+  .term .titlebar i.r{background:#d6543a;}.term .titlebar i.y{background:#d8a24a;}.term .titlebar i.g{background:#4f9d69;}
+  .term .titlebar span{font-size:.66rem;color:var(--term-mut);letter-spacing:.1em;margin-left:.3rem;}
+  .term .cmdline{color:var(--term-ink);white-space:pre-wrap;word-break:break-word;}
+  .term .cmdline .pr{color:var(--term-glow);}
+  .term .cmdline .cur{display:inline-block;width:8px;height:1.05em;background:var(--term-glow);vertical-align:-2px;margin-left:1px;animation:blink 1s steps(1) infinite;}
+  @keyframes blink{50%{opacity:0;}}
+  .tline{display:flex;gap:.55rem;padding:.12rem 0;opacity:0;transform:translateY(3px);transition:opacity .25s,transform .25s;}
+  .tline.show{opacity:1;transform:none;}
+  .tline .ts{flex:none;width:74px;color:#5f7183;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;padding-top:.18rem;}
+  .tline .tx{color:var(--term-ink);white-space:pre-wrap;word-break:break-word;}
+  .tline .tx .n{color:var(--term-glow);}
+  .tline .tx .ok{color:#7fc79a;}
+  .tline.done .tx{color:#7fc79a;}
+  .tline.cur .ts{color:var(--term-glow);}
+
+  .uh{background:var(--paper-2);border:1px solid var(--hair);border-radius:12px;padding:1rem 1.1rem 1.15rem;
+    display:flex;flex-direction:column;gap:.55rem;min-height:340px;}
+  .uh .uh-head{font-family:var(--mono);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);}
+  .uh .uh-sub{display:inline-flex;align-items:center;gap:.45rem;font-family:var(--sans);font-weight:660;font-size:1.05rem;color:var(--ink);}
+  .uh .uh-sub .dot{width:9px;height:9px;border-radius:2px;background:var(--spine);}
+  .uh .uh-sub .dot.support{background:var(--muted);}
+  .uh .uh-what{font-size:.86rem;color:var(--body);line-height:1.55;}
+  .uh .uh-calclbl{font-size:.62rem;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-top:.2rem;}
+  .uh .uh-calc{font-family:var(--mono);font-size:.78rem;color:var(--accent-ink);background:var(--accent-soft);
+    border-radius:8px;padding:.6rem .7rem;line-height:1.6;overflow-x:auto;white-space:pre-wrap;}
+  .uh .uh-calc .hl{color:var(--ink);font-weight:600;}
+  .uh .uh-none{font-size:.8rem;color:var(--muted);font-style:italic;}
+  .uh .uh-spans{margin-top:auto;display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;}
+  .uh .uh-spans .sl{font-size:.6rem;font-family:var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);width:100%;}
+  .uh .span{font-family:var(--mono);font-size:.68rem;color:var(--body);background:var(--paper);border:1px solid var(--hair-soft);border-radius:5px;padding:.12rem .4rem;}
+  .uh .span.new{color:var(--accent);border-color:var(--accent-soft);}
+  .term-hint{font-size:.76rem;color:var(--muted);padding:.55rem 0 0;}
+
+  .foot{font-size:.78rem;color:var(--muted);padding:.85rem clamp(1rem,3vw,2rem);border-top:1px solid var(--hair);display:flex;flex-wrap:wrap;gap:.4rem 1.3rem;margin-top:1.1rem;}
+  .foot code{font-family:var(--mono);color:var(--body);}
+  @media(max-width:720px){.concepts{grid-template-columns:1fr;}}
+  @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+</style>
+
+<div class="wrap">
+  <div class="bar">
+    <span class="eyebrow">~/ai · live</span>
+    <h1>System Architecture</h1>
+    <span class="sub">local-first multi-agent orchestrator</span>
+    <span class="spacer"></span>
+    <button id="themeBtn" class="theme-btn" title="Toggle light / dark" aria-label="Toggle light or dark theme">🌙</button>
+    <span class="modes" role="tablist">
+      <button id="mMap" class="on" role="tab">◧ System map</button>
+      <button id="mTerm" role="tab">▸_ Terminal</button>
+    </span>
+    <button class="trace-btn" id="traceBtn">▶ Trace a run</button>
+    <span class="legend">
+      <span><i class="lz"></i> depends on</span>
+      <span><i class="lz dash"></i> emits / data</span>
+    </span>
+  </div>
+  <p class="hint" id="mapHint"><b>Hover</b> a module to trace its links · <b>click</b> for what it does &amp; why · <b>hover an arrow</b> to read the relationship · <b>▶ Trace a run</b> to walk a request through · drag to pan, scroll to zoom.</p>
+
+  <!-- ════ MAP VIEW ════ -->
+  <div id="mapView">
+    <div class="stage" id="stage">
+      <div class="canvas" id="canvas">
+        <svg class="edges" id="edges" viewBox="0 0 1060 820">
+          <defs>
+            <marker id="ah" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto-start-reverse">
+              <path d="M0,0 L6,3 L0,6 Z" fill="context-stroke"></path>
+            </marker>
+          </defs>
+          <g id="edgeG"></g><g id="hitG"></g>
+        </svg>
+        <div id="nodes"></div>
+      </div>
+      <div class="controls">
+        <button id="zin" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zout" title="Zoom out" aria-label="Zoom out">&minus;</button>
+        <button id="zreset" title="Reset view" aria-label="Reset view">⤢</button>
+      </div>
+      <div class="tour-bar" id="tourBar">
+        <div class="tnum" id="tnum">Step 1 / 28</div>
+        <div class="ttext" id="ttext"></div>
+        <div class="trow">
+          <button id="tprev">Back</button>
+          <button id="tnext" class="primary">Next</button>
+          <span class="tprog" id="tprog"></span>
+          <button id="texit">Exit</button>
+        </div>
+      </div>
+    </div>
+    <div class="concepts" id="concepts"></div>
+  </div>
+
+  <!-- ════ TERMINAL VIEW ════ -->
+  <div id="termView" class="term-view" hidden>
+    <div class="cmdbar">
+      <span class="cl">Run</span>
+      <button class="chip on" data-sc="chat">chat</button>
+      <button class="chip" data-sc="crew">crew</button>
+      <button class="chip" data-sc="ingest">memory ingest</button>
+      <button class="chip" data-sc="recall">memory recall</button>
+      <button class="chip" data-sc="verify">verify</button>
+      <button class="chip" data-sc="provision">provision</button>
+      <button class="chip" data-sc="mcp">mcp</button>
+      <button class="chip" data-sc="build">agent-builder</button>
+      <span class="run-ctl">
+        <button id="scStep">Step ›</button>
+        <button id="scRun" class="primary">▶ Run</button>
+        <button id="scReset">Reset</button>
+      </span>
+    </div>
+    <div class="term-grid">
+      <div class="term" id="term">
+        <div class="titlebar"><i class="r"></i><i class="y"></i><i class="g"></i><span>~/ai — zsh</span></div>
+        <div class="cmdline" id="cmdline"></div>
+        <div id="tlog"></div>
+      </div>
+      <div class="uh" id="uh">
+        <div class="uh-head">Under the hood</div>
+        <div class="uh-sub" id="uhSub"><span class="dot"></span> Idle</div>
+        <div class="uh-what" id="uhWhat">Pick a command and press <b>▶ Run</b> (or <b>Step ›</b>) to watch what the framework actually does — every model-selection, context-sizing, retrieval and guardrail calculation, live.</div>
+        <div class="uh-calclbl" id="uhCalcLbl" hidden>Calculation</div>
+        <div class="uh-calc" id="uhCalc" hidden></div>
+        <div class="uh-spans"><span class="sl">Spans emitted (OpenTelemetry trace)</span><span id="uhSpans" class="uh-none">— none yet —</span></div>
+      </div>
+    </div>
+    <p class="term-hint">Numbers are illustrative of a 24&nbsp;GB M-series machine; the formulas are the real ones from <code>src/resource</code>, <code>src/core/guardrails.ts</code> and <code>src/memory</code>. This mock evolves as the product does.</p>
+  </div>
+
+  <div class="foot">
+    <span>Living document · <code>docs/architecture.md</code></span>
+    <span>Snapshot after Slice 24 — always-on daemon + durable job queue + resumable jobs + secure remote access (root→session token; Tailscale-default tunnel)</span>
+    <span>Slice 24 · 32 slices · 1762 root + 348 web tests · OpenTelemetry-traced · zero API keys</span>
+  </div>
+</div>
+<div class="etip" id="etip"></div>
+
+<script>
+(function(){
+  var NODES=[
+    {id:"cli",nm:"CLI",pt:"src/cli",kind:"spine",x:530,y:70,
+      what:"The entry points. chat.ts runs one LLM-routed session; flow.ts runs a deterministic workflow; crew.ts runs a role-based crew; memory.ts is the store's own CLI. select-runtime.ts is the shared live-model-selection helper the flow + crew CLIs use; with-mcp-run.ts (Slice 16) is the shared per-run scope helper — it creates the run dir → initializes telemetry → mounts MCP under the live tracer → runs → tears down, so the mcp.mount span actually lands in the trace. All print the result and write a traced run.",
+      mech:'chat "<task>"  ·  bun run flow <name>  ·  bun run crew <name>  ·  bun run memory <cmd>',
+      files:["chat.ts","run-chat.ts","with-mcp-run.ts","flow.ts","crew.ts","memory.ts","select-runtime.ts","select-hook.ts","runs.ts"]},
+    {id:"decl",nm:"Declarations",pt:"agents · models · workflows · crews",kind:"support",x:880,y:90,
+      what:"Pure data, no logic. An agent is a name + prompt + tools + capability requirement; a model is a runtime + params + footprint (+ an optional `fallbackModel` for graceful degrade); a workflow is a typed list of steps; a crew is members (role/goal/backstory) + tasks + a process. Changing behaviour means editing data, not code.",
+      files:["super.ts","file-qa.ts","web-fetch.ts","registry.ts","workflows/*","crews/*"]},
+    {id:"core",nm:"Core",pt:"src/core",kind:"spine",x:360,y:225,
+      what:"The brain. The orchestrator is itself an agent whose tools are delegate_to_<specialist> wrappers — so routing is just the router model picking a tool. Guardrails bound how deep and how large delegation can grow; runGuardedAgent is the one guarded delegation path, shared by the router and the workflow engine. Slice 30b added two <b>additive, opt-in streaming seams</b> that leave CLI behavior unchanged: <code>events.ts</code> defines an isomorphic-safe <code>EventSink</code> (StatusEvent-only, no AI-SDK/Node) threaded through delegation like the existing <code>ledger?</code>, and <code>agent.ts</code> gained a <code>StreamSink</code> — when a run supplies <code>stream</code>, <code>runAgent</code> calls <code>streamText</code> instead of <code>generateText</code> and <b>drains the stream inside withWallClock</b> (the mandatory consumeStream, or the timeout never bounds generation). Only the top-level orchestrator streams token-by-token; specialists stay batch and narrate through the events sink.",
+      mech:"agents-as-tools · depth ≤ 5 · outcome {answer|gap|resource} · opt-in EventSink + streamText StreamSink (top-level only)",
+      files:["agent.ts","orchestrator.ts","delegate.ts","events.ts","guardrails.ts","types.ts","kind-map.ts","errors.ts"]},
+    {id:"tel",nm:"Telemetry",pt:"src/telemetry",kind:"support",x:760,y:235,
+      what:"Turns every run into an OpenTelemetry trace: each delegation, model load, tool call, workflow step, memory recall and token count is a span, and the AI SDK contributes its own spans for free. Every later feature just adds a helper here. Slice 30a made this SAFE UNDER CONCURRENCY: one global provider now lives for the life of the process — no more swapping the global provider per run, which cross-contaminated spans between two runs in flight at once — and a per-run routing SpanProcessor (run-router.ts) reads the run-id carried on the OTel context (withRunContext / currentRunId) to route each span to that run's own spans.jsonl. <b>Slice 30b Phase 8</b> added a second root-span name, <code>chat.run</code> (<code>withChatRunSpan</code>, a byte-identical sibling of <code>withRunSpan</code>) — a chat turn now classifies as <code>RunKind.Chat</code> instead of borrowing <code>agent.run</code>, closing a false-positive completion toast on the web notifier — and the repo's first CLIENT-originated span, <code>voice.transcribe.web</code> (<code>recordVoiceTranscribeWeb</code>), opened server-side from a browser <code>sendBeacon</code> POST and kept deliberately distinct (different call site, attributes, name) from the pre-existing CLI-side <code>voice.transcribe</code>. <b>Slice 23</b> upgraded the AI-SDK integration itself for <code>ai@7</code>: v7 extracted OpenTelemetry out of core <code>ai</code> into <code>@ai-sdk/otel</code>, and a bare <code>generateText({telemetry})</code> call no longer emits spans on its own — an integration must supply the bridge. v7's own <code>registerTelemetry(...)</code> is opt-out at process scope (unlike v6's opt-in default), which would have made every AI-SDK call in the process start emitting spans, including builder/verify/embed calls that emitted nothing in v6. To preserve that narrower v6 scope, <code>src/telemetry/ai-sdk.ts</code> exports a singleton <code>aiSdkTelemetryIntegration</code> — a <code>LegacyOpenTelemetry</code> integration built on a <b>dynamic per-span tracer</b> (re-resolves <code>trace.getTracer('ai')</code> on every span instead of capturing one, so it keeps following run-router.ts's per-run global-tracer-provider swaps) — and <code>core/agent.ts</code> passes it <b>per call</b> via <code>telemetry.integrations:[aiSdkTelemetryIntegration]</code>, never a global registration. Only runAgent's two <code>generateText</code>/<code>streamText</code> calls emit <code>ai.generateText</code> spans, exactly as in v6; spans still land in the same <code>runs/&lt;id&gt;/spans.jsonl</code>. <b>Slice 24</b> adds the daemon/queue span vocabulary through these same helpers: <code>daemon.start</code>/<code>daemon.stop</code> (carrying <code>daemon.pid</code>, <code>src/daemon/spans.ts</code>), <code>job.enqueue</code> (<code>+server.principal=local</code>), and <code>job.run</code>/<code>job.retry</code>/<code>job.cancel</code> (<code>queue/pool.ts</code>, <code>withRunContext</code>-nested) — each job span carrying <code>job.id</code>/<code>job.kind</code>/<code>job.priority</code>/<code>job.attempt</code> + the <code>agent.run.id</code> and <code>job.origin=RunOrigin.Daemon</code>, nested under each job's run root; the reserved <b>provenance</b> attributes are now populated (<code>TokenGuard.principal()</code> — the authorizing device's session <code>deviceId</code> — threads into <code>server.request</code>).",
+      mech:"run = trace → withRunContext(id) → routing SpanProcessor → runs/<id>/spans.jsonl · OTLP seam · chat.run (D9) alongside agent.run · voice.transcribe.web (browser-beacon-originated) · Slice 23: @ai-sdk/otel extraction, per-call telemetry.integrations:[aiSdkTelemetryIntegration] (LegacyOpenTelemetry, dynamic tracer) — not global registerTelemetry · Slice 24: daemon.start/stop + job.enqueue/run/retry/cancel + populated RunOrigin.Daemon provenance",
+      files:["spans.ts","provider.ts","jsonl-exporter.ts","run-router.ts","ai-sdk.ts"]},
+    {id:"mcp",nm:"MCP registry",pt:"src/mcp · mcp.json",kind:"support",x:120,y:215,
+      what:"The integration library, declarative since Slice 15: mcp.json lists servers (stdio or Streamable HTTP) + which agents get them, loaded at startup. Mounting is consent-gated — first mount shows the exact untruncated command and pins the tool definitions (hash), so a server that later changes its command or tools triggers re-consent (rug-pull defense; approvals live in untracked .mcp-approvals.json, secrets never stored). A 12-entry capability-tagged starter pack (files, sql via an in-repo bun:sqlite server, web-search, browser, vcs, memory…) installs via bun run mcp add — keyed entries stay dormant until their env var is set. The in-repo sqlite server is engine-enforced read-only (`PRAGMA query_only`, allowing `WITH…SELECT` CTEs while the engine itself rejects writes); remote HTTP servers authenticate via a static key OR **live OAuth (Slice 26)** — DCR/CIMD + PKCE + a browser-loopback redirect + a 0600 on-disk token store + persisted authorization-server metadata, with the first-time handshake completed inside `mountMcpServer` and a provider registered per OAuth entry by `withMcpRun`; every mount emits `mcp.server.auth` telemetry (kind/outcome, never a secret value); pack writes are atomic and each mount span carries its `mcp.transport`. Scoped per-agent toolsets keep small local models accurate; workflow tool steps see the full merged set. This pack is the palette the future agent-builder suggests from.",
+      mech:"mcp.json → loadMcpConfig → consent+pin → mountAll → {forAgent, merged} · bun run mcp list|add|status",
+      files:["config.ts","consent.ts","mount.ts","pack.ts","client.ts","server.ts","sqlite-server.ts","cli/mcp.ts","oauth-provider.ts","token-store.ts","loopback.ts"]},
+    {id:"wf",nm:"Workflow / DAG",pt:"src/workflow",kind:"spine",x:560,y:325,
+      what:"A second, deterministic orchestration mode beside the LLM router — the capability that closes the gap vs both n8n and CrewAI. You define a typed DAG of agent/tool/branch/map steps with schema-validated data flow, instead of one model choosing one specialist. defineWorkflow validates the graph at construction (unique ids, resolvable deps, acyclic); the engine runs it wave-by-wave with bounded fan-out; agent steps reuse the same guarded delegation as the router. Steps can opt into memory: their output auto-persists and a recall tool is available.",
+      mech:"defineWorkflow({ steps }) · steps: agent · tool · branch · map · onError fail|continue|{fallback}",
+      files:["types.ts","define.ts","engine.ts","run-step.ts"]},
+    {id:"crew",nm:"Crews / roles",pt:"src/crew",kind:"spine",x:905,y:335,
+      what:"A CrewAI-style team layer that composes onto what already exists — NOT a new engine. Members carry {role, goal, backstory} + a capability requirement (model chosen live, largest-that-fits); tasks carry a description + optional typed output + dependency context. A sequential crew compiles to a workflow DAG (runs on the Workflow engine); a hierarchical crew reuses the orchestrator + an auto manager. When given a memory store, members get a recall tool + namespaced auto-write.",
+      mech:"defineCrew({ members, tasks, process }) · sequential | hierarchical · bun run crew <name>",
+      files:["types.ts","define.ts","member-agent.ts","compile.ts","engine.ts"]},
+    {id:"mem",nm:"Memory / RAG",pt:"src/memory",kind:"spine",x:855,y:495,
+      what:"Persistent semantic memory. A two-tier store — LanceDB (embedded vector, one table per named space) + bun:sqlite (space registry + (space,source)-scoped ingestion manifest) — with embeddings via the runtime port (default qwen3-embedding:0.6b, loaded weights-only through the Model Manager). A space records its embedder + dim, so the embedder is bound to the DATA while the chat model stays bound to the RUN — dynamic model selection never invalidates recall. Retrieval: dense search → optional default-on cross-encoder rerank (transformers.js; degrades gracefully) → a budget-fit pack sized to a live fraction of the delegation's context. Crews/workflows get a recall tool (citation-tagged [mem:id]) + namespaced auto-write. Slice 30a hardened the on-disk side for a long-lived host: sqlite schema changes now run through a user_version migration runner (db/migrate.ts) instead of assuming a fresh file, ensureSpace gained an embedder-mismatch guard (recall throws instead of silently returning garbage if a space's recorded embedder ever disagrees with the one asked for), and the sqlite connection runs in WAL mode with a busy_timeout so a concurrent writer no longer hits SQLITE_BUSY. <b>Slice 30b Phase 6</b> gave this pre-existing layer its first real chat caller via a new <code>chat</code> memory space: <code>rememberOnce</code> (a new, additive method on the <code>createMemoryStore</code> closure) content-hash-dedups each finished chat turn into the <code>chat</code> space — keyed on a synthetic <code>chat:&lt;sessionId&gt;:&lt;assistantMsgId&gt;</code> source, reusing <code>ingest</code>'s existing <code>seenDoc</code>/<code>recordDoc</code> guard so a retried auto-ingest is a safe skip — and <code>injectRecall</code> (<code>recall-tool.ts</code>, defined since Slice 12 but unused until now) recalls <b>space-wide, no namespace</b>, so an earlier conversation's facts can surface in a brand-new chat.",
+      mech:"spaces (embedder ⊥ chat model) · dense → rerank → budget-fit ≤ ¼·num_ctx · WAL + busy_timeout · migrate via user_version · chat space: injectRecall (space-wide) + rememberOnce dedup auto-ingest · bun run memory",
+      files:["types.ts","store.ts","retrieve.ts","lancedb-store.ts","sqlite-store.ts","embed.ts","chunk.ts","reranker.ts","recall-tool.ts","budget.ts","db/migrate.ts"]},
+    {id:"ver",nm:"Verification",pt:"src/verification",kind:"spine",x:855,y:645,
+      what:"The grounded-answer / anti-hallucination layer, opt-in via --verify. verify() decomposes an answer into claims, parses the chunk-ids it CITES ([mem:id], deterministic regex — never LLM-extracted), fetches those chunks (Memory.getByIds) into one evidence POOL, and judges each claim against the pool with a small fine-tuned checker — bespoke-minicheck, (document,claim)→Yes/No — consent-pulled, with a general-model NLI fallback. No citations ⇒ abstain. Below the faithfulness threshold ⇒ one bounded CRAG corrective (grade → rewrite → re-answer) runs; if it still fails, the run ABSTAINS ({kind:'unverified'}) instead of presenting an ungrounded answer. Auto-inserted as answer→verify→corrective→verify₂→abstain. A verifier is just another step.",
+      mech:"claims → cited-evidence pool → MiniCheck per claim → faithfulness ≥ 0.9 else bounded CRAG then abstain · --verify",
+      files:["types.ts","claims.ts","judge.ts","crag.ts","verify.ts","expand.ts","deps.ts","config.ts"]},
+    {id:"res",nm:"Resource",pt:"src/resource",kind:"spine",x:345,y:435,
+      what:"The hardware-aware core. On every delegation it re-reads free RAM, picks the largest model that fits, evicts least-recently-used models, and sizes the context window to the remaining headroom — never a frozen budget. Embedders load weights-only through the same manager (no generate-warm). Slice 30a added an ADMISSION MUTEX: concurrent delegations now serialize through ensureReady one at a time, so two runs racing for RAM at once can no longer both pick the same headroom, evict a model the other just loaded, or jointly over-commit VRAM.",
+      mech:"budget = min(0.75 × total RAM, 0.80 × live-free RAM) · ensureReady serialized behind an admission mutex",
+      files:["model-manager.ts","selector.ts","hardware.ts","kv-cache.ts","footprint.ts","ollama-control.ts"]},
+    {id:"run",nm:"Run store + mapper",pt:"src/run",kind:"support",x:790,y:430,
+      what:"Each run gets a folder: the canonical spans.jsonl trace plus human-readable answer/gap/resource.txt (or a workflow's result.txt/failed.txt). The reader rebuilds it into the timeline tree you see in bun run runs. Slice 30a replaced the old run-<pid> id — which two concurrent runs on the same process could collide on — with newRunId (run-id.ts): a collision-free, lexicographically-sortable id, so runs/ stays a reliable, race-free index even under concurrent runs. <b>Slice 30b Phase 3 added the web read-model mapper</b> that turns a run folder into validated wire DTOs for the browser Runs UI: <code>run-dto.ts</code>'s <code>mapRunToDto(runsRoot, id)</code> reads spans.jsonl via the existing readSpans/buildTree, depth-first-flattens the tree assigning <code>offsetMs</code>+<code>depth</code>, projects each span into a <code>SpanDTO</code> (status · delegation target/depth · model id/provider/numCtx · per-span tokens · a degraded flag derived from a reliability.degrade event · raw attrs+events), sums the run-level token roll-up + distinct model ids, tolerantly reads degradation.jsonl (a JSON-valid-but-wrong-shape line is dropped, never thrown — a torn degrade line can't make a whole run unviewable), reads artifacts via readRunArtifacts, and returns <code>RunDtoSchema.parse(dto)</code> so a malformed projection fails loudly on the server, never on the wire. A shared <code>runRootSummary(tree)</code> derives startMs/durationMs/outcome/lifecycle from the top-level roots <b>name-agnostically across agent.run/crew.run/workflow.run</b> — an adversarially-caught fix (the CLI's summarizeRun only recognized agent.run, so a finished crew/workflow misread as perpetually Running with durationMs 0); <b>both</b> mapRunToDto and the list-cheap <code>summarizeRunListItem</code> call this one helper, so the list and detail views can never disagree. summarizeRunListItem is fronted by an in-process <b>mtime-keyed summary cache</b> keyed on spans.jsonl's mtimeMs — not the run dir's, since a directory mtime doesn't change on append, so keying on it would leave an in-flight run's list summary stale as spans stream in. <code>artifacts.ts</code>'s readRunArtifacts readdir+classifies each entry into the extended <code>ArtifactKind</code> (a media/ subdir rolls up into one Media entry; a missing dir degrades to []). A real persisted run index is Phase 6 — today every cache miss still re-reads disk. <b>Phase 8</b>'s D9 <code>chat.run</code> rename had a CLI blast-radius: <code>run-trace.ts</code>'s <code>summarizeRun</code> and <code>runs.ts</code>'s <code>--follow</code> stopper both hardcoded a literal <code>=== 'agent.run'</code> check that silently never matched a <code>chat.run</code> root (0-duration / perpetual-Running in the CLI list). Both now check the shared <code>RUN_ROOT_NAMES</code> set — which over-corrected by also firing on three ephemeral precursor roots (<code>mcp.mount</code>/<code>memory.recall</code>/<code>memory.ingest</code>) a run opens and flushes before its own body starts; the fix is a second, narrower <code>TERMINAL_RUN_ROOTS</code> (RUN_ROOT_NAMES minus those three) checked FIRST, correctly preferring a run's own top-level root over an early precursor's. <b>Slice 24</b> made runs <b>resumable</b>: <code>src/workflow/checkpoint.ts</code>'s <code>createCheckpointStore(runDir)</code> backs a single <code>runs/&lt;id&gt;/checkpoint.json</code> (<code>{completed, nodeResults}</code>) with an <b>atomic temp-write+rename</b> (a crash mid-write never leaves a half-written checkpoint), so the DAG loop seeds done-nodes + re-applies branch dead-arms on resume and <b>skips completed nodes with no re-execution</b> (only sequential crews are step-resumable; hierarchical/orchestrator crews re-run from scratch — no static task graph); and the reserved <b>provenance</b> field is now populated — <code>dispatch.ts</code> stamps a run-dir <code>origin</code> marker (one seam, all kinds) that <code>mapRunToDto</code> reads as <code>RunOrigin.Daemon</code> (vs the <code>Manual</code> fallback).",
+      mech:"mapRunToDto → flatten → SpanDTO + RunDtoSchema.parse · runRootSummary (agent|crew|workflow-agnostic) · summarizeRunListItem + mtime(spans.jsonl) cache · readRunArtifacts · RUN_ROOT_NAMES / TERMINAL_RUN_ROOTS (terminal-root-first, precursor-safe) · Slice 24: checkpoint.json (atomic temp-write+rename) resume skips completed nodes · origin=RunOrigin.Daemon provenance",
+      files:["run-store.ts","run-trace.ts","run-id.ts","run-dto.ts","artifacts.ts"]},
+    {id:"session",nm:"Session store",pt:"src/session",kind:"spine",x:635,y:555,
+      what:"Cross-invocation persistence for web chat (Slice 30b Phase 6) — the store that closes chat's \"stateless per request\" gap. <code>createSessionStore</code> (<code>store.ts</code>) mirrors <code>createMemoryStore</code>'s <b>factory-returns-closure</b> shape and reuses the same <b>WAL + busy_timeout + foreign_keys pragma trio</b> and the <code>db/migrate.ts</code> user_version runner as the memory sqlite store. <code>migrations.ts</code>'s <code>SESSION_MIGRATIONS</code> (one migration; the DDL lives here) creates <code>sessions</code> (id PK · title · owner default 'local' · created/updated_at · nullable last_message_at/run_id) and <code>messages</code> (id PK · session_id FK→sessions(id) · nullable parent_message_id · role · parts JSON · created_at · nullable degraded) + <code>idx_messages_session(session_id, created_at)</code>. Every write is <b><code>INSERT OR IGNORE</code></b> on the row/message id, so a retried request for the same sessionId/message is a safe no-op — never a constraint-violation throw. <code>listSessions</code> is <b>keyset-cursor</b> paginated; <code>parent_message_id</code> is written-but-unused this phase (reserved for Slice 41's edit-in-place threading), <code>degraded</code> flags an assistant turn that saw a <code>StatusEventType.Degrade</code> event. Exposes upsertSession/getSession/renameSession/deleteSession/listSessions/appendMessage/getMessages.",
+      mech:"createSessionStore (bun:sqlite · WAL + busy_timeout + foreign_keys · db/migrate.ts runner) · sessions + messages tables · INSERT OR IGNORE idempotent upsert/append · keyset-cursor listSessions",
+      files:["migrations.ts","store.ts"]},
+    {id:"rt",nm:"Runtime",pt:"src/runtime",kind:"spine",x:250,y:580,
+      what:"Ports & adapters: the manager drives any backend through one Runtime interface, keyed by an inference `RuntimeKind` (Slice 18 split this from the download-side `ProviderKind`). Ollama (llama.cpp) is Tier-1 with its own control implementation. MLX, LM Studio and llama.cpp now share one **managed OpenAI-compatible base** (`createManagedRuntime`) that owns the server lifecycle: a **process supervisor** spawns the child on a fresh, free port per relaunch, health-polls it, and kills-on-timeout, behind a single-flight serialized warm and a per-runtime circuit breaker. Per-runtime **strategies** give load-time dynamic context as a capability — llama.cpp `relaunch`es (`llama-server -c`), LM Studio `reload`s via `@lmstudio/sdk`, MLX is `fixed` (`mlx_lm.server` has no context flag). LM Studio and llama.cpp are now full inference runtimes, not just download-only. The port also exposes embed() for the memory layer (Ollama-only). <b>Slice 23</b> moved the whole port onto <code>ai@7</code>, which bumped the provider contract to <b>spec-v4</b> (<code>@ai-sdk/provider@4</code>): <code>ollama.ts</code> now builds against <code>ollama-ai-provider-v2@4</code> (itself spec-v4-native — the reason the upgrade was unblocked), <code>managed-openai-compatible.ts</code> against <code>@ai-sdk/openai-compatible@3</code>, and the MCP client (<code>mcp/client.ts</code>) against <code>@ai-sdk/mcp@2</code>. The <code>num_ctx</code> provider-options seam (<code>{ollama:{options:{num_ctx}}}</code>) is unchanged and live-verified under v4 against real Ollama — context loads at the selector's computed value, not the 4096 default.",
+      mech:"createManagedRuntime(strategy) · supervise(spawn/health/kill) · warm(model,ctx) load-time · relaunch|reload|fixed · Slice 23: ai@7/provider-spec v4 (ollama-ai-provider-v2@4, @ai-sdk/openai-compatible@3, @ai-sdk/mcp@2); num_ctx shape unchanged, live-verified",
+      files:["registry.ts","ollama.ts","mlx-server.ts","runtime.ts","managed-openai-compatible.ts","process-supervisor.ts","strategies/llamacpp.ts","strategies/mlx.ts","strategies/lmstudio.ts"]},
+    {id:"disc",nm:"Discovery",pt:"src/discovery",kind:"support",x:530,y:600,
+      what:"Keeps the model list fresh with no code change: queries Hugging Face for tool-capable models that fit this machine, caches a catalog, and pre-pulls the top pick. Only discovery touches the network — the chat path stays offline.",
+      mech:"buildRegistry = bootstrap ∪ installed ∪ catalog",
+      files:["discover.ts","build-registry.ts","huggingface-gguf.ts","huggingface-mlx.ts","quant.ts"]},
+    {id:"disk",nm:"On-disk",pt:"git-ignored",kind:"support",x:660,y:730,
+      what:"What the system reads back: per-run traces (spans.jsonl), the local model store + discovered catalog, and the memory datastore (LanceDB tables + bun:sqlite). All git-ignored.",
+      files:["runs/<id>/spans.jsonl","answer/gap/resource.txt","model-images/","catalog.json","memory/ (LanceDB + sqlite)"]},
+    {id:"prov",nm:"Provisioning",pt:"src/provisioning",kind:"spine",x:115,y:455,
+      what:"First-boot / on-demand model provisioning: it gets weights onto disk before the Model Manager serves them — runProvision never calls ensureReady itself. It detects the host, discovers models that FIT via a dynamic per-runtime catalog query with a committed-snapshot fallback, gets per-model consent (recommended pre-selected, nothing pulled without it), and downloads through a runtime-agnostic DownloadProvider with a unified progress protocol + a live bar. Supervisor guards: disk preflight, stall-watchdog, jittered retry, in-band-{error} surfacing, monotonic-clamped progress. hf-fetch now genuinely persists weights to disk — atomic `.part`→rename, HF-LFS-oid verify-when-present (else compute-and-record), single-file GGUF + multi-file MLX snapshot enumeration, path-traversal-guarded, with retry + stall-watchdog parity. Downloads run bounded-parallel (2 at a time on a TTY) with a per-model MultiProgressBar. LM Studio's download adapter is wired into providerFor under its own `ProviderKind.LmStudio` and is now **live-verified (Slice 26)** — the live pass fixed its download status poll-URL. Ollama AND MLX are live-verified end-to-end (real HF-snapshot download + inference); LM Studio and llama.cpp are now full **inference** runtimes too, not just download-only (see the Runtime node).",
+      mech:"detect → discover(+snapshot fallback) → fit → consent → bounded-parallel download (atomic .part→rename, oid-verify) → verify · bun run provision",
+      files:["provisioner.ts","registry.ts","types.ts","dest-dir.ts","fit.ts","supervisor.ts","providers/ollama.ts","providers/hf-fetch.ts","providers/lmstudio.ts","catalog/*","ui/*","detect-missing.ts"]},
+    {id:"builder",nm:"Agent-builder",pt:"src/agent-builder · agents/index.ts",kind:"spine",x:185,y:120,
+      what:"Self-extension (Phase D): turns a capability gap into a new specialist. On a gap (or bun run agent-builder \"<need>\") an LLM drafts an agent definition (name + description + system prompt), picks a MINIMAL scoped MCP server from the curated pack (palette-only, least-privilege), validates it structurally (unique snake_case name, non-empty, pack-only + scoped tools), and — only on CONSENT (review-before-activate) — writes agents/<name>.ts + a new agents/index.ts registry entry + a scoped mcp.json entry, live on the next run. No same-run activation. It now also retries once on an invalid draft, and can propose brand-new TOOL CODE — written consent-gated as an inert `<name>.proposal.ts` for review (never imported or run in the same session). Structured generation uses generateText + JSON-extract + zod (local models don't emit strict JSON). agents/index.ts is a factory registry (like workflows/ · crews/) that super/chat/flow build their agent set from. Agent-only this slice; the crew/workflow builder (Slice 19) composes these one level up.",
+      mech:"gap | need → generate → suggest(pack) → validate → consent → write · bun run agent-builder \"<need>\"",
+      files:["types.ts","generate.ts","suggest-tools.ts","validate.ts","write.ts","generate-tool.ts","validate-tool.ts","write-tool.ts","builder.ts","deps.ts","prompt.ts","cli/agent-builder.ts","agents/index.ts"]},
+    {id:"cbuilder",nm:"Crew-builder",pt:"src/crew-builder · crews · workflows",kind:"spine",x:360,y:120,
+      what:"Self-extension, one level up (Slice 19): composes a multi-step need into a whole CREW or WORKFLOW, not just one agent. A staged declarative-IR pipeline — classify (crew vs workflow) → think-first analyze (decompose the need) → plan-nodes → plan-edges → two-tier validate (structural, then semantic) → consent → write. The model's only closures are a small safe-helper vocabulary (fromInput/fromStep/fromTemplate/whenEquals/whenContains/whenTruthy/mapOver) — never arbitrary code — so generated IR is deterministically transpilable. A shared assertAcyclic gates both crew and workflow graphs. Missing member agents are auto-built via the agent-builder before the crew/workflow is written; a CrewMember.agentRef reuses an already-registered agent instead of drafting a new one. Deterministic transpile turns the validated IR into TS (defineCrew/defineWorkflow) and an atomic write lands it live for the next run. Live-verified end-to-end: a generated crew EXECUTED; workflow generation was verified on a larger ~26b model. crew.build telemetry captures classify · validate · consent · write.",
+      mech:'need → classify → analyze → plan → validate(2-tier) → consent → transpile → write · bun run crew-builder "<need>"',
+      files:["ir.ts","safe-helpers.ts","classify.ts","analyze.ts","plan-nodes.ts","plan-edges.ts","validate.ts","transpile.ts","resolve-members.ts","write.ts","builder.ts","deps.ts","cli/crew-builder.ts"]},
+    {id:"vbuild",nm:"Verified build",pt:"src/verified-build",kind:"spine",x:270,y:220,
+      what:"Verified \"works out of the box\" (Slice 20): the agent-builder and crew-builder no longer just write — they STAGE → verify → commit, so nothing broken ever lands in a registry. BEFORE generating, a capability-signature cosine reuse-check (≥0.85 reuse · 0.75–0.85 offer, both confirm-gated) can skip building a near-duplicate. AFTER generate + consent the artifact is rendered to a staged (unregistered) file and gated: structural check → a bounded real DRY-RUN against a benign read-only task (wall-clock-bounded by withWallClock; the agent path also threads AbortSignal.timeout so a hung model FAILS the gate instead of hanging — crew/workflow are wall-clock-raced only; ≤2 repair attempts feed the real runtime error back into regeneration) → a behavioral GOLDEN-EVAL (3–7 auto-decomposed cases, ≥3× unanimous, judged by the largest-local model — PREFERRING a family different from the generator, temp 0; grounded cases via the verification layer's checkClaim). Only on PASS does it register into the index + write <name>.golden.json + a .generated.json manifest entry (need + capability signature + verified level + usage). Fail ⇒ the staged file is discarded; --force commits Unverified. No judge clears the bar (or it won't load) ⇒ degrade to verified:runs, never crash. bun run archive prunes idle near-duplicates (usage aggregated from spans, live-reference-guarded, reversible). Live-verified on Ollama: generate → dry-run → commit verified:runs (judge-degrade), and a re-run of the same need reused at 89% similarity, generating nothing.",
+      mech:"reuse-check → stage → structural → dry-run(+≤2 repair) → golden-eval → commit@level · degrade-to-runs · bun run archive",
+      files:["gate.ts","reuse.ts","signature.ts","dry-run.ts","repair.ts","judge.ts","golden.ts","eval.ts","manifest.ts","usage.ts","archive.ts","config.ts","types.ts","cli/archive.ts","cli/with-run.ts"]},
+    {id:"rel",nm:"Reliability",pt:"src/reliability",kind:"spine",x:150,y:345,
+      what:"Graceful degradation + retries (Slice 21): one canonical layer so a dead dependency drops that agent/step and TELLS THE USER instead of sinking the run. classify() sorts every failure into three lanes — Transient (back off + retry), RouteWorthy (degrade/fallback), Terminal (fail fast; unknown→Terminal, fail-safe). withRetry is full-jitter backoff + Retry-After for the cross-boundary ops WE own (MCP calls, downloads, probes) — NEVER the LLM turn (the AI SDK already retries transport; the agent turn only gets a wall-clock run_timeout, no double-retry). A hand-rolled circuit breaker (Closed/Open/HalfOpen) with a shared registry stops one dead MCP server from stalling a whole crew; degradeChain orders model candidates by failure domain so a dead daemon isn't 'degraded' to another model behind it. Every degrade/drop/retry is recorded to a per-run DegradationLedger → printed to the user, persisted to runs/<id>/degradation.jsonl, and emitted as reliability.degrade spans. Provisioning + verified-build retry/timeout primitives were consolidated onto this. In-run only (resume=Slice 24; downstream degradation-taint deferred to a later slice). Live-verified on real Ollama (4 scenarios). Slice 30a made the wall-clock timeout actually CANCEL work instead of merely racing it: withWallClock now aborts the underlying operation on timeout (and on an external AbortSignal), and that same signal is threaded all the way through runChat → orchestrator → agent → generateText — the cancellation seam the web UI's Stop button now hangs off (wired live in Slice 30b Phase 2: the browser's fetch abort → req.signal → AbortSignal → withWallClock actually cancels the run).",
+      mech:"classify → withRetry(Transient) | degradeChain | breaker · wall-clock run_timeout ABORTS via AbortSignal (runChat→orchestrator→agent→generateText) · ledger → user + runs/<id>/degradation.jsonl",
+      files:["classify.ts","retry.ts","timeout.ts","breaker.ts","degrade.ts","ledger.ts","errors.ts","config.ts","download-retry.ts"]},
+    {id:"media",nm:"Multimodal",pt:"src/media",kind:"spine",x:700,y:150,
+      what:"Full multimodal I/O (Slice 27) with <b>hardware-adaptive generation</b> (Slice 28): vision/audio/video INPUT (analysis) + text→image/speech/video GENERATION, plus a cross-cutting uncensored content-policy axis — all on one principle: <b>media-by-reference, never media-by-value</b>. Raw bytes never cross the router or the z.string() delegation boundary; a run-scoped MediaStore mints a short opaque handle (img_1/aud_1/vid_1) for every piece of media, only a [img:h]/[audio:h]/[video:h] MARKER travels, and the specialist that needs the bytes resolves the handle to an AI-SDK v6 FilePart (base64) at the last moment. Input: --image/--audio/--video flags + drag-in path auto-detect + macOS --paste; vision via a qwen2.5vl specialist (normal hardware-fit selection), STT via mlx-whisper, video→frames via ffmpeg (audio is transcribed once at ingest and spliced in as text). Generation: a MediaGenerator adapter (ExecMode OneShot|Server, async JobHandle, cancel-race-safe, wall-clock-bounded) with mflux image / Kokoro speech / LTX video strategies behind generate_image/speech/video tools on a media_creator specialist. <b>Slice 28 makes the gen MODEL machine-appropriate:</b> selectGenModel (generate/select.ts) is a selector PARALLEL to the main model picker — env-pin authoritative (AGENT_{IMAGE,VOICE,VIDEO}_MODEL) → uncensored filter → <b>largest-that-fits by footprint</b> vs the live RAM budget → installed/consent walk (isGenModelInstalled, HF_HOME-aware; consent-gate a pull, decline→next) → undefined on no-fit (graceful, never crash). Candidate ladders live in generate/catalog.ts (GenModelCandidate/GenEngine — deliberately NOT a ModelDeclaration: a gen engine spawns a CLI that writes a file, it isn't warmed as a LanguageModel). The chosen repo is injected as opts.model and its engine mapped to a strategy; createGenerateTools now runs via <b>runGenJob</b>, so the one-shot↔server degrade + the ComfyUI/Wan server lane are reachable, and every gen tool returns a graceful message on ANY failure. Uncensored is DEFAULT-ON via two orthogonal mechanisms — model eligibility (abliterated/dolphin/heretic/josiefied/pony/chroma class) + safety-checker disable (Diffusers/ComfyUI lane only; mflux/mlx-audio/mlx-video are filter-free by construction) — with voice-clone consent kept separate and a LEGAL_NOTE that is copy, not a gate. bun run setup:media installs ffmpeg + a media venv + an isolated video venv for out-of-box operation. Live-verified on this Mac (9 pass / 1 skip): image auto-fit → ungated FLUX-schnell-4bit rendered a real PNG, speech auto-fit → Kokoro-82M a real WAV, uncensored (JOSIEFIED-Qwen3); video degrades gracefully — no video model cached here, and a fitting ~18.5 GB LTX quant would render if pulled — exactly the hardware-adaptive scales-on-a-bigger-box case, not a code gap.",
+      mech:"ingest → [img/aud/vid:h] markers → resolve → v6 FilePart · selectGenModel largest-that-fits → runGenJob OneShot|Server · uncensored default-on · bun run setup:media",
+      files:["types.ts","store.ts","resolve.ts","ingest.ts","clipboard.ts","cmd-resolve.ts","audio/transcribe.ts","video/frames.ts","spawn.ts","policy.ts","consent.ts","generate/adapter.ts","generate/select.ts","generate/catalog.ts","generate/tools.ts","generate/image-mflux.ts","generate/audio-mlx.ts","generate/video-mlx.ts","generate/safety.ts","generate/comfy-lane.ts","agents/vision.ts","models/qwen-vision.ts"]},
+    {id:"voice",nm:"Voice (STT)",pt:"src/voice",kind:"spine",x:530,y:190,
+      what:"CLI voice <b>input</b> only (Slice 29) — speech-to-text feeding the chat prompt, a narrow re-scope after the original voice-in/out streaming pipeline hit real terminal limits (no acoustic echo cancellation, TTS reading markdown aloud) and was RESET (that hand-rolled pipeline is archived, unmerged, on branch slice-29-voice-streaming-cli). chat.ts runs ingestVoice before media ingest: --voice-in &lt;path&gt; transcribes a file via captureFromFile; --voice is an interactive tap-to-toggle mic capture (captureFromMic) that ffmpeg's silencedetect filter auto-stops on the first pause after speech was heard (not a real-time VAD model), or space/enter/ctrl-c stops manually, hard-capped at 60s. Both paths hand frames to a Transcriber (sherpa-onnx-node, moonshine-tiny) and splice the non-empty transcript(s) onto the prompt — exactly like --audio's text-splice. Transcription sits behind its own execution seam: in-process (the addon loaded directly) is the default, AGENT_VOICE_EXEC=subprocess shells out to stt-worker.mjs — the ONLY path whose wall-clock timeout is actually enforceable, since the in-process decode() blocks the event loop and can't be interrupted. Degrade-never-crash: each source's capture+transcribe runs in its own try/catch → a warning + a ledger entry, that source is skipped; a deps-construction failure (addon/model not installed) falls back to the original, non-voice prompt with a 'run bun run setup:voice' hint instead of exiting. Voice-out, barge-in, streaming and true hold-to-talk are explicitly out of scope — deferred to Slice 30's browser UI (getUserMedia AEC + keydown/keyup give both nearly for free); sherpa-onnx was picked specifically because it ships a browser-WASM build alongside its Node addon, so the same capture⟷transcribe split reuses there unchanged.",
+      mech:"captureFromFile|captureFromMic → Transcriber(inprocess|subprocess) → splice onto prompt · --voice · --voice-in &lt;path&gt; · bun run setup:voice",
+      files:["types.ts","model.ts","capture.ts","transcribe.ts","stt-worker.mjs","ingest.ts","cli-io.ts","scripts/setup-voice.ts"]},
+    {id:"proc",nm:"Process / lifecycle",pt:"src/process",kind:"support",x:280,y:730,
+      what:"Keeps the long-lived host safe on exit (Slice 30a). Every long-lived child spawn site — a managed runtime server, a media/ffmpeg subprocess, a voice mic capture — registers with one central child-process registry instead of relying on each call site to clean up after itself. A SIGINT/SIGTERM handler (lifecycle.ts) runs every registered onShutdown callback and then drains the registry (killAllChildren) before the process actually exits, so Ctrl-C never orphans a server or leaves a capture running in the background.",
+      mech:"registerChild(child) → registry · SIGINT/SIGTERM → onShutdown(cb)* → killAllChildren()",
+      files:["child-registry.ts","lifecycle.ts"]},
+    {id:"ops",nm:"Ops surface",pt:"src/log · src/config · src/usage · src/errors · src/cli",kind:"support",x:950,y:250,
+      what:"Operate and observe the framework itself, not just what it runs (Slice 30a). A structured logger stamps every line with the active run-id; one AGENT_* config schema replaces scattered ad-hoc env reads (bun run config prints the resolved values); bun run status/start/usage surface host info, version and aggregated run/cost data from the run store; and a top-level error boundary catches what nothing else does instead of an ugly stack trace to the terminal. A first CI pipeline (typecheck · lint · test) and an app version (0.2.0) give the project a real release surface for the first time.",
+      mech:"logger(runId) · AGENT_* schema · bun run status|start|config|usage · top-level error boundary · CI",
+      files:["log/logger.ts","config/schema.ts","usage/aggregate.ts","errors/boundary.ts","cli/status.ts","cli/start.ts","cli/config.ts","cli/usage.ts","version.ts",".github/workflows/ci.yml"]},
+    {id:"contracts",nm:"Contracts",pt:"src/contracts",kind:"support",x:250,y:660,
+      what:"The web wire protocol (Slice 30b Phase 1): the single source of truth for the local UI's over-the-wire shapes — Zod schemas plus their inferred TypeScript types. It is <b>isomorphic</b> — imported by both the server and the browser — and depends on <b>nothing but zod</b> (a test forbids <code>node:*</code>, the engine and AI-SDK types, so it runs unchanged client-side and validates server-side). enums.ts holds the finite named sets (RunOrigin/RunLifecycle/SpanStatus/ArtifactKind/DegradeKind/ChatRole/StatusEventType…); dto.ts the read-model DTOs (RunDTO/SpanDTO/DegradeDTO/ChatMessageDTO) with forward-compat fields already present-and-required (values only start arriving in later slices); events.ts the transient-SSE StatusEvent discriminated union (data-run-start … data-confirm … data-run-end — OUR types, never re-exported AI-SDK parts); requests.ts the inbound bodies the server validates before any engine call (ChatRequest/RespondRequest, + uploadIds/feedback in Phase 2). The DegradeKind wire enum mirrors reliability/ledger.ts <b>by value</b>, test-guarded, without importing it. <b>Slice 30b Phase 8</b> adds <code>telemetry.ts</code>'s <code>TelemetryEventSchema</code> — a <code>z.discriminatedUnion('kind', …)</code> with one variant today, <code>kind: 'voice.transcribe.web'</code>, deliberately equal to the span name it produces 1:1 so a later kind adds without a schema break; <code>VOICE_MODEL_TIERS</code> is a parity-tested wire mirror of web's <code>ModelTier</code> enum, not a shared import — contracts stays isomorphic.",
+      mech:"zod-only · enums · DTOs · StatusEvent 9-union · ChatRequest/RespondRequest · isomorphic (server ⨝ browser) · TelemetryEventSchema (voice.transcribe.web variant)",
+      files:["enums.ts","dto.ts","events.ts","requests.ts","index.ts","telemetry.ts"]},
+    {id:"server",nm:"Web server / BFF",pt:"src/server",kind:"spine",x:460,y:690,
+      what:"A thin, transport-agnostic <code>Bun.serve</code> back-end-for-frontend (Slice 30b) that owns <b>no business logic</b> — it adapts the engine to HTTP behind a localhost security <b>perimeter</b> (D17). Every /api request runs <b>perimeter → token → route</b> BEFORE any engine call: a per-session bearer token (constant-time verified), a Host-header allowlist + cross-origin Origin rejection (DNS-rebinding/CSRF defense), and realpath media-path confinement (localhost ≠ trusted). Static assets serve under <b>COOP/COEP</b> for the voice-phase sherpa WASM SharedArrayBuffer. <b>Phase 2 added the streaming heart:</b> <code>POST /api/chat</code> runs the same <code>runChatSession</code> the CLI does over a <b>lazily-built engine</b> (no model/MCP work at boot — only on the first real turn) and returns a v6 UI-message-stream SSE response — the orchestrator's answer merged through as <b>text-delta</b> tokens while the <code>events</code> sink writes each StatusEvent as a transient <code>data-*</code> part. The request's AbortSignal threads into <code>withWallClock</code>, so the browser Stop button actually cancels the run. <code>/api/runs/:id/respond</code> is the human-in-the-loop consent channel (randomBytes promptId → data-confirm → resolve; built-but-unconsumed seam this phase); <code>/api/feedback</code> is a one-shot chat.feedback span; <code>/api/upload</code> is a confined image upload (server mints its own name, mediaType allowlist, 20 MB cap, confineToDir on both write and read-back). Every request is one <code>server.request</code> span; a chat turn is a <code>ui.stream</code> span. <b>Phase 3 added the Runs read-API</b> — three GET routes under <code>src/server/runs/</code>, registered in <code>handleApi</code> in an order that matters (the <code>/stream</code> regex matches <b>before</b> the bare <code>:id</code>, so <code>/api/runs/:id/stream</code> opens an event-stream instead of being swallowed by detail): <code>GET /api/runs</code> (<code>handleRunList</code> — <code>RunListQuerySchema.parse</code> coerces + validates the query, an over-limit/malformed param <b>rejected with a 400</b> not silently clamped; readdirs runsRoot, maps each id through the cache-fronted <code>summarizeRunListItem</code>, substring-searches + outcome/degraded-facets, sorts newest-first, paginates via an opaque base64url cursor; a missing/unreadable root degrades to an empty page), <code>GET /api/runs/:id</code> (<code>handleRunDetail</code> — <code>confineToDir</code> guards the id against ../-/symlink/absolute traversal <b>before</b> any lookup; a MediaPathError maps to the exact same 404 a missing run returns, so escape and absence are indistinguishable — no fs-structure leak — then <code>mapRunToDto</code> returns the full RunDTO), and <code>GET /api/runs/:id/stream</code> (<code>handleRunStream</code> — same guard, then a text/event-stream that polls mapRunToDto every ~250 ms emitting each new SpanDTO as an SSE frame until <code>lifecycle !== Running</code>; <code>Last-Event-ID</code> resume re-seeds the emitted-set; triply bounded by maxWaitMs + the caller's AbortSignal + an internal controller a client-disconnect trips; wrapped in <code>withRunStreamSpan</code>). <code>ServerDeps</code> gained <code>runsRoot</code> (from main.ts); list/detail ride the per-request server.request span, stream adds runs.stream. <b>Phase 6 added turn-boundary chat persistence + the Sessions REST surface:</b> <code>chat/handler.ts</code>'s <code>handleChat</code> now calls <code>upsertSession</code> + <code>appendMessage</code> at <b>both turn boundaries</b> — the user message BEFORE any engine work, the assistant message only AFTER <code>runChatTurn</code> resolves (carrying its degraded flag + runId) — and fires a <b>fire-and-forget <code>rememberOnce</code></b> auto-ingest that the SSE response never waits on; <code>server/sessions/{list,detail,rename,delete,export}.ts</code> back <code>GET/PATCH/DELETE /api/sessions(/:id)</code> + <code>GET /api/sessions/:id/export</code> (→ <code>text/markdown</code> via <code>renderSessionMarkdown</code>), a plain REST read/mutate/export surface over the SessionStore — no SSE, no run. <b>Phase 8 adds <code>POST /api/telemetry</code></b> (<code>telemetry/handler.ts</code>'s <code>handleTelemetry</code>) — the first route whose auth check lives in the HANDLER, not the perimeter's header-bearer gate: <code>navigator.sendBeacon</code> can't set request headers, so the token rides the <code>sendBeacon</code> JSON BODY (<code>{token, event}</code>) rather than a <code>?k=</code> query param (which would leak via browser history / proxy access-logs once served beyond localhost). The handler verifies the body token TIMING-SAFE FIRST via <code>TokenGuard.verifyToken</code> (the same constant-time comparator every other route's header check uses) — 401 before the event is even parsed — then validates <code>event</code> against <code>TelemetryEventSchema</code> (400 on failure), calls <code>recordVoiceTranscribeWeb</code>, and <b>always acks 204</b>: a transient span-write failure is caught and swallowed, never surfaced as a 500, since the beacon never reads the response. The Host/Origin perimeter (<code>enforcePerimeter</code>) still fronts this route exactly as before — only the bearer/token check moved into the handler. <b>Slice 24</b> detached execution from the request: the chat/crew/workflow/pull/build handlers no longer inline-await or <code>void</code>-detach — they <b>enqueue</b> a job via <code>src/server/jobs/enqueue.ts</code> (<code>POST /api/jobs</code> → <code>202 {jobId, runId}</code>, the <code>pull</code> provider resolved <b>server-side</b> never client-trusted, the run dir <b>is</b> <code>job.runId</code> so <code>/api/runs/:id/stream</code> resolves immediately) that a daemon-owned worker pool runs independently of any connection; <code>GET /api/jobs</code>/<code>:id</code>/<code>:id/cancel</code> complete the control plane, and the SSE reconnect re-tails a pool-owned run (a §7.1 test caught reseed dropping a nested run's terminal root frame — fixed to reseed by <b>wire/end-time order</b>). <code>main.ts</code> gains <b>injected-pool mode</b> (<code>StartOptions.queue?</code>) so the daemon's single pool is reused rather than a second one on the same DB. The process-ephemeral token is replaced by a durable <b>root→per-device session token</b> (<code>security/root-token.ts</code>/<code>session-token.ts</code>: HMAC-SHA256, root minted once + persisted <code>0600</code> so it <b>survives restart</b>, stateless session verify — signature-before-parse, constant-time, expiry — against a persisted revocation set; a Fable audit rated it sound). The <b>§7.4 threat model</b> (real-boot test) binds <b>loopback by default</b> (<code>AGENT_WEB_BIND=127.0.0.1</code> — localhost is not a trust boundary), adds a Host allowlist for the tunnel so a wrong <code>Host</code> → <code>403</code> <b>before the token is even checked</b> and a tunnel request without a valid token → <code>401</code>, plus a body cap (<code>413</code>), a pre-parse telemetry-size guard, the run-dir rate limit (<code>429</code>), an explicit MCP <code>redirect:'error'</code> <b>SSRF</b> guard, and a path-confined <b>resume runId</b> (schema regex + <code>confineToDir</code>). Durable consent also survives restart (<code>consent/durable-registry.ts</code> writes a pending approval <code>0600</code> before emitting it).",
+      mech:"perimeter(token+Host/Origin+media-confine) → route · POST /api/chat → runChatSession → SSE(text-delta + data-*) · turn-boundary upsertSession/appendMessage + fire-and-forget rememberOnce · GET/PATCH/DELETE /api/sessions(/:id) + export → Markdown · GET /api/runs · :id · :id/stream · req.signal → AbortSignal · POST /api/telemetry: body-token(verifyToken) → TelemetryEventSchema → recordVoiceTranscribeWeb → always 204 · Slice 24: POST /api/jobs → 202 {jobId,runId} (enqueue, detached) + GET/cancel · injected-pool mode (StartOptions.queue?) · durable root→session token (survives restart) · §7.4 loopback-default + Host/Origin allowlist + body/rate caps + SSRF + confined resume runId",
+      files:["main.ts","app.ts","chat/handler.ts","chat/task.ts","chat/run-turn.ts","runs/list.ts","runs/detail.ts","runs/stream.ts","sessions/list.ts","sessions/detail.ts","sessions/rename.ts","sessions/delete.ts","sessions/export.ts","consent/registry.ts","feedback.ts","upload.ts","security/*","isolation-headers.ts","telemetry/handler.ts"]},
+    {id:"web",nm:"Web frontend",pt:"web/",kind:"spine",x:460,y:780,
+      what:"The browser UI (Slice 30b) — React 19 + Vite + Tailwind v4, its own Bun workspace member, feature-sliced with an isolation rule (a feature imports only <code>shared/</code> and <code>@contracts</code>, never another feature or <code>src/</code>). Phase 1b shipped the scaffold: Blueprint-Mono light/dark design tokens + ThemeProvider, Base-UI primitives, a per-area RegionErrorBoundary, the token'd contract client (reads the injected <code>window.__AGENT_TOKEN__</code>, zod-parses every response), a bidirectional/resumable transport-port interface, a TanStack-Router app shell over 7 nav areas + run-detail, and a ⌘K palette skeleton. <b>Phase 2 made Chat live:</b> <code>features/chat</code> drives <code>useChat</code> (@ai-sdk/react + DefaultChatTransport → /api/chat) and renders streamed markdown through <code>streamdown</code> (hand-authored AI-Elements in shared/ai-elements); <code>features/agents</code> is the live agent/model <b>rail</b> — <code>useStatusEvents</code> folds the transient data-* parts (via useChat's onData) into a RailView phase progression (Starting → ModelSelect → Loading → Running → Done) with runtime-fallback degrade OR'd in. Conversation basics all ship: Stop (aborts the fetch), copy, per-message regenerate, edit+resend, 👍/👎 feedback, an inline data-confirm consent prompt, and drag-drop/paste-image upload → confined /api/upload → uploadId rides the next turn. Chat is stateless per request (SessionStore = Phase 6); ⌘K polish + voice come in Phases 7/8. <b>Phase 3 shipped the Runs area</b> (<code>features/runs/</code>): <code>RunsArea</code> is the rich list — <code>apiFetch('/runs?&lt;qs&gt;', {schema})</code> in a cancelled-guarded effect, a search box + outcome/degraded facet selects, forward-only cursor pagination, each row Link-ing to <code>/runs/$runId</code> with id/outcome/lifecycle/models/token-rollup + a degraded badge; an empty page renders \"No runs yet\", a failed fetch a local role=alert. <code>run-detail.tsx</code>'s <code>RunDetail</code> is the phase's integration linchpin — a route entry keyed <code>key={runId}</code> forces a full remount on run→run navigation (so useRunTrace state can't merge run B's spans into run A's) and mounts <code>RunDetailView</code>, which fetches the RunDTO snapshot (GET /api/runs/:id), seeds <code>useRunTrace</code>, then opens the live-tail stream (<code>createSseTransport().stream(runId, cursor, SpanDtoSchema, signal)</code>) to ingest spans appended after the snapshot — the transport port's <b>first real consumer</b> and the first browser code to parse a SpanDTO off the wire; teardown uses <b>both</b> a cancelled flag <b>and</b> <code>AbortController.abort()</code> (a flag alone can't close a connection idle between spans). <code>use-run-trace.ts</code> is a pure <code>foldSpan</code> reducer (dedupe by spanId, keep offset-sorted, advance the resume cursor). <code>waterfall.tsx</code>'s <code>Waterfall</code> is an <b>@visx</b> Gantt: scaleLinear maps [0, maxEnd] onto a fixed width, one row per span, bar fill by precedence (error→danger, else degraded→signal, else accent), clicking a bar opens a span-detail panel. Per decision <b>D1</b> the waterfall is the <b>only</b> trace viz this phase — no @xyflow node-graph; a trace's natural shape is a timeline, not a DAG. <b>Phase 6 shipped the Sessions surface + long-run notifications:</b> <code>features/sessions/</code> is the conversation sidebar/list + a detail view that rehydrates a past chat, with rename · delete · export-to-Markdown over the new <code>/api/sessions</code> routes; <code>features/notifications/</code> is a <b>web-only</b> long-run watcher — <code>useRunNotifications</code> polls the <b>existing</b> <code>GET /api/runs</code> on an interval and diffs lifecycle transitions client-side (<code>notify-diff.ts</code>) into a toast (+ an opt-in OS notification behind a Settings toggle), adding zero server routes, schema or telemetry. <b>Phase 8</b> closes out WCAG 2.1 AA across the whole UI: a dedicated <code>--color-focus-ring</code> token backs one app-wide <code>:focus-visible</code> rule (keyboard/programmatic focus only, never a mouse click — replacing ad-hoc per-component focus styling) plus a <code>.sr-only</code> utility (<code>shared/design/tokens.css</code>); real <code>&lt;label htmlFor&gt;</code> coverage on the Composer textarea + Settings voice-tier <code>&lt;select&gt;</code>; live-bound <code>aria-pressed</code> on the theme/voice/OS-notify toggles + descriptive <code>aria-label</code>s on the three <code>&lt;aside&gt;</code> landmarks; a single shared <code>nextTabIndex</code> helper (<code>shared/ui/tab-list.ts</code>) gives the Library and Builders tab widgets one WAI-ARIA roving-tabindex implementation (ArrowLeft/Right wraps, Home/End jumps) instead of two that could drift; and <code>useReducedMotion</code> (<code>shared/a11y/</code>, a <code>matchMedia</code> hook) zeroes <code>@xyflow</code>'s imperative <code>fitView</code> pan/zoom duration for JS-driven motion the existing CSS <code>prefers-reduced-motion</code> rule can't reach. A <code>vitest-axe</code> regression net (<code>app/a11y-baseline.test.tsx</code>) asserts zero axe-core violations across six area baselines (Chat/Sessions/Runs/Library/Builders/Settings) plus a roving-tabindex keyboard test — and caught a real pre-existing gap (three unlabeled Runs-page filter selects, fixed in the same task).",
+      mech:"useChat(DefaultChatTransport) → streamdown tokens · useStatusEvents(onData) → live rail · features/runs: RunsArea list · RunDetail snapshot+live-tail · @visx Waterfall · features/sessions: sidebar/detail rename·delete·export · features/notifications: poll /api/runs → diff → toast · Phase 8: :focus-visible token + nextTabIndex roving-tabindex + useReducedMotion + vitest-axe baseline (6 areas, 0 violations)",
+      files:["main.tsx","app/app-shell.tsx","app/router.tsx","features/chat/index.tsx","features/agents/use-status-events.ts","features/runs/index.tsx","features/runs/run-detail.tsx","features/runs/use-run-trace.ts","features/runs/waterfall.tsx","features/sessions/sessions-area.tsx","features/sessions/session-detail.tsx","features/notifications/use-run-notifications.ts","features/notifications/notify-diff.ts","features/notifications/toast.tsx","shared/ai-elements/*","shared/transport/sse-adapter.ts","shared/contract/client.ts","shared/design/tokens.css","shared/ui/tab-list.ts","shared/a11y/use-reduced-motion.ts","app/a11y-baseline.test.tsx"]},
+    {id:"cwweb",nm:"Crews & Workflows (web)",pt:"web/src/features/crews · workflows · shared/dag",kind:"spine",x:850,y:770,
+      what:"Slice 30b <b>Phase 4</b> makes the Crews and Workflows nav areas real: browse both registries, launch a run from the browser, and <b>watch the step/task graph light up live</b> on run-detail. The pivotal insight: <b>watching is inherited free from Phase 3</b> — a crew/workflow run emits the same <code>crew.run</code>/<code>workflow.run</code> root span into the same <code>runs/&lt;id&gt;/spans.jsonl</code> the Runs browser already reads, so no new server stream code was needed. <code>CrewsArea</code>/<code>WorkflowsArea</code> list+search the projected DTOs; each detail page renders one reusable <b><code>@xyflow</code> <code>DagView</code></b> (<code>shared/dag/</code>) fed by <code>crewGraph</code> (sequential → task-dependency DAG; hierarchical → a manager→members delegation star, since a manager delegates at runtime with no static task graph) or <code>workflowGraph</code> (steps verbatim from the server-derived edges) — plus a <b>▶ Run</b> button that <code>POST</code>s the fire-and-watch launch and navigates to <code>/runs/$runId?graphKind=&amp;graphId=</code> (Amendment A) so the graph is visible from <code>t=0</code>, no run data needed. On run-detail, <code>stepStatusOverlay(spans)</code> lights a node <code>Done</code>/<code>Error</code> the instant its <code>workflow.step</code>-tagged span closes (a hierarchical crew emits none, so it degrades silently to the neutral look); <code>findRunGraphSource(spans)</code> is the cold-open fallback for a run opened from the Runs list rather than launched here. The Runs list itself gained a <code>kind</code> facet so a launched crew/workflow run is findable alongside chat/agent runs.",
+      mech:"GET /api/crews|workflows[/:id] → CrewsArea|WorkflowsArea · POST .../:id/run → {runId} (detached, watch immediately) · DagView(crewGraph|workflowGraph) + stepStatusOverlay(spans) · graphKind/graphId → t=0 · cold-open via findRunGraphSource",
+      files:["features/crews/index.tsx","features/crews/crew-detail.tsx","features/crews/crew-graph.ts","features/workflows/index.tsx","features/workflows/workflow-detail.tsx","shared/dag/types.ts","shared/dag/layout.ts","shared/dag/dag-view.tsx","shared/dag/workflow-graph.ts","features/runs/run-dag.ts","features/runs/run-detail.tsx"]},
+    {id:"libweb",nm:"Builders & Library (web)",pt:"web/src/features/builders · library · server/{builders,models,mcp,memory}",kind:"spine",x:945,y:560,
+      what:"Slice 30b <b>Phase 5</b> makes the last two stub nav areas real: <b>Builders</b> (browse the agent/crew/workflow builder registries, then run a guided, streamed build with mid-flow consent) and <b>Library</b> — a 3-tab shell for <b>Models</b> (installed + pullable inventory, pull with live progress), <b>MCP</b> (browse/status, add a server, test-mount a never-before-approved one with real consent + OAuth), and <b>Memory</b> (spaces + stats, upload→ingest, recall search). No new business logic anywhere — four new server BFF dirs are new callers onto the agent-builder, crew-builder, provisioning and memory engines. Two structural insights carry the whole phase: the <b>model-pull progress bridge</b> needs no new stream (each tick is its own short-lived span, so the <b>existing</b> <code>/api/runs/:id/stream</code> surfaces it live), and the <b>MCP test-mount consent gate</b> needs no new consent mechanism (the Phase-2 <code>ConsentRegistry</code>/<code>data-confirm</code> wire gets its first real caller, closing the \"a never-approved server has no way to get interactive consent from the browser\" gap).",
+      mech:"POST /api/builders/build (SSE, mid-flow consent) · GET /api/models + POST /api/models/pull (fire-and-watch, detached) · GET/POST /api/mcp[/add|/test-mount] (SSE) · GET /api/memory/spaces + POST .../recall|ingest · model.pull.progress child span → existing /api/runs/:id/stream",
+      files:["server/builders/build.ts","server/builders/list.ts","server/models/list.ts","server/models/pull.ts","server/mcp/list.ts","server/mcp/add.ts","server/mcp/test-mount.ts","server/memory/spaces.ts","server/memory/recall.ts","server/memory/ingest.ts","features/builders/index.tsx","features/builders/use-build-events.ts","features/library/index.tsx","features/library/models-tab.tsx","features/library/mcp-tab.tsx","features/library/memory-tab.tsx"]},
+    {id:"voiceweb",nm:"Voice (web)",pt:"web/src/features/voice — Slice 30b Ph7",kind:"spine",x:700,y:795,
+      what:"Browser voice <b>input</b> only — hands-free dictation into the Composer's own text state, completing the promise §23 explicitly deferred (getUserMedia gives real acoustic echo cancellation, keydown/keyup a real hold-to-talk gesture). <code>mic-button.tsx</code> mounts inside <code>composer.tsx</code>'s dropzone: hold-to-talk (pointerdown/keydown) buffers raw capture until release; tap-to-toggle runs a Silero-VAD-gated segmenter (<code>vad.ts</code>) that closes/reopens a segment per speech/silence cycle. <code>audio-capture.ts</code>'s <code>getUserMedia</code> + an <code>AudioWorkletProcessor</code> (<code>downsample-worklet.ts</code>) downsample the browser's native rate to 16kHz mono; a dedicated Web Worker (<code>stt.worker.ts</code>) runs transformers.js's own <code>AutoModel</code>/<code>AutoProcessor</code> pipeline for Moonshine ASR + Silero VAD — <b>one ONNX runtime, already a dependency</b>, not a second one. <b>D1 overrides the parent spec's D8</b>: sherpa-onnx ships no first-party browser package, so a working build would mean a from-source Emscripten build plus a <i>second</i> ONNX runtime beside transformers.js; the <code>VoiceFrames</code> contract + <code>voice.transcribe</code> span vocabulary carry over from §23 unchanged, only the engine differs. <code>onFinal</code> appends the transcript straight into the Composer's <code>value</code> state — <code>handleSubmit</code>/<code>sendMessage</code> stay byte-for-byte unchanged (D2): no TTS, no barge-in, voice never touches an in-flight assistant turn. <b>D10</b> ships on <b>Rung 1</b> — the existing COOP/COEP header already satisfies transformers.js's CORS fetch + same-origin WASM, confirmed empirically at live-verify; no isolation-header change was needed. A <code>live</code>-gated real-Chromium, fake-audio Vitest-browser-mode e2e (<code>voice-pipeline.browser.test.ts</code>) caught 3 real integration bugs the mocked happy-dom unit tests could not (Silero's custom-model load call, the Rolldown-build worklet chunk emit, and a WASM-only decoder dtype pin). <b>Phase 8</b> adds two additive changes and the pipeline's first outbound telemetry: <b>D6 progressive-decode interim reveal</b> — <code>stt.worker.ts</code>'s <code>transcribe()</code> now passes transformers.js a <code>TextStreamer</code> callback firing per decoded token, relayed through <code>stt-engine.ts</code>'s id-correlated <code>onInterim</code> map into <code>use-voice-input.ts</code>'s <code>interim</code> value — superseding the old static '…' placeholder with real, growing text decoded from an already-CLOSED segment's buffer (NOT real-time-during-speech); guards correlate on a per-<i>segment-token</i> (not per-segmenter) after an adversarial pass found the latter drops every 2nd+ segment of a multi-tap utterance. <b>D7 anti-alias low-pass filter</b> — <code>downsampler.ts</code> gains a one-pole ~7.5kHz-cutoff filter applied before the existing linear-interpolation resample, cutting aliasing energy above the 16kHz target's Nyquist. And the repo's first CLIENT-originated telemetry: <code>onFinal</code> calls <code>sendTelemetry</code> (<code>shared/telemetry/beacon.ts</code>) — a best-effort <code>navigator.sendBeacon</code> POST to <code>/api/telemetry</code>, fired only AFTER a segment's transcript passes the same per-segment-token guard D6 relies on, so a superseded segment never beacons either.",
+      mech:"getUserMedia→AudioWorklet(16kHz mono)→Worker(transformers.js AutoModel Moonshine+Silero) → composer.value · D1 overrides parent-spec sherpa-onnx · hold-to-talk | tap-to-toggle(VAD-gated) · D10 Rung 1 (no isolation-header change) · live e2e (real Chromium, fake-audio) caught 3 bugs · D6 TextStreamer→transcribeInterim (post-segment-close progressive reveal) · D7 one-pole LPF pre-resample · sendTelemetry beacon → /api/telemetry (best-effort)",
+      files:["audio-capture.ts","downsample-worklet.ts","downsampler.ts","stt-engine.ts","stt.worker.ts","model-tier.ts","vad.ts","use-voice-input.ts","mic-button.tsx","waveform.tsx"]},
+    {id:"queue",nm:"Queue",pt:"src/queue",kind:"spine",x:600,y:625,
+      what:"The durable SQLite job queue at the <b>heart</b> of the always-on daemon (Slice 24). <code>store.ts</code>'s <code>createJobStore</code> mirrors the session store verbatim (<code>bun:sqlite</code>, WAL + <code>busy_timeout</code> + <code>foreign_keys</code>, a <code>db/migrate.ts</code> <code>'init-jobs'</code> migration, <code>INSERT OR IGNORE</code> idempotency, base64url keyset pagination, snake↔camel mappers). The <b>atomic claim</b> is the correctness core: <code>claimNext(now)</code> runs in a <code>db.transaction().immediate()</code> (<b><code>BEGIN IMMEDIATE</code></b> takes the write lock at BEGIN, so two workers can never both read the same <code>queued</code> row), selects <code>WHERE status='queued' AND available_at&lt;=now ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1</code> (priority-then-FIFO — the <code>JobPriority</code> TEXT values sort <code>High</code> before <code>Normal</code>) and flips it to <code>running</code>, guarded by a <code>res.changes===1</code> check that closes the last double-claim window. The <code>available_at&lt;=now</code> gate is what makes retry backoff work. <code>markDone</code>/<code>markInterrupted</code>/<code>markCanceled</code> are terminal; <code>markFailed</code> re-queues below <code>max_attempts</code> with a <b>full-jitter exponential backoff</b> (<code>available_at=now+backoff</code>, reusing <code>reliability/config.ts</code>) — no re-increment of attempts (already bumped on claim) — terminal <code>Failed</code> at the cap. No circuit breaker was wired (jobs share no failure domain). <code>reconcileOrphans({durable?})</code> is boot recovery (§7.3) in its own <code>.immediate()</code> transaction: crash-left <code>running</code> rows → <code>Interrupted</code>, or for a <code>durable</code> crew/workflow → <code>Queued</code> with <code>available_at=0</code> so the pool re-claims and resumes from checkpoint (§24.4). The <b>bounded worker pool</b> (<code>pool.ts</code>) runs <code>computeConcurrency()</code> (half the logical cores, <code>AGENT_QUEUE_CONCURRENCY</code> override) concurrent claim loops, each with a per-job <code>AbortController</code> for cancel and a bounded <code>drain</code>; <code>retry-policy.ts</code>'s <code>jobRetryDecision</code> reuses <code>reliability/classify</code> (only <code>Lane.Transient</code> retries — no worker-side sleep, the <code>available_at</code> gate spaces retries). An adversarial-verify caught a <b>daemon-crash Critical</b> here — a <code>store</code> throw could escape the fire-and-forget loop and kill the daemon — fixed with try/catch around every store call plus <code>.catch</code> on each loop promise (degrade-never-crash). The queue→execution seam is <code>src/server/jobs/dispatch.ts</code> (<code>createJobDispatch</code>), mapping each <code>JobKind</code> to a <code>JobExecutor</code> over the EXISTING <code>launch-turns.ts</code> run turn — no execution logic duplicated.",
+      mech:"createJobStore (bun:sqlite · WAL · db/migrate 'init-jobs' · INSERT OR IGNORE · keyset page) · claimNext BEGIN IMMEDIATE priority-then-FIFO (res.changes===1) · markFailed full-jitter backoff → max_attempts · reconcileOrphans(durable?) → Interrupted|Queued · createWorkerPool ≤computeConcurrency() loops · per-job AbortController cancel + bounded drain · error-isolated (degrade-never-crash) · dispatch: JobKind→JobExecutor over launch-turns.ts",
+      files:["store.ts","pool.ts","concurrency.ts","retry-policy.ts","types.ts"]},
+    {id:"daemon",nm:"Daemon",pt:"src/daemon",kind:"spine",x:390,y:630,
+      what:"The always-on daemon lifecycle (Slice 24) that turns the foreground, request-scoped server into a long-lived host. <code>core.ts</code>'s <code>createDaemon().start()</code> runs a fixed sequence whose <b>order IS the correctness core</b> (§7.3): (1) double-start guard via <code>readLivePid</code> (which clears a crashed daemon's stale pid so a restart is never wrongly blocked); (2) <b><code>reconcileOrphans()</code> FIRST</b>, before the pool can claim anything; (3) <code>writePid</code>; (4) <code>pool.start()</code>; (5) <code>startWebServer({queue:{jobStore, pool}})</code> in <b>injected mode</b> — the daemon owns the single pool and the server does <b>not</b> construct a second on the same DB (the 'double-pool' defect the plan audit caught, fixed via <code>StartOptions.queue?</code>); (6) <code>onShutdown(stop)</code> + <code>SIGTERM</code>/<code>SIGINT</code> handlers. <code>stop()</code> drains the pool (bounded by <code>drainTimeoutMs</code>), stops the server, clears the pid — idempotent, so a SIGTERM-plus-explicit double-stop is safe. <code>pid.ts</code> owns the PID-file contract (<code>~/.agent/daemon.pid</code>, <code>writePid</code> 0600 in a 0700 dir; <code>isPidAlive</code> via <code>process.kill(pid,0)</code> — <code>ESRCH</code>→dead, <code>EPERM</code>→alive). <code>launchd.ts</code> renders the macOS plist (<code>Label ai.agent.daemon</code>, <code>KeepAlive</code>/<code>RunAtLoad</code>, <code>ProgramArguments=[bun, entry, daemon, start-foreground]</code>); <code>spans.ts</code> emits <code>daemon.start</code>/<code>daemon.stop</code> + the <code>job.*</code> span helpers. <code>cli/daemon.ts</code> (<code>agent daemon install|start|start-foreground|stop|status|logs</code>) drives <code>launchctl</code> through an <b>injectable seam</b> (never shells out in tests); <code>install</code> is macOS-only and prints <b>systemd</b> guidance on other platforms rather than failing. The daemon owns only a bind-address + token auth and is otherwise <b>tunnel-agnostic</b> (§24.6) — Tailscale is the default documented recipe (bind the <code>100.x</code> tailnet + <code>localhost</code>, add its MagicDNS name to <code>AGENT_WEB_ALLOWED_HOSTS</code>); Cloudflare Tunnel and a reverse proxy are documented alternatives, each carrying the TLS (WireGuard / edge TLS / the proxy cert — TLS is delegated to the transport, D7).",
+      mech:"createDaemon().start(): readLivePid → reconcileOrphans() FIRST → writePid → pool.start() → startWebServer({queue}) injected → onShutdown + signals · stop() bounded drain (idempotent) · pid.ts ~/.agent/daemon.pid 0600 (process.kill(pid,0) liveness) · launchd plist (KeepAlive/RunAtLoad) · agent daemon install|start|stop|status|logs · tunnel-agnostic (Tailscale default)",
+      files:["core.ts","pid.ts","launchd.ts","spans.ts","cli/daemon.ts"]}
+  ];
+  var EDGES=[
+    ["cli","core","dep","runs the orchestrator"],
+    ["cli","wf","dep","bun run flow — runs a deterministic workflow DAG"],
+    ["cli","res","dep","binds a fitting model per delegation (select-hook)"],
+    ["cli","disc","dep","buildRegistry() — offline registry merge"],
+    ["cli","mcp","dep","with-mcp-run → mcp.json → consent-gated mountAll (all three CLIs)"],
+    ["cli","run","dep","creates the run directory"],
+    ["cli","tel","dep","opens the trace + the run span"],
+    ["cli","mem","dep","bun run memory — ingest / recall / stats / reindex"],
+    ["decl","core","emit","agent definitions (data)"],
+    ["decl","res","emit","model declarations (data)"],
+    ["decl","wf","emit","workflow definitions (data)"],
+    ["core","tel","emit","emits delegation + guardrail spans"],
+    ["core","res","emit","delegation invokes the CLI-injected select-hook → model selection"],
+    ["wf","core","dep","agent steps reuse runGuardedAgent — the shared guarded delegation"],
+    ["wf","tel","emit","emits workflow.run / workflow.step spans"],
+    ["wf","mem","dep","steps auto-persist output; recall tool available"],
+    ["cli","crew","dep","bun run crew — runs a role-based crew (live model selection)"],
+    ["crew","wf","dep","sequential crew compiles to a workflow DAG"],
+    ["crew","core","dep","hierarchical = orchestrator + manager; agent work via runGuardedAgent"],
+    ["crew","tel","emit","emits crew.run / crew.task.member spans"],
+    ["crew","mem","dep","binds a recall tool + namespaced auto-write per crew"],
+    ["decl","crew","emit","crew definitions (data)"],
+    ["mcp","decl","emit","per-agent tool slices via the agents attach field (forAgent)"],
+    ["mcp","wf","emit","merged ToolSet — workflow tool steps dispatch by name"],
+    ["mcp","tel","emit","mcp.mount (server.count + summed tool.count) + workflow.tool spans → runs/<id>/spans.jsonl"],
+    ["mem","res","dep","embedder loaded weights-only via the Model Manager"],
+    ["mem","tel","emit","emits memory.recall / ingest / embed spans"],
+    ["mem","disk","emit","writes LanceDB tables + bun:sqlite store"],
+    ["crew","ver","dep","opt-in --verify grounds the crew's terminal answer"],
+    ["wf","ver","dep","verify step auto-inserted as a sub-graph"],
+    ["ver","mem","dep","getByIds — fetch the answer's cited chunks + CRAG re-recall"],
+    ["ver","res","dep","judge (bespoke-minicheck) loaded via the Model Manager"],
+    ["ver","tel","emit","emits verification.check spans (supported / faithfulness)"],
+    ["res","rt","dep","drives warm / unload / embed"],
+    ["res","tel","emit","emits model-load / evict spans"],
+    ["disc","rt","dep","pulls models via the runtime"],
+    ["disc","disk","emit","writes catalog.json"],
+    ["tel","disk","emit","writes spans.jsonl"],
+    ["run","disk","emit","reads spans.jsonl + degradation.jsonl back — the CLI viewer and mapRunToDto for the web"],
+    ["rt","disk","emit","Ollama model store"],
+    ["cli","prov","dep","bun run provision · TTY auto-detect hook when a declared model is missing"],
+    ["prov","res","dep","hardware-fit (footprint + live budget) + install-confirm"],
+    ["prov","disc","dep","reuses CatalogSource / Candidate discovery types"],
+    ["prov","tel","emit","emits agent.model.provision spans"],
+    ["cli","builder","dep","bun run agent-builder · TTY gap-offer at a capability gap in chat"],
+    ["builder","mcp","dep","suggests a minimal server from the pack palette + writes it scoped into mcp.json"],
+    ["builder","decl","emit","writes a new agent definition + registers it in agents/index.ts"],
+    ["builder","tel","emit","emits agent.build spans (generate · validate · consent · write)"],
+    ["cbuilder","builder","dep","auto-builds missing member agents via the agent-builder"],
+    ["cbuilder","wf","emit","writes workflows/<id>.ts (defineWorkflow)"],
+    ["cbuilder","crew","emit","writes crews/<id>.ts (defineCrew)"],
+    ["cbuilder","decl","emit","registers new crews/workflows (+ agents) in their index"],
+    ["cbuilder","mcp","dep","member tools chosen palette-only from the pack"],
+    ["cbuilder","tel","emit","emits crew.build spans (classify·validate·consent·write)"],
+    ["cli","cbuilder","dep","bun run crew-builder · TTY multi-step gap-offer in chat"],
+    ["builder","vbuild","dep","stages → verifies (dry-run + golden-eval) → commits; nothing broken registers"],
+    ["cbuilder","vbuild","dep","same stage→verify→commit gate before a crew/workflow lands"],
+    ["vbuild","mem","dep","embeds a capability signature → cosine reuse-check (skip near-duplicates)"],
+    ["vbuild","ver","dep","grounded golden cases judged via checkClaim"],
+    ["vbuild","decl","emit","commits into agents/crews/workflows + a .generated.json manifest"],
+    ["vbuild","tel","emit","emits build.verify / build.archive spans (verify.level · reuse · judge · golden)"],
+    ["core","rel","dep","runGuardedAgent classifies failures → drops the agent + records to the ledger"],
+    ["wf","rel","dep","per-step wall-clock timeout + Tool circuit-breaker/retry (emits Retried)"],
+    ["crew","rel","dep","threads the degradation ledger through crew delegation (seq + hierarchical)"],
+    ["mcp","rel","dep","per-server circuit breaker wraps every MCP tool call"],
+    ["res","rel","dep","degradeChain orders candidates by failure domain; select-hook records ModelDegraded"],
+    ["prov","rel","dep","download retry + stall-watchdog consolidated onto the reliability primitives"],
+    ["rel","tel","emit","recordDegrade → reliability.degrade span attrs (retry · breaker · degrade · dropped_agent)"],
+    ["rel","disk","emit","persists runs/<id>/degradation.jsonl (the user-facing degradation ledger)"],
+    ["cli","media","dep","chat ingests --image/--audio/--video → handle markers; threads the run-scoped MediaStore"],
+    ["media","core","dep","uses Capability/ContentPolicy; resolveAttachments feeds core's buildCallInput the v6 FileParts"],
+    ["media","rt","dep","media subprocess spawns reuse the process-supervisor SpawnFn / ChildHandle shape"],
+    ["media","rel","dep","wall-clock timeout on every media spawn; runGenJob degrade records ModelDegraded"],
+    ["media","tel","emit","emits media.transcribe / media.frames / media.generate spans + content.policy"],
+    ["media","disk","emit","writes runs/<id>/media/ — ingested + generated artifacts"],
+    ["cli","voice","dep","chat.ts runs ingestVoice before media ingest — captures + transcribes, splices the transcript onto the prompt"],
+    ["voice","tel","emit","emits voice.transcribe spans (stt.model · capture.source · audio.seconds · duration.ms · outcome)"],
+    ["voice","rel","dep","capture+transcribe wrapped in withWallClock; a per-source failure warns + records a ledger entry instead of aborting the turn"],
+    ["cli","ops","dep","status/config/usage/start commands"],
+    ["ops","run","dep","usage aggregates runs/ spans"],
+    ["ops","tel","dep","logger stamps run-id from telemetry context (currentRunId)"],
+    ["rt","proc","dep","registers spawned servers for signal-clean shutdown"],
+    ["media","proc","dep","registers gen/ffmpeg children"],
+    ["web","server","dep","browser calls the BFF — useChat POSTs /api/chat + the Runs area GETs /api/runs · :id · :id/stream (bearer-auth'd)"],
+    ["web","contracts","dep","zod-parses every response (ChatMessage · RunDTO · SpanDTO live-tail) against the same isomorphic @contracts schemas"],
+    ["server","contracts","dep","parses ChatRequest / RunListQuery at the perimeter · emits StatusEvent + RunDTO/SpanDTO as validated wire shapes · parses TelemetryEventSchema (POST /api/telemetry, Phase 8)"],
+    ["server","core","dep","POST /api/chat → runChatSession → orchestrator (lazy engine, no boot network)"],
+    ["core","server","emit","streams the orchestrator's answer (text-delta) + StatusEvents (events sink) back → SSE"],
+    ["server","tel","emit","server.request span per /api call · ui.stream span per chat turn · voice.transcribe.web span per POST /api/telemetry (Phase 8, client-originated)"],
+    ["server","rel","dep","req.signal → AbortSignal → withWallClock — the browser Stop button's cancel seam"],
+    ["contracts","rel","dep","DegradeKind wire enum mirrors reliability/ledger.ts by value (test-guarded, not an import)"],
+    ["server","run","dep","GET /api/runs* → mapRunToDto / summarizeRunListItem project a run folder into a validated RunDTO / RunListItemDTO (readRunArtifacts + runRootSummary)"],
+    ["contracts","crew","emit","CrewMemberDTO/CrewTaskDTO/CrewListItemDTO/CrewDetailDTO — crew-dto.ts's wire shapes"],
+    ["contracts","wf","emit","StepDTO/EdgeDTO/WorkflowListItemDTO/WorkflowDetailDTO — workflow-dto.ts's wire shapes (deriveEdges reuses effectiveDeps verbatim)"],
+    ["crew","server","dep","mapCrewToListItem/mapCrewToDetail feed GET /api/crews[/:name] + the fire-and-watch POST .../:name/run"],
+    ["wf","server","dep","mapWorkflowToListItem/mapWorkflowToDetail feed GET /api/workflows[/:id] + the fire-and-watch POST .../:id/run"],
+    ["server","cwweb","emit","browse (list/detail) + fire-and-watch launch ({runId} returned before the run finishes) feed CrewsArea / WorkflowsArea"],
+    ["cwweb","run","dep","run-detail's stepStatusOverlay / findRunGraphSource reads the same live spans stream the Runs area already tails"],
+    ["cwweb","contracts","dep","zod-parses CrewDetailDTO / WorkflowDetailDTO off the wire into DagModel"],
+    ["server","libweb","emit","build/pull/mount/recall/ingest routes (3 of them SSE) feed the Builders wizard + 3-tab Library shell"],
+    ["libweb","builder","dep","guided-build wizard's Agent mode wraps buildAgent via runBuilderTurn under the existing agent.build span — no new span kind"],
+    ["libweb","cbuilder","dep","Crew/Workflow build modes wrap buildCrewOrWorkflow under the existing crew.build span"],
+    ["libweb","prov","dep","Models tab's pull calls provider.download(...) directly, not the full runProvision orchestration — selection + disk-shortfall consent are pre-resolved by the browser click"],
+    ["libweb","mcp","dep","MCP tab's add validates+writes mcp.json atomically; test-mount's consent is mountOne's ConsentDeps.ask bridged onto the same ConfirmPort/data-confirm wire the builder route uses"],
+    ["libweb","mem","dep","Memory tab's recall/ingest call store.recall/store.ingest directly — the memory.recall span was already wired before this phase"],
+    ["libweb","run","dep","pull progress rides the existing /api/runs/:id/stream (Phase 3, unchanged) — each tick's model.pull.progress child span surfaces live with no new stream code"],
+    ["libweb","contracts","dep","zod-parses BuildResultDTO / ModelInventoryDTO / McpServerDTO / MemorySpaceDTO / RetrievalResultDTO off the wire"],
+    ["server","session","dep","handleChat upsertSession + appendMessage at both turn boundaries (user before stream · assistant after resolve) · GET/PATCH/DELETE /api/sessions(/:id) + export → Markdown"],
+    ["session","disk","emit","writes the sessions/ bun:sqlite store (WAL) — sessions + messages tables"],
+    ["server","mem","emit","chat turn recalls space-wide (injectRecall, chat space) + fire-and-forget rememberOnce auto-ingest — content-hash-deduped, never awaited"],
+    ["web","voiceweb","dep","mic-button.tsx mounts in composer.tsx's dropzone; onFinal appends the transcript into the Composer's own value state — voice never touches sendMessage/handleSend"],
+    ["voiceweb","voice","dep","reuses the VoiceFrames contract + voice.transcribe span vocabulary from CLI voice (§23) unchanged — D1 overrides only the concrete engine (transformers.js Moonshine+Silero, not sherpa-onnx)"],
+    ["voiceweb","contracts","dep","VoiceFrames + CaptureSource lifted from src/contracts, re-exported by src/voice/types.ts — one definition, two importers, parity-tested"],
+    ["voiceweb","server","emit","sendTelemetry(event) → POST /api/telemetry (sendBeacon; body-token auth; best-effort, dropped-beacon-safe)"],
+    ["server","queue","dep","POST /api/jobs validates + enqueues → 202 {jobId, runId} — the run dir IS job.runId, so GET /api/runs/:id/stream resolves immediately (chat/crew/workflow/pull/build no longer inline-await or void-detach)"],
+    ["queue","core","dep","dispatch.ts's createJobDispatch maps JobKind→JobExecutor → the EXISTING launch-turns.ts run turn (threading job.runId + the pool AbortSignal) — no execution logic duplicated"],
+    ["daemon","queue","dep","boot ordering (§7.3): reconcileOrphans() FIRST, then owns the single bounded worker pool (pool.start before the server, so no second pool on the same DB)"],
+    ["daemon","server","dep","startWebServer({queue:{jobStore, pool}}) in injected mode — the server reuses the daemon's already-reconciled, already-started pool"],
+    ["queue","run","emit","per-node checkpoint.json (atomic temp-write+rename, resume skips completed nodes) + job.run/retry/cancel spans nest under each job's run root"]
+  ];
+  var TOUR=[
+    {t:"You run a task. The CLI builds the model registry <b>offline</b> (no network) and mounts the MCP servers declared in <code>mcp.json</code> — consent-gated, each agent getting only its scoped tool slice.",nodes:["cli","disc","mcp"],edges:[["cli","disc"],["cli","mcp"]]},
+    {t:"<b>runChat</b> opens the run — a folder plus an OpenTelemetry trace that will capture every step that follows.",nodes:["cli","tel","run"],edges:[["cli","tel"],["cli","run"]]},
+    {t:"The pinned <b>router model</b> decides what to do. Routing is just the model choosing a <code>delegate_to_&lt;specialist&gt;</code> tool.",nodes:["cli","core"],edges:[["cli","core"]]},
+    {t:"A <b>guardrail</b> checks the hop: would this exceed depth 5? If so it returns a soft error the router can adapt to — the no-infinite-loop guarantee.",nodes:["core"],edges:[]},
+    {t:"To delegate, a model is <b>selected to fit live RAM</b>: largest-that-fits, evicting least-recently-used, sized to the free headroom — then warmed via the runtime.",nodes:["core","res","rt"],edges:[["core","res"],["res","rt"]]},
+    {t:"The specialist runs. Its <b>tokens, tool calls and model load all nest as spans</b> under the run's trace.",nodes:["core","tel","res"],edges:[["core","tel"],["res","tel"]]},
+    {t:"Its answer is <b>capped to a quarter of the caller's live context</b> before returning — so accumulated returns can't blow the window.",nodes:["core"],edges:[]},
+    {t:"Outcome recorded: spans flushed to <code>spans.jsonl</code> + a <code>.txt</code> artifact. <code>bun run runs &lt;id&gt;</code> renders the whole tree.",nodes:["tel","run","disk"],edges:[["tel","disk"],["run","disk"]]},
+    {t:"Beyond the router: <code>bun run flow</code> runs a <b>deterministic workflow</b> — a typed DAG of agent/tool/branch/map steps you define, with schema-validated data between them. Agent steps reuse the very same guarded delegation, and every step is traced as <code>workflow.run → workflow.step → agent.delegation</code>.",nodes:["cli","wf","core","tel"],edges:[["cli","wf"],["wf","core"],["wf","tel"]]},
+    {t:"And <code>bun run crew</code> runs a <b>role-based crew</b> — members with role/goal/backstory + tasks under a process. A <b>sequential</b> crew compiles to a workflow DAG; a <b>hierarchical</b> crew is the orchestrator + a manager. Members are model-selected live (largest-that-fits), and the run traces as <code>crew.run → workflow.step → agent.delegation</code>.",nodes:["cli","crew","wf","core"],edges:[["cli","crew"],["crew","wf"],["crew","core"]]},
+    {t:"To stay grounded, work reads &amp; writes <b>persistent memory</b>. A crew/workflow's <code>recall</code> tool (or <code>bun run memory</code>) embeds text with a weights-only embedder via the Model Manager, writes it to a per-space <b>LanceDB</b> table, and recalls by <b>dense search → default-on cross-encoder rerank → a budget-fit pack sized to a live fraction of <code>num_ctx</code></b> — returning citation-tagged <code>[mem:id]</code> chunks. The space records its embedder, so it stays valid whatever chat model runs.",nodes:["cli","mem","res","tel"],edges:[["cli","mem"],["mem","res"],["mem","tel"]]},
+    {t:"Finally, opt-in <code>--verify</code> makes an answer <b>grounded</b>. It's split into claims, and each is checked against only the chunks the answer <b>cites</b> — <code>[mem:id]</code> is parsed deterministically (never LLM-guessed) → <code>getByIds</code> → an evidence pool — by a small fine-tuned judge (<code>bespoke-minicheck</code>, <code>(doc,claim)→Yes/No</code>). Below the faithfulness threshold, one bounded <b>CRAG</b> corrective retries; if it still fails the run <b>abstains</b> (<code>{unverified}</code>) rather than present an ungrounded answer. Uncited ⇒ abstain.",nodes:["crew","ver","mem","res"],edges:[["crew","ver"],["ver","mem"],["ver","res"]]},
+    {t:"Zoom back out: none of this runs on a fresh machine until the models exist. <code>bun run provision</code> (or a TTY-gated auto-detect hook) <b>detects the host</b>, discovers models that <b>fit</b> — a dynamic per-runtime catalog query with a <b>committed-snapshot fallback</b> — asks <b>per-model consent</b> (nothing pulled without it), and downloads through a <b>runtime-agnostic <code>DownloadProvider</code></b> with a live bar, guarded by disk-preflight + stall-watchdog + retry. Degrade-never-crash. Downloads now <b>persist atomically</b> (`.part`→rename, HF-oid-verified) and run bounded-parallel; <b>Ollama and MLX are live-verified end-to-end</b> (real snapshot download + inference), LM Studio's download is wired too — LM Studio/llama.cpp <b>inference</b> stays deferred.",nodes:["cli","prov","res","disc"],edges:[["cli","prov"],["prov","res"],["prov","disc"]]},
+    {t:"And the tools themselves are <b>declared, not hardcoded</b>: <code>mcp.json</code> lists MCP servers (stdio or Streamable HTTP) + which agents get them. First mount shows the <b>exact command</b> and asks consent; the tool definitions are <b>hash-pinned</b>, so a server that later changes them triggers re-consent — the rug-pull defense. A <b>12-entry capability-tagged starter pack</b> (<code>bun run mcp add</code>) covers files, SQL (in-repo <code>bun:sqlite</code> server), web-search, browser, git/GitHub, memory — keyed entries stay <b>dormant</b> until their env var is set. Scoped slices keep small models' tool choice sharp; workflow tool steps see the merged set.",nodes:["cli","mcp","decl","wf"],edges:[["cli","mcp"],["mcp","decl"],["mcp","wf"]]},
+    {t:"And the system <b>grows its own capabilities</b>. When no agent can handle a task the orchestrator reports a <code>capability gap</code>; the <b>agent-builder</b> (<code>bun run agent-builder \"&lt;need&gt;\"</code>, or a TTY offer right at the gap) has an LLM draft a new specialist + pick a <b>minimal pack-only</b> tool server, validates it, and — only on <b>consent</b> — writes <code>agents/&lt;name&gt;.ts</code> + a registry entry + a scoped <code>mcp.json</code>, live on the next run. <b>Review-before-activate</b>; no same-run activation. It can now retry an invalid draft once and even propose <b>brand-new tool code</b> — written as an inert <code>.proposal.ts</code> for review, never run in the same session.",nodes:["cli","builder","mcp","decl"],edges:[["cli","builder"],["builder","mcp"],["builder","decl"]]},
+    {t:"Self-extension now goes <b>one level up</b>. Describe a multi-step need and the <b>crew-builder</b> (<code>bun run crew-builder \"&lt;need&gt;\"</code>) composes existing agents — and freshly-built ones — into a whole <b>crew or workflow</b>, not just one specialist. A staged, <b>validated declarative IR</b> (classify → analyze → plan-nodes → plan-edges → two-tier validate) is the only thing the model produces; a small safe-helper vocabulary is the only closures it can pick, so the IR always transpiles deterministically. Missing member agents are <b>auto-built via the agent-builder</b> before anything is written, and — only on <b>consent</b> — the result lands as <code>crews/&lt;id&gt;.ts</code> or <code>workflows/&lt;id&gt;.ts</code>. Live-verified: a generated crew <b>executed</b> end-to-end.",nodes:["cli","cbuilder","builder","wf"],edges:[["cli","cbuilder"],["cbuilder","builder"],["cbuilder","wf"]]},
+    {t:"And now the system <b>verifies what it builds</b>. The agent- and crew-builders became a <b>stage → verify → commit</b> gate: before generating, a capability-signature <b>cosine reuse-check</b> reuses a near-duplicate instead of building one (≥0.85, confirm-gated); after generate + consent the artifact is staged <b>unregistered</b> and <b>dry-run for real</b> against a benign task (wall-clock-bounded — a hung model FAILS the gate, never hangs; ≤2 repair attempts feed the real error back), then <b>behaviorally golden-eval'd</b> by the largest-local model (<b>preferring a different family</b> than the generator; grounded cases via <code>checkClaim</code>). Only on pass does it register + write a <code>&lt;name&gt;.golden.json</code> + a <code>.generated.json</code> manifest entry; failure <b>discards the staged file</b> so nothing broken lands, and no capable judge <b>degrades to verified:runs</b> rather than crash. <code>bun run archive</code> prunes idle near-duplicates. <b>Live-verified on Ollama</b>: generate → dry-run → commit verified:runs, and a re-run reused at 89%.",nodes:["vbuild","builder","cbuilder","mem"],edges:[["builder","vbuild"],["cbuilder","vbuild"],["vbuild","mem"]]},
+    {t:"And when something breaks mid-run, the system <b>degrades instead of crashing</b>. Every failure is <b>classified</b> into three lanes — <b>Transient</b> (back off + retry the cross-boundary ops we own), <b>RouteWorthy</b> (degrade to a fallback model/runtime, or drop that agent), <b>Terminal</b> (fail fast) — and a <b>circuit breaker</b> stops one dead MCP server from stalling a whole crew. A dead dependency <b>drops that agent/step and TELLS THE USER</b>: every degrade/drop/retry is recorded to a per-run <b>degradation ledger</b> — printed, persisted to <code>runs/&lt;id&gt;/degradation.jsonl</code>, and traced as <code>reliability.degrade</code>. The LLM turn is <b>never double-retried</b> (the AI SDK already does that); only cross-boundary ops we own are. <b>Live-verified on real Ollama</b> — a downed MCP server, an unreachable runtime, and a flaky tool all handled without a crash.",nodes:["rel","core","mcp","tel"],edges:[["core","rel"],["mcp","rel"],["rel","tel"]]},
+    {t:"And now the system <b>sees, hears, and creates</b>. <b>Full multimodal I/O</b> (Slice 27) adds vision/audio/video <b>input</b> and image/speech/video <b>generation</b> under one rule — <b>media-by-reference</b>: a run-scoped store mints an opaque handle (<code>img_1</code>/<code>aud_1</code>/<code>vid_1</code>) and only a <code>[img:h]</code> <b>marker</b> crosses the router and the <code>z.string()</code> delegation boundary (both untouched); the specialist resolves it to an AI-SDK v6 <b>FilePart</b> at the last moment. Input is a <code>qwen2.5vl</code> vision specialist + <code>mlx-whisper</code> STT + <code>ffmpeg</code> frame-sampling; generation is a <b>MediaGenerator</b> (one-shot or server jobs, wall-clock-bounded) driving mflux / Kokoro / LTX behind <code>generate_image/speech/video</code> tools on a <code>media_creator</code> specialist. <b>Slice 28 makes generation hardware-adaptive</b>: <code>selectGenModel</code> picks the <b>largest gen model that fits</b> live RAM by footprint from a candidate ladder — a selector <b>parallel</b> to the main model picker (a gen engine spawns a CLI writing a file, not a warmed <code>LanguageModel</code>) — env-pin-authoritative, uncensored-filtered, consent-gated on any pull, and <code>undefined</code>→graceful when nothing fits; tools now run via <code>runGenJob</code> so the one-shot↔server degrade + ComfyUI/Wan lane are reachable. An <b>uncensored</b> content-policy axis is <b>default-on</b> — model eligibility + safety-checker disable, two orthogonal mechanisms; voice-clone consent kept separate. <b>Live-verified on real hardware</b>: image auto-fit rendered a real PNG, speech a real WAV, uncensored ran — video degrades gracefully (no model cached; a fitting ~18.5 GB quant would render if pulled), the scales-on-a-bigger-box case.",nodes:["media","cli","core","tel"],edges:[["cli","media"],["media","core"],["media","tel"]]},
+    {t:"And now the system <b>listens</b>. CLI voice <b>input</b> (Slice 29) is a narrow re-scope after the original voice-in/out streaming pipeline hit real terminal limits — no acoustic echo cancellation, TTS reading markdown aloud — and was reset (that pipeline is archived, unmerged). Before media ingest, <code>chat.ts</code> runs <code>ingestVoice</code>: <code>--voice</code> is an interactive tap-to-toggle mic capture where ffmpeg's <code>silencedetect</code> filter auto-stops on the first pause <b>after</b> speech was heard — not a real-time VAD model — or <code>space</code>/<code>enter</code>/<code>ctrl-c</code> stops manually; <code>--voice-in &lt;path&gt;</code> transcribes a file instead. Both feed a <b>sherpa-onnx moonshine</b> <code>Transcriber</code> — in-process by default, an <code>AGENT_VOICE_EXEC=subprocess</code> escape hatch for when an enforceable timeout matters — and splice the transcript onto the prompt, exactly like <code>--audio</code>'s text-splice. Each source degrades independently: a capture/transcribe failure warns and is skipped, never aborts the turn. Voice-out, barge-in and streaming stay deferred to <b>Slice 30's browser UI</b>, which reuses this exact capture⟷transcribe split with real microphone echo cancellation.",nodes:["cli","voice","tel","rel"],edges:[["cli","voice"],["voice","tel"],["voice","rel"]]},
+    {t:"And now the engine is built to <b>stay up</b>. Slice 30a (production foundation) turns it from a run-once process into a long-lived host that can run many things at once, safely: telemetry now routes each span to its own run by run-id through a shared global provider, instead of swapping a global provider per run — which cross-contaminated traces when two runs overlapped. Run ids are collision-free, a wall-clock timeout can actually <b>abort</b> stuck work via <code>AbortSignal</code> (threaded runChat → orchestrator → agent → generateText), and every spawned child — a managed runtime server, an ffmpeg job, a mic capture — registers with a central <b>process registry</b> that a SIGINT/SIGTERM handler drains cleanly on exit. It also gained a real <b>ops surface</b>: <code>bun run status/usage/config/start</code>, structured run-id-stamped logs, a top-level error boundary, and the project's first CI pipeline.",nodes:["proc","ops","tel","run"],edges:[["cli","ops"],["ops","tel"]]},
+    {t:"And now it has a <b>face</b>. Slice 30b puts a local <b>web UI</b> in the browser over a thin <code>Bun.serve</code> BFF — but it doesn't trust the browser: every <code>/api</code> request runs <b>perimeter → token → route</b> first (a per-session bearer token + Host/Origin allowlist + media-path confinement — localhost ≠ trusted), and the page is COOP/COEP cross-origin-isolated for the future voice WASM. An <b>isomorphic <code>src/contracts/</code></b> Zod layer is the one wire truth for server and browser alike. <b>Phase 2 streams a real chat</b>: <code>POST /api/chat</code> runs the <b>same <code>runChatSession</code></b> the CLI does (over a lazily-built engine — no model work until the first turn) and returns an SSE UI-message stream — the top-level orchestrator's answer arrives <b>token-by-token</b> (text-delta) while transient <code>data-*</code> parts drive a <b>live agent/model rail</b> (Starting → ModelSelect → Loading → Running → Done). The browser's <b>Stop</b> aborts the fetch → <code>req.signal</code> → <code>withWallClock</code> actually cancels the run. Chat is <b>stateless per request</b> (persistence is Phase 6); the Runs waterfall + <code>@visx</code>/<code>@xyflow</code> come next in Phase 3.",nodes:["web","server","contracts","core"],edges:[["web","server"],["server","contracts"],["server","core"]]},
+    {t:"And now every run is <b>legible in the browser</b>. Slice 30b <b>Phase 3</b> turns the Runs area into a real history browser: <code>GET /api/runs</code> lists every run under <code>runsRoot</code> — searchable, outcome/degraded-facetable, cursor-paginated — each mapped through the cache-fronted <code>summarizeRunListItem</code> (an <b>mtime(spans.jsonl)</b>-keyed cache); open one and <code>GET /api/runs/:id</code> returns a full, <b>server-validated <code>RunDTO</code></b> — <code>mapRunToDto</code> flattens <code>spans.jsonl</code> into offset-stamped <code>SpanDTO</code>s, name-agnostic across agent.run/crew.run/workflow.run via the shared <code>runRootSummary</code>. The span tree renders as an <b>@visx waterfall</b>; for a <b>live</b> run, <code>GET /api/runs/:id/stream</code> polls the mapper and emits each new span as an SSE frame (<code>Last-Event-ID</code>-resumable, triply-bounded) so the bars <b>stream in as the run progresses</b> — the transport port's first real consumer and the first place a <code>SpanDTO</code> is parsed off the wire. Read-only + stateless per request (a persisted run index is Phase 6); per <b>D1</b> the waterfall is the only trace viz — a trace's shape is a timeline, not a DAG.",nodes:["web","server","run","disk"],edges:[["web","server"],["server","run"],["run","disk"]]},
+    {t:"And now you can <b>browse, launch and watch</b> crews and workflows from the browser. Phase 4 projects the in-memory <code>CREWS</code>/<code>WORKFLOWS</code> registries into JSON-safe DTOs (a workflow's edges are derived via <code>effectiveDeps</code> — the exact function the engine runs, so the browser's DAG can never disagree with what will execute); a <b>▶ Run</b> button <code>POST</code>s a <b>fire-and-watch launch</b> that mints a <code>runId</code> and returns immediately while the run proceeds <b>detached</b> — the run directory is pre-created so the browser's follow-up stream request never races a 404. One reusable <b>@xyflow <code>DagView</code></b> renders both a workflow's step-graph and a crew's task-graph (or, for a hierarchical crew with no static task graph, a manager→members delegation star), and on run-detail the very same live spans stream the Runs area already reads lights up each step <code>Done</code>/<code>Error</code> as it completes — <b>watching was inherited free from Phase 3</b>.",nodes:["cwweb","crew","wf","server","run"],edges:[["contracts","crew"],["contracts","wf"],["server","cwweb"],["cwweb","run"]]},
+    {t:"And now the last two nav areas are real. Slice 30b <b>Phase 5</b> ships <b>Builders</b> (browse the agent/crew/workflow registries, then a guided <b>SSE</b> build with mid-flow <b>consent</b> — a fresh promptId per ask, answered over the same connection's <code>data-confirm</code> event, fail-closed <b>DECLINE</b> on an abandoned ask) and <b>Library</b>'s 3-tab shell: <b>Models</b> (pull with live progress — <b>no new stream</b>, since each tick is its own short-lived <code>model.pull.progress</code> child span the <b>existing</b> <code>/api/runs/:id/stream</code> already surfaces), <b>MCP</b> (add + <b>test-mount</b> a never-before-approved server, reusing the Phase-2 <code>ConsentRegistry</code>/<code>data-confirm</code> wire for its first real caller), and <b>Memory</b> (upload→ingest, <b>fork-3 confined</b> to a server-minted <code>fileId</code> — the browser never sends a filesystem path — plus a recall search box). No new engine logic anywhere; the wizard and the 3 tabs are new callers onto the agent-builder, crew-builder, provisioning and memory engines.",nodes:["libweb","builder","cbuilder","mcp","mem","run"],edges:[["server","libweb"],["libweb","builder"],["libweb","mcp"],["libweb","mem"],["libweb","run"]]},
+    {t:"And now a chat <b>remembers</b>. Slice 30b <b>Phase 6</b> closes chat's \"stateless per request\" gap. <code>POST /api/chat</code> now <b>persists at both turn boundaries</b> into a new <code>SessionStore</code> (<code>src/session/</code>, <code>bun:sqlite</code>, mirroring the memory store's WAL + migration-runner idioms): the <b>client-minted <code>sessionId</code></b> is upserted and the user message appended <b>before</b> any engine work, the assistant message only <b>after</b> the turn resolves (with its degraded flag + runId) — every write an <b><code>INSERT OR IGNORE</code></b>, so a retried request is a safe no-op, never a constraint throw. Orthogonally, each finished turn <b>recalls space-wide across every session</b> (<code>injectRecall</code>, the new <code>chat</code> memory space, no namespace) and <b>fire-and-forget auto-ingests</b> its own text back (<code>rememberOnce</code>, content-hash-deduped, never awaited) — so an earlier conversation's facts can surface in a new one. A <b>Sessions sidebar</b> lists/reopens/renames/deletes/exports past chats over a plain <code>/api/sessions</code> REST surface; a <b>web-only</b> notifier polls the existing <code>/api/runs</code> to toast a long run's completion — zero new server routes or telemetry.",nodes:["server","session","mem","web"],edges:[["server","session"],["server","mem"],["session","disk"]]},
+    {t:"And now it <b>listens, in the browser</b>. Slice 30b <b>Phase 7</b> ships hands-free <b>dictation</b> — the promise §23 explicitly deferred to a real <code>getUserMedia</code> + <code>keydown</code>/<code>keyup</code> gesture. A mic button in the composer offers <b>hold-to-talk</b> (buffer until release) or <b>tap-to-toggle</b> (a Silero-VAD-gated segmenter closes/reopens per speech/silence cycle); an <code>AudioWorklet</code> downsamples to 16kHz mono and hands frames to a dedicated Web Worker running <b>transformers.js</b>'s own Moonshine ASR + Silero VAD pipeline. <b>D1 overrides the parent spec's D8</b>: sherpa-onnx ships no browser package, so Phase 7 reuses the ONNX runtime already in the tree instead of building a second one — the <code>VoiceFrames</code> contract + <code>voice.transcribe</code> span vocabulary carry over from the CLI's §23 unchanged. The transcript lands in the Composer's own <code>value</code> state exactly where a typed character would — <code>sendMessage</code> is byte-for-byte untouched (D2): no TTS, no barge-in, no interrupting an in-flight turn. Proven by a <b>real-Chromium, fake-audio Vitest-browser-mode e2e</b> that caught <b>three</b> integration bugs no mocked unit test could see, and by <b>D10</b> landing on Rung 1 — the existing COOP/COEP header already satisfies the model download + WASM run, confirmed empirically, no isolation-header change needed.",nodes:["web","voiceweb","voice","contracts"],edges:[["web","voiceweb"],["voiceweb","voice"],["voiceweb","contracts"]]},
+    {t:"And now the browser <b>reports back, and reads well</b>. Slice 30b <b>Phase 8</b> — the 30b finale — ships the repo's first CLIENT-originated telemetry: a closed voice segment's <code>onFinal</code> fires a best-effort <code>sendBeacon</code> to a new <code>POST /api/telemetry</code>, whose handler verifies the body-carried token <b>timing-safe first</b> (a beacon can't set headers, so the usual bearer header doesn't apply — the token rides the JSON body instead, never a leaky <code>?k=</code> query param), then validates a <code>TelemetryEventSchema</code> discriminated union and opens a <code>voice.transcribe.web</code> span — always acking <b>204</b> so a dropped beacon or a transient span-write failure never surfaces as an error. Alongside it, the whole UI closes out <b>WCAG 2.1 AA</b>: one app-wide <code>:focus-visible</code> ring, real labels, live <code>aria-pressed</code>/<code>aria-label</code>s, a shared roving-tabindex tab pattern, <code>useReducedMotion</code> for JS-driven pan/zoom, and a <code>vitest-axe</code> regression net across six areas that caught — and fixed, in the same task — a real pre-existing gap. A <code>chat.run</code> root span (D9) also now classifies a chat turn correctly as <code>Chat</code>, not <code>Agent</code>, closing the false-positive completion toast Phase 6 introduced.",nodes:["voiceweb","server","contracts","tel","web"],edges:[["voiceweb","server"],["server","contracts"],["server","tel"]]},
+    {t:"And now the engine <b>stays up as a daemon</b>. Slice 24 turns the foreground, request-scoped server into a long-lived <b>daemon with a persistent job queue at its heart</b>: an HTTP call (<code>POST /api/jobs</code>) <b>enqueues</b> a job and returns <code>202 {jobId, runId}</code> — a <b>bounded worker pool</b> inside the daemon runs it <b>detached</b> from any connection, and because the run dir <b>is</b> <code>job.runId</code> a client can disconnect and reconnect to <code>GET /api/runs/:id/stream</code> to collect output. Jobs persist in SQLite and <b>survive restart</b>: <code>claimNext</code> is an atomic <code>BEGIN IMMEDIATE</code> priority-then-FIFO claim (no two workers ever take the same row), <code>markFailed</code> re-queues with full-jitter backoff, and on boot <code>reconcileOrphans()</code> runs <b>FIRST</b> — before the pool can claim — turning crash-left runs into <code>Interrupted</code>, or re-queuing a <b>durable</b> crew/workflow to <b>resume from a per-node checkpoint</b> (<code>checkpoint.json</code>, atomic temp-write+rename, skips completed nodes with no re-execution). The daemon owns the single pool and injects it into the server (no double-pool on the same DB), and is <b>reachable from anywhere</b> via a pluggable tunnel (Tailscale default) behind a <b>durable root→per-device session token</b> (HMAC, survives restart) and a §7.4 perimeter — loopback-default bind, Host/Origin allowlist (wrong Host → 403 before the token is checked), body caps, run-dir rate limit, SSRF guard. Four capabilities — queue, daemon, resumable jobs, secure remote — ship as one slice.",nodes:["daemon","queue","server","core","run"],edges:[["daemon","queue"],["queue","core"],["daemon","server"],["queue","run"]]}
+  ];
+  var CONCEPTS=[
+    {ct:"Hardware-aware",h:"Live RAM budgeting",p:"Every delegation re-reads reclaimable memory and re-sizes the context window to fit. Models are keyed by name, so agents sharing a model share one resident copy.",f:"min(0.75 × Metal cap, 0.80 × live-free RAM)"},
+    {ct:"Observable by default",h:"OpenTelemetry tracing",p:"A run is a trace; delegations, loads, tool calls, MCP mounts, workflow steps, memory recalls and tokens are spans. Local spans.jsonl feeds the viewer; one env var also streams OTLP to Jaeger / Tempo / Phoenix.",f:"AGENT_OTLP_ENDPOINT → any OSS backend"},
+    {ct:"Safe composition",h:"Delegation guardrails",p:"An AsyncLocalStorage context bounds delegation depth (termination) and caps each return to the consumer's live context. Violations are soft, surfaced as trace events. The workflow engine inherits it for free.",f:"depth ≤ 5 · return ≤ ¼ × num_ctx"},
+    {ct:"Deterministic orchestration",h:"Workflow / DAG engine",p:"A second mode beside the LLM router: a typed graph of agent/tool/branch/map steps with schema-validated data flow you define. Fail-fast with per-step fallback; bounded fan-out; agent steps reuse the same guardrails.",f:"defineWorkflow({ steps }) · bun run flow <name>"},
+    {ct:"Role-based teams",h:"Crews & roles",p:"CrewAI-style teams composed onto the existing engine: members with role/goal/backstory (model chosen live), tasks with typed output + context, run sequential (→ a workflow DAG) or hierarchical (→ orchestrator + manager). No new engine — a thin layer over workflows + guardrails.",f:"defineCrew({ members, tasks, process }) · bun run crew <name>"},
+    {ct:"Semantic memory",h:"Memory / RAG",p:"A two-tier local store — LanceDB vector tables per space + bun:sqlite registry/manifest — with Ollama embeddings loaded weights-only through the Model Manager. A named space binds an embedder to the data; retrieval is dense → optional default-on cross-encoder rerank → a budget-fit pack sized live to the caller's context. Citation-tagged with explicit abstention.",f:"space embedder ⊥ chat model · inject ≤ fraction × num_ctx"},
+    {ct:"Grounded &amp; trustworthy",h:"Verification",p:"Opt-in --verify checks an answer against its own cited evidence before it's shown: decompose into claims → parse [mem:id] citations deterministically → fetch those chunks → judge each claim with a fine-tuned faithfulness checker (bespoke-minicheck), not a general-LLM prompt. Citations are load-bearing — uncited ⇒ abstain. Below threshold, one bounded CRAG corrective retries; still weak ⇒ the run abstains rather than present it. A verifier is just another step.",f:"faithfulness = supported / claims ≥ 0.9 · else CRAG → abstain"},
+    {ct:"Provisioned deliberately",h:"First-boot provisioning",p:"A fresh machine goes from zero models to a working setup without manual pulls: detect the host → discover models that fit (dynamic per-runtime catalog query + committed-snapshot fallback) → per-model consent (recommended pre-selected) → download through a runtime-agnostic DownloadProvider with a live bar, guarded by disk-preflight, stall-watchdog and jittered retry. Consent-before-pull and degrade-never-crash throughout. Ollama is live-verified end-to-end; LM Studio / llama.cpp / MLX ship contract-tested with live-verify deferred.",f:"detect → fit → consent → download + verify · bun run provision"},
+    {ct:"Mounted deliberately",h:"MCP registry & starter pack",p:"Integrations are declared in mcp.json (standard mcpServers format + one agents extension), not hardcoded: stdio or Streamable-HTTP servers, ${VAR} expansion with keyed entries dormant until set, per-entry degrade-never-silently. Mounting is consent-gated — the exact command is shown, approved once, and the server's tool definitions are hash-pinned so any later change (spec or tools) re-prompts: the rug-pull defense. A curated 12-entry capability-tagged pack is the palette the future agent-builder suggests from.",f:"consent → mount → pin → {forAgent | merged} · bun run mcp add <name>"},
+    {ct:"Self-extending",h:"Agent-builder",p:"A capability gap becomes a new specialist: an LLM drafts an agent (description + prompt + a minimal pack-only tool set), validates it structurally, and — only on consent — writes agents/<name>.ts + a registry entry + a scoped mcp.json, live next run. Review-before-activate, palette-only tools, no same-run activation; new tool code is proposed as an inert .proposal.ts for review, never run in-session. Generation uses generateText+extract+zod (local models don't emit strict JSON). Agent-only here; the crew/workflow builder (Slice 19) composes these one level up.",f:"gap | need → generate → suggest → validate → consent → write · bun run agent-builder"},
+    {ct:"Self-extension ·²",h:"Compose, don't just generate",p:"One level up from the agent-builder: a multi-step need becomes a whole crew or workflow, not just one agent. The model emits a small, validatable declarative IR (safe-helper closures only, never arbitrary code) which is deterministically transpiled to defineCrew/defineWorkflow TS — missing member agents are auto-built first, on consent. A generated crew has been live-verified executing end-to-end.",f:"need → IR → validate(2-tier) → transpile → crew | workflow"},
+    {ct:"Verified out of the box",h:"Stage → verify → commit",p:"A generated agent/crew/workflow is no longer trusted on structure alone. It's staged unregistered, dry-run for real (wall-clock-bounded, ≤2 repair attempts feeding the real error back), then behaviorally golden-eval'd by the largest-local model (a different family than the generator, preferred). Only a pass registers it + writes a .generated.json manifest; a cosine reuse-check skips near-duplicates first; no capable judge (or one that won't load) degrades to verified:runs, never crashes. Live-verified on Ollama end-to-end.",f:"reuse ≥0.85 · dry-run + golden-eval → commit@level · else discard"},
+    {ct:"Degrade, never crash",h:"Reliability: degradation + retries",p:"A dead dependency — a downed MCP server, an unavailable runtime, a model that won't load — drops that agent or step and TELLS THE USER, instead of sinking the run. Failures are classified into three lanes (Transient → backoff-retry the ops we own; RouteWorthy → degrade/fallback; Terminal → fail fast). A hand-rolled circuit breaker keeps one flaky MCP server from stalling a crew; a failure-domain degrade chain never falls back to a model behind the same dead daemon. Every degrade/drop/retry lands in a per-run ledger — printed, persisted to degradation.jsonl, and traced. The LLM turn is never double-retried (the AI SDK already does). Live-verified on real Ollama.",f:"classify → retry | degrade | breaker · ledger → runs/<id>/degradation.jsonl"},
+    {ct:"Any runtime, one interface",h:"Managed runtimes + live remote auth",p:"MLX, LM Studio and llama.cpp now sit behind one supervised OpenAI-compatible interface — a process supervisor spawns/health-polls/kills the child on a fresh free port per relaunch, and each runtime's strategy exposes load-time dynamic context (relaunch · reload · fixed) so LM Studio and llama.cpp are full inference runtimes, not just downloads. Remote MCP servers get the same completion on the auth side: live OAuth — DCR/CIMD + PKCE + browser-loopback + a 0600 token store — finishes the handshake inside mountMcpServer so a second run reconnects with no browser prompt.",f:"createManagedRuntime(strategy) · relaunch|reload|fixed · DCR+PKCE+loopback → 0600 tokens"},
+    {ct:"Sees, hears &amp; creates",h:"Full multimodal I/O",p:"Vision/audio/video in and image/speech/video out, on one rule: raw bytes never cross the router or the z.string() delegation boundary. A run-scoped store mints an opaque handle (img_1/aud_1/vid_1) and only a [img:h] marker travels; the specialist resolves it to an AI-SDK v6 FilePart at the last moment. Input = qwen2.5vl vision + mlx-whisper STT + ffmpeg frames; generation = a MediaGenerator (one-shot|server jobs) driving mflux / Kokoro / LTX. The gen MODEL is now hardware-adaptive (Slice 28): selectGenModel picks the largest-that-fits by footprint from a candidate ladder — a selector parallel to the main picker — and runGenJob makes the one-shot↔server degrade reachable. Uncensored is default-on via two orthogonal mechanisms (model eligibility + safety-checker disable); voice-clone consent stays separate. Live-verified end-to-end: image + speech rendered, video degrades to the scales-on-a-bigger-box case.",f:"handle markers → resolve → v6 FilePart · selectGenModel fits · bun run setup:media"},
+    {ct:"Voice, input only",h:"Speak to it — local STT voice input",p:"A mature OSS STT library — sherpa-onnx's moonshine-tiny — transcribes an utterance and splices the text onto the chat prompt, exactly like --audio's transcript-splice. --voice is an interactive tap-to-toggle mic capture: ffmpeg's silencedetect filter auto-stops on the first pause after speech was heard (not a VAD model), or space/enter/ctrl-c stops manually; --voice-in <path> transcribes a file instead. Transcription sits behind its own execution seam — in-process (the sherpa-onnx-node addon) by default, AGENT_VOICE_EXEC=subprocess as an escape hatch whose wall-clock timeout is actually enforceable (the in-process decode() call blocks the event loop, so its timer can't fire). Voice-out, barge-in and streaming are explicitly out of scope here — sherpa-onnx ships a browser-WASM build of the same recognizer, so Slice 30's browser UI reuses this exact capture⟷transcribe split with real getUserMedia echo cancellation.",f:"captureFromMic|File → Transcriber(inprocess|subprocess) → splice · --voice / --voice-in <path>"},
+    {ct:"Long-lived & operable",h:"Safe under concurrency, and operable",p:"Slice 30a (production foundation) turned the engine from 'one run per process that exits when done' into a long-lived host that runs many concurrent, cancellable runs safely: per-run telemetry routing instead of a cross-contaminating global-provider swap, collision-free run ids, a wall-clock timeout that actually cancels work via AbortSignal, signal-clean shutdown of every spawned child through one process registry, sqlite WAL + an embedder-mismatch guard, schema migrations, and an admission mutex around model loading. It also gained an ops surface to match: bun run status/usage/config/start, structured run-id-stamped logs, a top-level error boundary, and the project's first CI pipeline.",f:"run-router.ts · run-id.ts · child-registry.ts · lifecycle.ts · db/migrate.ts · log/logger.ts · config/schema.ts"},
+    {ct:"Local, in the browser",h:"Web UI over a thin, guarded BFF",p:"Slice 30b adds a browser UI without trusting the browser: a per-session bearer token + Host/Origin allowlist + media-path confinement gate every /api request BEFORE any engine call (localhost ≠ trusted), and COOP/COEP cross-origin-isolate the page for the future voice WASM. An isomorphic src/contracts/ Zod layer (zod-only, server ⨝ browser) is the one wire truth. Phase 2 streams a real chat: POST /api/chat runs the same runChatSession the CLI does — over a lazily-built engine, no model work at boot — and streams the top-level orchestrator's answer token-by-token over an SSE UI-message stream, while transient data-* parts drive a live agent/model rail. The browser's Stop aborts the fetch → req.signal → withWallClock actually cancels the run. Conversation basics (copy/regenerate/edit-resend/feedback/inline consent/drag-drop upload) all ship; chat is stateless per request — persistence is Phase 6, the Runs waterfall is Phase 3.",f:"perimeter → token → SSE(text-delta + data-*) · req.signal → AbortSignal cancels · stateless per request"},
+    {ct:"Observability, made visual",h:"The run trace, as a live waterfall",p:"Every run has always been an OpenTelemetry trace on disk; Slice 30b Phase 3 makes it legible in the browser. mapRunToDto flattens spans.jsonl into offset-stamped SpanDTOs (server-validated by RunDtoSchema — a malformed projection fails on the server, never on the wire) and a shared runRootSummary reads a run's lifecycle/duration/outcome name-agnostically across agent.run/crew.run/workflow.run, so the list and detail views can never disagree. The list is cursor-paginated and fronted by an mtime(spans.jsonl)-keyed cache; a detail view renders the span tree as an @visx Gantt waterfall and, for a running trace, GET /api/runs/:id/stream tails new spans over resumable SSE so the bars fill in live. Read-only, stateless per request — a persisted run index is Phase 6.",f:"spans.jsonl → mapRunToDto → SpanDTO waterfall · live via /stream SSE (Last-Event-ID resumable)"},
+    {ct:"Composed, watched live",h:"Browse · run · watch the step-DAG",p:"Slice 30b Phase 4 makes the Crews and Workflows nav areas real: browse both registries via JSON-safe DTOs — a workflow's edges are derived via effectiveDeps verbatim, so the browser's DAG can never disagree with the engine — launch a run with one fire-and-watch POST that returns {runId} immediately while the run proceeds detached, and watch the step/task graph light up live on run-detail, inherited free from Phase 3 since a crew/workflow run emits the same crew.run/workflow.run root span the Runs browser already reads. One reusable @xyflow DagView renders both a workflow step-graph and a crew task-graph (or a hierarchical crew's manager→members delegation star); Amendment A resolves the graph from launch-time search params for t=0 visibility, with a cold-open span-scan fallback for runs opened from the Runs list.",f:"POST .../:id/run → {runId} (detached) · DagView(crewGraph|workflowGraph) + stepStatusOverlay(spans)"},
+    {ct:"Every engine, in the browser",h:"Builders + Library",p:"Two structural insights carry the whole phase: the model-pull progress bridge needs no new stream — each tick is its own short-lived model.pull.progress child span, so the existing /api/runs/:id/stream surfaces it live — and the MCP test-mount consent gate needs no new consent mechanism, reusing the Phase-2 ConsentRegistry/data-confirm wire for its first real caller. A guided agent/crew/workflow build streams narration over SSE with mid-flow consent (fail-closed DECLINE on an abandoned ask); the Library shell's Models/MCP/Memory tabs are new callers onto the agent-builder, crew-builder, provisioning and memory engines — no new business logic anywhere.",f:"agent.build|crew.build→Build · model.pull→Pull · child-span bridge · data-confirm reused"},
+    {ct:"Remembers across turns",h:"Persistence &amp; recall",p:"Slice 30b Phase 6 closes chat's \"stateless per request\" gap. A client-minted sessionId is upserted and every turn appended into a new bun:sqlite SessionStore (src/session/, mirroring the memory store's factory-closure + WAL + user_version migration-runner idioms) — the user message before the stream, the assistant message after it resolves, each write an INSERT OR IGNORE so a retried request is a safe no-op. Orthogonally, chat gains cross-session recall: injectRecall reads a new space-wide chat memory space (no namespace) so an earlier conversation can inform a new one, and rememberOnce fire-and-forget auto-ingests each finished turn (content-hash-deduped, never awaited). A Sessions sidebar reopens/renames/deletes/exports past chats over a plain /api/sessions REST surface; a web-only notifier polls the existing /api/runs to toast long-run completion, adding zero server routes or telemetry.",f:"client sessionId → INSERT OR IGNORE upsert/append · injectRecall(chat space) + rememberOnce auto-ingest"},
+    {ct:"Voice, input only ·²",h:"Dictation in the browser — one runtime, two gestures",p:"Slice 30b Phase 7 completes what CLI voice (§23) explicitly deferred: hands-free dictation with real getUserMedia echo cancellation and a real hold-to-talk gesture. A composer-mounted mic button offers hold-to-talk (buffer until release) or tap-to-toggle (a Silero-VAD-gated segmenter); an AudioWorklet downsamples to 16kHz mono for a Web Worker running transformers.js's own Moonshine ASR + Silero VAD — one ONNX runtime, not a second one (D1 overrides the parent spec's sherpa-onnx D8). The transcript lands in the Composer's own value state — sendMessage stays byte-for-byte untouched (D2): no TTS, no barge-in, no interrupting an in-flight turn. Client-side only, no server route. Verified by a real-Chromium fake-audio browser-mode e2e that caught three integration bugs no mocked unit test could see, and by D10's Rung-1 outcome confirmed empirically — no isolation-header change needed.",f:"getUserMedia→AudioWorklet→Worker(Moonshine+Silero) → composer.value · D1: transformers.js overrides sherpa-onnx · live e2e caught 3 bugs"},
+    {ct:"Reports back, reads well",h:"Client telemetry + accessibility (the 30b finale)",p:"Phase 8 closes Slice 30b with the repo's first browser-originated telemetry — a closed voice segment's sendBeacon to POST /api/telemetry, body-token authenticated (never a URL param, which would leak via history/proxy logs), always acking 204 so a dropped beacon or a transient span-write failure never surfaces as an error — and WCAG 2.1 AA coverage across the UI: a shared :focus-visible ring + roving-tabindex tab pattern + useReducedMotion for JS-driven pan/zoom, backed by a vitest-axe regression net across six areas that caught (and fixed) a real pre-existing gap. A chat.run root span (D9) also now classifies a chat turn as Chat, not Agent, closing a false-positive completion toast Phase 6 introduced.",f:"sendBeacon → body-token verifyToken → TelemetryEventSchema → voice.transcribe.web (204 always) · vitest-axe: 0 violations / 6 areas"},
+    {ct:"Always-on &amp; resumable",h:"Daemon + durable job queue",p:"Slice 24 turns the run-once foreground server into a long-lived daemon with a persistent SQLite job queue at its heart. POST /api/jobs enqueues and returns 202 {jobId, runId}; a bounded worker pool runs the job detached from any connection, so a client can disconnect and reconnect to /api/runs/:id/stream. claimNext is an atomic BEGIN IMMEDIATE priority-then-FIFO claim (no two workers ever take the same row); markFailed re-queues with full-jitter backoff; on boot reconcileOrphans() runs FIRST, turning crash-left runs into Interrupted or re-queuing a durable crew/workflow to resume from a per-node checkpoint (atomic temp-write+rename, skips completed nodes with no re-execution). The daemon owns the single pool and injects it into the server (no double-pool on the same DB). Reachable from anywhere via a pluggable tunnel (Tailscale default) behind a durable root→per-device session token (HMAC, survives restart) and a §7.4 perimeter — loopback-default bind, Host/Origin allowlist, body caps, run-dir rate limit, SSRF guard.",f:"POST /api/jobs → 202 {jobId,runId} · claimNext BEGIN IMMEDIATE · reconcileOrphans FIRST → checkpoint resume · root→session token · agent daemon start"}
+  ];
+
+  var byId={}; NODES.forEach(function(n){byId[n.id]=n;});
+  var SVGNS="http://www.w3.org/2000/svg";
+  var edgeG=document.getElementById("edgeG"), hitG=document.getElementById("hitG"), edgeMap={};
+  var etip=document.getElementById("etip");
+
+  EDGES.forEach(function(e){
+    var a=byId[e[0]],b=byId[e[1]],dx=b.x-a.x,dy=b.y-a.y,len=Math.hypot(dx,dy)||1,ix=dx/len,iy=dy/len;
+    var sx=a.x+ix*34,sy=a.y+iy*30,ex=b.x-ix*40,ey=b.y-iy*34,my=sy+(ey-sy)*0.5;
+    var d="M"+sx+","+sy+" C"+sx+","+my+" "+ex+","+my+" "+ex+","+ey;
+    var p=document.createElementNS(SVGNS,"path");
+    p.setAttribute("d",d);p.setAttribute("class","edge"+(e[2]==="emit"?" emit":""));p.setAttribute("marker-end","url(#ah)");
+    edgeG.appendChild(p);
+    var hit=document.createElementNS(SVGNS,"path");hit.setAttribute("d",d);hit.setAttribute("class","hit");
+    hit.addEventListener("mouseenter",function(ev){if(tour.on||selId)return;p.classList.add("hot");showTip(ev,a.nm+" → "+b.nm,e[3]);});
+    hit.addEventListener("mousemove",function(ev){moveTip(ev);});
+    hit.addEventListener("mouseleave",function(){p.classList.remove("hot");hideTip();});
+    hitG.appendChild(hit);
+    edgeMap[e[0]+">"+e[1]]={path:p};
+  });
+  function showTip(ev,head,why){etip.innerHTML='<span class="ef">'+head+'</span><br>'+why;etip.style.opacity="1";moveTip(ev);}
+  function moveTip(ev){etip.style.left=(ev.clientX+14)+"px";etip.style.top=(ev.clientY+14)+"px";}
+  function hideTip(){etip.style.opacity="0";}
+
+  var nodesEl=document.getElementById("nodes"), nodeEls={};
+  NODES.forEach(function(n){
+    var b=document.createElement("button");b.className="node "+n.kind;b.style.left=n.x+"px";b.style.top=n.y+"px";
+    b.innerHTML='<span class="tier"></span><span class="nm"></span><span class="pt"></span>';
+    b.querySelector(".nm").textContent=n.nm;b.querySelector(".pt").textContent=n.pt;
+    b.setAttribute("aria-label",n.nm+" — "+n.pt);
+    b.addEventListener("mouseenter",function(){if(!selId&&!tour.on)highlight(n.id);});
+    b.addEventListener("mouseleave",function(){if(!selId&&!tour.on)clearHi();});
+    b.addEventListener("click",function(ev){ev.stopPropagation();if(tour.on)return;select(n.id);});
+    nodesEl.appendChild(b);nodeEls[n.id]=b;
+  });
+
+  function neighbors(id){var ins=[],outs=[];EDGES.forEach(function(e){if(e[0]===id)outs.push([e[1],e[3]]);if(e[1]===id)ins.push([e[0],e[3]]);});return{ins:ins,outs:outs};}
+  function highlight(id){
+    var nb=neighbors(id),keep={};keep[id]=1;nb.ins.concat(nb.outs).forEach(function(x){keep[x[0]]=1;});
+    NODES.forEach(function(n){var el=nodeEls[n.id];el.classList.toggle("dim",!keep[n.id]);el.classList.toggle("neighbor",keep[n.id]&&n.id!==id);});
+    EDGES.forEach(function(e){var on=e[0]===id||e[1]===id;var p=edgeMap[e[0]+">"+e[1]].path;p.classList.toggle("hot",on);p.classList.toggle("dim",!on);});
+  }
+  function clearHi(){NODES.forEach(function(n){nodeEls[n.id].classList.remove("dim","neighbor","tour");});EDGES.forEach(function(e){var p=edgeMap[e[0]+">"+e[1]].path;p.classList.remove("hot","dim");});}
+
+  var selId=null,panel=null;
+  function select(id){selId=id;NODES.forEach(function(n){nodeEls[n.id].classList.toggle("sel",n.id===id);});highlight(id);openPanel(id);}
+  function deselect(){selId=null;NODES.forEach(function(n){nodeEls[n.id].classList.remove("sel");});clearHi();if(panel){panel.remove();panel=null;}}
+  document.getElementById("stage").addEventListener("click",function(){if(!tour.on)deselect();});
+
+  function relList(arr,arrow){if(!arr.length)return '<div class="empty">none</div>';
+    return arr.map(function(x){return '<button data-go="'+x[0]+'"><span class="ar">'+arrow+'</span> '+byId[x[0]].nm+' <span class="why">— '+x[1]+'</span></button>';}).join("");}
+  function openPanel(id){
+    if(panel)panel.remove();var n=byId[id],nb=neighbors(id);
+    panel=document.createElement("div");panel.className="panel";
+    panel.innerHTML='<button class="pclose" aria-label="Close">×</button>'+
+      '<span class="pkind">'+(n.kind==="spine"?"Run spine":"Supporting")+'</span>'+
+      '<h2>'+n.nm+'</h2><div class="ppath">'+n.pt+'</div>'+
+      '<div class="pwhat">'+n.what+'</div>'+
+      (n.mech?'<div class="mech">'+n.mech+'</div>':'')+
+      '<div class="lbl">Files</div><div class="files">'+n.files.map(function(f){var hl=f.indexOf("guardrails")>=0||f.indexOf("engine")>=0||f.indexOf("store.ts")>=0;return '<span class="f'+(hl?" hl":"")+'">'+f+'</span>';}).join("")+'</div>'+
+      '<div class="lbl">Depends on</div><div class="rel">'+relList(nb.outs,"→")+'</div>'+
+      '<div class="lbl">Used by</div><div class="rel">'+relList(nb.ins,"←")+'</div>';
+    panel.addEventListener("click",function(e){e.stopPropagation();});
+    panel.querySelector(".pclose").addEventListener("click",deselect);
+    panel.querySelectorAll("[data-go]").forEach(function(btn){btn.addEventListener("click",function(){select(btn.getAttribute("data-go"));});});
+    document.getElementById("stage").appendChild(panel);
+  }
+
+  document.getElementById("concepts").innerHTML=CONCEPTS.map(function(c){
+    return '<div class="ccard"><span class="ct">'+c.ct+'</span><h3>'+c.h+'</h3><p>'+c.p+'</p><div class="formula">'+c.f+'</div></div>';
+  }).join("");
+
+  // tour
+  var tour={on:false,i:0};
+  var tourBar=document.getElementById("tourBar"),tnum=document.getElementById("tnum"),ttext=document.getElementById("ttext"),tprog=document.getElementById("tprog");
+  function startTour(){deselect();tour.on=true;tour.i=0;tourBar.classList.add("on");document.getElementById("traceBtn").textContent="▶ Tracing…";renderTour();}
+  function endTour(){tour.on=false;tourBar.classList.remove("on");document.getElementById("traceBtn").textContent="▶ Trace a run";clearHi();}
+  function renderTour(){
+    var s=TOUR[tour.i];clearHi();
+    var keep={};s.nodes.forEach(function(id){keep[id]=1;});
+    NODES.forEach(function(n){nodeEls[n.id].classList.toggle("dim",!keep[n.id]);nodeEls[n.id].classList.toggle("tour",!!keep[n.id]);});
+    EDGES.forEach(function(e){edgeMap[e[0]+">"+e[1]].path.classList.add("dim");});
+    s.edges.forEach(function(pair){var p=edgeMap[pair[0]+">"+pair[1]];if(p){p.path.classList.remove("dim");p.path.classList.add("hot");}});
+    tnum.textContent="Step "+(tour.i+1)+" / "+TOUR.length;ttext.innerHTML=s.t;tprog.textContent=(tour.i+1)+" of "+TOUR.length;
+    document.getElementById("tprev").disabled=tour.i===0;
+    document.getElementById("tnext").textContent=tour.i===TOUR.length-1?"Done":"Next";
+  }
+  document.getElementById("traceBtn").addEventListener("click",function(){tour.on?endTour():startTour();});
+  document.getElementById("tnext").addEventListener("click",function(){if(tour.i<TOUR.length-1){tour.i++;renderTour();}else{endTour();}});
+  document.getElementById("tprev").addEventListener("click",function(){if(tour.i>0){tour.i--;renderTour();}});
+  document.getElementById("texit").addEventListener("click",endTour);
+
+  // pan + zoom
+  var canvas=document.getElementById("canvas"),stage=document.getElementById("stage");
+  var tx=0,ty=0,scale=1;
+  function fit(){var r=stage.getBoundingClientRect();scale=Math.min(1,(r.width-32)/1060);tx=(r.width-1060*scale)/2;ty=14;apply();}
+  function apply(){canvas.style.transform="translate("+tx+"px,"+ty+"px) scale("+scale+")";}
+  var dragging=false,px=0,py=0;
+  stage.addEventListener("pointerdown",function(e){if(e.target.closest(".node")||e.target.closest(".panel")||e.target.closest(".controls")||e.target.closest(".tour-bar")||e.target.classList.contains("hit"))return;dragging=true;px=e.clientX;py=e.clientY;stage.classList.add("drag");stage.setPointerCapture(e.pointerId);});
+  stage.addEventListener("pointermove",function(e){if(!dragging)return;tx+=e.clientX-px;ty+=e.clientY-py;px=e.clientX;py=e.clientY;apply();});
+  stage.addEventListener("pointerup",function(){dragging=false;stage.classList.remove("drag");});
+  stage.addEventListener("wheel",function(e){e.preventDefault();var r=stage.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,ns=Math.min(2,Math.max(.4,scale*(e.deltaY<0?1.1:0.9)));tx=mx-(mx-tx)*(ns/scale);ty=my-(my-ty)*(ns/scale);scale=ns;apply();},{passive:false});
+  function zoomBtn(f){var r=stage.getBoundingClientRect(),mx=r.width/2,my=r.height/2,ns=Math.min(2,Math.max(.4,scale*f));tx=mx-(mx-tx)*(ns/scale);ty=my-(my-ty)*(ns/scale);scale=ns;apply();}
+  document.getElementById("zin").addEventListener("click",function(){zoomBtn(1.2);});
+  document.getElementById("zout").addEventListener("click",function(){zoomBtn(0.8);});
+  document.getElementById("zreset").addEventListener("click",function(){if(tour.on)endTour();deselect();fit();});
+  window.addEventListener("resize",function(){if(!document.getElementById("mapView").hidden)fit();});
+
+  /* ═══════════ TERMINAL MODE ═══════════ */
+  // Each scenario: a command + ordered steps. A step = terminal line(s) + the
+  // subsystem it exercises + the real calculation behind it. Data-driven so new
+  // flows/steps are just entries here — this mock evolves with the product.
+  var NB="<span class='n'>", NE="</span>";
+  var SCEN={
+    chat:{cmd:'chat "summarize research.pdf and cite the key claims"',steps:[
+      {sub:"cli",ts:"cli",tx:"build model registry "+NB+"offline"+NE+" · mount MCP tools (read_file, fetch)",
+        what:"The entry point assembles the model registry with no network call (bootstrap ∪ installed ∪ cached catalog) and mounts the MCP tool servers the agents may use.",
+        span:"agent.run"},
+      {sub:"tel",ts:"telemetry",tx:"run "+NB+"agent-71432"+NE+" · trace opened → runs/agent-71432/",
+        what:"A run is one OpenTelemetry trace. The root agent.run span opens now; everything below nests under it and is flushed to spans.jsonl.",
+        span:"agent.run"},
+      {sub:"core",ts:"core",tx:"router (qwen3.5:4b, pinned) → "+NB+"delegate_to_file_qa"+NE,
+        what:"The orchestrator is an agent whose tools are delegate_to_<specialist> wrappers. Routing is just the pinned router model choosing a tool — here, the file-Q&A specialist.",
+        span:"agent.delegation"},
+      {sub:"core",ts:"guardrails",tx:"depth check "+NB+"1 / 5"+NE+" ✓ · recursion allowed",
+        what:"Before descending, the guardrail checks the delegation depth against the termination bound. Depth-only (recursion is allowed); over-depth returns a soft error the router can adapt to.",
+        calc:"depth + 1 ≤ AGENT_MAX_DELEGATION_DEPTH\n<span class='hl'>1 + 1 = 2 ≤ 5</span>  ✓ proceed",
+        span:"agent.delegation"},
+      {sub:"res",ts:"resource",tx:"read live RAM · free "+NB+"12.4 GB"+NE+" of 24 GB",
+        what:"Every delegation re-reads reclaimable memory (vm_stat) — the budget is live, never a frozen startup number.",
+        calc:"budget = min(0.75 × total, 0.80 × live-free)\n       = min(0.75×24, 0.80×12.4)\n       = min(18.0, 9.92) = <span class='hl'>9.92 GB</span>",
+        span:"agent.model.load"},
+      {sub:"res",ts:"resource",tx:"largest-that-fits → "+NB+"qwen3.5:9b"+NE+" (5.8 GB weights)",
+        what:"Pick the largest capability-matching model whose footprint fits the live budget, evicting least-recently-used residents if needed.",
+        calc:"weights(9b, q4) ≈ 5.8 GB ≤ 9.92 ✓\nheadroom = 9.92 − 5.8 = <span class='hl'>4.12 GB</span> for KV",
+        span:"agent.model.load"},
+      {sub:"res",ts:"resource",tx:"size context → num_ctx "+NB+"16384"+NE+" (rounded to 1024)",
+        what:"The context window is sized to the free headroom after weights, using each model's live per-token KV cost (q8_0 KV ≈ half of f16). Never hardcoded.",
+        calc:"maxByFit = ⌊(headroom) / kv_per_tok⌋\n         = ⌊4.12 GB / ~80 KB⌋ ≈ 51k\nnum_ctx = min(desired 16384, modelMax 262144, 51k)\n        = <span class='hl'>16384</span>",
+        span:"agent.model.load"},
+      {sub:"rt",ts:"runtime",tx:"warm qwen3.5:9b @ 16384 · specialist generating…",
+        what:"The runtime port warms the chosen model at the chosen context, then the specialist runs. Its tokens & tool calls nest as spans under the delegation.",
+        span:"ai.generateText"},
+      {sub:"core",ts:"guardrails",tx:"return capped before hand-back",
+        what:"The specialist's answer is capped to a quarter of the caller's live context before returning, so accumulated returns across a deep graph can't blow the window.",
+        calc:"cap = ¼ × num_ctx × 4 chars/token\n    = 0.25 × 16384 × 4 = <span class='hl'>16,384 chars</span>",
+        span:"agent.delegation"},
+      {sub:"run",ts:"run store",tx:"✓ "+NB+"answer.txt"+NE+" + spans.jsonl flushed · "+NB+"bun run runs agent-71432"+NE,
+        what:"Outcome recorded: the human-readable artifact plus the canonical trace. bun run runs <id> rebuilds the whole span tree as a timeline.",
+        span:"agent.run"}
+    ]},
+    crew:{cmd:'bun run crew research-crew "Raft consensus"',steps:[
+      {sub:"cli",ts:"cli",tx:"load crew "+NB+"research-crew"+NE+" · members: researcher → writer",
+        what:"crew.ts loads a defined crew — members carry role/goal/backstory + a capability requirement; tasks carry a description, optional typed output, and dependency context.",
+        span:"crew.run"},
+      {sub:"crew",ts:"crew",tx:"process "+NB+"sequential"+NE+" → compile to workflow DAG",
+        what:"A sequential crew compiles to a Slice-10 workflow DAG (each task → an agent step; deps → context edges). No new engine — it runs on the workflow substrate.",
+        calc:"defineWorkflow({ id: 'research-crew',\n  steps: [researcher, writer(dependsOn: researcher)] })\n→ validated acyclic ✓",
+        span:"workflow.run"},
+      {sub:"res",ts:"resource",tx:"select for "+NB+"researcher"+NE+" · low live budget → qwen3.5:9b",
+        what:"Each member's model is chosen live (largest-that-fits) at its delegation — the same hardware-aware selection as chat, per task.",
+        calc:"budget = min(0.75×24, 0.80×4.9 free) = <span class='hl'>3.92 GB</span>\ngemma-4-12b (7 GB) ✗ → qwen3.5:9b adapts down ✓",
+        span:"crew.task.member"},
+      {sub:"mem",ts:"memory",tx:"researcher output → auto-write "+NB+"space=default ns=research-crew"+NE,
+        what:"When the crew has a memory store, each task's output auto-persists — namespaced by crew id so a crew recalls its own history, not everyone's.",
+        calc:"chunk → embed(qwen3-embedding, 768-d) → upsert\nid = 'research-crew:researcher#<ordinal>'",
+        span:"memory.ingest"},
+      {sub:"mem",ts:"memory",tx:"writer calls "+NB+"recall(\"leader election\")"+NE+" → 4 chunks [mem:…]",
+        what:"The downstream writer member has a recall tool bound to the crew's namespace. It retrieves the researcher's findings semantically, citation-tagged.",
+        calc:"budget = ¼ × num_ctx × 4 = 0.25×16384×4\n       = <span class='hl'>16,384 chars</span> → fit top-ranked 4",
+        span:"memory.recall"},
+      {sub:"crew",ts:"crew",tx:"✓ writer done · "+NB+"crew.run → workflow.step → agent.delegation"+NE+" traced",
+        what:"The crew outcome is recorded with the same trace shape as any run; bun run runs shows crew.run over per-member workflow steps.",
+        span:"crew.run"}
+    ]},
+    ingest:{cmd:'bun run memory ingest kb.md --space docs',steps:[
+      {sub:"cli",ts:"cli",tx:"open store "+NB+"memory/"+NE+" · resolve space "+NB+"docs"+NE,
+        what:"The memory CLI opens the two-tier store (LanceDB dir + bun:sqlite). A space is a named, independently-persisted collection.",
+        span:"memory.ingest"},
+      {sub:"mem",ts:"memory",tx:"space "+NB+"docs"+NE+" is new → record embedder + probe dims",
+        what:"On first write a space records its embedder + vector dim in sqlite — this becomes authoritative. The embedder is bound to the DATA, so later runs recall correctly whatever chat model is chosen.",
+        calc:"probe /api/show → embedding_length = <span class='hl'>768</span>\nSpaceMeta{ embedModel: qwen3-embedding:0.6b,\n  embedDim: 768, chunkCapTokens: 2048 }",
+        span:"memory.ingest"},
+      {sub:"mem",ts:"memory",tx:"dedupe by content hash · "+NB+"new"+NE+" → chunk",
+        what:"The (space,source)-scoped manifest skips unchanged files. New content is split by semantic chunking, capped live to the embedder's max input.",
+        calc:"sha256(file) ∉ manifest(space=docs) → ingest\nchunk cap = 2048 tok × 4 = <span class='hl'>8192 chars</span>",
+        span:"memory.ingest"},
+      {sub:"res",ts:"resource",tx:"load embedder "+NB+"weights-only"+NE+" via Model Manager (no generate-warm)",
+        what:"The embedder loads through the same Model Manager as chat models, but weights-only: it has no KV cache and is loaded by the embed call itself — never warmed via /api/generate.",
+        calc:"footprint.kvBytesPerToken = <span class='hl'>0</span>\nrole = 'embedder' → skip generate-warm; /api/embed loads it",
+        span:"memory.embed"},
+      {sub:"mem",ts:"memory",tx:"embed 14 chunks → "+NB+"LanceDB upsert"+NE+" · manifest recorded",
+        what:"Chunks are embedded in a batch and upserted into the space's LanceDB table; the sqlite manifest records the file hash + chunk count for future dedupe.",
+        span:"memory.ingest"},
+      {sub:"disk",ts:"on-disk",tx:"✓ ingested "+NB+"14 chunk(s)"+NE+" → memory/lance/docs.lance + memory.db",
+        what:"The store is plain on-disk data (git-ignored): a LanceDB table per space plus the sqlite registry/manifest.",
+        span:"memory.ingest"}
+    ]},
+    recall:{cmd:'bun run memory recall "how is a leader chosen" --space docs',steps:[
+      {sub:"cli",ts:"cli",tx:"resolve space "+NB+"docs"+NE+" → use its recorded embedder",
+        what:"Recall loads the space's authoritative embedder from sqlite — NOT the global default — so the query is embedded in the same vector space as the stored data.",
+        calc:"SpaceMeta(docs).embedModel = <span class='hl'>qwen3-embedding:0.6b</span> (768-d)",
+        span:"memory.recall"},
+      {sub:"mem",ts:"memory",tx:"embed query · guard "+NB+"dim 768 == 768"+NE+" ✓",
+        what:"The query is embedded and its dimension is asserted against the table. A mismatch is a hard error (never silent garbage) — the guarantee behind embedder⊥chat-model.",
+        calc:"vector.length (768) === space.embedDim (768) ✓\nelse → throw MemoryError",
+        span:"memory.recall"},
+      {sub:"mem",ts:"memory",tx:"dense search → "+NB+"top 24"+NE+" candidates (LanceDB, cosine)",
+        what:"LanceDB returns the nearest chunks by vector distance (v1 is dense-only; hybrid BM25 fusion is a wired-in follow-up). Candidate pool = 4× the top-k ceiling.",
+        calc:"limit = topK × 4 = 6 × 4 = <span class='hl'>24</span>  (best-first by _distance)",
+        span:"memory.recall"},
+      {sub:"mem",ts:"memory",tx:"cross-encoder rerank "+NB+"default-on"+NE+" (Xenova/bge-reranker-base)",
+        what:"A transformers.js cross-encoder re-scores each [query, chunk] pair and reorders by true relevance. It runs in-process; if it fails it degrades gracefully to the dense order (recall never crashes).",
+        calc:"score each pair → sort desc\ntry { rerank } catch → keep dense order (degrade)",
+        span:"memory.recall"},
+      {sub:"mem",ts:"memory",tx:"budget-fit → pack "+NB+"5 chunks"+NE+" tagged [mem:kb.md#…]",
+        what:"Top-ranked chunks are packed until the live injection budget — a fraction of the delegation's context window — is spent, capped at top-k. Fewer come back under a tight window.",
+        calc:"budget = AGENT_MEMORY_CTX_FRACTION × num_ctx × 4\n       = 0.25 × 16384 × 4 = <span class='hl'>16,384 chars</span>\npack top-ranked ≤ budget, ≤ topK(6) → 5 returned",
+        span:"memory.recall"},
+      {sub:"tel",ts:"telemetry",tx:"✓ memory.recall span · "+NB+"returned 5 · reranked true"+NE,
+        what:"The recall is one span with its space, candidate/returned counts and rerank outcome — visible in bun run runs alongside the rest of the trace.",
+        span:"memory.recall"}
+    ]},
+    verify:{cmd:'bun run crew research-crew "explain raft leader election" --verify',steps:[
+      {sub:"cli",ts:"cli",tx:"run crew with "+NB+"--verify"+NE+" · opt-in, auto-inserted sub-graph",
+        what:"--verify is opt-in. The compiler splices a verification sub-graph after the crew's terminal answer step (answer→verify→corrective→verify₂→abstain). Without verify deps injected the flag stays inert and the crew compiles exactly as before.",
+        calc:"expandVerification(answerStep) → verify · branch · corrective · verify₂ · abstain",
+        span:"verification.check"},
+      {sub:"ver",ts:"verification",tx:"decompose answer → "+NB+"3 claims"+NE+" (general model)",
+        what:"A general model splits the drafted answer into atomic factual claims — claim TEXTS only. It is deliberately NOT trusted to say which chunk supports a claim; that mapping is done deterministically in the next step.",
+        calc:"decomposeClaims(answer) → [c1, c2, c3]",
+        span:"verification.check"},
+      {sub:"ver",ts:"verification",tx:"parse "+NB+"[mem:id]"+NE+" citations deterministically → pool",
+        what:"Citations are parsed from the answer text with a regex — never LLM-extracted (which returned mem:-prefixed / empty ids in live testing). The cited ids form one evidence pool. A claim citing nothing is unsupported; zero citations ⇒ abstain outright.",
+        calc:"parseCitations(answer) = /\\[mem:([^\\]]+)\\]/g\n→ {kb.md#3, kb.md#7} · c3 cites nothing → unsupported",
+        span:"verification.check"},
+      {sub:"mem",ts:"memory",tx:"getByIds → fetch "+NB+"2 cited chunks"+NE+" (WHERE id IN …)",
+        what:"The pooled ids are fetched from the space via getByIds — a WHERE id IN lookup — into one evidence pool. Every claim is judged against the whole pool, not a single pre-mapped chunk.",
+        calc:"getByIds(default, [kb.md#3, kb.md#7]) → 2 chunks",
+        span:"verification.check"},
+      {sub:"ver",ts:"verification",tx:"judge each claim vs pool · "+NB+"bespoke-minicheck"+NE,
+        what:"A small fine-tuned checker judges (document, claim) → Yes/No per claim against the pooled evidence — SOTA at entailment, ~100-200ms, model-swap-proof. Consent-pulled if missing (4.7 GB); a general-model NLI prompt is the fallback.",
+        calc:"c1 vs pool → Yes\nc2 vs pool → Yes\nc3 (uncited) → No",
+        span:"verification.check"},
+      {sub:"ver",ts:"verification",tx:"faithfulness "+NB+"0.67 < 0.9"+NE+" → bounded CRAG corrective",
+        what:"faithfulness = supported / claims. Below threshold the answer is NOT presented; one bounded CRAG pass grades retrieval, rewrites the query and re-answers. The engine has branch/map but no native loop, so re-retrieve is capped at 1 — not an unbounded loop.",
+        calc:"faithfulness = 2 / 3 = <span class='hl'>0.67</span> < 0.90\n→ correctiveRetrieve (retry 1 / 1)",
+        span:"verification.check"},
+      {sub:"ver",ts:"verification",tx:"re-answer → verify₂ · "+NB+"3 / 3 supported"+NE+" ✓",
+        what:"CRAG re-recall surfaces the missing chunk; the re-answer cites all three claims and verify₂ passes. Had it still failed, the run would ABSTAIN — {kind:'unverified'} carrying the draft + unsupported claims — rather than present an ungrounded answer.",
+        calc:"faithfulness₂ = 3 / 3 = <span class='hl'>1.0</span> ≥ 0.90 → supported\nelse → {kind:'unverified'} (abstain, non-zero exit)",
+        span:"verification.check"},
+      {sub:"tel",ts:"telemetry",tx:"✓ verification.check span · "+NB+"supported · faithfulness 1.0"+NE,
+        what:"The verdict is one span — supported flag, faithfulness score, claim + unsupported counts — visible in bun run runs beside the rest of the trace.",
+        span:"verification.check"}
+    ]},
+    provision:{cmd:'bun run provision',steps:[
+      {sub:"cli",ts:"cli",tx:"first boot · "+NB+"no models installed"+NE+" · bun run provision",
+        what:"The explicit entry point (also reachable as a TTY-gated auto-detect hook in chat.ts when a declared BOOTSTRAP model is missing). Nothing downloads without consent — AGENT_PROVISION_AUTO_YES is the only non-interactive bypass.",
+        span:""},
+      {sub:"prov",ts:"provision",tx:"detect host → "+NB+"24 GB"+NE+" · fit budget ≈ 9.9 GB",
+        what:"detectHost reads total + live-free RAM; the fit budget is the same live figure the Model Manager uses. Provisioning only sizes WHAT to download — it never loads or serves (ensureReady does that later, on the next run).",
+        calc:"budget = min(0.75 × 24, 0.80 × 12.4)\n       = min(18.0, 9.92) = <span class='hl'>9.92 GB</span>",
+        span:""},
+      {sub:"disc",ts:"discovery",tx:"query catalogs → "+NB+"snapshot fallback"+NE+" · Ollama + HF",
+        what:"Discovery is a dynamic per-runtime query (Ollama registry-manifest sizes; HF tree sizes) wrapped in withSnapshotFallback — on any source throw OR empty list it degrades to a committed 4-entry snapshot. Degrade-never-crash; still works offline.",
+        calc:"withSnapshotFallback(ollamaCatalog, snap)\nper-source .catch(() => []) → never crashes",
+        span:""},
+      {sub:"res",ts:"resource",tx:"fitAndRank → recommend "+NB+"qwen3.5:9b"+NE+" (largest-that-fits)",
+        what:"Fit reuses the footprint + hardware math: estimatedBytes = max(fileSize, weights + KV @ a fixed 8192-tok sizing context). Ranks by params desc and marks the top-per-runtime candidate recommended — but never an unenriched 0/0 placeholder.",
+        calc:"9b ≈ 6.6 GB ≤ 9.92 ✓    14b ≈ 11 GB ✗\nrecommend = top-fitting = <span class='hl'>qwen3.5:9b</span>",
+        span:""},
+      {sub:"prov",ts:"consent",tx:"consent → "+NB+"[*] qwen3.5:9b — 6.6 GB"+NE+" · total 6.6 GB · [y/N]",
+        what:"Per-model consent with the recommended set pre-selected; the user chooses what to pull. Declining — like nothing-fits or nothing-selected — is a clean no-op early return, and deliberately opens no provisioning span.",
+        span:""},
+      {sub:"prov",ts:"preflight",tx:"disk preflight → "+NB+"6.6 GB + headroom ≤ free"+NE+" ✓",
+        what:"Ollama itself doesn't preflight disk and fails mid-download; checkDiskSpace sums the selected sizes + headroom against free space first. Short-on-space prompts 'continue anyway?'.",
+        calc:"required + headroom ≤ freeBytes ?\n6.6 + 2.0 = 8.6 GB ≤ free ✓",
+        span:""},
+      {sub:"prov",ts:"download",tx:"DownloadProvider · "+NB+"resolving → downloading 100% → verifying → done"+NE,
+        what:"Bounded-parallel download through the runtime-agnostic DownloadProvider (here the live-verified Ollama adapter streaming /api/pull), normalized to one progress protocol + a live bar. Guards: StallWatchdog aborts a stalled transfer, withRetry retries with jittered backoff, an in-band {error} line is surfaced (not swallowed). Each model's failure is isolated into result.failed — one bad pull never blocks the rest.",
+        calc:"DownloadPhase: Resolving → Downloading → Verifying\n→ Finalizing → <span class='hl'>Done</span>  · percent clamped monotonic",
+        span:"agent.model.provision"},
+      {sub:"prov",ts:"provision",tx:"confirm install (isModelInstalled) ✓ · "+NB+"Provisioned: 1 · failed: 0"+NE,
+        what:"After the stream reports success the adapter confirms the model actually landed on disk. Provisioning stops here — it got the weights down; the existing selector / ensureReady path is what loads and serves the model on the next run.",
+        span:"agent.model.provision"},
+      {sub:"tel",ts:"telemetry",tx:"✓ "+NB+"agent.model.provision"+NE+" span · downloaded 1 · failed 0",
+        what:"An actual download attempt is one provisioning span (candidate / selected / bytes / downloaded / failed counts) — the no-op early returns emit none. Visible in bun run runs beside the rest of the trace.",
+        span:"agent.model.provision"}
+    ]},
+    mcp:{cmd:'bun run mcp add sqlite && bun run flow fetch-then-summarize "https://example.com"',steps:[
+      {sub:"cli",ts:"mcp cli",tx:"add "+NB+"sqlite"+NE+" → mcp.json (pack entry, atomic write)",
+        what:"bun run mcp add copies a starter-pack entry into mcp.json — the capability-tagged catalog (12 entries: files, sql, web-search, browser, vcs, memory…). Keyed entries land dormant until their env var is set; existing entries are never overwritten.",
+        calc:"getPackEntry('sqlite') → mcpServers.sqlite =\n{ command:'bun', args:['run','src/mcp/sqlite-server.ts',\n  'data/agent.db'] } · temp+rename ✓",
+        span:"—"},
+      {sub:"cli",ts:"cli",tx:"loadMcpConfig() → "+NB+"3 entries"+NE+" · 0 dormant · 0 invalid",
+        what:"At startup each CLI loads mcp.json (standard mcpServers root + one agents extension field). ${VAR}/${VAR:-default} expand; entries with unset keys are listed dormant; a malformed entry warns and is skipped — the rest still mount.",
+        calc:"file-tools → agents:[file_qa]\nfetch → agents:[web_fetch]\nsqlite → (unscoped = all agents)",
+        span:"mcp.mount"},
+      {sub:"mcp",ts:"consent",tx:"first mount of "+NB+"sqlite"+NE+" → show exact command · approve? y",
+        what:"Consent-on-mount (spec-normative): the exact untruncated command from the RAW config is shown — expansion may inject secrets, so raw only — with dangerous patterns highlighted. Non-TTY without AGENT_MCP_AUTO_APPROVE=1 skips, never hangs. A decline is remembered.",
+        calc:"specHash = sha256({command, args, envKeys})\n→ recorded in .mcp-approvals.json (untracked;\n  hashes + timestamps only, never secret values)",
+        span:"mcp.mount"},
+      {sub:"mcp",ts:"mount + pin",tx:"mountAll → "+NB+"3 servers · 5 tools"+NE+" · tool defs hash-pinned",
+        what:"Approved entries mount (stdio subprocess or Streamable-HTTP connection). After client.tools() resolves, the tool DEFINITIONS (names + descriptions + schemas) are hashed and pinned to the approval — a server that later swaps a benign description for a malicious one triggers re-consent. The rug-pull defense.",
+        calc:"toolsHash = sha256(sorted per-tool\n  JSON([name, description, schema]))\ndrift ⇒ warn + re-consent (or skip, non-TTY)",
+        span:"mcp.mount"},
+      {sub:"mcp",ts:"attach",tx:"file_qa ⇐ {read_file} · web_fetch ⇐ {fetch} · tool steps ⇐ merged",
+        what:"The agents field scopes tool slices: each agent sees only its few relevant tools (small local models pick wrong from 40-tool menus), while workflow tool steps dispatch by exact name against the full merged set — breadth is free where no model has to choose.",
+        calc:"forAgent('file_qa') = unscoped ∪ scoped-to-file_qa\n= {query, execute, schema} ∪ {read_file}",
+        span:"mcp.mount"},
+      {sub:"wf",ts:"workflow",tx:"tool step "+NB+"fetch"+NE+" runs · "+NB+"workflow.tool"+NE+" span (gen_ai.tool.name)",
+        what:"The DAG's tool step calls the mounted tool through the merged set — now wrapped in a workflow.tool span, closing the gap where engine-level tool calls ran uninstrumented. (The startup mcp.mount span now lands in the run trace too — via the Slice-16 with-mcp-run ordering fix that creates the run + telemetry before mounting.)",
+        span:"workflow.tool"},
+      {sub:"run",ts:"run store",tx:"✓ summary written · approvals persist — "+NB+"no re-prompt next run"+NE,
+        what:"The workflow completes through registry-mounted tools; .mcp-approvals.json means the next run mounts silently (same spec hash, same tools hash). Change the command or the server's tools and consent is asked again.",
+        span:"workflow.run"}
+    ]},
+    build:{cmd:'bun run agent-builder "answer questions about PDF files in this repo"',steps:[
+      {sub:"cli",ts:"cli",tx:"capability gap · "+NB+"no agent handles PDFs"+NE+" → agent-builder",
+        what:"When the orchestrator can't route a task it calls report_capability_gap; interactively (TTY) chat OFFERS to build, or you run bun run agent-builder \"<need>\" directly. A live tools-capable model is selected largest-that-fits for the drafting.",
+        span:"agent.build"},
+      {sub:"builder",ts:"generate",tx:"draft proposal → "+NB+"pdf_qa"+NE+" (name · description · system prompt)",
+        what:"An LLM drafts the specialist. The need is inserted as a delimited <need> DATA block (never instructions) — prompt-injection guard. Local models don't emit strict JSON, so generation is generateText + JSON-extract + zod-validate (with one retry), not generateObject.",
+        calc:"generateText → extractJson → schema.parse\n{ name:'pdf_qa', description, systemPrompt, role }",
+        span:"agent.build"},
+      {sub:"builder",ts:"suggest",tx:"pick "+NB+"minimal pack server"+NE+" → filesystem (palette-only)",
+        what:"The builder presents the 12-entry curated pack and the model picks the MINIMAL set that fits — filtered to pack membership (never invents a server), each scoped to the new agent. Least-privilege doubles as keeping small-model tool choice sharp.",
+        calc:"picks ∩ STARTER_PACK names → [{ filesystem → pdf_qa }]",
+        span:"agent.build"},
+      {sub:"builder",ts:"validate",tx:"structural gate → "+NB+"unique snake_case · palette-only · scoped"+NE+" ✓",
+        what:"validateProposal rejects a duplicate/reserved/non-snake_case name, an empty description/prompt, any off-pack server, or a mis-scoped server. Invalid ⇒ return BEFORE asking consent (nothing written).",
+        calc:"name ∉ {existing ∪ super/orchestrator} · /^[a-z][a-z0-9_]*$/\nservers ⊆ pack · scopeToAgent === name",
+        span:"agent.build"},
+      {sub:"builder",ts:"consent",tx:"show proposal + files-to-write → "+NB+"create this agent? y"+NE,
+        what:"Review-before-activate: the proposal (agent + servers + the exact files) is shown and consent is MANDATORY (no autoYes in the gap path). Decline ⇒ nothing written. The name is JSON-escaped and re-checked against snake_case before any file I/O (path-traversal defense).",
+        span:"agent.build"},
+      {sub:"builder",ts:"write",tx:"write "+NB+"agents/pdf_qa.ts"+NE+" + index entry + scoped mcp.json · atomic",
+        what:"Renders agents/pdf_qa.ts from a template (guaranteed well-formed factory), inserts the import + entry at the agents/index.ts markers (idempotent; throws BEFORE any write if the markers are missing — no orphan file), and adds filesystem to mcp.json scoped agents:[pdf_qa]. All temp+rename atomic; STARTER_PACK is never mutated.",
+        calc:"agents/index.ts → pdf_qa: createPdfQaAgent\nmcp.json → filesystem.agents = [ …, 'pdf_qa' ]",
+        span:"agent.build"},
+      {sub:"tel",ts:"telemetry",tx:"✓ "+NB+"agent.build"+NE+" span · outcome written · "+NB+"live next run"+NE,
+        what:"The whole loop is one agent.build span (need, generated name, validation, consent, files) — visible in bun run runs. The new agent is registered; its MCP server is consent-gated + hash-pinned on first mount next run. No same-run activation.",
+        span:"agent.build"}
+    ]}
+  };
+
+  var term=document.getElementById("term"),cmdline=document.getElementById("cmdline"),tlog=document.getElementById("tlog");
+  var uhSub=document.getElementById("uhSub"),uhWhat=document.getElementById("uhWhat"),uhCalc=document.getElementById("uhCalc"),
+      uhCalcLbl=document.getElementById("uhCalcLbl"),uhSpans=document.getElementById("uhSpans");
+  var scStep=document.getElementById("scStep"),scRun=document.getElementById("scRun"),scReset=document.getElementById("scReset");
+  var curSc="chat",stepIdx=-1,playing=false,timer=null,spans=[];
+  var reduce=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function subName(id){return byId[id]?byId[id].nm:id;}
+  function subKind(id){return byId[id]&&byId[id].kind==="support"?"support":"spine";}
+
+  function resetRun(){
+    if(timer){clearTimeout(timer);timer=null;} playing=false;stepIdx=-1;spans=[];
+    var sc=SCEN[curSc];
+    cmdline.innerHTML='<span class="pr">~/ai ❯</span> '+sc.cmd+'<span class="cur"></span>';
+    tlog.innerHTML="";
+    uhSub.innerHTML='<span class="dot"></span> Ready';
+    uhWhat.innerHTML="Press <b>▶ Run</b> to play the whole sequence, or <b>Step ›</b> to advance one stage at a time. The right pane shows the live calculation behind each stage.";
+    uhCalc.hidden=true;uhCalcLbl.hidden=true;
+    uhSpans.className="uh-none";uhSpans.textContent="— none yet —";
+    scRun.textContent="▶ Run";scStep.disabled=false;
+  }
+  function selectScenario(sc){curSc=sc;document.querySelectorAll(".chip").forEach(function(c){c.classList.toggle("on",c.getAttribute("data-sc")===sc);});resetRun();}
+
+  function renderSpans(newSpan){
+    if(!spans.length){uhSpans.className="uh-none";uhSpans.textContent="— none yet —";return;}
+    uhSpans.className="";uhSpans.innerHTML="";
+    spans.forEach(function(s,i){var el=document.createElement("span");el.className="span"+(i===spans.length-1&&s===newSpan?" new":"");el.textContent=s;uhSpans.appendChild(el);});
+  }
+
+  function doStep(){
+    var sc=SCEN[curSc];
+    if(stepIdx>=sc.steps.length-1){stopPlay();return false;}
+    stepIdx++;
+    var s=sc.steps[stepIdx];
+    // remove caret from command once running
+    if(stepIdx===0){cmdline.innerHTML='<span class="pr">~/ai ❯</span> '+sc.cmd;}
+    // previous current line → normal
+    var prev=tlog.querySelector(".tline.cur");if(prev)prev.classList.remove("cur");
+    // append line
+    var line=document.createElement("div");line.className="tline cur";
+    var last=(stepIdx===sc.steps.length-1);
+    line.innerHTML='<span class="ts">'+s.ts+'</span><span class="tx">'+s.tx+'</span>';
+    tlog.appendChild(line);
+    requestAnimationFrame(function(){line.classList.add("show");});
+    term.scrollTop=term.scrollHeight;
+    // under the hood
+    uhSub.innerHTML='<span class="dot '+subKind(s.sub)+'"></span> '+subName(s.sub);
+    uhWhat.innerHTML=s.what;
+    if(s.calc){uhCalc.hidden=false;uhCalcLbl.hidden=false;uhCalc.innerHTML=s.calc;}else{uhCalc.hidden=true;uhCalcLbl.hidden=true;}
+    if(s.span&&spans[spans.length-1]!==s.span){spans.push(s.span);renderSpans(s.span);}else{renderSpans(null);}
+    if(last){var l2=tlog.querySelector(".tline.cur");if(l2){l2.classList.remove("cur");l2.classList.add("done");}}
+    return !last;
+  }
+  function stopPlay(){playing=false;if(timer){clearTimeout(timer);timer=null;}scRun.textContent="↻ Replay";}
+  function play(){
+    if(stepIdx>=SCEN[curSc].steps.length-1)resetRun();
+    playing=true;scRun.textContent="⏸ Pause";
+    (function tick(){if(!playing)return;var more=doStep();if(more){timer=setTimeout(tick,reduce?260:1150);}else{stopPlay();}})();
+  }
+
+  scRun.addEventListener("click",function(){if(playing){stopPlay();scRun.textContent="▶ Resume";}else{play();}});
+  scStep.addEventListener("click",function(){if(playing)stopPlay();if(stepIdx>=SCEN[curSc].steps.length-1)resetRun();doStep();});
+  scReset.addEventListener("click",resetRun);
+  document.querySelectorAll(".chip").forEach(function(c){c.addEventListener("click",function(){selectScenario(c.getAttribute("data-sc"));});});
+
+  /* ═══════════ MODE SWITCH ═══════════ */
+  var mMap=document.getElementById("mMap"),mTerm=document.getElementById("mTerm");
+  var mapView=document.getElementById("mapView"),termViewEl=document.getElementById("termView");
+  function setMode(m){
+    var map=m==="map";
+    mMap.classList.toggle("on",map);mTerm.classList.toggle("on",!map);
+    mapView.hidden=!map;termViewEl.hidden=map;
+    document.getElementById("mapHint").hidden=!map;
+    document.getElementById("traceBtn").hidden=!map;
+    document.querySelector(".legend").hidden=!map;
+    if(map){if(tour.on)endTour();fit();}else{resetRun();}
+  }
+  mMap.addEventListener("click",function(){setMode("map");});
+  mTerm.addEventListener("click",function(){setMode("term");});
+
+  /* ═══════════ THEME (light / dark, whole page) ═══════════ */
+  var wrapEl=document.querySelector(".wrap"),themeBtn=document.getElementById("themeBtn");
+  function applyTheme(t){
+    wrapEl.setAttribute("data-theme",t);
+    themeBtn.textContent=t==="dark"?"☀":"🌙";
+    themeBtn.title=t==="dark"?"Switch to light":"Switch to dark";
+    try{localStorage.setItem("arch-theme",t);}catch(e){}
+    if(!mapView.hidden)fit();
+  }
+  var storedT=null;try{storedT=localStorage.getItem("arch-theme");}catch(e){}
+  applyTheme(storedT||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light"));
+  themeBtn.addEventListener("click",function(){applyTheme(wrapEl.getAttribute("data-theme")==="dark"?"light":"dark");});
+
+  fit();
+})();
+</script>
+
+</body></html>
+</body></html>
