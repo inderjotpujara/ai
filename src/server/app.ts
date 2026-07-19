@@ -47,7 +47,11 @@ import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
 import type { DeviceRegistry } from './security/device-registry.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
-import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
+import {
+  enforcePerimeter,
+  isLoopbackHost,
+  type OriginPolicy,
+} from './security/origin.ts';
 import type { RootTokenStore } from './security/root-token.ts';
 import { handleRotateRoot } from './security/rotate-route.ts';
 import type { SessionTokenStore } from './security/session-token.ts';
@@ -90,6 +94,14 @@ export type ServerDeps = {
   staticDir?: string;
   recordIo: boolean;
   indexHtml: string;
+  /** The local-browser session token (deviceId 'local'). Injected into the
+   *  served index as window.__AGENT_TOKEN__ ONLY for a loopback request (see
+   *  serveStatic/indexFor). A remote client over an allowed tunnel host gets the
+   *  token-LESS base and must adopt a device-paired token via the #fragment
+   *  bootstrap — so a remote index load can never obtain the trusted-'local'
+   *  token and defeat requireTrustedLocal (Slice 25b §7.1b). Absent = never
+   *  inject (legacy fixtures whose indexHtml already carries a token). */
+  localToken?: string;
   runChatTurn: RunChatTurn;
   consent: ConsentRegistry;
   /** Durable dir confined-uploads are written to/read from (Task 16). */
@@ -581,13 +593,43 @@ const INDEX_HTML_HEADERS = {
 // eligible for the fallback below.
 const HAS_EXTENSION = /\.[a-zA-Z0-9]+$/;
 
+// Matches the built SPA's ES-module entry tag (mirrors main.ts's MODULE_SCRIPT_TAG).
+const MODULE_SCRIPT_TAG = /<script\s+type="module"[^>]*>/i;
+
+/** Inject `window.__AGENT_TOKEN__` into a token-LESS base index, before the SPA
+ *  module script so it is defined before app code runs. `JSON.stringify` does
+ *  not escape `</`, so escape `<` to keep the value from breaking out of the
+ *  <script> (same guard as renderIndexHtml). */
+function injectLocalToken(baseHtml: string, token: string): string {
+  const safe = JSON.stringify(token).replace(/</g, '\\u003c');
+  const script = `<script>window.__AGENT_TOKEN__=${safe};</script>`;
+  if (MODULE_SCRIPT_TAG.test(baseHtml)) {
+    return baseHtml.replace(MODULE_SCRIPT_TAG, (m) => script + m);
+  }
+  return baseHtml.replace(/<head(\s[^>]*)?>/i, (m) => m + script);
+}
+
+/** The index HTML to serve THIS request. The local session token is injected
+ *  ONLY for a loopback Host (isLoopbackHost) — a remote client over an allowed
+ *  tunnel gets the token-less base and must pair a device (the #fragment
+ *  bootstrap) to authenticate, so it can never hold the trusted 'local' token
+ *  and defeat requireTrustedLocal. Injection is per-request over the immutable
+ *  `deps.indexHtml` base — a loopback load never stamps the shared base that a
+ *  later remote request receives. */
+function indexFor(req: Request, deps: ServerDeps): string {
+  if (deps.localToken !== undefined && isLoopbackHost(req)) {
+    return injectLocalToken(deps.indexHtml, deps.localToken);
+  }
+  return deps.indexHtml;
+}
+
 async function serveStatic(
   req: Request,
   url: URL,
   deps: ServerDeps,
 ): Promise<Response> {
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
+    return new Response(indexFor(req, deps), { headers: INDEX_HTML_HEADERS });
   }
   if (deps.staticDir) {
     try {
@@ -618,7 +660,7 @@ async function serveStatic(
     (req.method === 'GET' || req.method === 'HEAD') &&
     !HAS_EXTENSION.test(url.pathname)
   ) {
-    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
+    return new Response(indexFor(req, deps), { headers: INDEX_HTML_HEADERS });
   }
   return new Response('not found', {
     status: 404,

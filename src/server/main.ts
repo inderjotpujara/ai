@@ -96,7 +96,7 @@ const DEFAULT_VOICE_CONFIG: VoiceWindowConfig = {
 };
 
 export function renderIndexHtml(
-  token: string,
+  token: string | undefined,
   distIndexHtml?: string,
   notify: NotifyConfig = DEFAULT_NOTIFY_CONFIG,
   voice: VoiceWindowConfig = DEFAULT_VOICE_CONFIG,
@@ -109,8 +109,14 @@ export function renderIndexHtml(
   // as new globals are added (it did for `voice.defaultModel`, a STRING
   // value, before this fix — the numeric globals were never at risk).
   const safeJson = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
+  // Token-LESS base when `token` is undefined: main.ts now renders the base
+  // WITHOUT the trusted-'local' token and lets serveStatic inject it per-request
+  // ONLY for loopback Hosts (Slice 25b §7.1b). The notify/voice globals are
+  // non-secret and stay in the base for every client.
+  const tokenLine =
+    token === undefined ? '' : `window.__AGENT_TOKEN__=${safeJson(token)};`;
   const tokenScript =
-    `<script>window.__AGENT_TOKEN__=${safeJson(token)};` +
+    `<script>${tokenLine}` +
     `window.__AGENT_NOTIFY_POLL_MS__=${safeJson(notify.pollMs)};` +
     `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${safeJson(notify.minDurationMs)};` +
     `window.__AGENT_VOICE_DEFAULT_MODEL__=${safeJson(voice.defaultModel)};` +
@@ -440,7 +446,7 @@ export function startWebServer(opts: StartOptions = {}): {
     recordIo,
     staticDir,
     indexHtml: renderIndexHtml(
-      token,
+      undefined, // token-LESS base; the local token is injected per-request in serveStatic (loopback-only)
       distIndexHtml,
       {
         pollMs: cfg.AGENT_WEB_NOTIFY_POLL_MS as number,
@@ -451,6 +457,7 @@ export function startWebServer(opts: StartOptions = {}): {
         vadSilenceMs: cfg.AGENT_WEB_VOICE_VAD_SILENCE_MS as number,
       },
     ),
+    localToken: token, // injected as window.__AGENT_TOKEN__ ONLY for loopback requests (serveStatic)
     runChatTurn,
     consent,
     uploadsDir,
