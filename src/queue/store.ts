@@ -141,17 +141,24 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
   function claimNext(now = Date.now()): JobRecord | null {
     // Single transaction: SELECT the winning Queued row then UPDATE it to
     // Running, so two workers calling claimNext concurrently cannot both read
-    // the same row as Queued and both claim it (busy_timeout=5000 serialises
-    // the writers; the UPDATE's WHERE status='queued' is the guard). bun:sqlite
-    // runs synchronously, so the transaction body is a critical section.
-    const tx = db.transaction((): JobRecord | null => {
+    // the same row as Queued and both claim it. The transaction runs as
+    // BEGIN IMMEDIATE (via .immediate() below), which takes the write lock
+    // at BEGIN rather than deferring it to the first write — so claimers
+    // serialise with no read-then-upgrade window between the SELECT and the
+    // UPDATE. The UPDATE's WHERE status='queued' plus the changes-count guard
+    // below is the belt-and-suspenders check for the row actually being won.
+    // bun:sqlite runs synchronously, so the transaction body is a critical
+    // section.
+    const claim = db.transaction((): JobRecord | null => {
       // `available_at <= now` gates retry-backoff'd rows: a job re-queued by
       // markFailed with a future available_at is NOT re-claimed until it
       // matures, so backoff actually spaces re-claims under concurrency
       // (the delay is enforced here, durably, not by a worker sleeping).
       // ORDER BY priority ASC uses the enum TEXT ordering (High before Normal;
-      // asserted at module load), then created_at ASC = FIFO, then id ASC as a
-      // stable tiebreak — served by idx_jobs_claim(status, priority, created_at).
+      // asserted at module load), then created_at ASC for FIFO-by-enqueue-time
+      // with id ASC as a stable, deterministic tiebreak (not true insertion
+      // order at sub-millisecond resolution) — served by
+      // idx_jobs_claim(status, priority, created_at).
       const r = db
         .query(
           `SELECT * FROM jobs WHERE status = 'queued' AND available_at <= ?
@@ -159,17 +166,21 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
         )
         .get(now) as JobRowRaw | undefined;
       if (!r) return null;
-      db.run(
+      const res = db.run(
         `UPDATE jobs SET status = 'running', started_at = ?, updated_at = ?,
          attempts = attempts + 1 WHERE id = ? AND status = 'queued'`,
         [now, now, r.id],
       );
+      // Someone else claimed this row between our SELECT and UPDATE (should
+      // be impossible under IMMEDIATE, but this is the guard that makes the
+      // impossible loud instead of silently double-claiming).
+      if (res.changes !== 1) return null;
       const claimed = db.query('SELECT * FROM jobs WHERE id = ?').get(r.id) as
         | JobRowRaw
         | undefined;
       return claimed ? toJobRecord(claimed) : null;
     });
-    return tx();
+    return claim.immediate();
   }
 
   return {

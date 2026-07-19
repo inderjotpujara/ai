@@ -93,6 +93,18 @@ test('a job with a future available_at is not claimed until it matures', () => {
   store.close();
 });
 
+test('a job whose available_at exactly equals now IS claimable (<= boundary)', () => {
+  const store = tempStore();
+  const t = Date.now();
+  const job = store.enqueue({
+    kind: JobKind.Chat,
+    payload: 'boundary',
+    availableAt: t,
+  });
+  expect(store.claimNext(t)?.id).toBe(job.id);
+  store.close();
+});
+
 test('claimNext on an empty store returns null', () => {
   const store = tempStore();
   expect(store.claimNext()).toBeNull();
