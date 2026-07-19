@@ -279,8 +279,22 @@ export const JobEnqueueRequestSchema = z.object({
    *  present, the enqueue reuses this runId (no fresh run dir is created) and
    *  stamps `resumeRunId` into the persisted payload, so dispatch runs the
    *  crew/workflow turn against the existing run dir — whose checkpoint skips
-   *  the already-completed DAG nodes. */
-  resume: z.string().min(1).optional(),
+   *  the already-completed DAG nodes.
+   *
+   *  SECURITY (HIGH finding, path traversal / IDOR): `resume` is a
+   *  client-controlled value that the handler resolves into a filesystem path
+   *  under `runsRoot` (`runs/<resume>/`) and stamps as `resumeRunId`. The
+   *  format is pinned to the exact shape `newRunId()` mints
+   *  (`src/run/run-id.ts`: `run-<base36 ms>-<base36 rand>`) and FORBIDS `/`
+   *  and `.` entirely, so no `../` traversal sequence can even reach the
+   *  handler — the schema rejects it as a 400 before `handleJobEnqueue` runs.
+   *  The handler additionally re-confines the resolved path via
+   *  `confineToDir` (defense-in-depth, in case this regex is ever loosened)
+   *  and requires the run dir to already exist. */
+  resume: z
+    .string()
+    .regex(/^run-[A-Za-z0-9-]{1,80}$/)
+    .optional(),
 });
 export type JobEnqueueRequest = z.infer<typeof JobEnqueueRequestSchema>;
 

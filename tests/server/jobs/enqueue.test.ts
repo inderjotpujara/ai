@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createJobStore } from '../../../src/queue/store.ts';
 import { JobStatus } from '../../../src/queue/types.ts';
+import { createRun } from '../../../src/run/run-store.ts';
 import { handleJobEnqueue } from '../../../src/server/jobs/enqueue.ts';
 
 const deps = () => ({
@@ -110,4 +111,70 @@ test('POST /api/jobs stays within the limit when the injected limiter allows it'
     { ...d, runLimiter } as never,
   );
   expect(res.status).toBe(202);
+});
+
+// Task 41 (HIGH security finding): `resume` is a client-controlled runId that
+// resolves a filesystem path under `runsRoot`. These pin down the
+// path-traversal/IDOR fix — schema format + confineToDir + existence check.
+test('POST /api/jobs rejects a path-traversal resume value (never a traversal, never 202)', async () => {
+  const d = deps();
+  for (const resume of [
+    '../../etc/passwd',
+    '..%2F..%2Fetc%2Fpasswd',
+    'foo/../../bar',
+  ]) {
+    const res = await handleJobEnqueue(
+      new Request('http://x/api/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          kind: 'crew',
+          payload: { name: 'c', input: 'go' },
+          resume,
+        }),
+      }),
+      d as never,
+    );
+    expect(res.status).not.toBe(202);
+    expect([400, 404]).toContain(res.status);
+  }
+});
+
+test('POST /api/jobs 404s a resume of a well-formed but nonexistent runId', async () => {
+  const d = deps();
+  const res = await handleJobEnqueue(
+    new Request('http://x/api/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'crew',
+        payload: { name: 'c', input: 'go' },
+        resume: 'run-does-not-exist-xyz',
+      }),
+    }),
+    d as never,
+  );
+  expect(res.status).toBe(404);
+});
+
+test('POST /api/jobs 202s a resume of an existing run dir, reusing it (no fresh createRun)', async () => {
+  const d = deps();
+  const existing = await createRun(d.runsRoot, 'run-abc123-xyz000');
+  const res = await handleJobEnqueue(
+    new Request('http://x/api/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'crew',
+        payload: { name: 'c', input: 'go' },
+        resume: 'run-abc123-xyz000',
+      }),
+    }),
+    d as never,
+  );
+  expect(res.status).toBe(202);
+  const body = (await res.json()) as { jobId: string; runId: string };
+  expect(body.runId).toBe('run-abc123-xyz000');
+  expect(body.runId).toBe(existing.id);
+  const job = d.jobStore.getJob(body.jobId);
+  expect((job?.payload as { resumeRunId: string }).resumeRunId).toBe(
+    'run-abc123-xyz000',
+  );
 });

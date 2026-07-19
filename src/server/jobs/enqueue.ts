@@ -13,6 +13,7 @@ import { newRunId } from '../../run/run-id.ts';
 import { createRun } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
 import { ALWAYS_ALLOW } from '../run-rate.ts';
+import { confineToDir, MediaPathError } from '../security/media-path.ts';
 
 export type JobEnqueueDeps = {
   jobStore: JobStore;
@@ -101,8 +102,37 @@ export async function handleJobEnqueue(
   // the engine's per-node checkpoint skips already-completed nodes. A
   // `resumeRunId` marker is stamped into the persisted payload so dispatch can
   // recognise a resumed run without re-deriving it.
+  //
+  // SECURITY (HIGH finding, path traversal / IDOR — Task 41): `body.resume` is
+  // a REMOTE-client-controlled runId that resolves a filesystem path under
+  // `deps.runsRoot`. Defense in depth, on top of the schema's format-only
+  // regex (`JobEnqueueRequestSchema.resume`, `src/contracts/requests.ts`):
+  // `confineToDir` re-resolves it against the real `runsRoot` and throws
+  // `MediaPathError` for BOTH an escape attempt and a run dir that doesn't
+  // exist — the SAME collapse-to-404 idiom `handleRunDetail`
+  // (`src/server/runs/detail.ts`) and `handleRunStream` already use, so a
+  // caller can never distinguish "escaped the runs root" from "no such run"
+  // (no filesystem-structure leak). A resume can only ever target a run dir
+  // that was already created by THIS server (via the fresh-run branch below),
+  // never an arbitrary, never-created path.
+  //
+  // Residual (out of scope here): this only proves the runId resolves to a
+  // REAL, confined run dir — it does not check who created that run. Cross-
+  // PRINCIPAL IDOR (device A resuming device B's run) is out of the current
+  // single-owner threat model (one owner, multiple devices = one principal).
+  // If multi-user/multi-principal ever lands, resuming would additionally
+  // need a per-run ownership record keyed by principal, checked here before
+  // reuse (future slice — not built now).
   let runId: string;
   if (body.resume) {
+    try {
+      confineToDir(body.resume, deps.runsRoot);
+    } catch (err) {
+      if (err instanceof MediaPathError) {
+        return json({ error: 'not found' }, 404);
+      }
+      throw err;
+    }
     runId = body.resume;
     payload = { ...(payload as Record<string, unknown>), resumeRunId: runId };
   } else {
