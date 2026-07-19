@@ -353,3 +353,21 @@ export type DevicePairResponse = z.infer<typeof DevicePairResponseSchema>;
  *  every non-local session + clearing the device registry. Slice 25b Incr 1 (T4). */
 export const RotateRootRequestSchema = z.object({ rootSecret: z.string() });
 export type RotateRootRequest = z.infer<typeof RotateRootRequestSchema>;
+
+/** `GET /api/daemon/logs?tail=&stream=` query — mirrors the
+ *  `RunListQuerySchema.limit`/`SessionListQuerySchema.limit` coercion idiom
+ *  for a raw query-string numeric param. `stream` is an inline
+ *  `z.enum(['out','err'])` literal, following the `EdgeDtoSchema` precedent
+ *  (`dto.ts:258`) for a wire-only two-value set with no engine-side mirror.
+ *  Slice 25b Incr 1 (final contract-seam task). */
+export const DaemonLogsQuerySchema = z.object({
+  tail: z.coerce.number().int().positive().max(2000).default(200),
+  stream: z.enum(['out', 'err']).default('out'),
+});
+export type DaemonLogsQuery = z.infer<typeof DaemonLogsQuerySchema>;
+
+/** `GET /api/daemon/logs` response — the requested tail of raw log lines. */
+export const DaemonLogsResponseSchema = z.object({
+  lines: z.array(z.string()),
+});
+export type DaemonLogsResponse = z.infer<typeof DaemonLogsResponseSchema>;
