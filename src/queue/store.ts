@@ -255,6 +255,29 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     );
   }
 
+  function reconcileOrphans(): { interrupted: number; requeued: number } {
+    // ONE transaction so no Running row is ever observed by a starting pool in
+    // an ambiguous mid-flight state (§7.3). Runs ONCE at boot BEFORE the worker
+    // pool accepts work. Increment 2 has no checkpoint layer yet, so EVERY
+    // Running orphan -> Interrupted (re-runnable on explicit re-enqueue only).
+    // SIGNATURE EVOLVES (Increment 6, Task 41): a `durableKinds` predicate is
+    // threaded in then to send checkpoint-resumable rows (crew/workflow) ->
+    // Queued instead, counted as `requeued`. Until then this returns
+    // requeued: 0 and the durable-requeue is a documented seam. Uses
+    // .immediate() (BEGIN IMMEDIATE) to take the write lock at BEGIN, same as
+    // the hardened claimNext.
+    const tx = db.transaction((): { interrupted: number; requeued: number } => {
+      const at = Date.now();
+      const info = db.run(
+        `UPDATE jobs SET status = 'interrupted', finished_at = ?, updated_at = ?
+         WHERE status = 'running'`,
+        [at, at],
+      );
+      return { interrupted: info.changes, requeued: 0 };
+    });
+    return tx.immediate();
+  }
+
   function listJobs(q: {
     status?: JobStatus;
     cursor?: string;
@@ -302,11 +325,8 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     markInterrupted,
     markCanceled,
     listJobs,
+    reconcileOrphans,
     close: (): void => db.close(),
-    // reconcileOrphans added in Task 10.
-    _db: db,
-    _decodeJobCursor: decodeJobCursor,
-    _encodeJobCursor: encodeJobCursor,
   };
 }
 
