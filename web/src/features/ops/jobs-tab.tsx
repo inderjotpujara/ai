@@ -1,5 +1,5 @@
 import { JobKindWire, JobPriorityWire, JobStatusWire } from '@contracts';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
 import { JobDetailDrawer } from './job-detail-drawer.tsx';
 import { useJobs } from './use-jobs.ts';
@@ -31,6 +31,27 @@ export function JobsTab({ onSelect }: Props) {
   // "First page" only shows once we've actually paged forward, same gate
   // `RunsArea` applies via `cursors.length`.
   const [hasPaged, setHasPaged] = useState(false);
+  // Job actions (Task 30) flip a row's displayed status the instant a
+  // mutation is fired — before the `useJobs` refresh() round trip lands —
+  // keyed by job id. Cleared whenever a fresh `page` object arrives (every
+  // `refresh()`/paging/facet change produces one), which is exactly the
+  // "reconciled on next refresh()" point the optimistic flip promises.
+  const [statusOverlay, setStatusOverlay] = useState<
+    Map<string, JobStatusWire>
+  >(new Map());
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: page isn't read in the body — it's a bump-to-clear trigger (a new `page` object is exactly the "reconciled" signal, same idiom as useJobs's reloadTick).
+  useEffect(() => {
+    setStatusOverlay(new Map());
+  }, [page]);
+
+  function applyOptimisticStatus(jobId: string, status: JobStatusWire) {
+    setStatusOverlay((prev) => {
+      const next = new Map(prev);
+      next.set(jobId, status);
+      return next;
+    });
+  }
 
   function setQuery(patch: Partial<typeof query>) {
     setHasPaged(false);
@@ -143,7 +164,7 @@ export function JobsTab({ onSelect }: Props) {
                   {job.kind}
                 </td>
                 <td className="px-3 py-1.5 text-[var(--color-muted)]">
-                  {job.status}
+                  {statusOverlay.get(job.id) ?? job.status}
                 </td>
                 <td className="px-3 py-1.5 text-[var(--color-muted)]">
                   {job.priority}
@@ -170,6 +191,8 @@ export function JobsTab({ onSelect }: Props) {
           jobId={openJobId}
           onClose={() => setOpenJobId(undefined)}
           onSelect={setOpenJobId}
+          refresh={jobs.refresh}
+          onOptimisticStatus={applyOptimisticStatus}
         />
       )}
     </section>

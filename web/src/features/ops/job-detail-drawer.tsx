@@ -1,9 +1,11 @@
 import type { JobDTO } from '@contracts';
-import { JobDtoSchema } from '@contracts';
+import { JobDtoSchema, JobStatusWire } from '@contracts';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '../../shared/contract/client.ts';
 import { Button } from '../../shared/ui/button.tsx';
+import { useToast } from '../notifications/toast.tsx';
+import { useJobActions } from './use-job-actions.ts';
 
 type Props = {
   jobId: string;
@@ -11,11 +13,30 @@ type Props = {
   /** Re-opens the drawer on a different job id — used by the `retriedFrom`
    *  back-link to jump to the job this one was retried from. */
   onSelect: (jobId: string) => void;
+  /** `useJobs`'s reload trigger (Task 30) — each action calls this via
+   *  `useJobActions` to reconcile the optimistic status flip below with the
+   *  server's real post-mutation state. */
+  refresh: () => void;
+  /** Lets the jobs-tab table's row overlay mirror this drawer's optimistic
+   *  status flip immediately, without waiting for `refresh()`'s round trip
+   *  (Task 30). */
+  onOptimisticStatus: (jobId: string, status: JobStatusWire) => void;
 };
 
 function formatTs(ms: number | undefined): string {
   return ms === undefined ? '—' : new Date(ms).toLocaleString();
 }
+
+/** Statuses `POST /api/jobs/:id/retry` accepts (`RETRYABLE`,
+ *  `src/server/jobs/retry.ts`) — mirrored here so the Retry button's gating
+ *  matches the server's 404-on-out-of-state-retry exactly. */
+const RETRYABLE_STATUSES = new Set<JobStatusWire>([
+  JobStatusWire.Failed,
+  JobStatusWire.Canceled,
+  JobStatusWire.Interrupted,
+]);
+
+type ActionKind = 'cancel' | 'resume' | 'retry';
 
 /** Job detail drawer (Task 29): fetches the full `JobDTO` via
  *  `GET /api/jobs/:id` (the jobs-tab row only carries the list-summary
@@ -23,16 +44,36 @@ function formatTs(ms: number | undefined): string {
  *  counters, all four lifecycle timestamps, the retry-scheduled-at
  *  (`availableAt`), `error`, `origin`/priority/status, a deep-link into the
  *  Runs viewer for `runId`, and a `retriedFrom` back-link that re-opens the
- *  drawer on the parent job. Action buttons (cancel/resume/retry) are a
- *  placeholder region here — wired in Task 30, not this one. */
-export function JobDetailDrawer({ jobId, onClose, onSelect }: Props) {
+ *  drawer on the parent job. Action buttons (cancel/resume/retry) are wired
+ *  in Task 30 via `useJobActions`, each optimistically flipping
+ *  `detail.status` (and the table row via `onOptimisticStatus`) before the
+ *  request settles, reverting on error and reconciling for real on the
+ *  `refresh()` that follows a success. */
+export function JobDetailDrawer({
+  jobId,
+  onClose,
+  onSelect,
+  refresh,
+  onOptimisticStatus,
+}: Props) {
   const [detail, setDetail] = useState<JobDTO | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [pending, setPending] = useState<ActionKind | undefined>(undefined);
+  const actions = useJobActions(refresh);
+  const { notify } = useToast();
+
+  // Also called (standalone, not as a dependency of the effect below) from
+  // `runAction` after a mutation settles, to reconcile this drawer's own
+  // `detail` with the real post-mutation status.
+  function loadDetail(): Promise<JobDTO> {
+    return apiFetch<JobDTO>(`/jobs/${jobId}`, { schema: JobDtoSchema });
+  }
 
   useEffect(() => {
     let cancelled = false;
     setDetail(undefined);
     setError(undefined);
+    setPending(undefined);
     apiFetch<JobDTO>(`/jobs/${jobId}`, { schema: JobDtoSchema })
       .then((result) => {
         if (!cancelled) setDetail(result);
@@ -46,6 +87,43 @@ export function JobDetailDrawer({ jobId, onClose, onSelect }: Props) {
       cancelled = true;
     };
   }, [jobId]);
+
+  /** Runs one lifecycle action: disables all three action buttons and marks
+   *  which one is `pending` (its label swaps to "…ing"), optimistically
+   *  flips the TABLE row's status via `onOptimisticStatus` (Task 30), then
+   *  calls the matching `useJobActions` mutation (which triggers the
+   *  jobs-tab's `refresh()` on success). This drawer's OWN `detail.status`
+   *  is deliberately NOT optimistically mutated — the action buttons are
+   *  gated on it (`RETRYABLE_STATUSES`/queued-running/interrupted checks
+   *  above), so flipping it immediately would make the button vanish mid-
+   *  request instead of visibly disabling; the real status only replaces it
+   *  once `loadDetail()` re-fetches after the mutation settles, which is
+   *  also when button gating legitimately changes. `resume` re-enqueues the
+   *  SAME `runId` (never mints a fresh one — ADVERSARIAL-VERIFY), so the
+   *  existing "view run {runId}" `Link` above stays the correct deep-link
+   *  the operator can follow to watch the continued run; no separate
+   *  post-resume navigation is needed since the target doesn't change. On
+   *  error, the table row's optimistic flip is reverted and the failure
+   *  surfaces as a toast — the row is never left in a false state. */
+  async function runAction(kind: ActionKind, optimisticStatus: JobStatusWire) {
+    if (!detail || pending) return;
+    const job = detail;
+    setPending(kind);
+    onOptimisticStatus(jobId, optimisticStatus);
+    try {
+      if (kind === 'cancel') await actions.cancel(job);
+      else if (kind === 'resume') await actions.resume(job);
+      else await actions.retry(job);
+      const fresh = await loadDetail();
+      setDetail(fresh);
+      onOptimisticStatus(jobId, fresh.status);
+    } catch (err: unknown) {
+      onOptimisticStatus(jobId, job.status);
+      notify(err instanceof Error ? err.message : `${kind} failed`);
+    } finally {
+      setPending(undefined);
+    }
+  }
 
   return (
     <aside
@@ -140,12 +218,36 @@ export function JobDetailDrawer({ jobId, onClose, onSelect }: Props) {
             </div>
           )}
 
-          {/* Cancel/resume/retry actions land in Task 30 — this region is
-           *  reserved so the drawer's layout doesn't shift when they're added. */}
-          <div
-            data-testid="ops-job-drawer-actions"
-            className="mt-2 flex gap-2"
-          />
+          <div data-testid="ops-job-drawer-actions" className="mt-2 flex gap-2">
+            {(detail.status === JobStatusWire.Queued ||
+              detail.status === JobStatusWire.Running) && (
+              <Button
+                data-testid="ops-job-action-cancel"
+                disabled={pending !== undefined}
+                onClick={() => runAction('cancel', JobStatusWire.Canceled)}
+              >
+                {pending === 'cancel' ? 'Canceling…' : 'Cancel'}
+              </Button>
+            )}
+            {detail.status === JobStatusWire.Interrupted && detail.runId && (
+              <Button
+                data-testid="ops-job-action-resume"
+                disabled={pending !== undefined}
+                onClick={() => runAction('resume', JobStatusWire.Running)}
+              >
+                {pending === 'resume' ? 'Resuming…' : 'Resume'}
+              </Button>
+            )}
+            {RETRYABLE_STATUSES.has(detail.status) && (
+              <Button
+                data-testid="ops-job-action-retry"
+                disabled={pending !== undefined}
+                onClick={() => runAction('retry', JobStatusWire.Queued)}
+              >
+                {pending === 'retry' ? 'Retrying…' : 'Retry'}
+              </Button>
+            )}
+          </div>
         </div>
       )}
     </aside>
