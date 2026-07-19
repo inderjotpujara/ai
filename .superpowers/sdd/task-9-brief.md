@@ -1,148 +1,178 @@
-### Task 9: `@huggingface/transformers` as a direct `web/` dep + Vite worker/optimizeDeps config + isolation-headers.ts comment update
+### Task 9: `stt.worker.ts` — `transcribeInterim` response variant + `TextStreamer` callback in `transcribe()`
 
 **Files:**
-- Modify: `web/package.json` (add the dependency)
-- Modify: `web/vite.config.ts` (add `optimizeDeps.exclude`; update the `isolation` comment)
-- Modify: `src/server/isolation-headers.ts` (update the stale "sherpa WASM" comment per D1/D10)
-- Test: none new (config-only task — verified via `typecheck` + a full install/build smoke, per Steps 2/4 below); this task closes Increment 3, so it ends with the controller's full `bun run check` (see the note after Step 5).
+- Modify: `web/src/features/voice/stt.worker.ts` (`SttWorkerResponse` union lines 35–40; `transcribe()` lines 162–175; `self.onmessage`'s `transcribe` branch lines 202–211; header comment lines 1–13)
+- Test: `web/src/features/voice/stt.worker.test.ts` (append)
 
 **Interfaces:**
-- Consumes: nothing new.
-- Produces: a resolvable `@huggingface/transformers` import from within `web/` (previously only resolvable via the root workspace's hoisted install — see below), and Vite build config that keeps transformers.js's WASM binaries out of esbuild's dependency pre-bundling pass.
+- Consumes: `TextStreamer` from `@huggingface/transformers` (verified export — `transformers.js:45` does `export * from './generation/streamers.js'`; constructor `new TextStreamer(tokenizer: PreTrainedTokenizer, { skip_prompt?: boolean; skip_special_tokens?: boolean; callback_function?: (text: string) => void })` — `callback_function` receives only the newly-finalized **delta** substring per call, per `streamers.js`'s `on_finalized_text`, NOT the full accumulated text); `asrProcessor.tokenizer` (a `Processor` getter, typed `PreTrainedTokenizer | undefined`); `asrModel.generate({ ...inputs, max_new_tokens: 256, streamer })` (verified `streamer` is a real generate-option — `modeling_utils.js:842` destructures `streamer = null` and calls `streamer.put(...)`/`streamer.end()` during generation, lines 944–945/1013–1014/1030–1031).
+- Produces: new `SttWorkerResponse` variant `{ kind: 'transcribeInterim'; id: number; text: string }` — `text` is always the **full accumulated** interim string so far (not a delta), so every consumer downstream can treat each message as a monotonic **replace** (spec §7.1 (b)) instead of an append. Also produces an exported pure helper `createInterimAccumulator(): { push(chunk: string): string }`, isolated and unit-tested the same way `detectWebGpuDevice` already is in this file (real model/generate behavior stays live-verify-only, per the file's own header comment).
 
-- [ ] **Step 1: Confirm the current (broken) state**
+- [ ] **Step 1: Write the failing test**
 
-Run: `cd web && bun run typecheck`
-Expected at this point: PASS (type-only imports still resolve via the root workspace's hoisted `node_modules/@huggingface/transformers`, since `web` is a `bun` workspace member and the root `package.json:43` already lists `"@huggingface/transformers": "^4.2.0"` as a dependency — hoisting makes the package resolvable even without `web/package.json` listing it directly). This step exists to make explicit that the FOLLOWING step is about explicitness/correctness (a workspace member should declare what it directly imports), not about fixing a current type error.
-
-- [ ] **Step 2: Add the direct dependency**
-
-Modify `web/package.json`'s `"dependencies"` block (insert alphabetically, matching the existing sort order):
-
-```json
-  "dependencies": {
-    "@ai-sdk/react": "^3",
-    "@base-ui-components/react": "1.0.0-rc.0",
-    "@fontsource-variable/geist": "^5",
-    "@fontsource-variable/geist-mono": "^5",
-    "@huggingface/transformers": "^4.2.0",
-    "@tanstack/react-router": "^1",
-    "@visx/axis": "^4.0.0",
-    "@visx/group": "^4.0.0",
-    "@visx/scale": "^4.0.0",
-    "@visx/shape": "^4.0.0",
-    "@visx/tooltip": "^4.0.0",
-    "@xyflow/react": "^12.11.2",
-    "ai": "^6.0.217",
-    "react": "^19",
-    "react-dom": "^19",
-    "streamdown": "^2.5.0",
-    "zod": "^4.4.3"
-  },
-```
-
-Run (from the repo root, since this is a `bun` workspace):
-```bash
-bun install
-```
-Expected: lockfile updates to record `web`'s now-direct dependency on `@huggingface/transformers` (already present at the root, so this should not change which version is resolved — just which `package.json` declares it).
-
-Modify `web/vite.config.ts` to keep transformers.js's WASM binaries out of esbuild's dev-server dependency pre-bundling pass (a commonly-needed exclusion for this package — large binary assets confuse the pre-bundler):
+Append to `web/src/features/voice/stt.worker.test.ts`:
 
 ```ts
-import { resolve } from 'node:path';
-import tailwindcss from '@tailwindcss/vite';
-import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { createInterimAccumulator, detectWebGpuDevice } from './stt.worker.ts';
+```
 
-// COOP/COEP so the frontend can use transformers.js's threaded WASM backend
-// (SharedArrayBuffer) for STT/VAD inference (Slice 30b Phase 7, D1/D8 —
-// originally put in place for a since-rejected sherpa-onnx WASM plan, see
-// docs/architecture.md's Voice section). The model-weight CDN fetch under
-// `require-corp` was proven/adjusted by the Task 7 D10 spike — see
-// `web/src/features/voice/stt.worker.ts`'s header comment for which rung of
-// the fallback ladder this repo actually ships on.
-const isolation = {
-  'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Embedder-Policy': 'require-corp',
-};
+(replace the existing single-symbol import line with the two-symbol one above), then append a new `describe` block at the bottom of the file:
 
-export default defineConfig({
-  base: '/',
-  plugins: [react(), tailwindcss()],
-  resolve: {
-    alias: {
-      '@contracts': resolve(import.meta.dirname, '../src/contracts/index.ts'),
-    },
-  },
-  server: { headers: isolation, fs: { allow: ['..'] } },
-  preview: { headers: isolation },
-  optimizeDeps: {
-    // transformers.js ships its own WASM/ONNX binaries; excluding it from
-    // esbuild's dependency pre-bundling avoids the dev server trying (and
-    // failing) to pre-process large binary assets as JS.
-    exclude: ['@huggingface/transformers'],
-  },
+```ts
+// The pure accumulation logic behind the new `transcribeInterim` response
+// variant (D6) — isolated exactly like `detectWebGpuDevice` above, because
+// `TextStreamer`'s `callback_function` only ever hands back the newly
+// finalized DELTA substring per call (see `streamers.js`'s
+// `on_finalized_text`); everything downstream of a real streamer wired to a
+// real `generate()` call is live-verify-only, same as the rest of this file.
+describe('createInterimAccumulator', () => {
+  it('accumulates incremental TextStreamer chunks into the full running text (never a delta)', () => {
+    const acc = createInterimAccumulator();
+    expect(acc.push('Hello ')).toBe('Hello ');
+    expect(acc.push('world')).toBe('Hello world');
+    expect(acc.push('!')).toBe('Hello world!');
+  });
+
+  it('starts empty and handles an immediate empty-string chunk without changing the running text', () => {
+    const acc = createInterimAccumulator();
+    expect(acc.push('')).toBe('');
+    expect(acc.push('ok')).toBe('ok');
+  });
 });
 ```
 
-Modify `src/server/isolation-headers.ts`'s stale comment (per D10: "the isolation-headers.ts comment gets updated off its stale 'sherpa' wording either way"):
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd web && bun run test -- features/voice/stt.worker.test.ts`
+Expected: FAIL — `createInterimAccumulator` is not exported from `./stt.worker.ts`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `web/src/features/voice/stt.worker.ts`, update the import line (add `TextStreamer`):
 
 ```ts
-/**
- * COOP/COEP so the frontend can use transformers.js's threaded WASM backend
- * (SharedArrayBuffer) for browser STT/VAD inference (Slice 30b Phase 7).
- * Originally put in place for a sherpa-onnx WASM plan the phase later
- * rejected (see docs/architecture.md's Voice section, D1) — the isolation
- * requirement carried over unchanged to transformers.js.
- * Lives in its own module (not `app.ts`) so route handlers under
- * `src/server/chat/**` can import it without a circular dependency on `app.ts`
- * (which imports those handlers to register routes).
- */
-export const ISOLATION_HEADERS: Record<string, string> = {
-  'cross-origin-opener-policy': 'same-origin',
-  'cross-origin-embedder-policy': 'require-corp',
-};
+import {
+  AutoModel,
+  AutoProcessor,
+  env,
+  type PreTrainedModel,
+  type PretrainedConfig,
+  type Processor,
+  type ProgressInfo,
+  Tensor,
+  TextStreamer,
+} from '@huggingface/transformers';
 ```
 
-(If Task 7's D10 spike landed on Rung 2 instead of Rung 1, change both `'require-corp'` values above — here AND in `web/vite.config.ts`'s `isolation` object — to `'credentialless'` instead, per the spec's fallback ladder. As written, this task assumes Rung 1; adjust if the spike said otherwise.)
+Add the new response variant to `SttWorkerResponse` (lines 35–40):
 
-- [ ] **Step 3: (No new failing test — config-only task, see Files note.)**
+```ts
+export type SttWorkerResponse =
+  | { kind: 'progress'; loaded: number; total: number }
+  | { kind: 'ready' }
+  | { kind: 'detectSpeechResult'; id: number; isSpeech: boolean }
+  | { kind: 'transcribeInterim'; id: number; text: string }
+  | { kind: 'transcribeResult'; id: number; text: string }
+  | { kind: 'error'; id?: number; message: string };
+```
 
-- [ ] **Step 4: Run verification**
+Add the pure accumulator (place just above `transcribe()`, near the other small pure helpers):
+
+```ts
+/** Pure accumulation for `TextStreamer`'s incremental `callback_function`
+ * calls — each call hands back only the newly finalized DELTA substring
+ * since the last call (see `@huggingface/transformers`'s
+ * `TextStreamer.on_finalized_text`). Returning the FULL running text on
+ * every `push()` is what lets `use-voice-input.ts` treat every
+ * `transcribeInterim` message as a monotonic REPLACE of its displayed
+ * interim text (spec §7.1 (b)), never an append. Isolated and unit-tested
+ * the same way `detectWebGpuDevice` above is — everything downstream (a real
+ * streamer wired to a real `generate()` call) is live-verify-only. */
+export function createInterimAccumulator(): { push(chunk: string): string } {
+  let text = '';
+  return {
+    push(chunk: string): string {
+      text += chunk;
+      return text;
+    },
+  };
+}
+```
+
+Replace `transcribe()` (lines 162–175):
+
+```ts
+async function transcribe(samples: Float32Array, id: number): Promise<string> {
+  const tokenizer = asrProcessor?.tokenizer;
+  if (!asrModel || !asrProcessor || !tokenizer) {
+    throw new Error('ASR model not loaded — call load() first');
+  }
+  const inputs = await asrProcessor(samples);
+  const accumulator = createInterimAccumulator();
+  // D6: emits `transcribeInterim` as Moonshine decodes the already-captured
+  // buffer — progressive reveal AFTER capture, never real-time-during-speech
+  // (spec D6/§9). `skip_prompt` drops the encoder-decoder's initial
+  // decoder-start token from the stream (it is not user-meaningful text).
+  const streamer = new TextStreamer(tokenizer, {
+    skip_prompt: true,
+    skip_special_tokens: true,
+    callback_function: (chunk: string) => {
+      post({ kind: 'transcribeInterim', id, text: accumulator.push(chunk) });
+    },
+  });
+  const output = (await asrModel.generate({
+    ...inputs,
+    max_new_tokens: 256,
+    streamer,
+  })) as Tensor;
+  const [text] = asrProcessor.batch_decode(output, {
+    skip_special_tokens: true,
+  });
+  return text ?? '';
+}
+```
+
+Update the `transcribe` branch of `self.onmessage` (lines 202–211) to pass `msg.id` through:
+
+```ts
+  if (msg.kind === 'transcribe') {
+    transcribe(msg.samples, msg.id)
+      .then((text) => post({ kind: 'transcribeResult', id: msg.id, text }))
+      .catch((err: unknown) => {
+        post({
+          kind: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }
+```
+
+Update the file's header comment (lines 1–13) — append one clause to the existing sentence about what's unit-tested:
+
+```
+ * ... The one piece of pure logic worth isolating — WebGPU device detection,
+ * and (Phase 8, D6) the TextStreamer callback-accumulation logic — IS
+ * exported and unit tested here (see stt.worker.test.ts); everything past
+ * that boundary (actual model load/inference, including the real streamer
+ * wired to a real generate() call) is validated at live-verify, not by an
+ * automated test.
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd web && bun run test -- features/voice/stt.worker.test.ts`
+Expected: PASS (6 tests: 4 pre-existing `detectWebGpuDevice` + 2 new `createInterimAccumulator`).
 
 Run: `cd web && bun run typecheck`
-Expected: PASS.
-
-Run: `cd web && bun run build`
-Expected: PASS — a successful production build proves `@huggingface/transformers` resolves cleanly through Vite's bundler as a direct `web/` dependency (not just via workspace hoisting) and that `stt.worker.ts`/`downsample-worklet.ts` (referenced only via `new URL(...)`, never statically imported at the top level) don't break the main bundle.
-
-Run: `cd web && bun run test`
-Expected: PASS — full `web/` suite (every test from Tasks 4-8, plus all pre-existing Phase 1-6 tests), confirming this config change didn't regress anything already shipped.
+Expected: PASS (confirms `tokenizer` narrowing via the local `const tokenizer = asrProcessor?.tokenizer;` guard, and the `streamer` option compiles against `generate()`'s real signature).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add web/package.json bun.lock web/vite.config.ts src/server/isolation-headers.ts
-git commit -m "feat(voice): @huggingface/transformers as a direct web/ dep + Vite worker config (D10)"
+git add web/src/features/voice/stt.worker.ts web/src/features/voice/stt.worker.test.ts
+git commit -m "feat(voice): stream transcribeInterim via a TextStreamer callback in stt.worker.ts (D6)"
 ```
 
 ---
-
-## Increment 3 boundary — controller gate
-
-**After Task 9, the controller runs the full `bun run check`** (from the repo root):
-
-```bash
-bun run check
-```
-
-This runs, in order: `docs:check` (expected to PASS — Part A has made no `docs/architecture.md`-requiring change since no new `src/<subsystem>` directory was added outside already-documented `src/contracts`/`src/config`/`src/server`, and `web/src/features/voice/` is a NEW subsystem directory that Part B's Task 18 documents; if `docs:check` flags `web/src/features/voice/` as undocumented at this checkpoint, that is expected and the controller should treat it as a known, tracked gap closed by Part B, not a Part A regression) → `typecheck` (root) → `lint` (repo-wide biome) → `check:web` (`cd web && bun run typecheck && bun run test`) → `test` (root `bun test`, excluding `web/**`). All nine tasks' individual per-task gates already passed; this is the aggregate confirmation before Part B (Tasks 10-18: `use-voice-input` hook + gestures + VAD gating, composer wiring, docs + live-verify + partial-slice land) begins.
-
----
-
----
-
-
-## Increment 4 — `vad.ts` segmenter + `use-voice-input` hook + both gestures
 

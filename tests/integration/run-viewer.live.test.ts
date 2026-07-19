@@ -21,7 +21,7 @@ describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
     await unloadModel(qwenRouter.model);
   });
 
-  test('a real run writes spans.jsonl with agent.run + agent.delegation, and renders', async () => {
+  test('a real chat turn writes spans.jsonl with chat.run + agent.delegation, and renders', async () => {
     const runsRoot = await mkdtemp(join(tmpdir(), 'rv-live-'));
     const fileDir = await mkdtemp(join(tmpdir(), 'rv-files-'));
     try {
@@ -49,13 +49,14 @@ describe.skipIf(!ready)('live run-viewer (real Ollama)', () => {
         await close();
       }
       const { spans } = await readSpans(join(runsRoot, 'live-1'));
-      expect(spans.some((s) => s.name === 'agent.run')).toBe(true);
+      // runChat opens a `chat.run` root (D9), not `agent.run`.
+      expect(spans.some((s) => s.name === 'chat.run')).toBe(true);
       expect(spans.some((s) => s.name === 'agent.delegation')).toBe(true);
       expect(spans.some((s) => s.name.startsWith('ai.generateText'))).toBe(
         true,
       );
       const out = await renderRun(runsRoot, 'live-1');
-      expect(out).toContain('agent.run');
+      expect(out).toContain('chat.run');
     } finally {
       await rm(runsRoot, { recursive: true, force: true });
       await rm(fileDir, { recursive: true, force: true });

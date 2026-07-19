@@ -83,6 +83,30 @@ export function buildTree(spans: SpanRecord[]): TraceNode[] {
   return roots;
 }
 
+/** Root span names that anchor a run: a chat turn (`chat.run`, D9), an
+ *  agent/crew/workflow run, an agent/crew build (Phase 5), a model pull
+ *  (Phase 5), a one-off MCP test-mount (`mcp.mount`), or a memory
+ *  recall/ingest. This is the single source of truth for "which span names
+ *  count as a run root", shared by the web projection (`run-dto.ts`, which
+ *  re-exports it), the CLI `runs` list summary (`summarizeRun` below) and the
+ *  `--follow` stopper (`src/cli/runs.ts`). Defined here — the dependency-free
+ *  base module — so `run-dto.ts` (which imports from this file) can reuse it
+ *  without a circular import. An unrecognized root leaves a run reading as
+ *  perpetually in-flight (durationMs 0 / lifecycle Running), so every
+ *  ephemeral-run root must be listed. */
+export const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
+  'chat.run',
+  'agent.run',
+  'crew.run',
+  'workflow.run',
+  'agent.build',
+  'crew.build',
+  'model.pull',
+  'mcp.mount',
+  'memory.recall',
+  'memory.ingest',
+]);
+
 export type RunSummary = {
   id: string;
   startMs: number;
@@ -97,7 +121,12 @@ export async function summarizeRun(
 ): Promise<RunSummary | undefined> {
   const { spans } = await readSpans(join(runsRoot, id));
   if (spans.length === 0) return undefined;
-  const root = spans.find((s) => s.name === 'agent.run');
+  // Find the run root by the shared RUN_ROOT_NAMES set (not just `agent.run`):
+  // a chat turn writes `chat.run`, a crew/workflow writes `crew.run`/
+  // `workflow.run`. Keying only off `agent.run` made those report durationMs 0
+  // / outcome 'unknown' in the CLI `runs` list. Fall back to spans[0] when no
+  // recognized root is present (never throw).
+  const root = spans.find((s) => RUN_ROOT_NAMES.has(s.name));
   const models = new Set<string>();
   for (const s of spans) {
     const m = s.attributes[ATTR.MODEL_ID];

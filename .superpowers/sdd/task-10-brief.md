@@ -1,255 +1,223 @@
-### Task 10: `vad.ts` — pure segmenter, hold-to-talk (non-gated) mode
+### Task 10: `stt-engine.ts` — forward `transcribeInterim` via a per-call, id-correlated `onInterim` callback
 
 **Files:**
-- Create: `web/src/features/voice/vad.ts`
-- Test: `web/src/features/voice/vad.test.ts`
+- Modify: `web/src/features/voice/stt-engine.ts` (`SttEngine` type lines 8–14; `worker.onmessage` lines 56–89; `transcribe()` lines 124–138; `close()` lines 140–154)
+- Test: `web/src/features/voice/stt-engine.test.ts` (append)
 
 **Interfaces:**
-- Consumes: `VoiceFrames` (`{ samples: Float32Array; sampleRate: 16000 }`) from `@contracts` (Part A Task 1 — the lifted contract; `src/voice/types.ts` re-exports the same type for the CLI side, so this import is the one, single source).
-- Produces (locked, verbatim — used by Task 11 in the same file, and by Task 12's `use-voice-input.ts`):
-  ```ts
-  export type SegmenterOpts = { silenceMs: number; gated: boolean; frameMs: number };
-  export type Segmenter = {
-    pushFrame(chunk: Float32Array, isSpeech: boolean): void;
-    flush(): void;
-    onSegment(cb: (frames: VoiceFrames) => void): () => void;
-    reset(): void;
-  };
-  export function createSegmenter(opts: SegmenterOpts): Segmenter;
-  ```
+- Consumes: `SttWorkerResponse`'s new `{ kind: 'transcribeInterim'; id: number; text: string }` variant (Task 9).
+- Produces: `SttEngine.transcribe(frames: VoiceFrames, onInterim?: (text: string) => void): Promise<string>` (widened from `transcribe(frames: VoiceFrames): Promise<string>`). Correlation is by the same numeric request `id` `transcribe()` already generates for `pendingTranscribe` — a new `interimListeners: Map<number, (text: string) => void>` is populated only for the duration of that one request and deleted the moment it settles (`transcribeResult` or `error` for that id, or `close()`), so two concurrent `transcribe()` calls never cross-deliver interim text to each other's callback.
 
-- [ ] **Step 1: Write the failing tests (hold-to-talk / `gated: false`)**
+- [ ] **Step 1: Write the failing tests**
 
-Create `web/src/features/voice/vad.test.ts`:
+Append to `web/src/features/voice/stt-engine.test.ts` (inside the existing `describe('createSttEngine', ...)` block, after the "transcribe() resolves with the matching response by request id" test):
 
 ```ts
-import { describe, expect, it, vi } from 'vitest';
-import { createSegmenter } from './vad.ts';
-
-function tone(length: number, fill = 0.5): Float32Array {
-  return new Float32Array(length).fill(fill);
-}
-
-describe('createSegmenter — hold-to-talk (gated: false)', () => {
-  it('buffers every pushed frame regardless of isSpeech, emitting nothing until flush()', () => {
-    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(512), true);
-    segmenter.pushFrame(tone(256), false); // ignored isSpeech — hold mode never gates
-    expect(onSegment).not.toHaveBeenCalled();
+  it('transcribe() forwards transcribeInterim messages to an optional onInterim callback, id-correlated', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    const onInterim = vi.fn();
+    const resultPromise = engine.transcribe(
+      { samples: new Float32Array([0.1]), sampleRate: 16000 },
+      onInterim,
+    );
+    const posted = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    lastWorker?.emit({ kind: 'transcribeInterim', id: posted.id, text: 'Hel' });
+    lastWorker?.emit({ kind: 'transcribeInterim', id: posted.id, text: 'Hello' });
+    lastWorker?.emit({
+      kind: 'transcribeResult',
+      id: posted.id,
+      text: 'Hello world',
+    });
+    expect(await resultPromise).toBe('Hello world');
+    expect(onInterim.mock.calls).toEqual([['Hel'], ['Hello']]);
   });
 
-  it('flush() emits exactly one segment concatenating every buffered chunk in push order', () => {
-    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(4, 0.1), true);
-    segmenter.pushFrame(tone(4, 0.2), false);
-    segmenter.pushFrame(tone(4, 0.3), false);
-    segmenter.flush();
-    expect(onSegment).toHaveBeenCalledTimes(1);
-    const frames = onSegment.mock.calls[0][0];
-    expect(frames.sampleRate).toBe(16000);
-    expect(Array.from(frames.samples as Float32Array)).toEqual([
-      0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.3,
-    ]);
+  it('does not cross-deliver transcribeInterim between two concurrent transcribe() calls (different ids)', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    const onInterimA = vi.fn();
+    const onInterimB = vi.fn();
+    const promiseA = engine.transcribe(
+      { samples: new Float32Array([0.1]), sampleRate: 16000 },
+      onInterimA,
+    );
+    const postedA = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    const promiseB = engine.transcribe(
+      { samples: new Float32Array([0.2]), sampleRate: 16000 },
+      onInterimB,
+    );
+    const postedB = lastWorker?.posted.at(-1) as { kind: string; id: number };
+
+    lastWorker?.emit({ kind: 'transcribeInterim', id: postedA.id, text: 'A-text' });
+    lastWorker?.emit({ kind: 'transcribeInterim', id: postedB.id, text: 'B-text' });
+    expect(onInterimA).toHaveBeenCalledWith('A-text');
+    expect(onInterimA).not.toHaveBeenCalledWith('B-text');
+    expect(onInterimB).toHaveBeenCalledWith('B-text');
+    expect(onInterimB).not.toHaveBeenCalledWith('A-text');
+
+    lastWorker?.emit({ kind: 'transcribeResult', id: postedA.id, text: 'A final' });
+    lastWorker?.emit({ kind: 'transcribeResult', id: postedB.id, text: 'B final' });
+    expect(await promiseA).toBe('A final');
+    expect(await promiseB).toBe('B final');
   });
 
-  it('does not truncate a frame pushed immediately before flush() (the release-boundary residual, §7.1 c)', () => {
-    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(2, 0.9), true);
-    segmenter.pushFrame(tone(2, 0.8), true); // the trailing "residual" flushed at release
-    segmenter.flush();
-    const frames = onSegment.mock.calls[0][0];
-    expect(Array.from(frames.samples as Float32Array)).toEqual([0.9, 0.9, 0.8, 0.8]);
-  });
+  it('stops delivering to onInterim once its request has settled (no leaked listener)', async () => {
+    const engine = createSttEngine({ model: ModelTier.Base });
+    const onInterim = vi.fn();
+    const resultPromise = engine.transcribe(
+      { samples: new Float32Array([0.1]), sampleRate: 16000 },
+      onInterim,
+    );
+    const posted = lastWorker?.posted.at(-1) as { kind: string; id: number };
+    lastWorker?.emit({ kind: 'transcribeResult', id: posted.id, text: 'done' });
+    await resultPromise;
 
-  it('flush() with nothing buffered emits nothing (no phantom empty segment)', () => {
-    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.flush();
-    expect(onSegment).not.toHaveBeenCalled();
+    // A stray late transcribeInterim for the same, already-settled id must
+    // not throw and must not resurrect the callback via a stale map entry.
+    expect(() =>
+      lastWorker?.emit({ kind: 'transcribeInterim', id: posted.id, text: 'late' }),
+    ).not.toThrow();
+    expect(onInterim).not.toHaveBeenCalledWith('late');
   });
-
-  it('reset() clears buffered audio without emitting a segment', () => {
-    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(4), true);
-    segmenter.reset();
-    segmenter.flush();
-    expect(onSegment).not.toHaveBeenCalled();
-  });
-
-  it('a second flush() after an emit is a no-op (buffer already drained)', () => {
-    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(4), true);
-    segmenter.flush();
-    segmenter.flush();
-    expect(onSegment).toHaveBeenCalledTimes(1);
-  });
-
-  it('onSegment() returns an unsubscribe function', () => {
-    const segmenter = createSegmenter({ silenceMs: 500, gated: false, frameMs: 32 });
-    const onSegment = vi.fn();
-    const off = segmenter.onSegment(onSegment);
-    off();
-    segmenter.pushFrame(tone(4), true);
-    segmenter.flush();
-    expect(onSegment).not.toHaveBeenCalled();
-  });
-});
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd web && bun run test -- vad.test.ts`
-Expected: FAIL — `Cannot find module './vad.ts'` (or all assertions fail once a stub exists). No implementation exists yet.
+Run: `cd web && bun run test -- features/voice/stt-engine.test.ts`
+Expected: FAIL — `engine.transcribe(frames, onInterim)`'s second argument is silently ignored by the current implementation (`onInterim` mock never called); `transcribeInterim` messages are unhandled by `worker.onmessage`.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Write minimal implementation**
 
-Create `web/src/features/voice/vad.ts`:
+In `web/src/features/voice/stt-engine.ts`, widen the `SttEngine` type (lines 8–14):
 
 ```ts
-import type { VoiceFrames } from '@contracts';
-
-export type SegmenterOpts = { silenceMs: number; gated: boolean; frameMs: number };
-
-export type Segmenter = {
-  pushFrame(chunk: Float32Array, isSpeech: boolean): void;
-  flush(): void;
-  onSegment(cb: (frames: VoiceFrames) => void): () => void;
-  reset(): void;
+export type SttEngine = {
+  ready(): Promise<void>;
+  onProgress(cb: (p: LoadProgress) => void): () => void;
+  detectSpeech(chunk16k: Float32Array): Promise<boolean>;
+  transcribe(
+    frames: VoiceFrames,
+    onInterim?: (text: string) => void,
+  ): Promise<string>;
+  close(): void;
 };
-
-/**
- * Pure segmentation state machine (spec §7.1) — no real VAD model, no
- * timers. `isSpeech` is supplied by the caller (the worker's Silero pass
- * per pushed chunk, Task 12). Silence duration is tracked from each
- * chunk's *actual* sample-derived duration (`chunk.length / 16000 * 1000`
- * ms), falling back to `frameMs` only for a zero-length "heartbeat" chunk
- * (a VAD tick with no new audio attached) — this keeps the silence clock
- * correct regardless of the AudioWorklet's real chunk sizing, rather than
- * assuming every pushed chunk is exactly `frameMs` long.
- *
- * Two modes (`gated`):
- *  - `false` (hold-to-talk): every pushed frame belongs to the one
- *    segment, `isSpeech` is ignored entirely — the key/pointer gesture
- *    itself IS the segment boundary. Only `flush()` closes it, and it
- *    closes with everything buffered so far (no truncation of the
- *    release-boundary residual, §7.1 c).
- *  - `true` (tap-to-toggle): `isSpeech` flips gate segment boundaries —
- *    a speech frame (re)starts/extends the current segment and resets the
- *    silence clock; a silent frame is buffered (kept, in case speech
- *    resumes) and accumulates against `silenceMs`; once sustained silence
- *    reaches `silenceMs`, the segment closes, with the trailing silent
- *    chunks trimmed back off the emitted audio (they are not speech).
- *    A tap-to-toggle session can close/reopen many segments in a row
- *    (§7.1 b — exactly one transcribe call per speech/silence cycle).
- */
-export function createSegmenter(opts: SegmenterOpts): Segmenter {
-  const { silenceMs, gated, frameMs } = opts;
-  let buffer: Float32Array[] = [];
-  let inSegment = false;
-  let silentMsAccumulated = 0;
-  const listeners = new Set<(frames: VoiceFrames) => void>();
-
-  function chunkDurationMs(chunk: Float32Array): number {
-    return chunk.length > 0 ? (chunk.length / 16000) * 1000 : frameMs;
-  }
-
-  function concat(chunks: Float32Array[]): Float32Array {
-    const total = chunks.reduce((sum, c) => sum + c.length, 0);
-    const out = new Float32Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      out.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return out;
-  }
-
-  function emit(): void {
-    inSegment = false;
-    silentMsAccumulated = 0;
-    if (buffer.length === 0) return;
-    const samples = concat(buffer);
-    buffer = [];
-    const frames: VoiceFrames = { samples, sampleRate: 16000 };
-    for (const cb of listeners) cb(frames);
-  }
-
-  function closeSustainedSilence(): void {
-    // Trim the trailing silent chunks themselves back off the emitted
-    // audio: walk back from the end, summing each chunk's duration, until
-    // the accumulated trim matches the silence total we tracked — that
-    // boundary is exactly the end of the last speech-bearing chunk.
-    let trimmedMs = 0;
-    let cut = buffer.length;
-    for (let i = buffer.length - 1; i >= 0; i -= 1) {
-      trimmedMs += chunkDurationMs(buffer[i]);
-      cut = i;
-      if (trimmedMs >= silentMsAccumulated) break;
-    }
-    buffer = buffer.slice(0, cut);
-    emit();
-  }
-
-  function pushFrame(chunk: Float32Array, isSpeech: boolean): void {
-    if (!gated) {
-      buffer.push(chunk);
-      inSegment = true;
-      return;
-    }
-    if (isSpeech) {
-      buffer.push(chunk);
-      inSegment = true;
-      silentMsAccumulated = 0;
-      return;
-    }
-    if (!inSegment) return; // silence before any speech started this cycle
-    buffer.push(chunk);
-    silentMsAccumulated += chunkDurationMs(chunk);
-    if (silentMsAccumulated >= silenceMs) closeSustainedSilence();
-  }
-
-  function flush(): void {
-    emit();
-  }
-
-  function reset(): void {
-    buffer = [];
-    inSegment = false;
-    silentMsAccumulated = 0;
-  }
-
-  function onSegment(cb: (frames: VoiceFrames) => void): () => void {
-    listeners.add(cb);
-    return () => listeners.delete(cb);
-  }
-
-  return { pushFrame, flush, onSegment, reset };
-}
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+Add a new correlation map next to `pendingTranscribe` (near line 54):
 
-Run: `cd web && bun run test -- vad.test.ts`
-Expected: PASS — 7/7 (the 6 hold-to-talk tests above; Task 11 appends tap-toggle tests to the same file).
+```ts
+  const pendingTranscribe = new Map<number, Pending<string>>();
+  // D6: id-correlated interim-text forwarding — one entry per in-flight
+  // transcribe() call that supplied an onInterim callback, deleted the
+  // moment that id settles (transcribeResult/error) or on close(). NOT a
+  // Set-based multi-subscriber (unlike progressListeners): interim text is
+  // inherently per-request, and two concurrent transcribe() calls (e.g. a
+  // back-to-back gesture, spec §7.1 (d)) must never cross-deliver.
+  const interimListeners = new Map<number, (text: string) => void>();
+```
 
-- [ ] **Step 5: Gate + commit**
+In `worker.onmessage` (lines 56–89), add a branch for `transcribeInterim` (placed after `detectSpeechResult`, before `transcribeResult`) and clear the listener wherever `pendingTranscribe.delete(msg.id)` already happens:
 
-Run: `cd web && bun run typecheck && cd web && bun run lint`
+```ts
+  worker.onmessage = (event: MessageEvent<SttWorkerResponse>) => {
+    const msg = event.data;
+    if (msg.kind === 'progress') {
+      for (const cb of progressListeners)
+        cb({ loaded: msg.loaded, total: msg.total });
+      return;
+    }
+    if (msg.kind === 'ready') {
+      readySettled = true;
+      readyResolve();
+      return;
+    }
+    if (msg.kind === 'detectSpeechResult') {
+      pendingDetect.get(msg.id)?.resolve(msg.isSpeech);
+      pendingDetect.delete(msg.id);
+      return;
+    }
+    if (msg.kind === 'transcribeInterim') {
+      interimListeners.get(msg.id)?.(msg.text);
+      return;
+    }
+    if (msg.kind === 'transcribeResult') {
+      pendingTranscribe.get(msg.id)?.resolve(msg.text);
+      pendingTranscribe.delete(msg.id);
+      interimListeners.delete(msg.id);
+      return;
+    }
+    if (msg.kind === 'error') {
+      if (msg.id !== undefined) {
+        pendingDetect.get(msg.id)?.reject(new Error(msg.message));
+        pendingDetect.delete(msg.id);
+        pendingTranscribe.get(msg.id)?.reject(new Error(msg.message));
+        pendingTranscribe.delete(msg.id);
+        interimListeners.delete(msg.id);
+      } else {
+        readySettled = true;
+        readyReject(new Error(msg.message));
+      }
+    }
+  };
+```
+
+Update `transcribe()` (lines 124–138):
+
+```ts
+  function transcribe(
+    frames: VoiceFrames,
+    onInterim?: (text: string) => void,
+  ): Promise<string> {
+    if (closed) return Promise.reject(new Error('stt-engine closed'));
+    const id = nextId++;
+    if (onInterim) interimListeners.set(id, onInterim);
+    return new Promise<string>((resolve, reject) => {
+      pendingTranscribe.set(id, { resolve, reject });
+      worker.postMessage(
+        {
+          kind: 'transcribe',
+          id,
+          samples: frames.samples,
+        } satisfies SttWorkerRequest,
+        [frames.samples.buffer],
+      );
+    });
+  }
+```
+
+Update `close()` (lines 140–154) to also clear the new map:
+
+```ts
+  function close(): void {
+    if (closed) return;
+    closed = true;
+    const closeErr = new Error('stt-engine closed');
+    for (const pending of pendingDetect.values()) pending.reject(closeErr);
+    for (const pending of pendingTranscribe.values()) pending.reject(closeErr);
+    pendingDetect.clear();
+    pendingTranscribe.clear();
+    interimListeners.clear();
+    if (!readySettled) {
+      readySettled = true;
+      readyReject(closeErr);
+    }
+    worker.terminate();
+    progressListeners.clear();
+  }
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd web && bun run test -- features/voice/stt-engine.test.ts`
+Expected: PASS (all pre-existing tests + 3 new).
+
+Run: `cd web && bun run typecheck`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add web/src/features/voice/vad.ts web/src/features/voice/vad.test.ts
-git commit -m "feat(voice): add createSegmenter pure state machine (hold-to-talk mode)"
+git add web/src/features/voice/stt-engine.ts web/src/features/voice/stt-engine.test.ts
+git commit -m "feat(voice): stt-engine.ts forwards id-correlated transcribeInterim via onInterim (D6)"
 ```
 
 ---

@@ -1,87 +1,50 @@
-# Task 9 Report: `@huggingface/transformers` direct dep + Vite worker/optimizeDeps config + isolation-headers.ts comment
+# Task 9 Report: `stt.worker.ts` — `transcribeInterim` response variant + `TextStreamer` callback in `transcribe()`
 
 Note: this filename was previously used for an unrelated Task 9 from Slice 30b
-Phase 5 (builder confirm/log adapter). That content is superseded — this is
-Slice 30b Phase 7's Task 9 (Increment 3 close-out: transformers.js dep +
-Vite worker config).
+Phase 7 (transformers.js dep + Vite worker config). That content is
+superseded — this is Slice 30b Phase 8, Increment 2's Task 9 (progressive
+decode reveal, D6).
 
 ## Status: DONE
 
-## Commit
-`b9fdea2` — `feat(voice): @huggingface/transformers as a direct web/ dep + Vite worker config (D10)`
-(4 files changed: `web/package.json`, `bun.lock`, `web/vite.config.ts`,
-`src/server/isolation-headers.ts`)
+## Summary
+
+Implemented exactly per brief `/Users/inderjotsingh/ai/.superpowers/sdd/task-9-brief.md`, TDD steps 1-5 in order, no deviations.
 
 ## Changes
 
-1. **`web/package.json`**: added `"@huggingface/transformers": "^4.2.0"` to
-   `dependencies`, alphabetically sorted between `@fontsource-variable/geist-mono`
-   and `@tanstack/react-router`, pinned to match root `package.json:43` exactly.
-2. **`bun install`** (repo root): re-resolved; lockfile updated, no version
-   change (already present at root, now also declared by `web/` directly
-   instead of relying on workspace hoisting).
-3. **`web/vite.config.ts`**:
-   - Updated the `isolation` block's comment per the brief (transformers.js
-     threaded WASM, not the rejected sherpa-onnx plan).
-   - Added `optimizeDeps.exclude: ['@huggingface/transformers']` per the brief
-     verbatim (keeps its WASM/ONNX binaries out of esbuild's dev pre-bundling
-     pass).
-   - Added `worker: { format: 'es' }` — **not present in the brief's literal
-     code snippet**, but added because `stt-engine.ts:31` constructs the
-     worker with `new Worker(url, { type: 'module' })`, and `stt.worker.ts`
-     statically imports `@huggingface/transformers` (which itself does
-     dynamic `import()` for backend selection). Vite's default
-     `worker.format` is `'iife'`, which can't express that; leaving it
-     unset would mismatch how the worker is instantiated once Part B wires
-     it in. Flagged as a deliberate, reasoned addition beyond the brief
-     text, not a silent deviation — matches the outer task description's
-     explicit call for "worker config (format 'es')".
-   - Left COOP/COEP headers untouched (still `require-corp`). Confirmed via
-     `stt.worker.ts:1`'s comment that Task 7's D10 spike landed on **Rung 1**
-     (require-corp + CDN CORS), matching the brief's default assumption — no
-     `credentialless` swap needed.
-4. **`src/server/isolation-headers.ts`**: replaced the stale "sherpa WASM
-   SharedArrayBuffer" comment with the brief's transformers.js-accurate
-   wording, verbatim from Step 2 of the brief. Comment-only change.
+`/Users/inderjotsingh/ai/web/src/features/voice/stt.worker.ts`:
+- Header comment (lines 1-13) updated to mention the TextStreamer callback-accumulation logic as unit-tested, alongside `detectWebGpuDevice`.
+- Import line adds `TextStreamer` from `@huggingface/transformers`.
+- `SttWorkerResponse` union gains `{ kind: 'transcribeInterim'; id: number; text: string }`.
+- New exported pure helper `createInterimAccumulator(): { push(chunk: string): string }` — concatenates delta chunks, returns full running text on each `push()`.
+- `transcribe(samples, id)` now takes an `id` param, narrows `asrProcessor?.tokenizer` via a local const, builds a `TextStreamer` (`skip_prompt: true`, `skip_special_tokens: true`, `callback_function` posts `transcribeInterim` with the accumulator's running text), and passes `streamer` into `asrModel.generate(...)`. Final `batch_decode` → `transcribeResult` path is unchanged.
+- `self.onmessage`'s `transcribe` branch now passes `msg.id` through to `transcribe()`.
+
+`/Users/inderjotsingh/ai/web/src/features/voice/stt.worker.test.ts`:
+- Import line updated to pull in both `createInterimAccumulator` and `detectWebGpuDevice`.
+- New `describe('createInterimAccumulator', ...)` block appended verbatim from the brief (2 tests: incremental delta accumulation; empty-string first chunk).
 
 ## Gate results
-- `cd web && bun run typecheck` — PASS (no output/errors)
-- `cd web && bun run test` — PASS, **51 test files / 235 tests**, all green
-  (some expected `ECONNREFUSED` console noise from a pre-existing test
-  hitting a non-running port 3000 — not a failure)
-- `cd web && bun run build` — **ran, PASS**, built in 279ms, no errors.
-  Note: no separate worker/transformers chunk appears in `dist/` yet because
-  `stt-engine.ts` (which references the worker) isn't imported by any app
-  component yet — that wiring is Part B (Tasks 10-18). Confirmed via grep
-  that only `stt-engine.ts`/`stt.worker.test.ts` reference it, nothing
-  reachable from the app entry. Expected at this point in the sequence.
-- Root `bun run typecheck` — PASS
-- Root `bun run lint` — PASS (exit 0; 18 pre-existing warnings elsewhere in
-  the repo — e.g. `tests/server/mcp-add.test.ts`, `tests/server/models-pull.test.ts`
-  — none touching files this task modified)
-- Pre-commit `docs:check` hook ran clean as part of the commit.
+
+- `cd web && bun run test -- features/voice/stt.worker.test.ts` — failed as expected before implementation (`createInterimAccumulator is not a function`), then passed after: **6/6 tests** (4 pre-existing `detectWebGpuDevice` + 2 new `createInterimAccumulator`).
+- `cd web && bun run typecheck` — clean, no errors (confirms tokenizer narrowing and `streamer` generate-option compile against the real `@huggingface/transformers` types).
+- `cd web && bun run test` (full suite) — **317/317 tests passed** across 61 files (the `ECONNREFUSED :3000` stack traces in output are pre-existing/unrelated live-server-dependent noise, not failures).
+- `bunx biome check --write web/src/features/voice/stt.worker.ts web/src/features/voice/stt.worker.test.ts` — clean, no fixes needed (no format drift).
+- Pre-commit `docs-check` hook ran clean as part of the commit (no `docs/architecture.md` change needed — internal API addition within an already-documented subsystem, not a new subsystem).
+
+## Commit
+
+`2d44c58` — `feat(voice): stream transcribeInterim via a TextStreamer callback in stt.worker.ts (D6)`
+- Files: `web/src/features/voice/stt.worker.ts`, `web/src/features/voice/stt.worker.test.ts`
 
 ## Self-review
-- Diff scope matches the brief's `git add` list exactly: `web/package.json`,
-  `bun.lock`, `web/vite.config.ts`, `src/server/isolation-headers.ts`.
-- Left numerous unrelated pre-existing modified files (other task
-  briefs/reports, `.remember/*`, `progress.md`) untouched/unstaged —
-  confirmed via `git status --short` before staging.
-- Verified root package.json:43 version string character-for-character
-  before pinning `web/package.json`'s entry to it.
-- Verified D10 rung (Rung 1 vs 2) empirically from `stt.worker.ts`'s own
-  header comment rather than assuming the brief's default — confirmed no
-  `credentialless` swap was needed.
+
+- Diff scope matches the brief's `git add` list exactly.
+- Left numerous unrelated pre-existing modified files (other task briefs/reports, `.remember/*`) untouched/unstaged — confirmed via `git status` before staging.
+- No deviations from the brief's verbatim code snippets.
 
 ## Concerns
-- The `worker.format: 'es'` addition is a judgment call beyond the brief's
-  literal snippet — reasoning given above. Recommend the controller/reviewer
-  double-check it against Part B's live-verify (Task 17/18) once the worker
-  is actually wired in and produces a real bundle chunk, to confirm the
-  format choice holds up in practice and not just by static inspection.
-- This task's `bun run build` passing proves the config is *syntactically*
-  and *structurally* sound (transformers.js resolves through Vite's
-  bundler as a direct dep, no build errors), but does NOT yet prove the
-  worker bundles/loads correctly at runtime — `stt-engine.ts`/`stt.worker.ts`
-  are still dead code until Part B wires them into a component. That
-  runtime proof is still pending Task 18 live-verify.
+
+- None outside scope. Real model/generate/streamer behavior remains live-verify-only per the file's own convention (no WASM/ONNX runtime under happy-dom/Vitest) — consistent with how `detectWebGpuDevice` was isolated in Task 7.
+- Downstream consumers (Task 10: `stt-engine.ts` message-protocol plumbing; Task 11/12: `use-voice-input.ts` UI wiring) can now rely on `transcribeInterim` carrying the full running text (monotonic replace semantics, spec §7.1(b)), never a delta.

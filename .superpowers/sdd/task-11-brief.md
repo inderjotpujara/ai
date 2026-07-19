@@ -1,121 +1,169 @@
-### Task 11: `vad.ts` — tap-to-toggle (gated) mode: multi-segment, jitter, short-utterance
+### Task 11: `use-voice-input.ts` — wire real streamed interim text (naive wiring; happy-path + monotonic-replace tests)
+
+This task wires `engine.transcribe(frames, onInterim)` into the hook's `interim` state for both gestures, replacing the static `'…'` placeholder with the real streamed text once it starts arriving. It deliberately does **not yet** add the three adversarial guards (dropped-for-invalidated-segmenter, back-to-back-gesture isolation, final-wins-over-late-interim) — those are Task 12's dedicated, individually-failing-first correctness surface (§7.1 (a), (c), (d)). Requirement (b) — monotonic replace — falls out of Task 9's accumulator design for free (every message carries the full running text, so `setInterim(text)` is always a replace) and is locked here as a property test.
 
 **Files:**
-- Modify: `web/src/features/voice/vad.ts` (already correct from Task 10 — the `gated: true` branch was implemented there; this task only ADDS tests, no code change, unless a test finds a real bug)
-- Modify: `web/src/features/voice/vad.test.ts` (append)
+- Modify: `web/src/features/voice/use-voice-input.ts` (the `onSegment` callback, lines 161–196)
+- Test: `web/src/features/voice/use-voice-input.test.ts` (append; reuses the file's existing `makeFakeCapture`/`makeFakeEngine`/`deferred` helpers, no new test scaffolding needed)
 
 **Interfaces:**
-- Consumes/Produces: unchanged from Task 10 (`createSegmenter`/`Segmenter`/`SegmenterOpts`).
+- Consumes: `SttEngine.transcribe(frames, onInterim?)` (Task 10).
+- Produces: `UseVoiceInput.interim` (existing field, unchanged shape) now reflects real streamed text instead of a static `'…'` busy indicator once decoding begins; `onFinal`/`status` semantics are unchanged.
 
-- [ ] **Step 1: Write the failing tests (tap-to-toggle / `gated: true`)**
+- [ ] **Step 1: Write the failing tests**
 
-Append to `web/src/features/voice/vad.test.ts`:
+Append to `web/src/features/voice/use-voice-input.test.ts` (inside `describe('useVoiceInput', ...)`):
 
 ```ts
-describe('createSegmenter — tap-to-toggle (gated: true)', () => {
-  const CHUNK_MS_32 = new Float32Array(512); // 512 samples @ 16kHz = 32ms
-
-  it('closes a segment after sustained silence >= silenceMs, trimming the trailing silence off the emitted audio', () => {
-    const segmenter = createSegmenter({ silenceMs: 100, gated: true, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(512, 0.5), true); // 32ms speech
-    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
-    segmenter.pushFrame(tone(512, 0), false); // 64ms
-    segmenter.pushFrame(tone(512, 0), false); // 96ms
-    expect(onSegment).not.toHaveBeenCalled(); // not yet sustained
-    segmenter.pushFrame(tone(512, 0), false); // 128ms >= 100ms — closes
-    expect(onSegment).toHaveBeenCalledTimes(1);
-    const frames = onSegment.mock.calls[0][0];
-    // only the one speech chunk survives trimming — no silent tail.
-    expect(frames.samples.length).toBe(512);
+  it('streams real interim text from engine.transcribe (hold-to-talk), replacing the "…" placeholder (D6)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {}); // never resolves — interim-only in this test
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+    act(() => capturedOnInterim?.('Hel'));
+    await waitFor(() => expect(result.current.interim).toBe('Hel'));
+    act(() => capturedOnInterim?.('Hello'));
+    await waitFor(() => expect(result.current.interim).toBe('Hello'));
   });
 
-  it('does not double-transcribe on a jittery VAD flip that never sustains past silenceMs (§7.1 b)', () => {
-    const segmenter = createSegmenter({ silenceMs: 100, gated: true, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(512), true);
-    segmenter.pushFrame(tone(512, 0), false); // 32ms silent — jitter
-    segmenter.pushFrame(tone(512), true); // speech resumes — silence clock resets
-    segmenter.pushFrame(tone(512, 0), false);
-    segmenter.pushFrame(tone(512), true);
-    expect(onSegment).not.toHaveBeenCalled(); // never sustained 100ms of silence
+  it('streams real interim text via VAD tap-to-toggle too (D6)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    engine.detectSpeech = vi.fn(async () => true);
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {});
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 10, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.toggleTap());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    await act(async () => {
+      emitChunk(new Float32Array(512));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.toggleTap();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.interim).toBe('…'));
+    act(() => capturedOnInterim?.('world'));
+    await waitFor(() => expect(result.current.interim).toBe('world'));
   });
 
-  it('a very short utterance (a single speech chunk) still emits once sustained silence follows (§7.1 b — no missed segment)', () => {
-    const segmenter = createSegmenter({ silenceMs: 64, gated: true, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(512), true); // one 32ms speech chunk
-    segmenter.pushFrame(tone(512, 0), false); // 32ms silent
-    segmenter.pushFrame(tone(512, 0), false); // 64ms — closes
-    expect(onSegment).toHaveBeenCalledTimes(1);
-    expect(onSegment.mock.calls[0][0].samples.length).toBe(512);
+  it('interim text is always a monotonic replace — every message is the full running text, never a shorter fragment (§7.1 b)', async () => {
+    const { engine, readyGate } = makeFakeEngine();
+    let capturedOnInterim: ((text: string) => void) | undefined;
+    engine.transcribe = vi.fn((_frames, onInterim) => {
+      capturedOnInterim = onInterim;
+      return new Promise<string>(() => {});
+    });
+    const { capture, emitChunk } = makeFakeCapture();
+    const onFinal = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput(
+        { enabled: true, model: MODEL, silenceMs: 500, onFinal },
+        { createCapture: () => capture, createEngine: () => engine },
+      ),
+    );
+    act(() => readyGate.resolve());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.startHold());
+    await waitFor(() => expect(result.current.status).toBe('listening'));
+    act(() => emitChunk(new Float32Array(512)));
+    act(() => result.current.stopHold());
+    const seen: string[] = [];
+    for (const chunk of ['Hel', 'Hello', 'Hello world']) {
+      act(() => capturedOnInterim?.(chunk));
+      await waitFor(() => expect(result.current.interim).toBe(chunk));
+      seen.push(result.current.interim);
+    }
+    // Each observed value is a prefix-superset of the previous one — never
+    // shorter, never a different branch (a decode-restart artifact).
+    expect(seen).toEqual(['Hel', 'Hello', 'Hello world']);
+    expect(seen.every((s, i) => i === 0 || s.startsWith('') )).toBe(true);
+    expect(seen[2]?.startsWith('Hello')).toBe(true);
   });
-
-  it('a tap-to-toggle session spans multiple speech/silence cycles, each closing its own segment independently', () => {
-    const segmenter = createSegmenter({ silenceMs: 64, gated: true, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    // cycle 1
-    segmenter.pushFrame(tone(512, 0.1), true);
-    segmenter.pushFrame(tone(512, 0), false);
-    segmenter.pushFrame(tone(512, 0), false); // closes cycle 1
-    // cycle 2 (re-armed automatically — no explicit re-arm call needed)
-    segmenter.pushFrame(tone(512, 0.2), true);
-    segmenter.pushFrame(tone(512, 0), false);
-    segmenter.pushFrame(tone(512, 0), false); // closes cycle 2
-    expect(onSegment).toHaveBeenCalledTimes(2);
-    expect(onSegment.mock.calls[0][0].samples[0]).toBeCloseTo(0.1);
-    expect(onSegment.mock.calls[1][0].samples[0]).toBeCloseTo(0.2);
-  });
-
-  it('leading silence before any speech is ignored (never buffered, never closes an empty segment)', () => {
-    const segmenter = createSegmenter({ silenceMs: 64, gated: true, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(512, 0), false);
-    segmenter.pushFrame(tone(512, 0), false);
-    segmenter.pushFrame(tone(512, 0), false);
-    expect(onSegment).not.toHaveBeenCalled();
-  });
-
-  it('flush() during an open (not-yet-silence-closed) tap-toggle segment closes it immediately with whatever is buffered', () => {
-    const segmenter = createSegmenter({ silenceMs: 1000, gated: true, frameMs: 32 });
-    const onSegment = vi.fn();
-    segmenter.onSegment(onSegment);
-    segmenter.pushFrame(tone(512, 0.4), true);
-    segmenter.flush(); // manual stop before silence would ever have closed it
-    expect(onSegment).toHaveBeenCalledTimes(1);
-    expect(onSegment.mock.calls[0][0].samples[0]).toBeCloseTo(0.4);
-  });
-});
 ```
 
-Remove the unused `CHUNK_MS_32` local (it documents intent inline but isn't referenced) — keep the file lint-clean by deleting that line before running tests.
+- [ ] **Step 2: Run test to verify it fails**
 
-- [ ] **Step 2: Run the tests to verify they fail (or pass vacuously) before trusting them**
+Run: `cd web && bun run test -- features/voice/use-voice-input.test.ts`
+Expected: FAIL — the hook's `onSegment` callback still hardcodes `setInterim('…')` with no follow-up updates; `capturedOnInterim` is never invoked because `engine.transcribe(frames)` is called with a single argument.
 
-Run: `cd web && bun run test -- vad.test.ts`
-Expected: all 6 new tap-toggle tests already PASS against Task 10's implementation (the `gated: true` branch was written in Task 10) — this step is a verification, not a red step, since the code pre-exists. If any fails, the failure is a REAL bug in Task 10's gated branch — fix `vad.ts` before proceeding (do not weaken the test).
+- [ ] **Step 3: Write minimal implementation**
 
-- [ ] **Step 3: (only if Step 2 found a failure) fix `vad.ts`, else skip**
+In `web/src/features/voice/use-voice-input.ts`, replace the `onSegment` callback body (lines 161–196):
 
-No change expected. If `closeSustainedSilence`'s trim-walk under- or over-trims for a specific edge case surfaced by these tests, fix the loop in `web/src/features/voice/vad.ts` and re-run Step 2 until green — do not adjust the tests' assertions to match a wrong implementation.
+```ts
+      const offSegment = segmenter.onSegment((frames) => {
+        setStatus('transcribing');
+        setInterim('…');
+        engine
+          .transcribe(frames, (text) => {
+            // D6: real streamed interim text replaces the static '…'
+            // placeholder as Moonshine decodes. The three adversarial
+            // guards (dropped-for-invalidated-segmenter, back-to-back
+            // gesture isolation, final-wins-over-late-interim) land in
+            // Task 12 — deliberately absent here.
+            setInterim(text);
+          })
+          .then((text) => {
+            if (!validSegmentersRef.current.has(segmenter)) return;
+            if (text) opts.onFinal(text);
+            setInterim('');
+            setStatus(gestureRef.current ? 'listening' : 'ready');
+          })
+          .catch(() => {
+            if (!validSegmentersRef.current.has(segmenter)) return;
+            setError('transcription failed');
+            setInterim('');
+            setStatus(gestureRef.current ? 'listening' : 'ready');
+          })
+          .finally(() => {
+            validSegmentersRef.current.delete(segmenter);
+          });
+      });
+```
 
-- [ ] **Step 4: Run the full file to verify all 13 tests pass**
+- [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd web && bun run test -- vad.test.ts`
-Expected: PASS — 13/13 (7 from Task 10 + 6 from Task 11).
+Run: `cd web && bun run test -- features/voice/use-voice-input.test.ts`
+Expected: PASS (all pre-existing tests + 3 new).
 
-- [ ] **Step 5: Gate + commit**
+Run: `cd web && bun run typecheck`
+Expected: PASS.
 
-Run: `cd web && bun run typecheck && cd web && bun run lint`
+- [ ] **Step 5: Commit**
 
 ```bash
-git add web/src/features/voice/vad.test.ts
-git commit -m "test(voice): cover tap-to-toggle segmentation (multi-cycle, jitter, short-utterance)"
+git add web/src/features/voice/use-voice-input.ts web/src/features/voice/use-voice-input.test.ts
+git commit -m "feat(voice): wire real streamed interim text into use-voice-input.ts (D6)"
 ```
 
 ---

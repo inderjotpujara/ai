@@ -1,79 +1,94 @@
-### Task 2: Mirror `CaptureSource` into `src/contracts/enums.ts` with a parity test
+### Task 2: Real `<label>`/`htmlFor` for the composer textarea + the Settings model-tier `<select>` (D1)
 
 **Files:**
-- Modify: `src/contracts/enums.ts`
-- Modify: `src/voice/types.ts:7-10` (the local `CaptureSource` definition, now removed → re-export)
-- Test: `tests/contracts/capture-source-parity.test.ts`
+- Modify: `web/src/shared/ai-elements/prompt-input.tsx` (lines 46-54 — add a `.sr-only` `<label>`, give the textarea an `id`)
+- Modify: `web/src/shared/ai-elements/smoke.test.tsx` (append assertion)
+- Modify: `web/src/features/settings/index.tsx:162-173` (add a `.sr-only` `<label>`, give the select an `id`)
+- Modify: `web/src/features/settings/index.test.tsx` (append assertion)
 
 **Interfaces:**
-- Consumes: `src/contracts/enums.ts`'s existing enum-file conventions (mirrors `RuntimeKind`'s "wire mirror + parity test" pattern, `enums.ts:146-154`).
-- Produces: `CaptureSource` enum (`Mic = 'mic'`, `File = 'file'` — values UNCHANGED from the CLI's current definition) importable from `src/contracts/enums.ts`, `src/contracts/index.ts`, and re-exported (not redefined) from `src/voice/types.ts` for `src/voice/transcribe.ts` and `src/telemetry/spans.ts`'s existing import sites.
+- Consumes: `.sr-only` (Task 1).
+- Produces: `<PromptInput>`'s textarea is reachable via `getByLabelText(/message/i)`; the Settings model-tier select is reachable via `getByLabelText(/voice model tier/i)`. No prop/signature changes — both components keep their existing public interfaces.
 
-**⚠ Values preserved (no rename):** the CLI's `CaptureSource` uses lowercase values (`Mic = 'mic'`, `File = 'file'`). This lift is a source-RELOCATION only — the enum values stay byte-identical, so the `voice.transcribe` span's `voice.capture.source` attribute value does NOT change and no existing test needs updating. (The earlier `phase7-interfaces.md` note showing `'Mic'/'File'` was a controller error; preserve `'mic'/'file'`.) `src/voice/transcribe.ts`/`tests/voice/spans.test.ts`/`tests/voice/transcribe.test.ts` reference the enum members (`CaptureSource.Mic`), never the raw string, and `tests/voice/types.test.ts` already asserts `'mic'` — all keep passing unchanged.
+- [ ] **Step 1: Write the failing tests**
 
-- [ ] **Step 1: Write the failing test**
+Append to `web/src/shared/ai-elements/smoke.test.tsx`:
 
-Create `tests/contracts/capture-source-parity.test.ts` (mirrors `tests/contracts/runtime-kind-parity.test.ts`):
+```tsx
+it('associates a real (visually-hidden) label with the composer textarea (D1)', () => {
+  render(
+    <PromptInput value="" onChange={() => {}} onSubmit={() => {}} />,
+  );
+  expect(screen.getByLabelText(/message/i)).toBe(screen.getByRole('textbox'));
+});
+```
 
-```ts
-import { expect, test } from 'bun:test';
-import { CaptureSource as ContractCaptureSource } from '../../src/contracts/enums.ts';
-import { CaptureSource as VoiceCaptureSource } from '../../src/voice/types.ts';
+Append to `web/src/features/settings/index.test.tsx` (inside the existing `describe('SettingsArea — voice input', ...)` block):
 
-test('contract CaptureSource values stay isomorphic with voice (single-sourced post-lift, D5)', () => {
-  expect(Object.values(ContractCaptureSource).sort()).toEqual(
-    Object.values(VoiceCaptureSource).sort(),
+```tsx
+it('associates a real (visually-hidden) label with the voice model-tier select (D1)', async () => {
+  renderAt('/settings');
+  expect(await screen.findByLabelText(/voice model tier/i)).toBe(
+    screen.getByTestId('voice-model-tier'),
   );
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `bun test tests/contracts/capture-source-parity.test.ts`
-Expected: FAIL — `src/contracts/enums.ts` has no export named `CaptureSource`.
+Run: `cd web && bun run test -- ai-elements/smoke.test.tsx settings/index.test.tsx`
+Expected: FAIL — `getByLabelText` finds no matching element in either case (no `<label>` exists yet).
 
 - [ ] **Step 3: Write minimal implementation**
 
-Append to `src/contracts/enums.ts` (after the `McpAuthKind` block, before `McpServerStatus`, or simply at the end of the file — appending at the end is simplest and matches the file's existing "append new enums as features land" pattern):
+Modify `web/src/shared/ai-elements/prompt-input.tsx` (inside the `<form>`, immediately before the `<textarea>`):
 
-```ts
-/** Wire mirror of `src/voice/types.ts` CaptureSource (isomorphic rule — no
- *  `src/voice/` import; that module is Node-only, pulling Bun spawn/ffmpeg
- *  glue). Lifted to be the SINGLE source of truth (Slice 30b Phase 7, D5) —
- *  `src/voice/types.ts` re-exports this rather than redefining it, so this
- *  parity test is a regression guard against future redefinition drift, not
- *  a live divergence check. Needed as a `voice.transcribe` span attribute
- *  value (`src/telemetry/spans.ts` `VOICE_CAPTURE_SOURCE`) from the browser
- *  path. `tests/contracts/capture-source-parity.test.ts` guards value
- *  parity. */
-export enum CaptureSource {
-  Mic = 'mic',
-  File = 'file',
-}
+```tsx
+      <label htmlFor="composer-input" className="sr-only">
+        Message
+      </label>
+      <textarea
+        id="composer-input"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={handleKeyDown}
+        disabled={disabled}
+        placeholder={placeholder}
+        rows={1}
+        className="min-h-[2.5rem] flex-1 resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-mono text-sm text-[var(--color-fg)] placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)]"
+      />
 ```
 
-Modify `src/voice/types.ts` — replace the local `CaptureSource` enum (lines 7-10) with a re-export, right below the `VoiceFrames` re-export from Task 1:
+Modify `web/src/features/settings/index.tsx` (inside the voice-input `<div>`, immediately before the `<select>`):
 
-```ts
-/** Re-exported from contracts (Slice 30b Phase 7, D5) — see the VoiceFrames
- *  re-export above for the rationale. */
-export { CaptureSource } from '../contracts/enums.ts';
+```tsx
+        <label htmlFor="voice-model-tier" className="sr-only">
+          Voice model tier
+        </label>
+        <select
+          id="voice-model-tier"
+          data-testid="voice-model-tier"
+          value={modelTier}
+          disabled={!voiceEnabled}
+          onChange={(e) => setModelTier(e.target.value as ModelTier)}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 font-mono text-sm text-[var(--color-fg)]"
+        >
 ```
 
-No test change is needed — `tests/voice/types.test.ts` already asserts `CaptureSource.Mic` is `'mic'`, which stays true (values preserved).
+- [ ] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 4: Run test to verify it passes**
+Run: `cd web && bun run test -- ai-elements/smoke.test.tsx settings/index.test.tsx`
+Expected: PASS.
 
-Run: `bun test tests/contracts/capture-source-parity.test.ts tests/voice/`
-Expected: PASS (parity test + all pre-existing voice tests, unchanged).
-
-Run: `bun run typecheck`
+Run: `cd web && bun run typecheck`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/contracts/enums.ts src/voice/types.ts tests/contracts/capture-source-parity.test.ts
-git commit -m "feat(voice): mirror CaptureSource into contracts with a parity test (D5)"
+git add web/src/shared/ai-elements/prompt-input.tsx web/src/shared/ai-elements/smoke.test.tsx web/src/features/settings/index.tsx web/src/features/settings/index.test.tsx
+git commit -m "feat(a11y): real labels for the composer textarea + voice model-tier select (D1)"
 ```
+
+---
 

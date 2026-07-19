@@ -1,143 +1,189 @@
-### Task 3: `AGENT_WEB_VOICE_*` config entries + `renderIndexHtml` window globals
+### Task 3: `aria-pressed` on the theme/OS-notify/voice toggles + `aria-label` on the three unnamed `<aside>` landmarks (D1)
 
 **Files:**
-- Modify: `src/config/schema.ts` (append two entries to `CONFIG_SPEC`, after the `AGENT_WEB_NOTIFY_MIN_DURATION_MS` entry at line 511)
-- Modify: `src/server/main.ts:62-101,200-203` (`NotifyConfig`/`DEFAULT_NOTIFY_CONFIG` neighbors gain a `VoiceWindowConfig`/`DEFAULT_VOICE_CONFIG` pair; `renderIndexHtml` gains a 4th parameter; the `startWebServer` call site threads `cfg.AGENT_WEB_VOICE_*` through)
-- Test: `tests/config/schema.test.ts` (append), `tests/server/main.test.ts` (append)
+- Modify: `web/src/app/app-shell.tsx:82` (theme toggle `<Button>`)
+- Modify: `web/src/app/app-shell.test.tsx` (append)
+- Modify: `web/src/features/settings/index.tsx:136-161` (OS-notify + voice-input toggle `<Button>`s)
+- Modify: `web/src/features/settings/index.test.tsx` (append)
+- Modify: `web/src/features/sessions/index.tsx:38` (`<aside data-testid="sessions-sidebar">`)
+- Modify: `web/src/features/sessions/index.test.tsx` (append)
+- Modify: `web/src/features/workflows/workflow-detail.tsx:111` (`<aside data-testid="step-detail">`)
+- Modify: `web/src/features/workflows/workflow-detail.test.tsx` (append)
+- Modify: `web/src/features/runs/waterfall.tsx:53` (`<aside data-testid="span-detail">`)
+- Modify: `web/src/features/runs/waterfall.test.tsx` (append)
 
 **Interfaces:**
-- Consumes: `ConfigEntry`/`CONFIG_SPEC`/`loadConfig` (`src/config/schema.ts`, unchanged shape); `renderIndexHtml`'s existing `token`/`distIndexHtml`/`notify` parameters and `tokenScript` string-building mechanism (`src/server/main.ts:69-80`).
-- Produces: `AGENT_WEB_VOICE_DEFAULT_MODEL` (string, default `'moonshine-base'`) and `AGENT_WEB_VOICE_VAD_SILENCE_MS` (number, default `800`) config keys; `window.__AGENT_VOICE_DEFAULT_MODEL__` / `window.__AGENT_VOICE_VAD_SILENCE_MS__` injected globals, read later by `web/src/features/settings/index.tsx` (Task 4) and `web/src/features/voice/*` (Tasks 5-9, Part B).
+- Consumes: nothing new — `Button` (`web/src/shared/ui/button.tsx`) already forwards arbitrary `ButtonHTMLAttributes`, including `aria-pressed`, via its `...rest` spread.
+- Produces: no new exports; five existing elements gain accessibility attributes only (no behavior/prop-shape change).
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/config/schema.test.ts`:
+Append to `web/src/app/app-shell.test.tsx` (inside `describe('AppShell', ...)`):
 
-```ts
-test('AGENT_WEB_VOICE_DEFAULT_MODEL defaults to moonshine-base', () => {
-  const { values, sources } = loadConfig({});
-  expect(values.AGENT_WEB_VOICE_DEFAULT_MODEL).toBe('moonshine-base');
-  expect(sources.AGENT_WEB_VOICE_DEFAULT_MODEL).toBe('default');
-});
-test('AGENT_WEB_VOICE_VAD_SILENCE_MS defaults to 800', () => {
-  const { values, sources } = loadConfig({});
-  expect(values.AGENT_WEB_VOICE_VAD_SILENCE_MS).toBe(800);
-  expect(sources.AGENT_WEB_VOICE_VAD_SILENCE_MS).toBe('default');
+```tsx
+it('the theme toggle exposes aria-pressed reflecting dark mode (D1)', async () => {
+  renderAt('/');
+  const btn = await screen.findByRole('button', { name: /theme/i });
+  expect(btn).toHaveAttribute('aria-pressed', 'true'); // ThemeProvider defaults to dark
 });
 ```
 
-Append to `tests/server/main.test.ts`:
+Append to `web/src/features/settings/index.test.tsx` (inside `describe('SettingsArea', ...)` for the notify toggle, and inside `describe('SettingsArea — voice input', ...)` for the voice toggle):
 
-```ts
-test('renderIndexHtml also injects the voice config (defaults) alongside the token', () => {
-  const html = renderIndexHtml('tok-999');
-  expect(html).toContain('window.__AGENT_VOICE_DEFAULT_MODEL__="moonshine-base"');
-  expect(html).toContain('window.__AGENT_VOICE_VAD_SILENCE_MS__=800');
+```tsx
+it('exposes aria-pressed on the OS-notify toggle reflecting its state (D1)', async () => {
+  stubNotification('granted');
+  renderAt('/settings');
+  const btn = await screen.findByTestId('notify-os-toggle');
+  expect(btn).toHaveAttribute('aria-pressed', 'false');
+  fireEvent.click(btn);
+  expect(await screen.findByText('OS notifications: on')).toBeInTheDocument();
+  expect(btn).toHaveAttribute('aria-pressed', 'true');
 });
+```
 
-test('renderIndexHtml threads an explicit voice config through', () => {
-  const html = renderIndexHtml('tok-1000', undefined, undefined, {
-    defaultModel: 'moonshine-tiny',
-    vadSilenceMs: 1200,
-  });
-  expect(html).toContain('window.__AGENT_VOICE_DEFAULT_MODEL__="moonshine-tiny"');
-  expect(html).toContain('window.__AGENT_VOICE_VAD_SILENCE_MS__=1200');
+```tsx
+it('exposes aria-pressed on the voice-input toggle reflecting its state (D1)', async () => {
+  renderAt('/settings');
+  const btn = await screen.findByTestId('voice-input-toggle');
+  expect(btn).toHaveAttribute('aria-pressed', 'false');
+  fireEvent.click(btn);
+  expect(btn).toHaveAttribute('aria-pressed', 'true');
+});
+```
+
+Append to `web/src/features/sessions/index.test.tsx` (inside `describe('SessionsSidebar', ...)`):
+
+```tsx
+it('labels the sidebar landmark for assistive tech (D1)', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => jsonResponse({ items: [], total: 0 })),
+  );
+  renderAt('/');
+  expect(
+    await screen.findByRole('complementary', { name: /recent sessions/i }),
+  ).toBeInTheDocument();
+  vi.unstubAllGlobals();
+});
+```
+
+Append to `web/src/features/workflows/workflow-detail.test.tsx` (inside `describe('WorkflowDetail', ...)`):
+
+```tsx
+it('labels the step-detail landmark for assistive tech (D1)', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => jsonResponse(detail)),
+  );
+  renderAt('/workflows/fetch-then-summarize');
+  fireEvent.click(await screen.findByTestId('dag-node-fetch'));
+  expect(
+    await screen.findByRole('complementary', { name: /selected step detail/i }),
+  ).toBeInTheDocument();
+  vi.unstubAllGlobals();
+});
+```
+
+Append to `web/src/features/runs/waterfall.test.tsx` (inside `describe('Waterfall', ...)`):
+
+```tsx
+it('labels the span-detail landmark for assistive tech (D1)', () => {
+  render(<Waterfall spans={[span({ spanId: 'a' })]} />);
+  fireEvent.click(screen.getByTestId('bar-a'));
+  expect(
+    screen.getByRole('complementary', { name: /selected span detail/i }),
+  ).toBeInTheDocument();
 });
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `bun test tests/config/schema.test.ts tests/server/main.test.ts`
-Expected: FAIL — `values.AGENT_WEB_VOICE_DEFAULT_MODEL` is `undefined` (no such config entry yet); `renderIndexHtml` doesn't accept/inject a 4th param yet (the two new assertions on `html` fail — the strings aren't present).
+Run: `cd web && bun run test -- app-shell.test.tsx settings/index.test.tsx sessions/index.test.tsx workflows/workflow-detail.test.tsx runs/waterfall.test.tsx`
+Expected: FAIL on all five new assertions — none of the five elements has the attribute yet.
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/config/schema.ts`, append two entries to `CONFIG_SPEC` immediately after the `AGENT_WEB_NOTIFY_MIN_DURATION_MS` entry (before the closing `];` at line 512):
+Modify `web/src/app/app-shell.tsx:82`:
 
-```ts
-  {
-    env: 'AGENT_WEB_VOICE_DEFAULT_MODEL',
-    kind: 'string',
-    def: 'moonshine-base',
-    doc: "Default Moonshine model tier for browser voice input (web/src/features/voice/stt-engine.ts): 'moonshine-base' (~120-150MB, default, better accuracy) or 'moonshine-tiny' (~76MB, faster/lighter). Injected into the served page as window.__AGENT_VOICE_DEFAULT_MODEL__ (server/main.ts renderIndexHtml). Slice 30b Phase 7.",
-  },
-  {
-    env: 'AGENT_WEB_VOICE_VAD_SILENCE_MS',
-    kind: 'number',
-    def: 800,
-    doc: 'Sustained silence (ms) that closes a tap-to-toggle voice segment (web/src/features/voice/vad.ts Segmenter). Injected into the served page as window.__AGENT_VOICE_VAD_SILENCE_MS__ (server/main.ts renderIndexHtml). Slice 30b Phase 7.',
-  },
+```tsx
+          <Button
+            onClick={toggle}
+            aria-label={`theme: ${theme}`}
+            aria-pressed={theme === 'dark'}
+          >
+            {theme === 'dark' ? '☾' : '☀'}
+          </Button>
 ```
 
-In `src/server/main.ts`, add a `VoiceWindowConfig` type + default next to `NotifyConfig`/`DEFAULT_NOTIFY_CONFIG` (around line 62-67):
+Modify `web/src/features/settings/index.tsx` (both toggle buttons):
 
-```ts
-export type NotifyConfig = { pollMs: number; minDurationMs: number };
-
-const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
-  pollMs: 5_000,
-  minDurationMs: 60_000,
-};
-
-export type VoiceWindowConfig = { defaultModel: string; vadSilenceMs: number };
-
-const DEFAULT_VOICE_CONFIG: VoiceWindowConfig = {
-  defaultModel: 'moonshine-base',
-  vadSilenceMs: 800,
-};
+```tsx
+        <Button
+          data-testid="notify-os-toggle"
+          variant={enabled ? 'accent' : 'default'}
+          aria-pressed={enabled}
+          onClick={handleToggle}
+        >
+          {enabled ? 'OS notifications: on' : 'Enable OS notifications'}
+        </Button>
 ```
 
-Update `renderIndexHtml`'s signature and `tokenScript` build (lines 69-80) to accept and inject a 4th parameter:
-
-```ts
-export function renderIndexHtml(
-  token: string,
-  distIndexHtml?: string,
-  notify: NotifyConfig = DEFAULT_NOTIFY_CONFIG,
-  voice: VoiceWindowConfig = DEFAULT_VOICE_CONFIG,
-): string {
-  // JSON.stringify does not escape `</`, so a token value could break out of
-  // the <script> tag; escape `<` to a unicode escape before interpolating.
-  const safeToken = JSON.stringify(token).replace(/</g, '\\u003c');
-  const tokenScript =
-    `<script>window.__AGENT_TOKEN__=${safeToken};` +
-    `window.__AGENT_NOTIFY_POLL_MS__=${JSON.stringify(notify.pollMs)};` +
-    `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${JSON.stringify(notify.minDurationMs)};` +
-    `window.__AGENT_VOICE_DEFAULT_MODEL__=${JSON.stringify(voice.defaultModel)};` +
-    `window.__AGENT_VOICE_VAD_SILENCE_MS__=${JSON.stringify(voice.vadSilenceMs)};</script>`;
+```tsx
+        <Button
+          data-testid="voice-input-toggle"
+          variant={voiceEnabled ? 'accent' : 'default'}
+          aria-pressed={voiceEnabled}
+          onClick={() => setVoiceEnabled((v) => !v)}
+        >
+          {voiceEnabled ? 'Voice input: on' : 'Enable voice input'}
+        </Button>
 ```
 
-(The rest of `renderIndexHtml`'s body — the `distIndexHtml` branch and the Phase-1 stub fallback — is unchanged; both already just concatenate `tokenScript` wherever it was used, so the extra globals ride along automatically.)
+Modify `web/src/features/sessions/index.tsx:38`:
 
-Update the `startWebServer` call site (around line 200-203) to thread the real config values through:
+```tsx
+    <aside
+      data-testid="sessions-sidebar"
+      aria-label="Recent sessions"
+      className="w-[var(--spacing-rail)] shrink-0 border-r border-[var(--color-border)] p-4"
+    >
+```
 
-```ts
-    indexHtml: renderIndexHtml(
-      token,
-      distIndexHtml,
-      {
-        pollMs: cfg.AGENT_WEB_NOTIFY_POLL_MS as number,
-        minDurationMs: cfg.AGENT_WEB_NOTIFY_MIN_DURATION_MS as number,
-      },
-      {
-        defaultModel: cfg.AGENT_WEB_VOICE_DEFAULT_MODEL as string,
-        vadSilenceMs: cfg.AGENT_WEB_VOICE_VAD_SILENCE_MS as number,
-      },
-    ),
+Modify `web/src/features/workflows/workflow-detail.tsx:111`:
+
+```tsx
+                <aside
+                  data-testid="step-detail"
+                  aria-label="Selected step detail"
+                  className="min-w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-fg)]"
+                >
+```
+
+Modify `web/src/features/runs/waterfall.tsx:53`:
+
+```tsx
+        <aside
+          data-testid="span-detail"
+          aria-label="Selected span detail"
+          className="min-w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-fg)]"
+        >
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `bun test tests/config/schema.test.ts tests/server/main.test.ts`
-Expected: PASS (all existing + new assertions, including the pre-existing notify-config tests which must still pass unchanged since `notify`/`voice` are independent parameters).
+Run: `cd web && bun run test -- app-shell.test.tsx settings/index.test.tsx sessions/index.test.tsx workflows/workflow-detail.test.tsx runs/waterfall.test.tsx`
+Expected: PASS.
 
-Run: `bun run typecheck && bun run lint:file -- "src/config/schema.ts" "src/server/main.ts"`
+Run: `cd web && bun run typecheck`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/config/schema.ts src/server/main.ts tests/config/schema.test.ts tests/server/main.test.ts
-git commit -m "feat(voice): add AGENT_WEB_VOICE_* config + renderIndexHtml window globals (D7)"
+git add web/src/app/app-shell.tsx web/src/app/app-shell.test.tsx web/src/features/settings/index.tsx web/src/features/settings/index.test.tsx web/src/features/sessions/index.tsx web/src/features/sessions/index.test.tsx web/src/features/workflows/workflow-detail.tsx web/src/features/workflows/workflow-detail.test.tsx web/src/features/runs/waterfall.tsx web/src/features/runs/waterfall.test.tsx
+git commit -m "feat(a11y): aria-pressed on toggle buttons + aria-label on unnamed aside landmarks (D1)"
 ```
+
+---
 

@@ -1,85 +1,76 @@
-# Task 19 Report: MCP config — retain transport kind on dormant entries (Phase 5)
+# Task 19 Report — `src/contracts/telemetry.ts` (D10)
 
 ## Status: DONE
 
-## What was implemented
+## Summary
+Created the isomorphic `TelemetryEventSchema` zod contract for the client→server voice
+telemetry beacon (Slice 30b Phase 8, Increment 4). Followed the task brief verbatim.
 
-Widened `McpConfig['dormant']` to carry the transport `kind` (`McpTransportKind`)
-alongside `name` and `missingVars`, and populated it in `loadMcpConfig` when an
-entry is demoted to dormant due to unset env vars. This is a pure retention fix:
-`entry.kind` is read off the already-built `McpServerEntry` (schema validation +
-`toEntry()` construction happen *before* the missing-var check), so no mount
-behavior changes — only the dormant record now preserves data that already
-existed at that point in the pipeline.
+## Files
+- Created `/Users/inderjotsingh/ai/src/contracts/telemetry.ts`:
+  - `VOICE_MODEL_TIERS = ['moonshine-base', 'moonshine-tiny'] as const` — wire-mirror of
+    web's `ModelTier` string enum (`web/src/features/voice/model-tier.ts`), since
+    `src/contracts/` is isomorphic and cannot import the web-only enum. Same precedent as
+    Phase 7's `CaptureSource` lift (D5), per the brief's explicit controller decision.
+  - `TelemetryEventSchema = z.discriminatedUnion('kind', [...])` with one variant,
+    `kind: z.literal('voice.transcribe.web')` — matches Task 20's span name and stays
+    distinct from the pre-existing CLI-side `voice.transcribe` span.
+  - `type TelemetryEvent = z.infer<typeof TelemetryEventSchema>`.
+- Modified `/Users/inderjotsingh/ai/src/contracts/index.ts`: appended
+  `export * from './telemetry.ts';` (kept alphabetical: requests → telemetry → voice).
+- Created `/Users/inderjotsingh/ai/tests/contracts/telemetry.test.ts`: round-trip parse,
+  unknown-`kind` rejection, missing/negative-field rejection (per brief Step 1, exact code).
 
-This unblocks Task 20 (`mapMcpDormantToDto`), since `McpServerDTO` requires a
-`kind` field even for dormant/unmounted servers.
-
-## Files changed
-
-- `src/mcp/types.ts` — `McpConfig.dormant` entries gain `kind: McpTransportKind`
-  (with doc comment explaining why it's safe/available at that point).
-- `src/mcp/config.ts` — `loadMcpConfig`'s dormant-push branch now includes
-  `kind: entry.kind`.
-- `tests/mcp/config.test.ts` — widened the `'marks entries with unset env vars
-  dormant, not failed'` test (renamed to `'... — and keeps the transport kind'`)
-  to assert the dormant record includes `kind: McpTransportKind.Http`.
-
-## TDD evidence
-
-**RED** (`bun test tests/mcp/config.test.ts` after widening the test only):
-```
-- Expected  - 1
-+ Received  + 0
-   {
--     "kind": "http",
-      "missingVars": [ ... ]
-   }
-(fail) loadMcpConfig > marks entries with unset env vars dormant, not failed — and keeps the transport kind
-13 pass / 1 fail
-```
-
-**GREEN** (`bun test tests/mcp/config.test.ts` after implementation):
-```
-14 pass
-0 fail
-30 expect() calls
-Ran 14 tests across 1 file. [31.00ms]
-```
+## TDD flow
+1. Wrote the test first; ran `bun test tests/contracts/telemetry.test.ts` → failed as
+   expected (`Cannot find module '../../src/contracts/telemetry.ts'`).
+2. Wrote the minimal implementation per brief Step 3 (verbatim).
+3. Re-ran `bun test tests/contracts/telemetry.test.ts tests/contracts/isomorphic.test.ts`
+   → 4 pass, 0 fail (round-trip + reject shapes + isomorphic-import guard).
 
 ## Gate results
+- `bun run typecheck` → clean (`tsc --noEmit`, no output).
+- `bun run lint:file -- "src/contracts/telemetry.ts" "src/contracts/index.ts" "tests/contracts/telemetry.test.ts"`
+  → initially failed on 2 long `expect(() => ...)` lines in the test (formatter wanted
+  them wrapped). Ran the required format guard:
+  `bunx biome check --write src/contracts/telemetry.ts src/contracts/index.ts tests/contracts/telemetry.test.ts`
+  → fixed 1 file (wrapped the two long `expect` calls onto multiple lines; no logic
+  change). Re-ran lint → clean, 0 errors.
+- Focused test: `bun test tests/contracts/telemetry.test.ts tests/contracts/isomorphic.test.ts`
+  → 4 pass, 0 fail, 20 expect() calls.
+- Full contracts suite (`bun test tests/contracts/`) → 108 pass, 0 fail, 170 expect()
+  calls across 27 files — confirms no regression to existing parity/isomorphic tests.
 
-- `bun run typecheck` — clean (`tsc --noEmit`, no output).
-- `bun run lint:file -- src/mcp/types.ts src/mcp/config.ts tests/mcp/config.test.ts`
-  — `Checked 3 files in 28ms. No fixes applied.` (0 errors).
-- Focused tests: 14/14 pass in `tests/mcp/config.test.ts`.
+## Decision followed (per brief)
+The spec's `modelTier: ModelTier` cannot be satisfied by importing `ModelTier` directly
+(it's web-side; `src/contracts/` is isomorphic and the isomorphic test forbids anything
+but `zod`/sibling imports). Per the brief's explicit controller reconciliation, mirrored
+the two tier values as a plain `const ... as const` array (`VOICE_MODEL_TIERS`), matching
+the Phase 7 `CaptureSource` (D5) precedent — not a TS `enum`, despite the repo's general
+"prefer enum over string-literal unions" style rule, since the brief specifies this exact
+shape as the reconciled decision for this task.
 
-## Self-review
-
-- Confirmed this is additive/retention-only: `entry.kind` was already computed
-  by `toEntry()` before the `missing.length > 0` branch runs, so nothing about
-  *which* entries become dormant or *when* mounting happens changed — only the
-  recorded shape widened. No STOP/DONE_WITH_CONCERNS trigger (mount behavior
-  is untouched).
-- Searched for other consumers of `cfg.dormant` / `McpConfig['dormant']` in
-  `src/` — none exist yet (Tasks 20/21, the mapper and list endpoint, are
-  still pending), so no other call sites needed updates.
-- `git status` / `git show --stat HEAD` confirm only the three intended files
-  were staged and committed; no incidental changes swept in.
-
-## Concerns
-
-None. Change is a minimal, type-safe field addition consistent with existing
-`src/mcp/` idioms (matches how `entries` already carry `kind` via the
-discriminated `McpServerEntry` union).
+No parity test (like `capture-source-parity.test.ts`) was added between
+`VOICE_MODEL_TIERS` and web's `ModelTier`, since the brief's Step 1–5 didn't request one
+and it wasn't in this task's scope — flagging in case Task 20/22 or the controller wants
+one added later to guard against value drift (the two moonshine tier values must stay
+byte-identical per the brief's own note).
 
 ## Commit
+`56a9549` — `feat(telemetry): TelemetryEventSchema wire contract for the voice beacon (D10)`
+on branch `slice-30b-phase8-polish-a11y`. Files staged: `src/contracts/telemetry.ts`,
+`src/contracts/index.ts`, `tests/contracts/telemetry.test.ts`. Pre-commit hook
+(`docs-check`) passed automatically.
 
-`4445dc0` — `feat(mcp): retain transport kind on dormant config entries (Phase 5)`
+## Concerns / flags for controller
+1. No web-side/`CaptureSource`-style parity test was added for `VOICE_MODEL_TIERS` vs
+   `ModelTier` — recommend Task 20/22 or a follow-up task add one if drift risk matters
+   (values must stay byte-identical: `moonshine-base`/`moonshine-tiny`).
+2. Working tree had many pre-existing unrelated modified files (other task briefs/reports,
+   `.remember/` state) before this task started — untouched, not part of this commit.
 
 ## Note on file history
-
-This report file previously held a stale Task-19 entry from an earlier
-Phase-4 task-numbering scheme (⌘K jump-to-crew/jump-to-workflow commands,
-commit `e695ee6`). It has been fully overwritten per the brief's instruction
-for this slice's Task 19; nothing from the old content was preserved or merged.
+This report file previously held a stale Task-19 entry from an earlier task-numbering
+scheme (MCP config dormant-transport-kind, commit `4445dc0`). It has been fully
+overwritten per the brief's instruction for this slice's Task 19; nothing from the old
+content was preserved or merged.

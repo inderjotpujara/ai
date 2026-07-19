@@ -1,5 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { RUN_ROOT_NAMES } from '../run/run-dto.ts';
 import type { RunSummary } from '../run/run-trace.ts';
 import { buildTree, readSpans, summarizeRun } from '../run/run-trace.ts';
 import { renderRunList, renderTimeline } from './render-trace.ts';
@@ -59,7 +60,13 @@ async function main(): Promise<void> {
     }, 500);
     const stopper = setInterval(async () => {
       const { spans } = await readSpans(join(root, id));
-      if (spans.some((s) => s.name === 'agent.run')) {
+      // Stop tailing once a recognized run-root span is present. A span is
+      // only flushed to spans.jsonl when it ends, so a run-root's presence == a
+      // terminated run. Keying off the shared RUN_ROOT_NAMES set (not the
+      // hardcoded 'agent.run') means a chat turn (`chat.run`, D9) and
+      // crew/workflow runs now terminate the tail instead of re-rendering
+      // forever.
+      if (spans.some((s) => RUN_ROOT_NAMES.has(s.name))) {
         clearInterval(timer);
         clearInterval(stopper);
         await tick();
