@@ -18,6 +18,11 @@
         "formatter": { "enabled": false },
         "linter": { "enabled": false }
       }
+    },
+    {
+      "includes": ["docs/diagrams/**/*.html"],
+      "linter": { "enabled": false },
+      "formatter": { "enabled": false }
     }
   ]
 }

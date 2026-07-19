@@ -1,15 +1,16 @@
 import type { ProviderOptions } from '@ai-sdk/provider-utils';
 import {
   generateText,
+  isStepCount,
   type LanguageModel,
   type ModelMessage,
-  stepCountIs,
   streamText,
   type ToolSet,
 } from 'ai';
 import type { MediaFilePart } from '../media/types.ts';
 import { runTimeoutMs } from '../reliability/config.ts';
 import { withWallClock } from '../reliability/timeout.ts';
+import { aiSdkTelemetryIntegration } from '../telemetry/ai-sdk.ts';
 import { recordIoEnabled } from '../telemetry/provider.ts';
 import { MaxStepsError } from './errors.ts';
 
@@ -68,13 +69,20 @@ export async function runAgent(input: RunAgentInput): Promise<{
   text: string;
   steps: Awaited<ReturnType<typeof generateText>>['steps'];
 }> {
+  // AI SDK v7 no longer emits telemetry spans unless an OTel integration is
+  // supplied (it was extracted from core `ai` into `@ai-sdk/otel`). We pass the
+  // integration PER CALL via `telemetry.integrations` (below) rather than
+  // registering it globally, so ONLY these runAgent calls emit `ai.*` spans —
+  // matching v6's opt-in scope. A global `registerTelemetry` would make every
+  // AI-SDK call in the process (builder/verify generateText, memory embedMany)
+  // emit spans too. See src/telemetry/ai-sdk.ts.
   if (input.stream) {
     const { text, finishReason, steps } = await withWallClock(
       runTimeoutMs(),
       async (signal) => {
         const result = streamText({
           model: input.model,
-          system: input.systemPrompt,
+          instructions: input.systemPrompt,
           ...buildCallInput(input.prompt, input.attachments),
           tools: input.tools,
           temperature: input.temperature,
@@ -83,9 +91,10 @@ export async function runAgent(input: RunAgentInput): Promise<{
           // withWallClock's combined signal (timeout + external abort) and
           // must be passed unconditionally.
           abortSignal: signal,
-          stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
-          experimental_telemetry: {
+          stopWhen: isStepCount(input.maxSteps ?? DEFAULT_MAX_STEPS),
+          telemetry: {
             isEnabled: true,
+            integrations: [aiSdkTelemetryIntegration],
             functionId: input.functionId,
             recordInputs: recordIoEnabled(),
             recordOutputs: recordIoEnabled(),
@@ -120,7 +129,7 @@ export async function runAgent(input: RunAgentInput): Promise<{
     (signal) =>
       generateText({
         model: input.model,
-        system: input.systemPrompt,
+        instructions: input.systemPrompt,
         ...buildCallInput(input.prompt, input.attachments),
         tools: input.tools,
         temperature: input.temperature,
@@ -132,9 +141,10 @@ export async function runAgent(input: RunAgentInput): Promise<{
         // signal whenever a caller supplies one, so the timeout would no
         // longer abort the model call (the exact background-leak this fixes).
         abortSignal: signal,
-        stopWhen: stepCountIs(input.maxSteps ?? DEFAULT_MAX_STEPS),
-        experimental_telemetry: {
+        stopWhen: isStepCount(input.maxSteps ?? DEFAULT_MAX_STEPS),
+        telemetry: {
           isEnabled: true,
+          integrations: [aiSdkTelemetryIntegration],
           functionId: input.functionId,
           recordInputs: recordIoEnabled(),
           recordOutputs: recordIoEnabled(),

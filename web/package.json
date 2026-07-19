@@ -12,7 +12,7 @@
     "test:voice-e2e": "vite build && bun run scripts/check-worklet-build.ts && vitest run --config vitest.browser.config.ts"
   },
   "dependencies": {
-    "@ai-sdk/react": "^3",
+    "@ai-sdk/react": "^4.0.34",
     "@base-ui-components/react": "1.0.0-rc.0",
     "@fontsource-variable/geist": "^5",
     "@fontsource-variable/geist-mono": "^5",
@@ -24,7 +24,7 @@
     "@visx/shape": "^4.0.0",
     "@visx/tooltip": "^4.0.0",
     "@xyflow/react": "^12.11.2",
-    "ai": "^6.0.217",
+    "ai": "^7.0.31",
     "react": "^19",
     "react-dom": "^19",
     "streamdown": "^2.5.0",
@@ -43,7 +43,7 @@
     "happy-dom": "^15",
     "playwright": "^1.61.1",
     "tailwindcss": "^4",
-    "typescript": "^5.9.0",
+    "typescript": "^6.0.3",
     "vite": "^8",
     "vitest": "^4",
     "vitest-axe": "^0.1.0"
