@@ -818,7 +818,7 @@ export function recordPullProgressTick(p: PullProgressTick): Promise<void> {
 
 /** Span for one engine-level tool call (StepKind.Tool) — closes the gap where
  *  direct tool dispatch ran uninstrumented (agent-internal tool calls are
- *  already covered by AI-SDK experimental_telemetry). */
+ *  already covered by the AI-SDK telemetry integration, `telemetry.ai-sdk.ts`). */
 export function withToolSpan<T>(
   toolName: string,
   fn: () => Promise<T>,

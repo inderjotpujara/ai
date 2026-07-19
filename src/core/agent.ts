@@ -10,7 +10,7 @@ import {
 import type { MediaFilePart } from '../media/types.ts';
 import { runTimeoutMs } from '../reliability/config.ts';
 import { withWallClock } from '../reliability/timeout.ts';
-import { ensureAiSdkTelemetry } from '../telemetry/ai-sdk.ts';
+import { aiSdkTelemetryIntegration } from '../telemetry/ai-sdk.ts';
 import { recordIoEnabled } from '../telemetry/provider.ts';
 import { MaxStepsError } from './errors.ts';
 
@@ -70,9 +70,12 @@ export async function runAgent(input: RunAgentInput): Promise<{
   steps: Awaited<ReturnType<typeof generateText>>['steps'];
 }> {
   // AI SDK v7 no longer emits telemetry spans unless an OTel integration is
-  // registered (it was extracted from core `ai` into `@ai-sdk/otel`). Register
-  // once, idempotently, before any generateText/streamText call.
-  ensureAiSdkTelemetry();
+  // supplied (it was extracted from core `ai` into `@ai-sdk/otel`). We pass the
+  // integration PER CALL via `telemetry.integrations` (below) rather than
+  // registering it globally, so ONLY these runAgent calls emit `ai.*` spans —
+  // matching v6's opt-in scope. A global `registerTelemetry` would make every
+  // AI-SDK call in the process (builder/verify generateText, memory embedMany)
+  // emit spans too. See src/telemetry/ai-sdk.ts.
   if (input.stream) {
     const { text, finishReason, steps } = await withWallClock(
       runTimeoutMs(),
@@ -91,6 +94,7 @@ export async function runAgent(input: RunAgentInput): Promise<{
           stopWhen: isStepCount(input.maxSteps ?? DEFAULT_MAX_STEPS),
           telemetry: {
             isEnabled: true,
+            integrations: [aiSdkTelemetryIntegration],
             functionId: input.functionId,
             recordInputs: recordIoEnabled(),
             recordOutputs: recordIoEnabled(),
@@ -140,6 +144,7 @@ export async function runAgent(input: RunAgentInput): Promise<{
         stopWhen: isStepCount(input.maxSteps ?? DEFAULT_MAX_STEPS),
         telemetry: {
           isEnabled: true,
+          integrations: [aiSdkTelemetryIntegration],
           functionId: input.functionId,
           recordInputs: recordIoEnabled(),
           recordOutputs: recordIoEnabled(),
