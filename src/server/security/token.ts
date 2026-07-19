@@ -8,7 +8,7 @@ export function mintSessionToken(): string {
 
 export type TokenGuard = {
   verify(req: Request): boolean;
-  verifyQuery(url: URL): boolean;
+  verifyToken(raw: string): boolean;
 };
 
 /** Constant-time bearer verification against the session token. */
@@ -16,8 +16,9 @@ export function createTokenGuard(token: string): TokenGuard {
   const expected = Buffer.from(token);
   const prefix = 'Bearer ';
   // Shared constant-time compare — the ONLY place a candidate is checked
-  // against the session token, so both the header and query paths get the
-  // same timing-safe treatment (no hand-rolled `===` anywhere).
+  // against the session token, so both the header bearer and the beacon
+  // body-token paths get the same timing-safe treatment (no hand-rolled
+  // `===` anywhere).
   const matches = (candidate: string): boolean => {
     const got = Buffer.from(candidate);
     if (got.length !== expected.length) return false;
@@ -30,13 +31,13 @@ export function createTokenGuard(token: string): TokenGuard {
       return matches(header.slice(prefix.length));
     },
     // `navigator.sendBeacon` cannot set an Authorization header (Slice 30b
-    // Phase 8, D10). `buildFetch` calls this ONLY for POST /api/telemetry —
-    // same-origin, already behind the Host/Origin perimeter, and the token is
-    // already same-origin-readable via `window.__AGENT_TOKEN__`, so it adds no
-    // material attack surface. Scoped narrowly on purpose.
-    verifyQuery(url) {
-      const k = url.searchParams.get('k');
-      return k !== null && matches(k);
+    // Phase 8, D10), so the beacon carries the token in its JSON BODY (never
+    // the URL — a `?k=` query token leaks via browser history and proxy
+    // access-logs once the app is served beyond localhost). The telemetry
+    // handler reads the body, extracts the token, and calls this to verify it
+    // timing-safe BEFORE parsing the event. Scoped narrowly to that one route.
+    verifyToken(raw) {
+      return matches(raw);
     },
   };
 }

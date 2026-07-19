@@ -34,7 +34,7 @@ import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
-import { createTokenGuard } from './security/token.ts';
+import { createTokenGuard, type TokenGuard } from './security/token.ts';
 import { handleSessionDelete } from './sessions/delete.ts';
 import { handleSessionDetail } from './sessions/detail.ts';
 import { handleSessionExport } from './sessions/export.ts';
@@ -117,16 +117,19 @@ export function buildFetch(
 
       const url = new URL(req.url);
       if (url.pathname.startsWith('/api')) {
-        // `navigator.sendBeacon` can't set an Authorization header, so POST
-        // /api/telemetry ALONE also accepts a constant-time-compared ?k= token
-        // (D10). Every other route stays header-only — the exception is scoped
-        // to the beacon, and the Host/Origin perimeter still fronts it.
+        // `navigator.sendBeacon` can't set an Authorization header, so the
+        // beacon carries its token in the request BODY (not the URL — a query
+        // token leaks via browser history / proxy logs). POST /api/telemetry
+        // ALONE is therefore let past this shared header guard; the telemetry
+        // handler owns the timing-safe body-token check (see handler.ts). The
+        // Host/Origin perimeter above STILL fronts it, and every OTHER route
+        // stays header-bearer-only. The exception is scoped to the beacon.
         const isBeacon =
           req.method === 'POST' && url.pathname === '/api/telemetry';
-        if (!guard.verify(req) && !(isBeacon && guard.verifyQuery(url))) {
+        if (!isBeacon && !guard.verify(req)) {
           return json({ error: 'unauthorized' }, 401);
         }
-        return await handleApi(req, url, deps);
+        return await handleApi(req, url, deps, guard);
       }
       return await serveStatic(req, url, deps);
     } catch (err) {
@@ -139,6 +142,7 @@ async function handleApi(
   req: Request,
   url: URL,
   deps: ServerDeps,
+  guard: TokenGuard,
 ): Promise<Response> {
   return withServerRequestSpan(
     { route: url.pathname, method: req.method },
@@ -169,7 +173,7 @@ async function handleApi(
           return handleFeedback(req);
         }
         if (req.method === 'POST' && url.pathname === '/api/telemetry') {
-          const res = await handleTelemetry(req);
+          const res = await handleTelemetry(req, guard);
           rec.status(res.status);
           return res;
         }

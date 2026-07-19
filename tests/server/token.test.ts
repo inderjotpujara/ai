@@ -32,15 +32,9 @@ test('guard rejects a wrong, missing, or non-bearer token', () => {
   );
 });
 
-test('verifyQuery accepts the token from the ?k= query param (sendBeacon path)', () => {
+test('verifyToken accepts the raw token from the sendBeacon BODY (constant-time), rejects a wrong one', () => {
   const guard = createTokenGuard('sekret');
-  expect(
-    guard.verifyQuery(new URL('http://localhost/api/telemetry?k=sekret')),
-  ).toBe(true);
-  expect(
-    guard.verifyQuery(new URL('http://localhost/api/telemetry?k=wrong')),
-  ).toBe(false);
-  expect(guard.verifyQuery(new URL('http://localhost/api/telemetry'))).toBe(
-    false,
-  );
+  expect(guard.verifyToken('sekret')).toBe(true);
+  expect(guard.verifyToken('wrong')).toBe(false);
+  expect(guard.verifyToken('')).toBe(false);
 });

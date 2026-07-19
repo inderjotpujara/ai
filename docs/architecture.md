@@ -4927,24 +4927,33 @@ span-worthy event **from the browser**, after the fact.
   `CaptureSource` set in Phase 7 (D5) — guarded against drift by a parity
   test asserting the two independently-defined arrays match.
 - **`POST /api/telemetry`** (`src/server/telemetry/handler.ts`,
-  `handleTelemetry`) — parses the body against `TelemetryEventSchema`
-  (`400` on failure), calls `recordVoiceTranscribeWeb`, and **always acks
-  `204`** with no body: the browser's `sendBeacon` never reads a response,
-  so a transient span-write failure is caught and swallowed rather than
-  surfaced as a `500` (the span writer is only *nominally* fire-and-forget —
-  `inSpan` sets `ERROR` status and re-throws on failure — the handler
-  isolates that from the beacon's ack).
-- **Auth: `sendBeacon` `?k=` query-token, scoped to this one route.**
-  `navigator.sendBeacon()` cannot set request headers, so the existing
-  header-based `TokenGuard` (`src/server/security/token.ts`) gains a second
-  check, `verifyQuery(url)`, reusing the same constant-time `matches()`
-  comparator (never `===`) against a `?k=<token>` query param.
-  `src/server/app.ts`'s auth gate accepts `guard.verify(req) ||
-  (isBeacon && guard.verifyQuery(url))`, where `isBeacon` is narrowly
-  `req.method === 'POST' && url.pathname === '/api/telemetry'` — every other
-  route still requires the header, so widening the auth surface stays
-  confined to this one beacon endpoint. The token itself is never logged or
-  spanned (only `url.pathname` is recorded).
+  `handleTelemetry`) — reads the `sendBeacon` JSON body `{ token, event }`,
+  **verifies `token` timing-safe FIRST** (see Auth below; `401` on
+  mismatch/missing, before the event is even looked at), then parses `event`
+  against `TelemetryEventSchema` (`400` on failure), calls
+  `recordVoiceTranscribeWeb`, and **always acks `204`** with no body: the
+  browser's `sendBeacon` never reads a response, so a transient span-write
+  failure is caught and swallowed rather than surfaced as a `500` (the span
+  writer is only *nominally* fire-and-forget — `inSpan` sets `ERROR` status
+  and re-throws on failure — the handler isolates that from the beacon's
+  ack).
+- **Auth: token in the `sendBeacon` JSON BODY, handler-verified timing-safe.**
+  `navigator.sendBeacon()` cannot set request headers, so the beacon can't
+  carry the usual `Authorization` bearer. It therefore ships the token in the
+  request **body** (`{ token, event }`) — deliberately **not** a `?k=<token>`
+  query param, which would leak via browser history and proxy access-logs
+  once the app is served beyond localhost (a standing future requirement).
+  `src/server/app.ts`'s perimeter lets `POST /api/telemetry` past the shared
+  header-bearer guard (`isBeacon = req.method === 'POST' && url.pathname ===
+  '/api/telemetry'`), and the handler owns the token check: it calls
+  `TokenGuard.verifyToken(raw)` (`src/server/security/token.ts`), which reuses
+  the same constant-time `matches()` comparator (never `===`) the header path
+  uses. Every **other** route still requires the header bearer at the
+  perimeter, and — crucially — the **Host/Origin perimeter
+  (`enforcePerimeter`) still fronts `/api/telemetry` exactly as before**; only
+  the bearer/token check moved into the handler for this one route. The token
+  is never logged, spanned, or echoed in an error body (only `url.pathname` is
+  recorded on the request span).
 - **`recordVoiceTranscribeWeb`** (`src/telemetry/spans.ts`) opens a
   **`voice.transcribe.web`** span with attributes `voice.stt.model`,
   `voice.duration.ms`, `voice.word.count`, `voice.real_time_factor`,

@@ -1,26 +1,60 @@
 import { TelemetryEventSchema } from '../../contracts/telemetry.ts';
 import { recordVoiceTranscribeWeb } from '../../telemetry/spans.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
+import type { TokenGuard } from '../security/token.ts';
+
+function jsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      ...ISOLATION_HEADERS,
+    },
+  });
+}
 
 /**
- * `POST /api/telemetry` (Slice 30b Phase 8, D10) — the first client-originated
- * telemetry in the repo. Validates the `sendBeacon` body against
- * `TelemetryEventSchema`, writes the matching `voice.transcribe.web` span, and
- * acks 204 (fire-and-forget: the browser never reads a body). No `deps` — the
- * span is the only side effect (mirrors `handleFeedback`).
+ * `POST /api/telemetry` (Slice 30b Phase 8, D10; body-token security
+ * fast-follow) — the first client-originated telemetry in the repo. Because
+ * `navigator.sendBeacon` can't set an Authorization header AND a `?k=` query
+ * token leaks via browser history / proxy access-logs (a real risk once the app
+ * is served beyond localhost), the beacon carries `{ token, event }` in its JSON
+ * BODY. This route is let past the perimeter's shared header guard, so the
+ * handler owns the token check: it verifies the token TIMING-SAFE (via the
+ * shared `TokenGuard.verifyToken`) FIRST and 401s on mismatch/missing — no span,
+ * no body echo, the token is NEVER logged or spanned. Only after the token
+ * passes does it validate `event` against `TelemetryEventSchema` (400 on
+ * invalid), write the matching `voice.transcribe.web` span, and ack 204
+ * (fire-and-forget: the browser never reads a body).
  */
-export async function handleTelemetry(req: Request): Promise<Response> {
+export async function handleTelemetry(
+  req: Request,
+  guard: TokenGuard,
+): Promise<Response> {
+  // Parse the body once; a non-JSON body simply yields no token → 401 below.
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    body = null;
+  }
+  const token =
+    typeof body === 'object' && body !== null
+      ? (body as { token?: unknown }).token
+      : undefined;
+  // TOKEN CHECK FIRST — before touching the event. Never echo/log the token.
+  if (typeof token !== 'string' || !guard.verifyToken(token)) {
+    return jsonError('unauthorized', 401);
+  }
+  const eventRaw =
+    typeof body === 'object' && body !== null
+      ? (body as { event?: unknown }).event
+      : undefined;
   let event: ReturnType<typeof TelemetryEventSchema.parse>;
   try {
-    event = TelemetryEventSchema.parse(await req.json());
+    event = TelemetryEventSchema.parse(eventRaw);
   } catch {
-    return new Response(JSON.stringify({ error: 'invalid telemetry event' }), {
-      status: 400,
-      headers: {
-        'content-type': 'application/json; charset=utf-8',
-        ...ISOLATION_HEADERS,
-      },
-    });
+    return jsonError('invalid telemetry event', 400);
   }
   // Single variant today (§9); switch on `kind` when a second lands.
   // `recordVoiceTranscribeWeb` is only NOMINALLY fire-and-forget: `inSpan`

@@ -137,50 +137,70 @@ test('/api/health requires the bearer token', async () => {
   expect(await ok.json()).toEqual({ ok: true });
 });
 
-test('POST /api/telemetry authorizes via the ?k= query token (sendBeacon path, no Authorization header)', async () => {
-  const body = JSON.stringify({
-    kind: 'voice.transcribe.web',
-    durationMs: 1200,
-    wordCount: 8,
-    modelTier: 'moonshine-tiny',
-    realTimeFactor: 0.5,
-    engine: 'transformers.js',
-  });
-  const ok = await fetch(`${base}/api/telemetry?k=${TOKEN}`, {
+const validEvent = {
+  kind: 'voice.transcribe.web',
+  durationMs: 1200,
+  wordCount: 8,
+  modelTier: 'moonshine-tiny',
+  realTimeFactor: 0.5,
+  engine: 'transformers.js',
+};
+
+test('POST /api/telemetry authorizes via the BODY token (sendBeacon path, no Authorization header)', async () => {
+  const ok = await fetch(`${base}/api/telemetry`, {
     method: 'POST',
-    body,
+    body: JSON.stringify({ token: TOKEN, event: validEvent }),
     headers: { 'content-type': 'application/json' },
   });
   expect(ok.status).toBe(204);
 });
 
-test('POST /api/telemetry with a wrong/missing ?k= token is unauthorized (401)', async () => {
-  const wrong = await fetch(`${base}/api/telemetry?k=${'b'.repeat(64)}`, {
+test('POST /api/telemetry with a wrong/missing body token is unauthorized (401)', async () => {
+  const wrong = await fetch(`${base}/api/telemetry`, {
     method: 'POST',
-    body: '{}',
+    body: JSON.stringify({ token: 'b'.repeat(64), event: validEvent }),
     headers: { 'content-type': 'application/json' },
   });
   expect(wrong.status).toBe(401);
   const missing = await fetch(`${base}/api/telemetry`, {
     method: 'POST',
-    body: '{}',
+    body: JSON.stringify({ event: validEvent }),
     headers: { 'content-type': 'application/json' },
   });
   expect(missing.status).toBe(401);
 });
 
-test('the ?k= query token does NOT authorize any other route (scoped to the beacon only)', async () => {
-  // The beacon exception must not weaken the shared header guard: a valid
-  // ?k= on a non-telemetry route stays 401.
+test('the ?k= query token is no longer honored ANYWHERE (incl. /api/telemetry)', async () => {
+  // The old sendBeacon `?k=` special-case is gone: a request carrying only a
+  // query token — no header bearer, no body token — is 401 on every route,
+  // /api/telemetry included.
   const health = await fetch(`${base}/api/health?k=${TOKEN}`);
   expect(health.status).toBe(401);
-  // Even POSTing the ?k= to another /api route is rejected.
   const feedback = await fetch(`${base}/api/feedback?k=${TOKEN}`, {
     method: 'POST',
     body: '{}',
     headers: { 'content-type': 'application/json' },
   });
   expect(feedback.status).toBe(401);
+  // Even the beacon route: a ?k= with no valid BODY token is unauthorized.
+  const telemetry = await fetch(`${base}/api/telemetry?k=${TOKEN}`, {
+    method: 'POST',
+    body: JSON.stringify({ event: validEvent }),
+    headers: { 'content-type': 'application/json' },
+  });
+  expect(telemetry.status).toBe(401);
+});
+
+test('the Host/Origin perimeter still fronts /api/telemetry (cross-origin rejected before the handler)', async () => {
+  const res = await fetch(`${base}/api/telemetry`, {
+    method: 'POST',
+    body: JSON.stringify({ token: TOKEN, event: validEvent }),
+    headers: {
+      'content-type': 'application/json',
+      origin: 'https://evil.example.com',
+    },
+  });
+  expect(res.status).toBe(403);
 });
 
 test('a cross-origin request is rejected at the perimeter (403) before auth', async () => {
