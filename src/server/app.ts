@@ -48,6 +48,7 @@ import type { DeviceRegistry } from './security/device-registry.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
 import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
 import type { RootTokenStore } from './security/root-token.ts';
+import { handleRotateRoot } from './security/rotate-route.ts';
 import type { SessionTokenStore } from './security/session-token.ts';
 import {
   createSessionGuard,
@@ -395,6 +396,24 @@ async function handleApi(
             {
               deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
               sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/api/security/rotate-root'
+        ) {
+          const res = await handleRotateRoot(
+            req,
+            {
+              rootTokens: need(deps.rootTokens, 'rootTokens'),
+              sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
+              deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
+              bindInfo: need(deps.bindInfo, 'bindInfo'),
               policy: deps.policy,
             },
             guard,

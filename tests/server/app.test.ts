@@ -212,6 +212,28 @@ test('POST /api/devices/:id/revoke requires the bearer token and degrades to 503
   });
 });
 
+test('POST /api/security/rotate-root requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the device 503 tests above: this fixture never wires the
+  // OPTIONAL rootTokens/sessionTokens/deviceRegistry, so the break-glass route
+  // trips a clean 503 (not a crash) — AND it stays behind the shared session
+  // guard (401 with no token) like every other /api route. `rootTokens` is the
+  // FIRST `need()` in the route, so that is the field named in the 503.
+  const unauth = await fetch(`${base}/api/security/rotate-root`, {
+    method: 'POST',
+    body: JSON.stringify({ rootSecret: 'x' }),
+  });
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/security/rotate-root`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ rootSecret: 'x' }),
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: rootTokens',
+  });
+});
+
 const validEvent = {
   kind: 'voice.transcribe.web',
   durationMs: 1200,
