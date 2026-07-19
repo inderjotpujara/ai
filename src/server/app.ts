@@ -19,7 +19,9 @@ import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
+import { handleJobDetail } from './jobs/detail.ts';
 import { handleJobEnqueue } from './jobs/enqueue.ts';
+import { handleJobList } from './jobs/list.ts';
 import { handleMcpAdd } from './mcp/add.ts';
 import { handleMcpList } from './mcp/list.ts';
 import type { McpMountOne } from './mcp/mount-one.ts';
@@ -244,6 +246,19 @@ async function handleApi(
         }
         if (req.method === 'POST' && url.pathname === '/api/jobs') {
           const res = await handleJobEnqueue(req, deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/jobs') {
+          rec.status(200);
+          return handleJobList(new URLSearchParams(url.search), deps);
+        }
+        // Bare-:id detail match. A future action sub-path (e.g. `/cancel`)
+        // MUST be checked BEFORE this — same stream/action-before-detail
+        // discipline as `/api/runs/:id/stream` vs `/api/runs/:id` above.
+        const jobDetail = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+        if (req.method === 'GET' && jobDetail?.[1]) {
+          const res = handleJobDetail(jobDetail[1], deps);
           rec.status(res.status);
           return res;
         }
