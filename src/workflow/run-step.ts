@@ -13,6 +13,7 @@ import {
   recordDegrade,
   withToolSpan,
 } from '../telemetry/spans.ts';
+import type { CheckpointStore } from './checkpoint.ts';
 import {
   type MapSubStep,
   type Step,
@@ -46,6 +47,11 @@ export type WorkflowDeps = {
   /** Optional degradation ledger; when set, a Tool step that retries records a
    *  Retried event (in addition to the telemetry span event). */
   ledger?: DegradationLedger;
+  /** Optional per-run checkpoint store (Slice 24 Incr 6, D5 fallback). When set,
+   *  the engine seeds `done`/`ctx` from already-checkpointed nodes at start (so a
+   *  re-enqueue of the same runId skips them with NO re-execution) and records
+   *  each node as it completes. Absent = runs as today (no durable resume). */
+  checkpoint?: CheckpointStore;
 };
 
 /** Auto-write a completed step's output to memory, namespaced by workflow id.

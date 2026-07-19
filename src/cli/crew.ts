@@ -6,6 +6,7 @@ import type { DegradationLedger } from '../reliability/ledger.ts';
 import { formatLedger } from '../reliability/ledger.ts';
 import { type RunHandle, writeArtifact } from '../run/run-store.ts';
 import type { VerifyDeps } from '../verification/types.ts';
+import { createCheckpointStore } from '../workflow/checkpoint.ts';
 import { createSelectionRuntime } from './select-runtime.ts';
 import { makeRealVerifyDeps } from './verify-runtime.ts';
 import { withMcpRun } from './with-mcp-run.ts';
@@ -30,12 +31,16 @@ export type CrewCliDeps = {
 export async function runCrewCli(deps: CrewCliDeps): Promise<CrewOutcome> {
   const { run } = deps;
   const def = deps.verifyDeps ? { ...deps.def, verify: true } : deps.def;
+  // Durable per-node checkpoint under the run dir: a re-enqueue of the same runId
+  // resumes the sequential DAG at the first incomplete task (Incr 6, D5 fallback).
+  const checkpoint = createCheckpointStore(run.dir);
   const outcome = await runCrew(def, deps.input, {
     tools: deps.tools,
     onBeforeDelegate: deps.onBeforeDelegate,
     runAgentStep: deps.runAgentStep,
     verifyDeps: deps.verifyDeps,
     ledger: deps.ledger,
+    checkpoint,
   });
   if (outcome.kind === 'done') {
     const text =

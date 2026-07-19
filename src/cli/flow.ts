@@ -10,6 +10,7 @@ import { formatLedger } from '../reliability/ledger.ts';
 import { type RunHandle, writeArtifact } from '../run/run-store.ts';
 import { ATTR, annotateStep, withWorkflowSpan } from '../telemetry/spans.ts';
 import type { VerifyDeps } from '../verification/types.ts';
+import { createCheckpointStore } from '../workflow/checkpoint.ts';
 import { defineWorkflow } from '../workflow/define.ts';
 import { defaultRunAgentStep, runWorkflow } from '../workflow/engine.ts';
 import {
@@ -74,10 +75,14 @@ export async function runFlow(deps: FlowDeps): Promise<WorkflowOutcome> {
     ? defineWorkflow(withVerifyFlags(deps.def), { verifyDeps: deps.verifyDeps })
     : deps.def;
   return await withWorkflowSpan(def.id, async () => {
+    // Durable per-node checkpoint under the run dir: a re-enqueue of the same
+    // runId resumes at the first incomplete node with no re-execution (Incr 6).
+    const checkpoint = createCheckpointStore(run.dir);
     const outcome = await runWorkflow(def, deps.input, {
       runAgentStep: defaultRunAgentStep(deps.agents, deps.onBeforeDelegate),
       tools: deps.tools,
       ledger: deps.ledger,
+      checkpoint,
     });
     annotateStep({ [ATTR.WORKFLOW_OUTCOME]: outcome.kind });
     if (outcome.kind === 'done') {
