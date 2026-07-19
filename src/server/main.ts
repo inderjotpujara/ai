@@ -18,7 +18,7 @@ import { runtimeFor } from '../runtime/registry.ts';
 import { createSessionStore } from '../session/store.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
-import { createConsentRegistry } from './consent/registry.ts';
+import { createDurableConsentRegistry } from './consent/durable-registry.ts';
 import { createJobDispatch } from './jobs/dispatch.ts';
 import {
   createRealRunBuilderTurn,
@@ -248,7 +248,13 @@ export function startWebServer(opts: StartOptions = {}): {
   const mcpConfigPath = defaultConfigPath();
   const mcpMountStatus = createMcpMountStatus();
   const mountOne = createRealMcpMountOne();
-  const consent = createConsentRegistry();
+  // Durable consent (Task 42): pending approval prompts persist under the runs
+  // root (OUTSIDE any per-run dir, like `_uploads` below) so a prompt awaiting
+  // an answer survives a daemon restart — `POST /api/runs/:id/respond` can still
+  // resolve it after a crash+restart, instead of it being lost with the process.
+  const consent = createDurableConsentRegistry({
+    path: join(runsRoot, '_consent', 'consent.json'),
+  });
   // A durable dir OUTSIDE any per-run dir (Task 16): uploads must survive
   // across the per-request `/api/chat` run lifecycle since the upload and
   // the chat turn that references it are two separate HTTP requests.
