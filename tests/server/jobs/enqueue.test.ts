@@ -79,3 +79,35 @@ test('POST /api/jobs 404s a pull whose model is unresolvable in the catalog', as
   );
   expect(res.status).toBe(404);
 });
+
+test('POST /api/jobs 429s once the injected run-rate limiter is over cap (Slice 24 Incr 5, item 2)', async () => {
+  const d = deps();
+  const runLimiter = { allow: () => false };
+  const res = await handleJobEnqueue(
+    new Request('http://x/api/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'crew',
+        payload: { name: 'c', input: 'go' },
+      }),
+    }),
+    { ...d, runLimiter } as never,
+  );
+  expect(res.status).toBe(429);
+});
+
+test('POST /api/jobs stays within the limit when the injected limiter allows it', async () => {
+  const d = deps();
+  const runLimiter = { allow: () => true };
+  const res = await handleJobEnqueue(
+    new Request('http://x/api/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'crew',
+        payload: { name: 'c', input: 'go' },
+      }),
+    }),
+    { ...d, runLimiter } as never,
+  );
+  expect(res.status).toBe(202);
+});

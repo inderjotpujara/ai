@@ -12,6 +12,7 @@ import type { JobKind, JobPriority } from '../../queue/types.ts';
 import { newRunId } from '../../run/run-id.ts';
 import { createRun } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
+import { ALWAYS_ALLOW } from '../run-rate.ts';
 
 export type JobEnqueueDeps = {
   jobStore: JobStore;
@@ -24,6 +25,12 @@ export type JobEnqueueDeps = {
     runtime: RuntimeKind,
     modelRef: string,
   ) => ProviderKind | undefined;
+  /** Gates run-dir creation against a client (now potentially remote)
+   *  spamming enqueue/launch (Slice 24 Incr 5, item 2). The real server
+   *  injects the process-shared limiter (`server/run-rate.ts
+   *  createProcessRunLimiter`, wired in `ServerDeps` by `main.ts`); absent
+   *  (most unit tests) falls back to `ALWAYS_ALLOW`. */
+  runLimiter?: { allow(): boolean };
 };
 
 function json(body: unknown, status: number): Response {
@@ -84,6 +91,9 @@ export async function handleJobEnqueue(
     if (!provider) return json({ error: 'unknown model' }, 404);
     payload = { ...pull, provider };
   }
+
+  const limiter = deps.runLimiter ?? ALWAYS_ALLOW;
+  if (!limiter.allow()) return json({ error: 'rate limited' }, 429);
 
   const runId = newRunId();
   await createRun(deps.runsRoot, runId);

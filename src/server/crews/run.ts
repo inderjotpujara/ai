@@ -9,6 +9,7 @@ import { JobKind } from '../../queue/types.ts';
 import { newRunId } from '../../run/run-id.ts';
 import { createRun } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
+import { ALWAYS_ALLOW } from '../run-rate.ts';
 
 /** Runs a crew to completion under its own `withMcpRun` scope. No longer called
  *  by the route — the worker pool's dispatch (`server/jobs/dispatch.ts`) invokes
@@ -21,7 +22,16 @@ export type RunCrewTurn = (input: {
   runId: string;
 }) => Promise<unknown>;
 
-export type CrewRunDeps = { runsRoot: string; jobStore: JobStore };
+export type CrewRunDeps = {
+  runsRoot: string;
+  jobStore: JobStore;
+  /** Gates run-dir creation against a client (now potentially remote)
+   *  spamming enqueue/launch (Slice 24 Incr 5, item 2). The real server
+   *  injects the process-shared limiter (`server/run-rate.ts
+   *  createProcessRunLimiter`, wired in `ServerDeps` by `main.ts`); absent
+   *  (most unit tests) falls back to `ALWAYS_ALLOW`. */
+  runLimiter?: { allow(): boolean };
+};
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -54,6 +64,9 @@ export async function handleCrewRun(
   } catch {
     return json({ error: 'bad request' }, 400);
   }
+  const limiter = deps.runLimiter ?? ALWAYS_ALLOW;
+  if (!limiter.allow()) return json({ error: 'rate limited' }, 429);
+
   const runId = newRunId();
   await createRun(deps.runsRoot, runId);
   deps.jobStore.enqueue({

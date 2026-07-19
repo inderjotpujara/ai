@@ -577,6 +577,12 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: '',
     doc: 'Comma-separated extra Host-header hostnames allowed past the DNS-rebinding Host check beyond localhost/127.0.0.1/[::1] (server/security/origin.ts hostAllowed). Empty = loopback-only (default-safe); a Slice-24 Tailscale/Cloudflare tunnel adds its MagicDNS/hostname here (paired with its origin in AGENT_WEB_ORIGIN_ALLOWLIST) so remote requests pass the perimeter — the durable session-token guard (Tasks 32-34) still gates every request (§7.4: the network is not the trust boundary). Matched with or without the configured port. The AGENT_WEB_BIND interface is always included automatically.',
   },
+  {
+    env: 'AGENT_WEB_RUN_RATE',
+    kind: 'number',
+    def: 0,
+    doc: 'Max run-dir creations per fixed 60s window (server/run-rate.ts maxRunsPerWindow, gating createRun in jobs/enqueue.ts, crews/run.ts, workflows/run.ts, models/pull.ts). 0/unset = computed from worker concurrency (×10 headroom); a positive integer overrides. Over the rate → 429. Slice 24 Incr 5 item 2 (remote access can now spam run-dir creation — never hardcode).',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in

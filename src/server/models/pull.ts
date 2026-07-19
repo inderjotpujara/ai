@@ -9,6 +9,7 @@ import { JobKind } from '../../queue/types.ts';
 import { newRunId } from '../../run/run-id.ts';
 import { createRun } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
+import { ALWAYS_ALLOW } from '../run-rate.ts';
 
 /** Downloads a model's weights to completion. No longer called by the route —
  *  the worker pool's dispatch invokes it for a `JobKind.Pull` job, reading the
@@ -29,6 +30,12 @@ export type ModelPullDeps = {
     runtime: RuntimeKind,
     modelRef: string,
   ) => ProviderKind | undefined;
+  /** Gates run-dir creation against a client (now potentially remote)
+   *  spamming enqueue/launch (Slice 24 Incr 5, item 2). The real server
+   *  injects the process-shared limiter (`server/run-rate.ts
+   *  createProcessRunLimiter`, wired in `ServerDeps` by `main.ts`); absent
+   *  (most unit tests) falls back to `ALWAYS_ALLOW`. */
+  runLimiter?: { allow(): boolean };
 };
 
 function json(body: unknown, status: number): Response {
@@ -76,6 +83,9 @@ export async function handleModelPull(
   const resolveProvider = deps.resolveProvider ?? defaultResolveProvider;
   const provider = resolveProvider(body.runtime, body.modelRef);
   if (!provider) return json({ error: 'unknown model' }, 404);
+
+  const limiter = deps.runLimiter ?? ALWAYS_ALLOW;
+  if (!limiter.allow()) return json({ error: 'rate limited' }, 429);
 
   const runId = newRunId();
   await createRun(deps.runsRoot, runId);

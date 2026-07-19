@@ -8,6 +8,7 @@ import {
 import { Experimental_StdioMCPTransport as StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
 import { type BreakerOpts, breakerFor } from '../reliability/breaker.ts';
+import { noRedirectFetch } from './http-redirect.ts';
 import type { LiveOAuthClientProvider } from './oauth-provider.ts';
 
 /** How to launch a stdio MCP server. */
@@ -41,15 +42,45 @@ export type McpMountSpec = McpServerSpec | McpHttpSpec;
 /** A mounted server's tools plus a handle to stop its subprocess/connection. */
 export type MountedServer = { tools: ToolSet; close: () => Promise<void> };
 
+/** Adapts {@link noRedirectFetch} to the `typeof fetch` shape `@ai-sdk/mcp`'s
+ *  `fetch` transport option requires (its own `redirect: 'error'` default,
+ *  set explicitly below, already rejects a redirect at the transport layer;
+ *  this is a defense-in-depth second guard so the SSRF protection survives
+ *  even if a future edit swaps in a custom `fetch` that ignores `redirect`). */
+function redirectSafeFetchImpl(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<Response> {
+  return noRedirectFetch(String(input), init ?? {});
+}
+
+// `@ai-sdk/mcp`'s `MCPTransportConfig.fetch` is typed as `typeof fetch`
+// (the ambient global, which under bun-types also carries `preconnect`).
+// `redirectSafeFetchImpl` implements the real `(input, init) => Promise
+// <Response>` contract the SDK actually calls — the cast only satisfies the
+// unused `preconnect` member of that ambient type, same convention as the
+// other injectable-fetch seams in this repo (e.g.
+// provisioning/catalog/hf-catalog.ts, tests/provisioning/hf-fetch.test.ts).
+const redirectSafeFetch = redirectSafeFetchImpl as unknown as typeof fetch;
+
 /** Pure builder for the HTTP transport config, split out so the
  *  static-header-vs-authProvider wiring is unit-testable without a network
- *  round-trip or mocking `createMCPClient`. */
+ *  round-trip or mocking `createMCPClient`. `redirect: 'error'` is set
+ *  EXPLICITLY (not left to the SDK's own default) so a future edit can't
+ *  silently weaken it to `'follow'` without a visible diff here — a remote
+ *  MCP server redirecting to an internal address is an SSRF vector, now more
+ *  relevant with Slice 24 opening remote access (architecture.md §14 /
+ *  Slice 23 forward-item, revisited here). Locked by
+ *  tests/mcp/redirect-ssrf.test.ts + the `buildHttpTransportConfig` suite in
+ *  tests/mcp/client.test.ts. DO NOT change to `'follow'`. */
 export function buildHttpTransportConfig(spec: McpHttpSpec) {
   return {
     type: 'http' as const,
     url: spec.url,
     headers: spec.headers,
     authProvider: spec.authProvider,
+    redirect: 'error' as const,
+    fetch: redirectSafeFetch,
   };
 }
 

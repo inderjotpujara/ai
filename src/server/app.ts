@@ -122,6 +122,14 @@ export type ServerDeps = {
    *  fires its per-job `AbortController` for a Running job. Same standalone-
    *  vs-injected duality as `jobStore` above. */
   pool: WorkerPool;
+  /** Process-shared run-dir creation rate limiter (Slice 24 Incr 5, item 2):
+   *  ONE instance (`server/run-rate.ts createProcessRunLimiter`, built by
+   *  `main.ts`) gates every run-launch route (`/api/jobs`, `/api/crews/:n/run`,
+   *  `/api/workflows/:n/run`, `/api/models/pull`) so a client can't reset the
+   *  cap by hitting a different route. Absent (test fixtures that predate
+   *  this knob) — each handler's own `Deps.runLimiter` falls back to
+   *  `ALWAYS_ALLOW`, so an unset limiter never blocks. */
+  runLimiter?: { allow(): boolean };
 };
 
 export function json(body: unknown, status = 200): Response {
@@ -269,11 +277,13 @@ async function handleApi(
           return handleModelList({ freeDiskBytes: deps.freeDiskBytes });
         }
         if (req.method === 'POST' && url.pathname === '/api/models/pull') {
-          rec.status(200);
-          return handleModelPull(req, {
+          const res = await handleModelPull(req, {
             runsRoot: deps.runsRoot,
             jobStore: deps.jobStore,
+            runLimiter: deps.runLimiter,
           });
+          rec.status(res.status);
+          return res;
         }
         if (req.method === 'POST' && url.pathname === '/api/jobs') {
           const res = await handleJobEnqueue(req, deps);

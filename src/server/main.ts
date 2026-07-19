@@ -28,6 +28,7 @@ import {
 } from './launch-turns.ts';
 import { createRealMcpMountOne } from './mcp/mount-one.ts';
 import { createMcpMountStatus } from './mcp/mount-status.ts';
+import { createProcessRunLimiter } from './run-rate.ts';
 import {
   createRootTokenStore,
   defaultRootTokenPath,
@@ -235,6 +236,11 @@ export function startWebServer(opts: StartOptions = {}): {
 
   const policy = { port, allowedOrigins, allowedHosts };
   const runsRoot = 'runs';
+  // ONE process-shared limiter (Slice 24 Incr 5, item 2): gates run-dir
+  // creation across ALL FOUR run-launch routes (jobs/crews/workflows/pull) so
+  // a client (now potentially remote) can't spam createRun — see
+  // server/run-rate.ts. Built once here so the routes share one window/count.
+  const runLimiter = createProcessRunLimiter();
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
@@ -371,6 +377,7 @@ export function startWebServer(opts: StartOptions = {}): {
     sessionStore,
     jobStore,
     pool,
+    runLimiter,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB
