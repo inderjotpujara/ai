@@ -14,7 +14,7 @@ import {
   type JobKind,
   JobPriority,
   type JobRecord,
-  type JobStatus,
+  JobStatus,
   type JobStoreDeps,
 } from './types.ts';
 
@@ -346,6 +346,29 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     return { items, nextCursor, total: totalRow.n };
   }
 
+  function stats(): { counts: Record<JobStatus, number>; total: number } {
+    // ONE read, ONE consistent snapshot: a single GROUP BY over the whole
+    // table, so the six per-status counts are all taken at the SAME instant.
+    // Six separate COUNT(*) reads would each see a different mid-transition
+    // moment (§7.2), breaking sum(counts) === total. bun:sqlite is synchronous,
+    // so this query is atomic w.r.t. any interleaved claimNext/markDone write.
+    const rows = db
+      .query(`SELECT status, COUNT(*) AS n FROM jobs GROUP BY status`)
+      .all() as { status: string; n: number }[];
+    // Zero-default EVERY status so the wire DTO always has all keys (the panel
+    // renders a fixed row set; a missing key would render as blank, not 0).
+    const counts = Object.fromEntries(
+      Object.values(JobStatus).map((s) => [s, 0]),
+    ) as Record<JobStatus, number>;
+    let total = 0;
+    for (const r of rows) {
+      // Guard an unknown status value defensively (never NaN the sum).
+      if (r.status in counts) counts[r.status as JobStatus] = r.n;
+      total += r.n;
+    }
+    return { counts, total };
+  }
+
   return {
     enqueue,
     getJob,
@@ -356,6 +379,7 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     markCanceled,
     listJobs,
     reconcileOrphans,
+    stats,
     close: (): void => db.close(),
   };
 }
