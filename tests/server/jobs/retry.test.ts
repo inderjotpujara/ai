@@ -66,3 +66,18 @@ test('a Done/Queued job is not retryable → 404', async () => {
   const job = d.jobStore.enqueue({ kind: JobKind.Chat, payload: 1 }); // Queued
   expect((await handleJobRetry(job.id, d)).status).toBe(404);
 });
+
+test('retry honors the run-dir rate limiter → 429 (no run dir created)', async () => {
+  const d = deps();
+  const orig = await failedJob(d);
+  // A limiter that refuses — retry is a run-launch path and MUST consult the
+  // same process-shared cap the enqueue/crew/workflow/pull routes do, or a
+  // paired remote device could spam createRun unbounded (Fable capstone MEDIUM).
+  const res = await handleJobRetry(orig.id, {
+    ...d,
+    runLimiter: { allow: () => false },
+  });
+  expect(res.status).toBe(429);
+  // The 429 short-circuits BEFORE createRun/enqueue: no retry job was minted.
+  expect(d.jobStore.listJobs({ limit: 10 }).items).toHaveLength(1); // only original
+});

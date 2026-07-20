@@ -5,8 +5,18 @@ import { JobStatus } from '../../queue/types.ts';
 import { newRunId } from '../../run/run-id.ts';
 import { createRun } from '../../run/run-store.ts';
 import { ISOLATION_HEADERS } from '../isolation-headers.ts';
+import { ALWAYS_ALLOW } from '../run-rate.ts';
 
-export type JobRetryDeps = { jobStore: JobStore; runsRoot: string };
+export type JobRetryDeps = {
+  jobStore: JobStore;
+  runsRoot: string;
+  /** Process-shared run-dir rate limiter (the SAME instance enqueue + the
+   *  crew/workflow/pull launch routes consult, from `main.ts`'s
+   *  `createProcessRunLimiter`). Retry is a run-launch path too — a paired
+   *  REMOTE device (session-guarded, not trusted-local) could otherwise spam
+   *  `createRun` past the cap. Absent (most unit tests) → `ALWAYS_ALLOW`. */
+  runLimiter?: { allow(): boolean };
+};
 
 const RETRYABLE = new Set<JobStatus>([
   JobStatus.Failed,
@@ -43,6 +53,8 @@ export async function handleJobRetry(
   const job = deps.jobStore.getJob(id);
   if (!job || !RETRYABLE.has(job.status))
     return json({ error: 'not found' }, 404);
+  const limiter = deps.runLimiter ?? ALWAYS_ALLOW;
+  if (!limiter.allow()) return json({ error: 'rate limited' }, 429);
   const runId = newRunId();
   await createRun(deps.runsRoot, runId);
   const retry = deps.jobStore.enqueue({
