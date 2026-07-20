@@ -4,6 +4,7 @@ import type { WorkerPool } from '../queue/pool.ts';
 import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
+import type { TriggersEngine } from '../triggers/engine.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
 import {
@@ -180,6 +181,13 @@ export type ServerDeps = {
   /** Public base URL the pairing URL/QR (POST /api/devices) is built from —
    *  `AGENT_WEB_PUBLIC_URL` or derived from the request origin. Optional. */
   publicBaseUrl?: string;
+  /** The triggers engine (Slice 25, Task 16). In injected (daemon) mode the
+   *  daemon constructs+owns it and passes it through so the /api/triggers* routes
+   *  (Increment 5) can resolve the store/fire/secretStore. In standalone mode it
+   *  is present ONLY when `AGENT_TRIGGERS_ENABLED` is truthy (I3 invariant —
+   *  otherwise undefined, and no scheduler/watcher handle is opened). Optional:
+   *  the trigger routes degrade to 503 (via `need()`) when unset. */
+  triggers?: TriggersEngine;
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so

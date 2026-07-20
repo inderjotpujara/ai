@@ -48,6 +48,8 @@ import {
   createRealRunWorkflowTurn,
 } from '../server/launch-turns.ts';
 import { startWebServer } from '../server/main.ts';
+import { createTriggersEngine } from '../triggers/engine.ts';
+import { createTriggerSecretStore } from '../triggers/secret-store.ts';
 
 export type DaemonCliDeps = {
   run: (cmd: string, args: string[]) => void;
@@ -146,6 +148,20 @@ function buildRealDaemon() {
     memoryStore,
   );
   const jobStore = createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
+  // Triggers engine (Task 16): the daemon constructs+owns it explicitly and runs
+  // triggers UNCONDITIONALLY (the real deployment — unlike the standalone server,
+  // which gates on AGENT_TRIGGERS_ENABLED, I3). It reads/writes the SAME jobs.db
+  // (`AGENT_QUEUE_PATH`) the pool drains — its own store connection, its own
+  // tables (T5 migration). `createDaemon` lifecycle-binds it (start after
+  // pool+server, stop first); the pool's `onSettled` below routes every terminal
+  // settle to its chain observer.
+  const secretStore = createTriggerSecretStore({});
+  const triggers = createTriggersEngine({
+    jobStore,
+    runsRoot,
+    triggersDbPath: String(cfg.AGENT_QUEUE_PATH),
+    secretStore,
+  });
   const dispatch = createJobDispatch({
     runCrewTurn,
     getCrew,
@@ -166,11 +182,15 @@ function buildRealDaemon() {
     concurrency,
     dispatch,
     pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
+    // §7.3 chain seam: a job's TERMINAL settle (Done / no-retry Failed) drives
+    // the engine's chain observer, so a `jobchain` trigger fires the next hop.
+    onSettled: triggers.handleJobSettled,
   });
   return createDaemon({
     startWebServer,
     queue: jobStore,
     pool,
+    triggers,
     concurrency,
     // Crew/workflow orphans are checkpoint-resumable (per-node checkpoint.json)
     // → re-queue them at boot so the pool re-claims and resumes from the last

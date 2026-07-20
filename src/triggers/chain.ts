@@ -13,12 +13,15 @@
  * at the one place all four trigger sources funnel through.
  */
 
+import { createLogger, type Logger } from '../log/logger.ts';
 import type { JobRecord, JobStatus } from '../queue/types.ts';
 import type { FireTrigger } from './fire.ts';
 import type { TriggerStore } from './store.ts';
 import { type JobChainConfig, TriggerType } from './types.ts';
 
 type SettledStatus = JobStatus.Done | JobStatus.Failed;
+
+const defaultLog = createLogger('triggers.chain');
 
 export type ChainObserver = {
   handleJobSettled: (job: JobRecord, status: SettledStatus) => void;
@@ -53,7 +56,14 @@ export function createChainObserver(deps: {
   // Present for interface parity; the depth cap itself lives in fire.ts (the
   // single convergence point), so the observer always increments + delegates.
   maxChainDepth: () => number;
+  // T13 carry (closed at daemon-wiring, Task 16): the fire() below is
+  // fire-and-forget from the pool's synchronous settle seam, so a rejection was
+  // previously swallowed silently. Log it here — a chain-fire failure must still
+  // degrade (never wedge the settle path), but it must no longer vanish without
+  // a trace. Injectable for tests; defaults to the module logger.
+  log?: Logger;
 }): ChainObserver {
+  const log = deps.log ?? defaultLog;
   return {
     handleJobSettled(job, status): void {
       for (const trigger of deps.triggerStore.list()) {
@@ -71,8 +81,14 @@ export function createChainObserver(deps: {
             chainDepth: (job.chainDepth ?? 0) + 1,
             vars: { 'chain.jobId': job.id, 'chain.runId': job.runId ?? '' },
           })
-          .catch(() => {
-            /* degrade: a chain fire failure must not wedge the settle path */
+          .catch((err: unknown) => {
+            // Degrade: a chain-fire failure must not wedge the settle path — but
+            // it is logged (T13 carry) rather than silently swallowed.
+            log.error('chain fire failed', {
+              triggerId: trigger.id,
+              jobId: job.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
           });
       }
     },
