@@ -22,7 +22,9 @@
 
 import { randomBytes } from 'node:crypto';
 import { loadConfig } from '../config/schema.ts';
+import type { TriggerTypeWire } from '../contracts/index.ts';
 import { createJobStore } from '../queue/store.ts';
+import { parseTriggerConfig } from '../server/triggers/config-parse.ts';
 import { createFireTrigger } from '../triggers/fire.ts';
 import { computeNextRun } from '../triggers/next-run.ts';
 import { createTriggerSecretStore } from '../triggers/secret-store.ts';
@@ -40,6 +42,14 @@ import { hashToken } from '../triggers/webhook-verify.ts';
 export type TriggersCliDeps = {
   list(): Trigger[];
   add(spec: TriggerInput): { trigger: Trigger; token?: string; url?: string };
+  /**
+   * Fix 2 (Task 32 review): the same M2 duplicate-name pre-check the HTTP
+   * create route runs (`store.getByName(name, TriggerOrigin.Console)`) —
+   * lets `add` print a clean "already exists" error and exit non-zero
+   * BEFORE any mint/insert, instead of the raw SQLITE_CONSTRAINT surfacing
+   * from a top-level catch.
+   */
+  getByName(name: string): Trigger | undefined;
   setEnabled(id: string, enabled: boolean): void;
   remove(id: string): void;
   history(id: string): TriggerFiring[];
@@ -103,7 +113,38 @@ export async function runTriggersCli(
       );
       return;
     }
-    const { trigger, token, url } = deps.add(spec);
+    // Fix 1 (Task 32 review): run the SAME `parseTriggerConfig` the HTTP
+    // create route runs — per-type Zod schema + `validateCron` (rejects an
+    // unparseable cron pattern) + `confineWatchPath` (file-trigger path
+    // confinement) — BEFORE any mint/insert. Without this, a bad cron
+    // pattern silently created a dead trigger (computeNextRun → null →
+    // nextRunAt undefined) while still printing "created". `spec.type` is
+    // the domain `TriggerType`; it's isomorphic with the wire
+    // `TriggerTypeWire` (guarded by trigger-enum-parity.test.ts), same cast
+    // idiom used throughout this file and config-parse.ts.
+    let config: ReturnType<typeof parseTriggerConfig>;
+    try {
+      config = parseTriggerConfig(
+        spec.type as unknown as TriggerTypeWire,
+        spec.config,
+      );
+    } catch (err) {
+      deps.print(`error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    // Fix 2 (Task 32 review): the same M2 duplicate-name pre-check the HTTP
+    // route runs — a clean error BEFORE any mint/insert, rather than letting
+    // the store's `UNIQUE(name, origin)` constraint surface as a raw
+    // SQLITE_CONSTRAINT from the top-level catch.
+    if (deps.getByName(spec.name)) {
+      deps.print(
+        `error: a console trigger named "${spec.name}" already exists`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const { trigger, token, url } = deps.add({ ...spec, config });
     deps.print(`created ${trigger.id} (${trigger.name})`);
     if (token) {
       deps.print(`webhook token (shown once — save it now): ${token}`);
@@ -194,6 +235,7 @@ function buildRealTriggersDeps(): TriggersCliDeps {
 
   return {
     list: () => store.list(),
+    getByName: (name) => store.getByName(name, TriggerOrigin.Console),
     add: (spec) => {
       // Console-origin only (Task 32 scope): never trust an origin field a
       // caller might smuggle in the JSON — mirrors the wire
