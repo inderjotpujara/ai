@@ -343,3 +343,43 @@ implemented as specified — not re-litigated). All four fixed in one commit.
 - `bun run lint:file -- src/triggers/fire.ts src/triggers/store.ts src/triggers/substitute.ts tests/triggers/` — clean (9 files, no fixes).
 - `bun run test:file -- tests/triggers/` — **36 pass / 0 fail** (109 expect calls; +4 new regression tests over the prior 32).
 - M7 NOTE untouched; over-cap outcome value (Failed) unchanged, per brief.
+
+## Fix pass 2
+
+Re-review found a pre-existing latent ordering bug in `src/triggers/store.ts`: firing
+ids are `newId('f', now, rand)` (random suffix per ms), but `latestFiring` /
+`latestFiredFiring` / `listFirings` ordered by `fired_at DESC, id ASC`. Two firings in
+the same millisecond sorted in random id order, so "latest" occasionally returned the
+OLDER row — the `overlap skip when the previous job is still running` test failed ~25%
+of runs when the Fired and SkippedOverlap firings shared a millisecond.
+
+### Root cause fix — monotonic rowid tiebreak
+- `latestFiring` + `latestFiredFiring`: `ORDER BY fired_at DESC, rowid DESC` (newest
+  insertion wins ties).
+- `listFirings` keyset reworked from (fired_at, id / `id ASC`) to (fired_at, rowid):
+  `SELECT rowid, *`, cursor now encodes `fired_at:rowid`, WHERE clause
+  `fired_at < ? OR (fired_at = ? AND rowid < ?)`, `ORDER BY fired_at DESC, rowid DESC`
+  — strictly monotonic, no gaps/overlaps under ties. Cursor stays opaque (same
+  base64url encode/decode helpers); `TriggerFiring` DTO does NOT gain a rowid field
+  (rowid is internal to the cursor only).
+
+### Comment nits
+- NIT 1: fire.ts run-dir comment `markJobOrigin` → `markDaemonOrigin` (real fn in
+  `src/server/jobs/dispatch.ts`).
+- NIT 2: extended the M7 NOTE — after the F2 reorder, if `createRun` throws post-enqueue
+  the job is durably enqueued + Fired recorded but fire() throws; same audit-gap family
+  as M7, accepted.
+
+### Tests
+- Existing keyset page-2 test still passes.
+- ADDED `same-millisecond firings resolve deterministically by insertion order (rowid
+  tiebreak)`: records 5 firings with an identical `fired_at`, asserts latestFiring /
+  latestFiredFiring return the LAST-inserted row and that size-2 keyset pagination over
+  the tied rows is stable + complete (newest-insertion→oldest, no gap/overlap) — wrapped
+  in a 20-iteration loop to prove determinism.
+
+### Gate
+- `bun run typecheck` — clean.
+- `bun run lint:file -- src/triggers/store.ts src/triggers/fire.ts tests/triggers/store.test.ts tests/triggers/fire.test.ts` — clean (no fixes).
+- `bun run test:file -- tests/triggers/` — **37 pass / 0 fail** (189 expect calls; +1 new determinism test).
+- Previously-flaky loop: `for i in {1..20}; do bun test tests/triggers/fire.test.ts -t "overlap skip"; done` → **PASSED 20/20**.

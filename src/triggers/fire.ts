@@ -146,7 +146,11 @@ export function createFireTrigger(deps: {
       // job itself is durable and runs normally; only the firing-history record
       // may be missing one entry. Accepted for this slice (unifying the writes
       // would couple the two stores' connection management for a cosmetic audit
-      // record); documented rather than fixed.
+      // record); documented rather than fixed. Related edge from the F2
+      // reorder: because `createRun` now runs AFTER this enqueue + the Fired
+      // recordFiring below, if createRun throws the job is durably enqueued and
+      // the Fired row is written but fire() still throws — same audit-gap family
+      // as M7 (durable job, best-effort bookkeeping), likewise accepted.
       deps.triggerStore.recordFiring({
         triggerId: t.id,
         firedAt: now,
@@ -159,9 +163,9 @@ export function createFireTrigger(deps: {
       deps.triggerStore.update(t.id, { lastFiredAt: now });
       // Create the run dir AFTER the yield-free enqueue span so an immediate
       // /api/runs/:id/stream never 404s once fireTrigger returns (mirrors
-      // handleJobEnqueue). dispatch's markJobOrigin re-creates it idempotently
-      // at execution time. This is the sole `await`, deliberately outside the
-      // critical span (F2).
+      // handleJobEnqueue). dispatch's markDaemonOrigin re-creates it
+      // idempotently at execution time. This is the sole `await`, deliberately
+      // outside the critical span (F2).
       await createRun(deps.runsRoot, runId);
       rec.outcome(TriggerOutcome.Fired);
       return { fired: true, jobId: job.id, runId };

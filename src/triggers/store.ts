@@ -84,21 +84,26 @@ function newId(
   return `${prefix}-${ms}-${r}`;
 }
 
-function encodeFiringCursor(firedAt: number, id: string): string {
-  return Buffer.from(`${firedAt}:${id}`).toString('base64url');
+// Cursor encodes (fired_at, rowid). rowid is SQLite's monotonic insertion order,
+// so it is a strictly increasing tiebreak at equal fired_at — no two firings can
+// ever share a (fired_at, rowid) pair (unlike the old random-suffix id, which
+// could collide in sort order within a millisecond). It stays INTERNAL to the
+// cursor; the TriggerFiring DTO does not expose it.
+function encodeFiringCursor(firedAt: number, rowid: number): string {
+  return Buffer.from(`${firedAt}:${rowid}`).toString('base64url');
 }
 
 function decodeFiringCursor(
   cursor: string,
-): { firedAt: number; id: string } | undefined {
+): { firedAt: number; rowid: number } | undefined {
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
     const idx = decoded.indexOf(':');
     if (idx === -1) return undefined;
     const firedAt = Number(decoded.slice(0, idx));
-    const id = decoded.slice(idx + 1);
-    if (!Number.isFinite(firedAt) || id.length === 0) return undefined;
-    return { firedAt, id };
+    const rowid = Number(decoded.slice(idx + 1));
+    if (!Number.isFinite(firedAt) || !Number.isFinite(rowid)) return undefined;
+    return { firedAt, rowid };
   } catch {
     return undefined;
   }
@@ -309,23 +314,29 @@ export function createTriggerStore(
       .query('SELECT COUNT(*) as n FROM trigger_firings WHERE trigger_id = ?')
       .get(triggerId) as { n: number };
 
-    // Keyset on (fired_at DESC, id ASC) — the stable descending idiom of
-    // listJobs, on fired_at. id ASC breaks ties at equal fired_at so a page
-    // boundary landing between same-timestamp rows never skips or repeats one.
+    // Keyset on (fired_at DESC, rowid DESC). rowid is SQLite's monotonic
+    // insertion order, so it breaks ties at equal fired_at STRICTLY — two
+    // firings recorded in the same millisecond can never sort in a
+    // non-deterministic order (the old `id ASC` tiebreak used a random-suffix
+    // id, which could put the OLDER row first and made pagination + "latest"
+    // queries flaky under same-ms inserts). rowid is selected alongside the
+    // columns purely to build the cursor; it never reaches the DTO.
     const cursor = q.cursor ? decodeFiringCursor(q.cursor) : undefined;
     const cursorClause = cursor
-      ? 'AND (fired_at < ? OR (fired_at = ? AND id > ?))'
+      ? 'AND (fired_at < ? OR (fired_at = ? AND rowid < ?))'
       : '';
     const cursorArgs: (string | number)[] = cursor
-      ? [cursor.firedAt, cursor.firedAt, cursor.id]
+      ? [cursor.firedAt, cursor.firedAt, cursor.rowid]
       : [];
 
     const rows = db
       .query(
-        `SELECT * FROM trigger_firings WHERE trigger_id = ? ${cursorClause}
-         ORDER BY fired_at DESC, id ASC LIMIT ?`,
+        `SELECT rowid, * FROM trigger_firings WHERE trigger_id = ? ${cursorClause}
+         ORDER BY fired_at DESC, rowid DESC LIMIT ?`,
       )
-      .all(triggerId, ...cursorArgs, q.limit + 1) as FiringRowRaw[];
+      .all(triggerId, ...cursorArgs, q.limit + 1) as (FiringRowRaw & {
+      rowid: number;
+    })[];
 
     const hasMore = rows.length > q.limit;
     const page = rows.slice(0, q.limit);
@@ -333,7 +344,7 @@ export function createTriggerStore(
     const lastRaw = page[page.length - 1];
     const nextCursor =
       hasMore && lastRaw
-        ? encodeFiringCursor(lastRaw.fired_at, lastRaw.id)
+        ? encodeFiringCursor(lastRaw.fired_at, lastRaw.rowid)
         : undefined;
     return { items, nextCursor, total: totalRow.n };
   }
@@ -341,8 +352,11 @@ export function createTriggerStore(
   function latestFiring(triggerId: string): TriggerFiring | undefined {
     const r = db
       .query(
+        // rowid DESC tiebreak: newest INSERTION wins at equal fired_at, so
+        // same-millisecond firings resolve to the last one recorded (not a
+        // random-id order). See listFirings for the full rationale.
         `SELECT * FROM trigger_firings WHERE trigger_id = ?
-         ORDER BY fired_at DESC, id ASC LIMIT 1`,
+         ORDER BY fired_at DESC, rowid DESC LIMIT 1`,
       )
       .get(triggerId) as FiringRowRaw | undefined;
     return r ? toFiring(r) : undefined;
@@ -356,9 +370,12 @@ export function createTriggerStore(
   function latestFiredFiring(triggerId: string): TriggerFiring | undefined {
     const r = db
       .query(
+        // rowid DESC tiebreak (same rationale as latestFiring): the newest
+        // FIRED insertion wins ties, so the overlap guard always sees the most
+        // recent in-flight job even under same-ms fires.
         `SELECT * FROM trigger_firings
          WHERE trigger_id = ? AND job_id IS NOT NULL
-         ORDER BY fired_at DESC, id ASC LIMIT 1`,
+         ORDER BY fired_at DESC, rowid DESC LIMIT 1`,
       )
       .get(triggerId) as FiringRowRaw | undefined;
     return r ? toFiring(r) : undefined;

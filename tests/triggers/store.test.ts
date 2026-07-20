@@ -108,3 +108,47 @@ test('firings keyset list page 2 continues from the cursor with no overlap/gap',
   expect(new Set(allFiredAt).size).toBe(allFiredAt.length);
   store.close();
 });
+
+test('same-millisecond firings resolve deterministically by insertion order (rowid tiebreak)', () => {
+  // ROOT-CAUSE regression guard: firing ids carry a random per-ms suffix, so
+  // ordering by (fired_at, id) sorted same-ms rows randomly and the "latest"
+  // query could return the OLDER row. rowid (monotonic insertion order) makes
+  // the tiebreak strict. Run the whole assertion in a loop so any residual
+  // non-determinism surfaces (the old bug failed ~25% of runs).
+  for (let iter = 0; iter < 20; iter++) {
+    const store = createTriggerStore({
+      path: mkdtempSync(join(tmpdir(), 'trg-')),
+    });
+    const t = store.create(cronInput('sms', 100));
+    const TS = 5000; // identical fired_at for every firing
+    const ids: string[] = [];
+    for (let i = 1; i <= 5; i++) {
+      const f = store.recordFiring({
+        triggerId: t.id,
+        firedAt: TS,
+        jobId: `j${i}`,
+        runId: `r${i}`,
+        outcome: TriggerOutcome.Fired,
+      });
+      ids.push(f.id);
+    }
+    const lastInserted = ids[ids.length - 1];
+
+    // latestFiring / latestFiredFiring must return the LAST-inserted row.
+    expect(store.latestFiring(t.id)?.id).toBe(lastInserted);
+    expect(store.latestFiredFiring(t.id)?.id).toBe(lastInserted);
+
+    // Keyset pagination over the tied rows is stable AND complete: paging in
+    // size-2 steps visits every row exactly once, newest-insertion first.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const pg = store.listFirings(t.id, { cursor, limit: 2 });
+      seen.push(...pg.items.map((f) => f.id));
+      cursor = pg.nextCursor;
+    } while (cursor);
+    expect(seen).toEqual([...ids].reverse()); // newest insertion → oldest
+    expect(new Set(seen).size).toBe(ids.length); // no gap/overlap
+    store.close();
+  }
+});
