@@ -241,31 +241,39 @@ graph TD
         voicecliio["cli-io.ts · createCliVoiceDeps (real ffmpeg MicIo + raw-TTY keys)"]
         voicescript["scripts/setup-voice.ts · setup:voice (moonshine model download + ffmpeg check)"]
     end
-    subgraph QUEUE["Queue · src/queue (Slice 24)"]
+    subgraph QUEUE["Queue · src/queue (Slice 24; stats() Slice 25b)"]
         qtypes["types.ts · JobStatus/JobPriority/JobKind enums + JobRecord"]
         qmig["migrations.ts · 'init-jobs' (jobs table + idx_jobs_claim)"]
-        qstore["store.ts · createJobStore · enqueue/claimNext/mark*/reconcileOrphans"]
+        qstore["store.ts · createJobStore · enqueue/claimNext/mark*/reconcileOrphans/stats (single GROUP BY, race-safe)"]
         qpool["pool.ts · createWorkerPool (bounded, per-job AbortController, drain)"]
         qconc["concurrency.ts · computeConcurrency (hardware-derived)"]
         qretry["retry-policy.ts · jobRetryDecision (reuses reliability/classify)"]
     end
     subgraph DAEMON["Daemon · src/daemon (Slice 24)"]
-        dpid["pid.ts · PID file 0600 · readLivePid (stale-clear)"]
+        dpid["pid.ts · PID file 0600 · readLivePid (stale-clear) + readStartedAt (mtime, Slice 25b uptime)"]
         dcore["core.ts · createDaemon · start() boot-ordering + SIGTERM drain"]
         dlaunchd["launchd.ts · renderLaunchdPlist (KeepAlive/RunAtLoad)"]
         dspans["spans.ts · daemon.start/stop + job.* span helpers"]
         dcli["cli/daemon.ts · agent daemon install/start/stop/status/logs"]
     end
-    subgraph SRVJOBS["Job API + durable auth · src/server (Slice 24)"]
+    subgraph SRVJOBS["Job API + durable auth + Ops routes · src/server (Slice 24; Slice 25b Ops HTTP)"]
         sjenqueue["jobs/enqueue.ts · POST /api/jobs → 202 (+resume, path-confined)"]
         sjdispatch["jobs/dispatch.ts · createJobDispatch (JobKind→JobExecutor)"]
         sjlist["jobs/{list,detail,cancel}.ts · GET list/detail + cancel"]
-        sroot["security/root-token.ts · durable ~/.agent/daemon-token 0600"]
-        ssession["security/session-token.ts · HMAC per-device session tokens"]
+        sjretry["jobs/retry.ts · POST /api/jobs/:id/retry (lineage retriedFrom, Slice 25b)"]
+        sroot["security/root-token.ts · durable ~/.agent/daemon-token 0600 (atomic rotate+mint, Slice 25b hardening)"]
+        ssession["security/session-token.ts · HMAC per-device session tokens (root resolved via GETTER, Slice 25b)"]
         sconsent["consent/durable-registry.ts · restart-surviving approvals"]
         sredirect["mcp/http-redirect.ts · redirect:'error' SSRF guard"]
         srate["run-rate.ts · fixed-window run-dir rate limit"]
         schkpt["workflow/checkpoint.ts · per-node runs/<id>/checkpoint.json"]
+        squeuestats["queue/stats.ts · GET /api/queue/stats (Slice 25b)"]
+        sdstatus["daemon/status.ts · GET /api/daemon/status (uptime+bind, Slice 25b)"]
+        sdlogs["daemon/{logs,redact}.ts · GET /api/daemon/logs (bounded+redacted tail, Slice 25b)"]
+        sdevreg["security/device-registry.ts · ~/.agent/devices.json (positive list, Slice 25b)"]
+        strustedlocal["security/trusted-local.ts · requireTrustedLocal (session+loopback+origin gate, Slice 25b)"]
+        sdevices["devices/{list,pair,revoke}.ts · GET/POST /api/devices + POST /api/devices/:id/revoke (Slice 25b)"]
+        srotate["security/{rotate,rotate-route}.ts · POST /api/security/rotate-root (Slice 25b)"]
     end
 
     %% Slice 24 data flow: an HTTP call (or a Slice-25 trigger) ENQUEUES a job and
@@ -299,6 +307,23 @@ graph TD
     schkpt --> wfengine
     sroot --> ssession
     sredirect --> mcpclient
+
+    %% Slice 25b Ops-console HTTP additions: read endpoints project queue/daemon
+    %% state (no new mutation of engine state); the device-pairing/revoke/rotate
+    %% routes are gated by BOTH the session guard and requireTrustedLocal before
+    %% touching the registry or the root; retry re-enqueues with lineage.
+    squeuestats --> qstore
+    squeuestats --> qpool
+    sdstatus --> dpid
+    sdlogs --> dpid
+    sjretry --> qstore
+    sdevices --> sdevreg
+    sdevices --> ssession
+    sdevices --> strustedlocal
+    srotate --> sroot
+    srotate --> ssession
+    srotate --> sdevreg
+    srotate --> strustedlocal
 
     %% Reliability data flow (Slice 21): classify feeds retry/breaker/degrade;
     %% delegation/workflow/crew/mcp/selector wrap cross-boundary ops through it;
@@ -3608,7 +3633,7 @@ path.
 
 ---
 
-## 24. Always-on daemon + task queue + resumable jobs + secure remote access (Slice 24, Phase E)
+## 24. Always-on daemon + task queue + resumable jobs + secure remote access (Slice 24, Phase E; Slice 25b added the Ops-console HTTP surfaces below — the web UI itself is its own section immediately after this one)
 
 Through Slice 23 the BFF was a **foreground** `Bun.serve` whose runs were
 **request-scoped**: `POST /api/chat` awaited the turn inline, and if the HTTP
@@ -3623,7 +3648,9 @@ jobs and their status persist in SQLite and survive restart; long crew/workflow
 runs resume at DAG-node granularity; and the daemon is reachable from anywhere
 via a pluggable tunnel authenticated by a durable root token that mints
 per-device session tokens. Four capabilities ship as **one slice** (§2 module
-map gained the `QUEUE`, `DAEMON`, and job-API/durable-auth subgraphs).
+map gained the `QUEUE`, `DAEMON`, and job-API/durable-auth subgraphs — Slice
+25b later extended the latter with the Ops-console's read routes, device
+registry, and trusted-local gate; see §24.1/24.3/24.5).
 
 ### 24.1 The task queue (`src/queue/`) — the heart
 
@@ -3674,6 +3701,21 @@ DB-closed-on-shutdown, disk-full) escaped the fire-and-forget loop and could kil
 the daemon — fixed with try/catch around every store call plus `.catch` on each
 loop promise (degrade-never-crash).
 
+**`stats()` — race-safe queue-health snapshot (Slice 25b §7.2).** Added for the
+Ops console's Overview tab, `store.ts`'s `stats()` reads `SELECT status,
+COUNT(*) FROM jobs GROUP BY status` as a **single** synchronous, yield-free
+`bun:sqlite` query (no `await` in the body, so no worker-pool write can
+interleave mid-read regardless of query shape) rather than one `COUNT(*)` per
+status, which would sample the pool at different instants and let
+`sum(counts) ≠ total` under live concurrency. Every `JobStatus` is
+zero-defaulted into the result so the wire payload always carries a complete
+row set (`counts[status]` is never `undefined`); `total` is computed from the
+**same** snapshot. `GET /api/queue/stats` (`src/server/queue/stats.ts`)
+projects this plus `pool.activeCount()` as a **deliberately separate**
+`activeCount` field — in-flight worker-pool controllers vs. the DB's `running`
+row count are never reconciled by arithmetic, since they can transiently
+diverge; the Overview cards label them "active workers" vs. "running rows".
+
 ### 24.2 Detaching execution from the request — jobs + SSE reconcile (§7.1)
 
 `src/server/jobs/enqueue.ts` (`POST /api/jobs`) validates the body, resolves the
@@ -3683,7 +3725,13 @@ never client-trusted), `createRun`s a run dir, `enqueue`s, and returns
 /api/runs/:id/stream` resolves immediately. `GET /api/jobs` (list + status filter
 + keyset page), `GET /api/jobs/:id` (status + result), and `POST
 /api/jobs/:id/cancel` (fires the pool's `AbortController`) complete the control
-plane. The chat/crew/workflow/pull/build handlers changed from inline-await /
+plane. **`POST /api/jobs/:id/retry`** (`src/server/jobs/retry.ts`, Slice 25b,
+matched before the bare-`:id` detail regex) is a lineage-preserving re-enqueue
+for the Ops console's Jobs tab: it loads a `Failed`/`Canceled`/`Interrupted`
+job (a `Done`/`Running`/`Queued`/unknown id 404s), re-enqueues a fresh job with
+the same `kind`+`payload`, and stamps the new `JobRecord.retriedFrom` with the
+original job's id (`JobDtoSchema.retriedFrom`, projected by `jobs/map.ts`), so
+the drawer can show "retry of job X" and back-link the lineage. The chat/crew/workflow/pull/build handlers changed from inline-await /
 `void`-detach to **enqueue** — the old `void deps.run*Turn().catch()` is fully
 removed, so there is no double-execution; response shapes are unchanged.
 `dispatch.ts`'s `createJobDispatch` is the single queue→execution seam
@@ -3725,6 +3773,28 @@ escaped stdout/err paths). `src/cli/daemon.ts` (`agent daemon
 install|start|start-foreground|stop|status|logs`) drives `launchctl` through an
 injectable seam (never shells out in tests); `install` is macOS-only and prints
 **systemd** guidance on other platforms rather than failing.
+
+**HTTP status + logs surfaces (Slice 25b, on top of the CLI-only lifecycle
+above).** Through Slice 24 `agent daemon status|logs` were CLI-only. Slice 25b
+adds two **read-only** HTTP routes for the Ops console's Overview tab —
+`GET /api/daemon/status` (`src/server/daemon/status.ts`) and `GET
+/api/daemon/logs` (`src/server/daemon/{logs,redact}.ts`) — with **no** remote
+start/stop route anywhere (D6): the daemon hosts this very web server, so
+stopping it over its own HTTP surface is a bootstrap paradox; the tab instead
+shows copy-the-CLI-command guidance. `handleDaemonStatus` derives liveness via
+`readLivePid` and uptime via **`readStartedAt`, the PID file's mtime**
+(`pid.ts`) — not `process.uptime()`, which is only correct because the server
+happens to run in-daemon and would silently mis-report the moment status is
+ever proxied — clamped to `Math.max(0, …)` against clock skew, plus a `bind`
+sub-object (bind address, allowed hosts, port, session TTL) the Devices tab
+also renders. `handleDaemonLogs` reads only a **bounded tail** (≤1 MiB off
+disk, ≤2000 lines per `DaemonLogsQuerySchema`) of `~/.agent/logs/agent.{out,err}.log`
+— never the whole file, which is unbounded on an always-on, rotation-less
+daemon — and runs every line through `redact.ts`'s `redactSecrets` (strips any
+`[0-9a-f]{64,}`-shaped or `Bearer <token>` substring, case-insensitively)
+**before** the bytes leave the host, so a root token or session token that
+happened to appear in a logged request/error line can never be exfiltrated
+over the tail endpoint.
 
 ### 24.4 Resumable jobs — a custom per-node checkpoint store (D5, spike-gated)
 
@@ -3773,6 +3843,13 @@ by a durable **root → per-device session** model:
   restarts** — a reconnecting device stays authorized without re-pairing. It
   **never** leaves the host. `rotate()` is break-glass: replacing the root
   invalidates every outstanding session at once (their sigs stop verifying).
+  **Slice 25b hardening:** both the rotate and the one-time mint are now
+  **crash-atomic** (temp-file + rename/hard-link, the mint's `link()` failing
+  `EEXIST` so of two racing first-boot minters only one wins and the loser
+  re-reads the winner's token) and a stale-but-present-and-empty root file
+  (a torn write mid-flight — the fail-open "empty HMAC key forges any
+  signature" vector a Fable review caught) self-heals by re-minting rather
+  than trusting the empty read.
 - **`security/session-token.ts`** — a session token is what a browser/remote
   device actually holds: a stateless HMAC grant `payload=base64url({deviceId,exp})`,
   `sig=HMAC-SHA256(root, payload)`, `token=payload.sig`. No session DB is needed
@@ -3788,7 +3865,52 @@ by a durable **root → per-device session** model:
   revocation file **fails closed** on corruption. `src/server/main.ts` mints a
   short-TTL (`AGENT_WEB_SESSION_TTL_MS`, default 12h) session token for the local
   browser at boot and injects **that** as `window.__AGENT_TOKEN__` — never the
-  root; a reload re-mints.
+  root; a reload re-mints. **Slice 25b:** the session store is now constructed
+  over a root **getter** (`rootToken: () => rootStore.getOrCreateRoot()`,
+  resolved **per-call** in both mint and verify) rather than a captured
+  string, so a `rotate-root` (below) takes effect live without rebuilding the
+  store or swapping the guard — a captured-string store was the first
+  adversarial-review CRITICAL this increment closed. The token is injected
+  into the served index HTML **only for a loopback `Host`** (`isLoopbackHost`,
+  `src/server/app.ts`'s `indexFor`) — a request that only satisfies an
+  allowlisted **tunnel** host (§7.4 below) gets a **token-less** index and so
+  can never obtain the boot-minted `'local'` session by fetching `/`; this
+  closed the second adversarial-review CRITICAL (a remote client replaying
+  the injected `'local'` token over the tunnel).
+- **Device registry + pairing (`security/device-registry.ts`,
+  `security/trusted-local.ts`, `src/server/devices/`, Slice 25b D4/D5).**
+  Through Slice 24 there was no positive device list — only the negative
+  `revoked-devices.json` above, and `mintSessionToken` was only ever called
+  for a hardcoded `deviceId:'local'`. Slice 25b adds the first **positive**
+  registry, `~/.agent/devices.json` (`{deviceId, label, createdAt, exp}[]`,
+  `0600`/`0700`, atomic temp+rename, fail-closed on a corrupt/non-array file;
+  `list()` prunes expired rows on read) backing three new routes: **`GET
+  /api/devices`** lists it; **`POST /api/devices`** (`devices/pair.ts`) mints
+  a **server-side** `crypto.randomUUID()` device id (a client-supplied
+  `deviceId` in the body is never trusted — closes an IDOR/overwrite path),
+  appends `{deviceId, label, createdAt, exp}` to the registry, and returns
+  `{deviceId, token, pairingUrl}` **once** — the token is never persisted or
+  re-listed, and `pairingUrl` carries the token in a `#fragment` (never a
+  query string, so it never lands in server logs); **`POST
+  /api/devices/:id/revoke`** (`devices/revoke.ts`) both adds the device to
+  the negative revocation set **and** removes it from the positive registry
+  (revoke-token-before-remove ordering, so there is no window where a device
+  is unlisted but its token still verifies). All three privileged-write
+  routes, plus rotate-root below, are gated by **`requireTrustedLocal`**
+  (`security/trusted-local.ts`): the standard session guard (`principal ===
+  'local'`) **AND** a genuinely **loopback** `Host` (`isLoopbackHost` — an
+  allowlisted tunnel host is deliberately **not** sufficient) **AND**
+  origin-allowed, checked **before** any body parse or side effect — so
+  pairing/revoking/rotating can only be initiated from the physically-local
+  browser, never from an already-paired remote device or a tunnel replaying
+  a leaked token. **`POST /api/security/rotate-root`**
+  (`security/rotate-route.ts` + `rotate.ts`) additionally re-confirms
+  possession of the root secret (`RotateRootRequestSchema.rootSecret`,
+  constant-time-compared against `rootTokens.getOrCreateRoot()`) before
+  rotating; on success it clears the device registry, invalidates every
+  other outstanding session, and **re-mints the caller's own `'local'`
+  session** in the same response so the operator's tab survives the mass
+  invalidation it just triggered (anti-self-DoS).
 - **§7.4 threat model (`tests/server/threat-model.test.ts`, real server boot).**
   The daemon binds **loopback by default** (`AGENT_WEB_BIND`=`127.0.0.1` — no
   implicit `0.0.0.0`; "localhost is not a trust boundary"). A tunnel host is
@@ -3819,6 +3941,20 @@ special-cased in code). **Tailscale is the default documented recipe** (bind the
 `AGENT_WEB_ALLOWED_HOSTS`); **Cloudflare Tunnel** and a **reverse proxy**
 (Caddy/nginx) are documented alternatives. Each carries the TLS: Tailscale
 WireGuard (automatic) / Cloudflare edge TLS / the proxy's cert.
+
+**Deployment note — the tunnel MUST forward the real Host (Slice 25b
+finding).** Both loopback backstops added in Slice 25b —
+`requireTrustedLocal`'s `isLoopbackHost` check (§24.5) and `indexFor`'s
+loopback-only `'local'`-token injection (§24.5) — decide "is this request
+local" **from the inbound `Host` header**. That means the tunnel/proxy in
+front of the daemon **must forward the tailnet/tunnel hostname it actually
+received**, never rewrite or forge `Host: 127.0.0.1` on the daemon-facing
+leg — doing so would make a genuinely remote request masquerade as loopback
+and defeat both backstops. Tailscale's own `tailscale serve` does this
+correctly out of the box (it forwards the original Host); a hand-rolled
+reverse-proxy recipe (Caddy/nginx) must be configured the same way
+(`proxy_set_header Host $host;` or equivalent) rather than pointing a
+`Host: 127.0.0.1` rewrite at the daemon.
 
 ### 24.7 Telemetry + provenance
 
@@ -3852,13 +3988,133 @@ All registered in `config/schema.ts` (`bun run config` dumps the effective table
 | `AGENT_WEB_BIND` | `127.0.0.1` | Interface `Bun.serve` binds. Loopback-only default (no implicit `0.0.0.0`); always auto-allowed as a Host. |
 | `AGENT_WEB_ALLOWED_HOSTS` | *(empty)* | Comma-separated extra Host-header hostnames past the DNS-rebinding check (the tunnel's MagicDNS/hostname); matched with or without the port. Empty = loopback-only. |
 | `AGENT_WEB_RUN_RATE` | `0` | Max run-dir creations per fixed 60s window. `0`/unset = worker-concurrency ×10; over → `429`. |
+| `AGENT_WEB_PUBLIC_URL` | *(empty)* | Base URL the Ops console's device-pairing `pairingUrl` is built from (Slice 25b — e.g. the Tailscale/tunnel URL a phone opens). Empty falls back to `http://<bind>:<port>`. |
 
 Plus the daemon's fixed paths: root token `~/.agent/daemon-token`, revocation set
-`~/.agent/revoked-devices.json`, PID `~/.agent/daemon.pid` (all `0600` in a
-`0700` dir; not env-tunable knobs, but overridable through the injected store
-options for tests).
+`~/.agent/revoked-devices.json`, PID `~/.agent/daemon.pid`, and (Slice 25b) the
+positive device registry `~/.agent/devices.json` (all `0600` in a `0700` dir;
+not env-tunable knobs, but overridable through the injected store options for
+tests).
 
 ---
+
+## Jobs & Triggers Ops Console (web UI — Slice 25b)
+
+**Feature.** Slice 24 shipped the always-on daemon + task queue + durable
+root→session auth entirely **backend-only** — the only client was the CLI.
+Slice 25b adds the operator surface: one new top-level nav entry **Ops** at
+`/ops` (`web/src/app/app-shell.tsx`'s `NAV`, `web/src/app/router.tsx`'s
+`opsRoute`) with a roving-tabindex sub-nav of four tabs whose active tab is a
+`?tab=overview|jobs|triggers|devices` search param (`OpsSearch`,
+deep-linkable, plus a `go-ops` + four per-tab `⌘K` commands in
+`web/src/app/commands.ts`): **Overview** (daemon/queue health cards + a
+redacted logs tail), **Jobs** (the queue table + detail drawer + cancel/
+resume/retry), **Triggers** (designed IA, read-only **stub** — cron/webhook/
+event → `JobKind`, "arrives in Slice 25", no backend wiring), and **Devices &
+Access** (bind posture, device pairing with a QR, revoke, break-glass root
+rotate). It follows the existing feature-module conventions exactly
+(`web/src/features/ops/`, `data-testid="area-ops"`, one `RegionErrorBoundary`
+per tab so one failing card never blanks the console, `apiFetch` + a zod
+contract schema, automatic Bearer auth via the injected session token). The
+backend routes and security model it consumes (`/api/queue/stats`,
+`/api/daemon/status`+`/api/daemon/logs`, the device registry, `trusted-local`
+gate, and the pairing/revoke/rotate-root/retry routes) are documented in
+**§24.1/24.2/24.3/24.5** above, alongside the existing daemon/queue/durable-auth
+subsystems they extend; this section covers the **DTOs and the web layer**.
+
+**Slice-26 naming overlap (clarified, not a scope change).** Slice 26 already
+shipped as "Alternate runtimes + remote-auth completion" — but its
+"remote-auth" is OAuth **to remote MCP servers** (`src/mcp/oauth-provider.ts`,
+§14), an orthogonal concern from this slice's device pairing/rotate, which is
+auth **to our own daemon** (§24.5). The two share the phrase "remote auth"
+only by coincidence of naming; Slice 26's scope is unaffected and nothing in
+it needs narrowing. (The device pairing/rotate work itself was previously
+only reachable from the CLI/API directly — Slice 25b is what gives it a web
+UI and, on the backend, the first positive device registry.)
+
+### Contracts (`src/contracts/`)
+
+New DTOs/requests added to `dto.ts`/`requests.ts` (isomorphic, no I/O):
+`DaemonBindDtoSchema{bind, allowedHosts, port, sessionTtlMs}`;
+`DaemonStatusDtoSchema{running, pid?, startedAt?, uptimeMs?, bind}` (`pid`/
+`startedAt`/`uptimeMs` absent when not running); `QueueStatsDtoSchema{counts:
+z.partialRecord(JobStatusWire, number), total, activeCount, concurrency}` (the
+schema is a partial record — a status key **may** be absent on the wire type
+— but `JobStore.stats()` always populates every status with a zero default in
+practice, per §24.1); `DeviceDtoSchema{deviceId, label, createdAt, exp}` (no
+token field — the registry and this DTO never carry it) +
+`DeviceListResponseSchema{items}`; `DevicePairRequestSchema{label}` +
+`DevicePairResponseSchema{deviceId, token, pairingUrl}`;
+`RotateRootRequestSchema{rootSecret}`; `DaemonLogsQuerySchema{tail
+(coerced, capped 2000, default 200), stream: 'out'|'err'}` +
+`DaemonLogsResponseSchema{lines}`. `JobDtoSchema` gains `availableAt` (the
+retry-backoff floor) and `retriedFrom` (nullable lineage back-link);
+`RunListQuerySchema` gains an `origin` facet (`RunOrigin`) so the Jobs
+drawer's linked run can be filtered to daemon-originated runs.
+
+### Web (`web/src/features/ops/`)
+
+- **`index.tsx`'s `OpsArea`** — the shell: `<section data-testid="area-ops">`,
+  the roving-tabindex tab-list (reusing `web/src/shared/ui/tab-list.ts`'s
+  `nextTabIndex`, the same helper the Library/Builders tab widgets use, so
+  the pattern can't drift across three call sites), and the four tab panels,
+  each its own `RegionErrorBoundary` region.
+- **`overview-tab.tsx` + `use-daemon-status.ts` + `use-queue-stats.ts`** — the
+  Daemon card (running/pid/uptime), the Queue card (per-status counts read
+  via `counts[status] ?? 0` against the partial-record DTO, `activeCount`/
+  `concurrency` rendered as **distinct** numbers, never reconciled), and a
+  Recent-failures list (last failed/interrupted jobs with one-click resume/
+  retry) — both hooks poll on the same cadence as the existing notifications
+  feature (`notifyConfig().pollMs`).
+- **`daemon-logs.tsx`** — the redacted logs-tail viewer (monospace,
+  `out`/`err` stream toggle) plus copy-the-CLI-command guidance for
+  start/stop (D6 — no remote-stop button exists anywhere in the UI).
+- **`use-jobs.ts` + `jobs-tab.tsx` + `job-detail-drawer.tsx` +
+  `use-job-actions.ts`** — the queue table (status/kind/priority facets +
+  keyset "load more", mirroring `web/src/features/runs/index.tsx`'s
+  pattern), a detail drawer (payload, attempts/maxAttempts, timestamps,
+  `availableAt`, `error`, `retriedFrom` back-link, and the linked `runId`
+  deep-linked into the existing Runs viewer `/runs/$runId`), and optimistic
+  cancel/resume/retry actions (an action flips the row's local status
+  immediately, reconciled on the next poll).
+- **`triggers-tab.tsx`** — a **static** empty-state only (no `apiFetch`, no
+  network call): the intended IA (cron/webhook/event → `JobKind`) rendered
+  read-only with a "Triggers arrive in Slice 25" card.
+- **`devices-tab.tsx` + `use-devices.ts` + `pair-device-dialog.tsx` +
+  `rotate-root-dialog.tsx`** — bind-status card (bind/allowedHosts/port/
+  sessionTtlMs) + static Tailscale/Cloudflare recipe cards (§24.6); the
+  device-session list (`{device.label}` React-escaped — never
+  `dangerouslySetInnerHTML`, closing a stored-XSS finding an adversarial
+  review raised); `PairDeviceDialog` posts a label, shows the returned
+  `{token, pairingUrl}` **once** with a "won't be shown again" notice and a
+  **self-contained** QR (the bundled `qrcode` package's `toDataURL`, a data
+  URI — zero CDN, CSP-safe) — a paired remote client bootstraps its session
+  from the pairing URL's `#fragment`; revoke removes the row;
+  `RotateRootDialog` is a strong-confirm dialog that posts `rootSecret`,
+  adopts the re-minted local token (`window.__AGENT_TOKEN__`) so the
+  operator's own tab keeps working, and surfaces a `401` on a wrong secret
+  without changing any client state.
+
+### Telemetry
+
+New spans through `src/daemon/spans.ts` and `src/server/devices/spans.ts`
+(shared `telemetry/spans.ts` `ATTR`/tracer conventions, no-op without a
+registered tracer, no parallel emission path): `queue.stats.read`,
+`daemon.status.read`, `daemon.logs.read` (all no-attribute, one-shot);
+`ops.devices.pair`/`ops.devices.revoke` (carrying `ATTR.SERVER_PRINCIPAL` +
+a new `ATTR.DEVICE_ID` for the target device); `security.rotate-root`
+(principal only — never a device id, since rotate invalidates every session
+at once — with an `all-sessions-invalidated` span event marking the mass
+invalidation).
+
+### What's still deferred (explicit, not Slice-25b debt)
+
+No triggers backend (cron/webhook/event enqueue is Slice 25 proper — this
+slice only ships the read-only IA shell); no remote daemon start/stop
+(bootstrap paradox, D6); no `@visx` charts on the Overview tab (card-lite by
+design, an explicit future enhancement); no multi-user/RBAC (single local
+principal + per-device session tokens only, matching the rest of the daemon's
+single-owner threat model).
 
 ## Contracts (web wire protocol — `src/contracts/`, Slice 30b Phase 1)
 
