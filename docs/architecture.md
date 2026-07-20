@@ -241,7 +241,7 @@ graph TD
         voicecliio["cli-io.ts · createCliVoiceDeps (real ffmpeg MicIo + raw-TTY keys)"]
         voicescript["scripts/setup-voice.ts · setup:voice (moonshine model download + ffmpeg check)"]
     end
-    subgraph QUEUE["Queue · src/queue (Slice 24; stats() Slice 25b)"]
+    subgraph QUEUE["Queue · src/queue (Slice 24; stats() Slice 25b; origin/chainDepth Slice 25)"]
         qtypes["types.ts · JobStatus/JobPriority/JobKind enums + JobRecord"]
         qmig["migrations.ts · 'init-jobs' (jobs table + idx_jobs_claim)"]
         qstore["store.ts · createJobStore · enqueue/claimNext/mark*/reconcileOrphans/stats (single GROUP BY, race-safe)"]
@@ -256,7 +256,7 @@ graph TD
         dspans["spans.ts · daemon.start/stop + job.* span helpers"]
         dcli["cli/daemon.ts · agent daemon install/start/stop/status/logs"]
     end
-    subgraph SRVJOBS["Job API + durable auth + Ops routes · src/server (Slice 24; Slice 25b Ops HTTP)"]
+    subgraph SRVJOBS["Job API + durable auth + Ops routes · src/server (Slice 24; Slice 25b Ops HTTP; Slice 25 triggers API + webhook)"]
         sjenqueue["jobs/enqueue.ts · POST /api/jobs → 202 (+resume, path-confined)"]
         sjdispatch["jobs/dispatch.ts · createJobDispatch (JobKind→JobExecutor)"]
         sjlist["jobs/{list,detail,cancel}.ts · GET list/detail + cancel"]
@@ -274,7 +274,54 @@ graph TD
         strustedlocal["security/trusted-local.ts · requireTrustedLocal (session+loopback+origin gate, Slice 25b)"]
         sdevices["devices/{list,pair,revoke}.ts · GET/POST /api/devices + POST /api/devices/:id/revoke (Slice 25b)"]
         srotate["security/{rotate,rotate-route}.ts · POST /api/security/rotate-root (Slice 25b)"]
+        shooks["hooks/webhook.ts · POST /hooks/:token (outside /api guard, inside perimeter, Slice 25)"]
+        strigroutes["triggers/{list,detail,firings,create,patch,delete,fire}.ts · seven /api/triggers* routes (mutations behind requireTrustedLocal, Slice 25)"]
     end
+    subgraph TRIGGERS["Triggers engine · src/triggers (Slice 25)"]
+        trigtypes["types.ts · TriggerType/Origin/Outcome enums + Trigger/TriggerFiring/TriggerConfig"]
+        trigmig["migrations.ts · TRIGGER_MIGRATIONS + JOBS_DB_MIGRATIONS superset (shares jobs.db)"]
+        trigstore["store.ts · createTriggerStore · claimDueCron (BEGIN IMMEDIATE) + recordFiring + upsertRepo"]
+        trigscheduler["scheduler.ts + next-run.ts · poll-tick (AGENT_TRIGGERS_POLL_MS) + Croner computeNextRun"]
+        trigfire["fire.ts + substitute.ts · single convergence (chain-cap/overlap/origin/audit/span)"]
+        trigwatcher["watcher.ts + confine.ts · chokidar file triggers, path-confined"]
+        trigchain["chain.ts · pool onSettled observer (terminal-only, depth+1 from persisted job)"]
+        trigsync["sync.ts · boot repo triggers/index.ts → SQLite origin=repo (upsert+prune)"]
+        trigsecrets["secret-store.ts + webhook-verify.ts · ~/.agent/trigger-secrets.json 0600 + HMAC/replay/token-hash"]
+        trigengine["engine.ts · createTriggersEngine (composition root, lifecycle-bound to the daemon)"]
+    end
+
+    %% Slice 25 trigger data flow: the poll-tick scheduler, the file watcher, and
+    %% the job-chain observer all funnel through the ONE fire.ts convergence point,
+    %% which enqueues onto the SAME Slice-24 JobStore (origin/chainDepth threaded)
+    %% and writes a trigger_firings audit row + a trigger.fire span. The engine is
+    %% lifecycle-bound to the daemon (constructed beside the pool, started AFTER
+    %% pool+server, stopped FIRST). Webhooks arrive on /hooks/:token, outside the
+    %% /api session guard but inside the Host/Origin perimeter.
+    trigscheduler --> trigstore
+    trigscheduler --> trigfire
+    trigwatcher --> trigstore
+    trigwatcher --> trigfire
+    trigchain --> trigfire
+    trigfire --> trigstore
+    trigfire --> qstore
+    trigfire --> spans
+    trigsync --> trigstore
+    trigstore --> trigmig
+    trigstore --> trigtypes
+    trigmig --> qmig
+    trigengine --> trigstore
+    trigengine --> trigscheduler
+    trigengine --> trigwatcher
+    trigengine --> trigchain
+    trigengine --> trigsync
+    trigengine --> trigsecrets
+    dcli --> trigengine
+    qpool --> trigengine
+    shooks --> trigstore
+    shooks --> trigfire
+    shooks --> trigsecrets
+    shooks --> spans
+    strigroutes --> trigstore
 
     %% Slice 24 data flow: an HTTP call (or a Slice-25 trigger) ENQUEUES a job and
     %% returns 202; the daemon owns ONE worker pool that claims + dispatches jobs
@@ -3996,17 +4043,216 @@ positive device registry `~/.agent/devices.json` (all `0600` in a `0700` dir;
 not env-tunable knobs, but overridable through the injected store options for
 tests).
 
-### `src/triggers/` — trigger engine (Slice 25, stub)
+### `src/triggers/` — trigger engine (Slice 25)
 
-A durable poll-tick trigger engine that lives in the daemon: four sources —
-cron, webhook, file-watch, and job-chain — converge on `fire.ts`, which
-enqueues a target `JobKind`+payload via `JobStore.enqueue` (threading `origin`
-provenance) and writes a `trigger_firings` audit row. Triggers are authored
-from repo TS defs (`triggers/index.ts`, `origin=repo`) and console/API CRUD
-(`origin=console`), persisted in `jobs.db`.
+A durable **poll-tick scheduler** living inside the daemon converges four
+independent trigger sources onto one job-enqueue path. No per-trigger timers
+exist anywhere — a single `setInterval` loop (`scheduler.ts`,
+`AGENT_TRIGGERS_POLL_MS`, default 1000ms) ticks, and each tick atomically
+claims due cron rows via `TriggerStore.claimDueCron` — one write-locked
+(`BEGIN IMMEDIATE`) `bun:sqlite` transaction that selects the due rows AND
+advances their `next_run_at` (via Croner's `computeNextRun`, `next-run.ts`)
+inside the same critical section, so a row can never be claimed twice even
+across two racing processes. Misfire policy is **at-most-once,
+fire-once-on-boot**: `scheduler.reconcile()` runs before the first tick and,
+for any cron trigger whose `next_run_at` passed while the daemon was down,
+leaves the past timestamp in place (or advances past it if the trigger opts
+out with `catchUp:false`) so the very first tick claims exactly one catch-up
+occurrence — never one fire per missed interval; honestly documented as
+*at-most-once*, not "exactly once" (a crash between claim-commit and enqueue
+can still drop a catch-up fire).
 
-> Stub — expanded into the full subsystem writeup (module map, data-flow
-> edges, `/hooks/:token` route class) in this slice's docs task (Task 34).
+**The convergence point — `fire.ts`.** Every source (cron tick, webhook POST,
+file event, job-chain completion, and manual test-fire) calls the same
+`FireTrigger` function, the ONLY place that: enforces the chain-depth cap
+(`AGENT_TRIGGERS_MAX_CHAIN_DEPTH`, default 8 — the A→B→A cycle guard),
+applies overlap protection (skip while the previously-fired job is still
+`Queued`/`Running`, unless `allowOverlap`/a manual bypass), stamps
+`RunOrigin` provenance (cron→`Schedule`, webhook→`Webhook`,
+file/chain/manual→`Api`), calls `JobStore.enqueue()` with the target
+`JobKind`+payload (after `substitute.ts`'s `substituteTemplate` — plain
+string/JSON interpolation, `Object.hasOwn`-guarded against a
+`{{toString}}` prototype-chain leak; never `eval`/`Function`/a template
+engine), and writes a `trigger_firings` audit row for every outcome
+(`fired`/`skipped-overlap`/`failed`) plus a `trigger.fire` span.
+
+**The four sources.**
+- **Cron** (`scheduler.ts` + `next-run.ts`) — Croner v10 used as a pure
+  library (`new Cron(schedule, {timezone}).nextRun(after)`), never Croner's
+  own timers; correct IANA-timezone/DST handling.
+- **Webhook** (`src/server/hooks/webhook.ts`, see below) — `POST
+  /hooks/:token`.
+- **File** (`watcher.ts` + `confine.ts`) — chokidar v4 (`awaitWriteFinish`
+  400ms/100ms so a half-written drop never fires; `followSymlinks:false`,
+  `depth:0`), watching every enabled `TriggerType.File` trigger's path
+  confined under `AGENT_TRIGGERS_WATCH_ROOT` (default `~/.agent/inbox`,
+  `expandHome` resolves the literal `~`). Confinement (`confineWatchPath`)
+  realpaths both the root and the candidate and is re-checked at BOTH
+  trigger-creation time (the API) and watch-start time — defence in depth;
+  an adversarial review found and closed a symlinked-ancestor-with-absent-leaf
+  escape by walking up to the nearest existing ancestor and realpathing it
+  before the prefix check. The matched path is injected into the target
+  payload as `{{file.path}}`.
+- **Job-chain** (`chain.ts`) — a `handleJobSettled` observer the worker pool
+  calls on a job's TERMINAL settle only (`onSettled` seam on `pool.ts`,
+  additive — never on retry-requeue/cancel/interrupt); matches
+  `{onKind?, onName?, onStatus}` against the finished job and fires with
+  `chainDepth = finishedJob.chainDepth + 1` **read from the persisted job
+  row** — never client input — so the `fire.ts` cap is the sole enforcement
+  point.
+
+**Storage.** Two new tables share `jobs.db` with the Slice-24 queue:
+`triggers` (`UNIQUE(name, origin)`; `token_hash` for the constant-time-safe
+webhook lookup, never the raw token; `secret_ref` POINTER only, never a raw
+secret column) and `trigger_firings` (`trigger_id, fired_at, job_id?,
+run_id?, outcome`). `src/triggers/migrations.ts` exports
+`JOBS_DB_MIGRATIONS = [...JOB_MIGRATIONS, ...TRIGGER_MIGRATIONS]` — the
+AUTHORITATIVE ordered list `createTriggerStore` runs — because `migrate()`
+tracks one `PRAGMA user_version` per database, not per caller; running the
+combined superset means whichever store opens `jobs.db` first, the other's
+later `migrate()` call is a correct no-op over an already-advanced version.
+`JobRecord`/`JobInput` gained `origin?: RunOrigin` and `chainDepth: number`
+(`src/queue/migrations.ts`'s `add-origin-and-chain-depth`, two plain `ALTER
+TABLE` columns) threaded through `JobStore.enqueue`.
+
+**Authoring — both surfaces (D1).** Repo TS defs in the root
+`triggers/index.ts` registry (`TRIGGERS: Record<string, TriggerDef>`,
+`Object.hasOwn`-guarded `getTrigger`, `TRIGGER-BUILDER:IMPORTS`/`:ENTRIES`
+splice markers reserved unused) — exactly the `crews/index.ts` pattern —
+synced into the store at daemon boot by `sync.ts`'s `syncRepoTriggers`
+(upsert-by-name as `origin=repo`, then prune rows no longer in the
+registry); `TriggerStore.upsertRepo` deliberately excludes
+`enabled`/`id`/`next_run_at` from the overwrite so a console pause/resume
+overlay **survives every re-sync**. An invalid repo cron pattern/timezone is
+registered but force-disabled (never thrown — a bad file must not crash
+boot); a repo `Webhook` def is registered visibly-disabled with a warn (a
+repo TS file can't hold a raw secret, so it can never be made to fire).
+Console/API-created rows (`origin=console`) get full CRUD; the console may
+only pause/resume a repo-origin row, never edit/delete it (`PATCH`/`DELETE`
+on a repo trigger beyond enable/disable → `403`).
+
+**Composition — `engine.ts`.** `createTriggersEngine` builds the store, then
+ONE shared `fire` injected into the scheduler, watcher, and chain observer
+alike (the single convergence point), and exposes `{store, secretStore,
+fire, handleJobSettled, start, stop}`. `buildRealDaemon` (`src/cli/daemon.ts`)
+constructs it beside the worker pool and passes `onSettled:
+engine.handleJobSettled` into `createWorkerPool`; `createDaemon.start()`
+(`src/daemon/core.ts`) starts it **AFTER** the pool and server are up (step
+5b — the engine only enqueues, so a fire the instant it starts lands on an
+already-running consumer), and `stop()` stops it **FIRST**, before
+`pool.stop()` (halt the producer before draining consumers). A standalone
+`startWebServer` (test fixtures, no injected daemon) never auto-constructs a
+triggers engine unless `AGENT_TRIGGERS_ENABLED=1` (default off) — so the
+existing 500+-test server corpus spins no scheduler/watcher/timer by
+default; every `/api/triggers*`/`/hooks/:token` route degrades (`503`) when
+`deps.triggers` is unset.
+
+**Webhook receiver — `POST /hooks/:token` (D3, §7.1).** Wired in
+`src/server/app.ts`'s `buildFetch`, matched **after** the Host/Origin
+perimeter (`enforcePerimeter`) but **before** the `/api` session-guard block
+— the only unauthenticated route class in the app
+(`src/server/hooks/webhook.ts`'s `handleWebhook`). Defense in depth, in
+order: (1) SHA-256 token-hash lookup (`hashToken`/`getByTokenHash` — the DB
+never stores or compares the raw token; a miss, wrong type, or disabled
+trigger all return the same 404, no oracle); (2) a pre-buffer
+`Content-Length` body cap (`AGENT_WEB_MAX_BODY_BYTES`, the same knob
+`/api/telemetry` uses, plus `Bun.serve`'s `maxRequestBodySize` runtime
+backstop) before the RAW body is read ONCE (reused for both HMAC and
+`{{webhook.body}}` — never re-parsed); (3) when `WebhookConfig.hmac` is set,
+`webhook-verify.ts`'s `verifyHmac` — the ±5-minute replay window
+(`X-Agent-Timestamp`, UNIX SECONDS) is checked **before** the signature so a
+stale-but-correctly-signed request is `409` not `401`, then a constant-time
+(`timingSafeEqual`, length-guarded both before and after hex-decode)
+HMAC-SHA256 over `${timestamp}.${rawBody}`; (4) the shared run-dir rate
+limiter (`429` on trip); (5) fire-and-forget through `fire.ts` and an
+immediate `202 {jobId, runId}` (or `{skipped: outcome}`) — the job body
+never executes in the request. In-window replay is not nonce-deduped
+(documented, GitHub/Stripe-standard posture for a local single-owner
+daemon). HMAC secrets never live in the `triggers` table —
+`secret-store.ts`'s `createTriggerSecretStore` persists them at
+`~/.agent/trigger-secrets.json` (`0600` file in a `0700` dir, atomic
+temp+rename, fail-closed on a corrupt file, rejects an empty/whitespace
+secret at load so an unforgeable-by-omission HMAC key can never surface),
+keyed by the table's `secret_ref` pointer; the raw secret is shown to the
+console/CLI caller exactly once at mint time and never appears in a DTO,
+log, or span.
+
+**Provenance threading (D3).** `fire.ts` stamps `job.origin` per source;
+`src/server/jobs/dispatch.ts`'s `markJobOrigin` (the Task-24-era
+`markDaemonOrigin`, generalized in this slice) writes a
+`runs/<runId>/origin` marker from `job.origin ?? RunOrigin.Daemon` before
+every queue-dispatched turn runs, so `run-dto.ts`'s `readRunOrigin` — and
+the existing Slice-25b `?origin=` runs facet — pick up
+`Schedule`/`Webhook`/`Api` for trigger-fired runs with zero facet-code
+changes. `retry.ts` re-enqueues carry the original `origin` and
+`chainDepth` forward (a dropped `chainDepth` on retry would have let a
+retried chain job evade the cap).
+
+**API (D4) — seven `/api/triggers*` routes**, all behind the normal `/api`
+session guard: `GET`/`POST /api/triggers` (list / create), `GET
+/api/triggers/:id` (detail), `PATCH`/`DELETE /api/triggers/:id`
+(edit/enable-disable / delete), `GET /api/triggers/:id/firings` (keyset
+history, the `listJobs` cursor idiom), `POST /api/triggers/:id/fire`
+(manual test-fire, `bypassOverlap:true`, depth always 0 — the handler never
+reads a chain-depth from the request body). The four mutating routes
+(`create`/`patch`/`delete`/`fire`) additionally sit behind
+`requireTrustedLocal` — trigger creation is persistent
+code-execution-by-schedule. `app.ts` matches the `/firings` and `/fire`
+action sub-paths BEFORE the bare `:id` pattern (the same ordering
+discipline as `/api/jobs/:id/cancel` and `/api/devices/:id/revoke`).
+`TriggerDto`/`TriggerFiringDto` (`src/contracts/dto.ts`) project explicit
+fields only — no `secretRef`/`tokenHash`/raw token ever leaves the server;
+the raw webhook token/URL appear exactly once, in
+`TriggerCreateResponseSchema` only (the `DevicePairResponseSchema`
+once-only precedent).
+
+**Console (`web/src/features/ops/`).** The Slice-25b static stub is fully
+replaced: `triggers-tab.tsx` is now a live `apiFetch`-driven list
+(`use-triggers.ts`/`use-trigger-firings.ts`, no query lib) with
+Name/Type/Target/Schedule/Enabled/Last-fired columns,
+`trigger-create-dialog.tsx` (per-type config forms; a webhook trigger's
+token/secret are shown once with a "won't be shown again" notice and a copy
+button, never re-fetched), and `trigger-firings-drawer.tsx` (row-click
+firing history with `firedAt`/`outcome`/a `/runs/$runId` deep-link;
+action-button clicks `stopPropagation` so toggling/firing/deleting a row
+never also opens the drawer). Repo-origin rows may only be toggled/fired,
+never edited/deleted, mirroring the server's `403` rule; every
+user-controlled string (trigger name) renders through React text nodes,
+never `dangerouslySetInnerHTML`.
+
+**CLI (`src/cli/triggers.ts`).** `agent triggers
+list|add|enable|disable|remove|history|fire`, mirroring `runDaemonCli`'s
+injected-deps dispatch shape byte-for-byte; operates on the SAME `jobs.db`
+the running daemon's scheduler polls, so a console-origin row created via
+the CLI is picked up on the daemon's very next tick — no restart. `add`
+reuses the same `parseTriggerConfig` the HTTP create route uses (a bad cron
+pattern or an unconfined file path is rejected before insert, never
+silently creating a dead trigger) and mints a webhook token/secret exactly
+like the API, printed once.
+
+**Telemetry.** `spans.ts` adds `trigger.register`/`trigger.fire`/
+`trigger.skip` through the shared `inSpan`/`ATTR` machinery (no parallel
+emission path, no-op without a tracer), carrying
+`ATTR.TRIGGER_ID`/`TRIGGER_TYPE`/`TRIGGER_ORIGIN`/`TRIGGER_OUTCOME` — a
+dedicated test pins that `secretRef` never reaches a span attribute.
+
+**Config knobs** (`src/config/schema.ts`, computed defaults, never
+hardcoded): `AGENT_TRIGGERS_POLL_MS` (1000ms tick cadence),
+`AGENT_TRIGGERS_MAX_CHAIN_DEPTH` (8), `AGENT_TRIGGERS_WATCH_ROOT`
+(`~/.agent/inbox`), `AGENT_TRIGGERS_ENABLED` (default `false` — gates ONLY
+whether a standalone `startWebServer` auto-constructs its own engine; the
+daemon always injects one unconditionally, ignoring this flag). There is
+deliberately no `AGENT_TRIGGERS_PATH` — the repo registry is a compile-time
+`triggers/index.ts` import, so a path override would have no consumer.
+
+**Known, accepted gaps (documented, not defects).** The firing-audit row
+and the job enqueue span two separate `bun:sqlite` connections onto the
+same `jobs.db` (not one transaction) — a crash in the sliver between them
+can leave a job durably enqueued with no matching `trigger_firings` row;
+the job itself is unaffected, only the audit trail may miss an entry.
+`trigger_firings.trigger_id` has no `FOREIGN KEY` constraint — a deleted
+trigger can leave orphaned firing rows (audit-only). In-window webhook
+replay is not nonce-deduped (see above).
 
 ---
 
@@ -4021,10 +4267,13 @@ Slice 25b adds the operator surface: one new top-level nav entry **Ops** at
 deep-linkable, plus a `go-ops` + four per-tab `⌘K` commands in
 `web/src/app/commands.ts`): **Overview** (daemon/queue health cards + a
 redacted logs tail), **Jobs** (the queue table + detail drawer + cancel/
-resume/retry), **Triggers** (designed IA, read-only **stub** — cron/webhook/
-event → `JobKind`, "arrives in Slice 25", no backend wiring), and **Devices &
-Access** (bind posture, device pairing with a QR, revoke, break-glass root
-rotate). It follows the existing feature-module conventions exactly
+resume/retry), **Triggers** (originally shipped in this slice as a
+read-only IA-only **stub** — cron/webhook/event → `JobKind`, "arrives in
+Slice 25", no backend wiring; **replaced by a fully live tab in Slice 25**,
+see the `src/triggers/` subsystem section above for the shipped backend +
+console), and **Devices & Access** (bind posture, device pairing with a QR,
+revoke, break-glass root rotate). It follows the existing feature-module
+conventions exactly
 (`web/src/features/ops/`, `data-testid="area-ops"`, one `RegionErrorBoundary`
 per tab so one failing card never blanks the console, `apiFetch` + a zod
 contract schema, automatic Bearer auth via the injected session token). The
@@ -4089,9 +4338,13 @@ drawer's linked run can be filtered to daemon-originated runs.
   deep-linked into the existing Runs viewer `/runs/$runId`), and optimistic
   cancel/resume/retry actions (an action flips the row's local status
   immediately, reconciled on the next poll).
-- **`triggers-tab.tsx`** — a **static** empty-state only (no `apiFetch`, no
-  network call): the intended IA (cron/webhook/event → `JobKind`) rendered
-  read-only with a "Triggers arrive in Slice 25" card.
+- **`triggers-tab.tsx`** — shipped in this slice (25b) as a **static**
+  empty-state only (no `apiFetch`, no network call): the intended IA
+  (cron/webhook/event → `JobKind`) rendered read-only with a "Triggers
+  arrive in Slice 25" card. **Superseded in Slice 25** by a live
+  `apiFetch`-driven list + create dialog + firings drawer — see the
+  `src/triggers/` subsystem section above ("Console
+  (`web/src/features/ops/`)") for the shipped component.
 - **`devices-tab.tsx` + `use-devices.ts` + `pair-device-dialog.tsx` +
   `rotate-root-dialog.tsx`** — bind-status card (bind/allowedHosts/port/
   sessionTtlMs) + static Tailscale/Cloudflare recipe cards (§24.6); the
@@ -4121,12 +4374,12 @@ invalidation).
 
 ### What's still deferred (explicit, not Slice-25b debt)
 
-No triggers backend (cron/webhook/event enqueue is Slice 25 proper — this
-slice only ships the read-only IA shell); no remote daemon start/stop
-(bootstrap paradox, D6); no `@visx` charts on the Overview tab (card-lite by
-design, an explicit future enhancement); no multi-user/RBAC (single local
-principal + per-device session tokens only, matching the rest of the daemon's
-single-owner threat model).
+No remote daemon start/stop (bootstrap paradox, D6); no `@visx` charts on
+the Overview tab (card-lite by design, an explicit future enhancement); no
+multi-user/RBAC (single local principal + per-device session tokens only,
+matching the rest of the daemon's single-owner threat model). (The triggers
+backend this section originally deferred to "Slice 25 proper" has since
+shipped — see the `src/triggers/` subsystem section above.)
 
 ## Contracts (web wire protocol — `src/contracts/`, Slice 30b Phase 1)
 
@@ -4687,10 +4940,12 @@ dedicated span of their own — they ride the existing per-request
   disk, fronted only by the mtime-keyed summary cache above.
 - **`@xyflow` node-graph** (D1) — the waterfall is the only trace
   visualization this phase ships.
-- **`SpanDTO.node`** (span location, Slices 31/38), **`RunDTO.origin`**
-  (still emitted as the constant `RunOrigin.Manual`, Slice 25), and
-  **`server.principal`** (still the constant `'local'`, Slices 24/33/35/38)
-  stay reserved — Phase 3 gives them real readers, not real values.
+- **`SpanDTO.node`** (span location, Slices 31/38) and **`server.principal`**
+  (still the constant `'local'`, Slices 24/33/35/38) stay reserved — Phase 3
+  gives them real readers, not real values. (**`RunDTO.origin`** — reserved
+  here as the constant `RunOrigin.Manual` — got its real values in Slice 25:
+  `dispatch.ts`'s `markJobOrigin` now stamps `Schedule`/`Webhook`/`Api` for
+  trigger-fired runs, read back by `readRunOrigin` for this same field.)
 - **`runs/` retention GC** — registered as a Tier-2 `docs/ROADMAP.md` slice,
   not built here.
 - **Accessibility polish + full ⌘K** (a recent-run entry beyond the existing
