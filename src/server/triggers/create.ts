@@ -42,6 +42,22 @@ function json(body: unknown, status: number): Response {
 }
 
 /**
+ * True for a `store.create` failure caused by the `UNIQUE(name, origin)`
+ * backstop (bun:sqlite raises `SQLITE_CONSTRAINT_UNIQUE`; matched on `code`
+ * with a message fallback in case a different driver ever backs this store).
+ * Anything else is a genuine unexpected failure and must propagate to the
+ * caller as a 500, not be swallowed into a false 409.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as { code?: string }).code;
+  return (
+    code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+    err.message.includes('UNIQUE constraint failed')
+  );
+}
+
+/**
  * `POST /api/triggers` — create a console-origin trigger (Slice 25, Task 23).
  * Behind `requireTrustedLocal` FIRST (persistent code-execution-by-schedule is
  * a privileged write, the `handleDevicePair` precedent) — a rejected caller
@@ -64,7 +80,12 @@ function json(body: unknown, status: number): Response {
  *  5. Cron only: seed `nextRunAt` at create time so a freshly-created cron
  *     doesn't sit un-scheduled until the next boot reconcile.
  *  6. Insert + `recordTriggerRegister` (span carries id/type/origin only —
- *     never the token/secret).
+ *     never the token/secret). `store.create` is wrapped: if it throws (e.g.
+ *     the M2 pre-check lost a race and the UNIQUE(name, origin) backstop
+ *     fires), any secret minted in step 4 is removed via `secretStore.remove`
+ *     BEFORE returning — a thrown create must never orphan a freshly-minted
+ *     secret on disk. A UNIQUE failure maps to the same clean 409 shape as
+ *     the pre-check; any other error rethrows to the app-level 500 handler.
  *  7. `201` with the DTO, and — webhook only — `webhookToken` + `webhookUrl`
  *     (`${publicBaseUrl}/hooks/${token}`), mirroring `DevicePairResponseSchema`.
  */
@@ -139,10 +160,27 @@ export async function handleTriggerCreate(
       computeNextRun({ config } as Trigger, Date.now()) ?? undefined;
   }
 
-  const trigger = deps.triggers.store.create(
-    input,
-    tokenHashValue ? { tokenHash: tokenHashValue } : undefined,
-  );
+  let trigger: Trigger;
+  try {
+    trigger = deps.triggers.store.create(
+      input,
+      tokenHashValue ? { tokenHash: tokenHashValue } : undefined,
+    );
+  } catch (err) {
+    // A minted secret with no row to reference it is an orphan on disk —
+    // clean it up before returning/rethrowing, mirroring delete.ts's
+    // secret-then-row ordering in reverse.
+    if (input.secretRef) {
+      deps.triggers.secretStore.remove(input.secretRef);
+    }
+    if (isUniqueConstraintError(err)) {
+      return json(
+        { error: `a console trigger named "${body.name}" already exists` },
+        409,
+      );
+    }
+    throw err;
+  }
   recordTriggerRegister(trigger); // id/type/origin only — never the token/secret.
   return json(
     TriggerCreateResponseSchema.parse({

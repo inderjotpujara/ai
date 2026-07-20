@@ -174,6 +174,60 @@ test('create a second console trigger with a duplicate name → 409 (no side eff
   expect(rows[0]?.secretRef).toBe(secretRefBefore);
 });
 
+test('create failure after secret mint (UNIQUE race): 409, no orphaned secret', async () => {
+  const d = deps();
+
+  // Spy on mint to capture the ref the handler generates internally (the
+  // failed create never returns a trigger/secretRef to the caller).
+  const realMint = d.triggers.secretStore.mint.bind(d.triggers.secretStore);
+  let mintedRef: string | undefined;
+  d.triggers.secretStore.mint = () => {
+    const minted = realMint();
+    mintedRef = minted.secretRef;
+    return minted;
+  };
+
+  // Stub store.create to simulate the UNIQUE(name, origin) backstop firing
+  // AFTER the M2 pre-check already passed (e.g. a race) — the pre-check
+  // can't catch this, so the handler's own try/catch must.
+  const failingCreate: typeof d.triggers.store.create = () => {
+    const err = new Error(
+      'UNIQUE constraint failed: triggers.name, triggers.origin',
+    ) as Error & { code?: string };
+    err.code = 'SQLITE_CONSTRAINT_UNIQUE';
+    throw err;
+  };
+  d.triggers.store.create = failingCreate;
+
+  const res = await handleTriggerCreate(
+    req('POST', '/api/triggers', webhookBody('inbound')),
+    d as never,
+    localGuard,
+  );
+
+  expect(res.status).toBe(409);
+  expect(d.triggers.store.list()).toEqual([]);
+  // The secret minted for this create was cleaned up — no orphan on disk.
+  expect(mintedRef).toBeDefined();
+  expect(d.triggers.secretStore.get(mintedRef as string)).toBeUndefined();
+});
+
+test('create failure with a non-UNIQUE store error rethrows (not swallowed into a 409)', async () => {
+  const d = deps();
+  const failingCreate: typeof d.triggers.store.create = () => {
+    throw new Error('disk full');
+  };
+  d.triggers.store.create = failingCreate;
+
+  await expect(
+    handleTriggerCreate(
+      req('POST', '/api/triggers', cronBody('nightly')),
+      d as never,
+      localGuard,
+    ),
+  ).rejects.toThrow('disk full');
+});
+
 test('patch requires trusted-local (403, zero side effect)', async () => {
   const d = deps();
   const t = d.triggers.store.create(
@@ -234,6 +288,35 @@ test('patch a console trigger: config change is applied + nextRunAt recomputed',
   const updated = d.triggers.store.get(t.id);
   expect(updated?.config).toEqual({ schedule: '*/1 * * * *' });
   expect(updated?.nextRunAt).toBeDefined();
+});
+
+test('patch re-enabling a parked cron (nextRunAt null) recomputes nextRunAt', async () => {
+  const d = deps();
+  // A parked trigger: disabled, and nextRunAt never seeded (the create-time
+  // seed only runs when `enabled` — mirrors an un-computable-pattern park or
+  // a disable that leaves nextRunAt null).
+  const t = d.triggers.store.create({
+    ...cronInput('parked', TriggerOrigin.Console),
+    enabled: false,
+  });
+  expect(t.enabled).toBe(false);
+  expect(t.nextRunAt).toBeUndefined();
+
+  const before = Date.now();
+  const res = await handleTriggerPatch(
+    t.id,
+    req('PATCH', `/api/triggers/${t.id}`, { enabled: true }),
+    d as never,
+    localGuard,
+  );
+  expect(res.status).toBe(200);
+
+  const updated = d.triggers.store.get(t.id);
+  expect(updated?.enabled).toBe(true);
+  // Re-enabling a parked cron must re-seed nextRunAt via the cron pattern —
+  // not leave it unscheduled forever.
+  expect(updated?.nextRunAt).toBeDefined();
+  expect(updated?.nextRunAt as number).toBeGreaterThan(before);
 });
 
 test('patch rejects a bad cron config with 400', async () => {
