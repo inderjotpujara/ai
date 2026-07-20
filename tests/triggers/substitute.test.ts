@@ -17,6 +17,15 @@ test('unknown placeholders are left literal (never evaluated)', () => {
   expect(substituteTemplate({ a: '{{secret}}' }, {})).toEqual({
     a: '{{secret}}',
   });
+  // N1: prototype-chain members are NOT own keys of vars, so {{toString}} /
+  // {{constructor}} / {{__proto__}} must stay literal (never interpolate a
+  // function source), per the module contract.
+  expect(
+    substituteTemplate(
+      { a: '{{toString}}', b: '{{constructor}}', c: '{{__proto__}}' },
+      {},
+    ),
+  ).toEqual({ a: '{{toString}}', b: '{{constructor}}', c: '{{__proto__}}' });
 });
 
 test('substitutes inside array elements and leaves non-string leaves untouched', () => {

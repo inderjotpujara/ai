@@ -33,7 +33,12 @@ export type FireReason = 'cron' | 'webhook' | 'file' | 'chain' | 'manual';
 export type FireContext = {
   reason: FireReason;
   vars?: Record<string, string>;
-  chainDepth?: number; // depth of the job ABOUT to be created (chain hops)
+  // Depth of the job ABOUT to be created (chain hops). TRUST BOUNDARY: callers
+  // MUST derive this from the source job's persisted chainDepth (+1 per hop);
+  // never accept a client-supplied value. Caller-side enforcement lands in
+  // T13/T24 (F1 carry). A non-integer/negative value is rejected here as
+  // cap-exceeded (see N2 clamp below).
+  chainDepth?: number;
   bypassOverlap?: boolean; // manual test-fire ignores overlap protection
 };
 
@@ -67,7 +72,16 @@ export function createFireTrigger(deps: {
       // is enforced HERE (the single convergence point) so no source can bypass
       // it.
       const depth = ctx.chainDepth ?? 0;
-      if (depth > deps.maxChainDepth()) {
+      // N2 clamp: a supplied depth must be a non-negative integer. NaN /
+      // negative / fractional are treated as cap-exceeded — NaN in particular
+      // self-perpetuates through `depth + 1` hops (NaN > cap is false), so it
+      // would slip past the numeric cap and drive an unbounded chain if it ever
+      // reached ctx. Same over-cap outcome (Failed, plan-mandated), no enqueue.
+      const overCap =
+        (ctx.chainDepth !== undefined &&
+          (!Number.isInteger(ctx.chainDepth) || ctx.chainDepth < 0)) ||
+        depth > deps.maxChainDepth();
+      if (overCap) {
         deps.triggerStore.recordFiring({
           triggerId: t.id,
           firedAt: now,
@@ -84,8 +98,19 @@ export function createFireTrigger(deps: {
         ctx.bypassOverlap === true ||
         (t.type === TriggerType.Cron &&
           (t.config as CronConfig).allowOverlap === true);
+      // F2 TOCTOU fix: the overlap check → enqueue → recordFiring → update
+      // span below is ONE yield-free synchronous block (bun:sqlite is sync).
+      // The run-dir create — the only async step — is moved AFTER it, so two
+      // concurrent fires (e.g. concurrent webhook deliveries) can no longer
+      // both pass the check during each other's `await`: whichever runs first
+      // completes the whole check+enqueue span before the second even starts.
+      const runId = newRunId();
       if (!allowOverlap) {
-        const last = deps.triggerStore.latestFiring(t.id);
+        // FIX 1: latestFiredFiring (job_id IS NOT NULL), NOT latestFiring — a
+        // skip/fail row has jobId=null, so latestFiring would let this tick
+        // fall through the jobId check and breach overlap while the earlier
+        // fired job is still in flight.
+        const last = deps.triggerStore.latestFiredFiring(t.id);
         if (last?.jobId) {
           const prev = deps.jobStore.getJob(last.jobId);
           if (
@@ -104,11 +129,6 @@ export function createFireTrigger(deps: {
           }
         }
       }
-      // Pre-mint + pre-create the run dir so an immediate /api/runs/:id/stream
-      // never 404s (mirrors handleJobEnqueue). dispatch's markJobOrigin will
-      // also write the origin marker at execution time.
-      const runId = newRunId();
-      await createRun(deps.runsRoot, runId);
       const job = deps.jobStore.enqueue({
         kind: t.target.kind,
         payload: substituteTemplate(t.target.payload, ctx.vars ?? {}),
@@ -137,6 +157,12 @@ export function createFireTrigger(deps: {
       // M5: last_fired_at is written HERE, only on an actual Fired outcome —
       // never on a skip/fail. claimDueCron deliberately does not bump it.
       deps.triggerStore.update(t.id, { lastFiredAt: now });
+      // Create the run dir AFTER the yield-free enqueue span so an immediate
+      // /api/runs/:id/stream never 404s once fireTrigger returns (mirrors
+      // handleJobEnqueue). dispatch's markJobOrigin re-creates it idempotently
+      // at execution time. This is the sole `await`, deliberately outside the
+      // critical span (F2).
+      await createRun(deps.runsRoot, runId);
       rec.outcome(TriggerOutcome.Fired);
       return { fired: true, jobId: job.id, runId };
     });

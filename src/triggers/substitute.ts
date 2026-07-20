@@ -14,6 +14,10 @@ const PLACEHOLDER = /\{\{\s*([\w.]+)\s*\}\}/g;
 
 function substituteString(s: string, vars: Record<string, string>): string {
   return s.replace(PLACEHOLDER, (whole, key: string) => {
+    // Object.hasOwn (NOT `vars[key]`) so a placeholder naming an inherited
+    // prototype member — {{toString}}, {{constructor}}, {{__proto__}} — is left
+    // literal instead of interpolating a function source. Only own keys count.
+    if (!Object.hasOwn(vars, key)) return whole;
     const value = vars[key];
     return value === undefined ? whole : value;
   });

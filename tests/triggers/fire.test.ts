@@ -147,6 +147,78 @@ test('bypassOverlap (manual test-fire) ignores an in-flight previous job', async
   jobStore.close();
 });
 
+test('overlap guard: a skip row does not mask the still-in-flight fired job (3-fire regression)', async () => {
+  const { triggerStore, jobStore, fire } = harness();
+  const t = cronTrigger(triggerStore); // every-tick cron, no allowOverlap
+  // fire1: job A enqueued and Fired.
+  const fire1 = await fire(t, { reason: 'cron' });
+  expect(fire1.fired).toBe(true);
+  // Job A goes Queued → Running and stays in flight.
+  jobStore.claimNext();
+  // fire2: A still Running → SkippedOverlap (writes a jobId-null skip row).
+  const fire2 = await fire(t, { reason: 'cron' });
+  expect(fire2.fired).toBe(false);
+  if (fire2.fired) throw new Error('expected skip');
+  expect(fire2.outcome).toBe(TriggerOutcome.SkippedOverlap);
+  // fire3: the MOST-RECENT firing is now fire2's skip row (jobId=null). With
+  // latestFiring the guard would fall through and BREACH (concurrent enqueue);
+  // latestFiredFiring still sees job A Running → must ALSO SkippedOverlap.
+  const fire3 = await fire(t, { reason: 'cron' });
+  expect(fire3.fired).toBe(false);
+  if (fire3.fired) throw new Error('expected skip');
+  expect(fire3.outcome).toBe(TriggerOutcome.SkippedOverlap);
+  triggerStore.close();
+  jobStore.close();
+});
+
+test('two concurrent fires on a non-allowOverlap trigger yield exactly one Fired + one SkippedOverlap', async () => {
+  const { triggerStore, jobStore, fire } = harness();
+  const t = cronTrigger(triggerStore);
+  // Concurrent webhook-style deliveries. Under the F2 reorder the
+  // check→enqueue→record→update span no longer yields, so this is deterministic.
+  const [a, b] = await Promise.all([
+    fire(t, { reason: 'webhook' }),
+    fire(t, { reason: 'webhook' }),
+  ]);
+  const outcomes = [a, b]
+    .map((r) => (r.fired ? TriggerOutcome.Fired : r.outcome))
+    .sort();
+  expect(outcomes).toEqual(
+    [TriggerOutcome.Fired, TriggerOutcome.SkippedOverlap].sort(),
+  );
+  // Exactly one job was enqueued.
+  expect(jobStore.stats().total).toBe(1);
+  triggerStore.close();
+  jobStore.close();
+});
+
+test('chainDepth clamp: NaN is rejected as cap-exceeded (no enqueue)', async () => {
+  const { triggerStore, jobStore, fire } = harness();
+  const t = cronTrigger(triggerStore);
+  const before = jobStore.stats().total;
+  const res = await fire(t, { reason: 'chain', chainDepth: Number.NaN });
+  expect(res.fired).toBe(false);
+  if (res.fired) throw new Error('expected fail');
+  expect(res.outcome).toBe(TriggerOutcome.Failed);
+  expect(jobStore.stats().total).toBe(before);
+  expect(triggerStore.latestFiring(t.id)?.outcome).toBe(TriggerOutcome.Failed);
+  triggerStore.close();
+  jobStore.close();
+});
+
+test('chainDepth clamp: a negative depth is rejected as cap-exceeded (no enqueue)', async () => {
+  const { triggerStore, jobStore, fire } = harness();
+  const t = cronTrigger(triggerStore);
+  const before = jobStore.stats().total;
+  const res = await fire(t, { reason: 'chain', chainDepth: -5 });
+  expect(res.fired).toBe(false);
+  if (res.fired) throw new Error('expected fail');
+  expect(res.outcome).toBe(TriggerOutcome.Failed);
+  expect(jobStore.stats().total).toBe(before);
+  triggerStore.close();
+  jobStore.close();
+});
+
 test('webhook fire maps to origin=webhook', async () => {
   const { triggerStore, jobStore, fire } = harness();
   const t = triggerStore.create({

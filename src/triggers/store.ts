@@ -348,6 +348,22 @@ export function createTriggerStore(
     return r ? toFiring(r) : undefined;
   }
 
+  // Most-recent firing that actually enqueued a job (outcome='fired' ⇔ job_id
+  // IS NOT NULL). The overlap guard MUST use this, not latestFiring: a
+  // skipped-overlap/failed row has job_id=null, so latestFiring would let the
+  // NEXT tick fall through the jobId check and breach overlap protection while
+  // the still-in-flight fired job runs (a skip row masking an earlier fire).
+  function latestFiredFiring(triggerId: string): TriggerFiring | undefined {
+    const r = db
+      .query(
+        `SELECT * FROM trigger_firings
+         WHERE trigger_id = ? AND job_id IS NOT NULL
+         ORDER BY fired_at DESC, id ASC LIMIT 1`,
+      )
+      .get(triggerId) as FiringRowRaw | undefined;
+    return r ? toFiring(r) : undefined;
+  }
+
   function upsertRepo(input: TriggerInput): Trigger {
     // Upsert by (name, origin=repo). When the row already exists, UPDATE the
     // DEFINITION columns (type/target/config/secret_ref) but NEVER enabled, id,
@@ -403,6 +419,7 @@ export function createTriggerStore(
     recordFiring,
     listFirings,
     latestFiring,
+    latestFiredFiring,
     upsertRepo,
     pruneRepo,
     close: (): void => db.close(),
