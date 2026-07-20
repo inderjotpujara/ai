@@ -5,6 +5,7 @@ import { nextTabIndex } from '../../shared/ui/tab-list.ts';
 import { DevicesTab } from './devices-tab.tsx';
 import { JobsTab } from './jobs-tab.tsx';
 import { OverviewTab } from './overview-tab.tsx';
+import { TriggersTab } from './triggers-tab.tsx';
 
 /** The four Ops tabs. `enum` per this repo's enum-over-union convention. */
 export enum OpsTab {
@@ -100,12 +101,7 @@ export function OpsArea() {
                   {t.id === OpsTab.Overview && <OverviewTab />}
                   {t.id === OpsTab.Jobs && <JobsTab />}
                   {t.id === OpsTab.Devices && <DevicesTab />}
-                  {t.id === OpsTab.Triggers && (
-                    // Replaced with the real panel content in a later increment.
-                    <p className="text-sm text-[var(--color-muted)]">
-                      {t.label} — coming in a later increment.
-                    </p>
-                  )}
+                  {t.id === OpsTab.Triggers && <TriggersTab />}
                 </RegionErrorBoundary>
               </div>
             ),
