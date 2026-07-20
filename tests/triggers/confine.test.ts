@@ -1,5 +1,11 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -58,6 +64,31 @@ test('rejects a symlink under the root that escapes to an outside dir', () => {
   symlinkSync(outside, join(base, 'link'));
   expect(() => confineWatchPath(join(base, 'link', 'secret'), base)).toThrow(
     WatchPathError,
+  );
+});
+
+test('rejects a symlinked ANCESTOR with an absent leaf (§7.4 escape)', () => {
+  // The common file-trigger case: watch a drop path before the file lands.
+  // `link-out` is an in-root symlink to an OUTSIDE dir; `drop.csv` does not
+  // exist yet. A plain resolve of the absent leaf would keep the in-root prefix
+  // and wrongly ACCEPT; realpathing the nearest existing ancestor (`link-out`)
+  // resolves the symlink and the escape must be REJECTED.
+  const base = realBase();
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'out-')));
+  symlinkSync(outside, join(base, 'link-out'));
+  expect(() =>
+    confineWatchPath(join(base, 'link-out', 'drop.csv'), base),
+  ).toThrow(WatchPathError);
+});
+
+test('accepts an absent leaf under a REAL (non-symlink) in-root dir', () => {
+  // The legit counterpart of the escape above: a not-yet-created file under a
+  // genuine in-root subdir must still be ACCEPTED.
+  const base = realBase();
+  const sub = join(base, 'sub');
+  mkdirSync(sub);
+  expect(confineWatchPath(join(sub, 'future.csv'), base)).toBe(
+    join(sub, 'future.csv'),
   );
 });
 

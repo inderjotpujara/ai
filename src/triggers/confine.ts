@@ -12,7 +12,7 @@
 
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { parse, resolve, sep } from 'node:path';
+import { basename, dirname, join, parse, resolve, sep } from 'node:path';
 
 /** A file-trigger watch path resolved to the filesystem root or outside its
  *  confinement root (including via symlink or `../` escape). */
@@ -58,9 +58,26 @@ export function confineWatchPath(candidate: string, baseDir: string): string {
   try {
     real = realpathSync(resolve(realRoot, candidate));
   } catch {
-    // Not yet on disk — no symlink can exist at a non-existent leaf, so a plain
-    // `resolve` (which collapses `..`) is sufficient for the confinement check.
-    real = resolve(realRoot, candidate);
+    // Not yet on disk. A plain `resolve` would collapse `..` but NOT resolve a
+    // symlinked ANCESTOR (e.g. `<root>/link-out/absent.csv` where `link-out` →
+    // /outside), letting an escape slip past the prefix check. So walk up to the
+    // nearest EXISTING ancestor, realpath THAT (defeating a symlinked ancestor),
+    // then re-append the non-existent tail before the prefix check runs.
+    const abs = resolve(realRoot, candidate);
+    let cur = abs;
+    const tail: string[] = [];
+    for (;;) {
+      try {
+        cur = realpathSync(cur);
+        break;
+      } catch {
+        const p = dirname(cur);
+        if (p === cur) break;
+        tail.unshift(basename(cur));
+        cur = p;
+      }
+    }
+    real = tail.length ? join(cur, ...tail) : cur;
   }
   // Reject the filesystem root outright (§7.4), independent of the root check.
   if (real === parse(real).root) {

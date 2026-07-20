@@ -16,9 +16,9 @@
  * confinement is skipped with a logged warning; it never crashes `start()`.
  */
 
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import chokidar from 'chokidar';
-import { createLogger } from '../log/logger.ts';
+import { createLogger, type Logger } from '../log/logger.ts';
 import { confineWatchPath, expandHome } from './confine.ts';
 import type { FireTrigger } from './fire.ts';
 import type { TriggerStore } from './store.ts';
@@ -29,7 +29,7 @@ import {
   TriggerType,
 } from './types.ts';
 
-const log = createLogger('triggers.watcher');
+const defaultLog = createLogger('triggers.watcher');
 
 // Hold events until the file size is stable — a half-written drop never fires.
 const AWAIT_WRITE_FINISH = {
@@ -55,8 +55,10 @@ export function createFileWatcher(deps: {
   fire: FireTrigger;
   watchRoot: string;
   watch?: typeof chokidar.watch;
+  log?: Logger;
 }): FileWatcher {
   const watchFn = deps.watch ?? chokidar.watch;
+  const log = deps.log ?? defaultLog;
   // One watcher per trigger id (so stop() can close them all).
   const watchers = new Map<string, WatcherHandle>();
   let started = false;
@@ -81,6 +83,10 @@ export function createFileWatcher(deps: {
       awaitWriteFinish: AWAIT_WRITE_FINISH,
       ignoreInitial: true,
       depth: 0,
+      // Belt-and-braces (§7.4): never follow an in-root symlink outward at
+      // event time — a symlink can't extend the watch past the confinement
+      // root, and it shrinks the create-vs-watch (TOCTOU) window.
+      followSymlinks: false,
     }) as unknown as WatcherHandle;
     for (const ev of events) {
       w.on(ev, (matchedPath: string) => {
@@ -113,13 +119,40 @@ export function createFileWatcher(deps: {
       // Idempotency guard: a double-start must not arm a second set of
       // watchers (which would double-fire every trigger).
       if (started) return;
-      started = true;
       // I4: expand `~` FIRST, then ensure the confinement root exists private
       // (0700) BEFORE confining any trigger path under it — so the default
       // `~/.agent/inbox` exists and `realpathSync(root)` in confineWatchPath
       // succeeds on a fresh install.
       const root = expandHome(deps.watchRoot);
-      mkdirSync(root, { recursive: true, mode: 0o700 });
+      try {
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+      } catch (err) {
+        // An unwritable/invalid parent must NOT crash start() (skip-with-warning
+        // robustness posture). `started` stays false so a later start() retries.
+        log.warn('watch root unavailable — file triggers disabled this start', {
+          root,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      // mkdir(mode) does NOT chmod an already-existing dir — a pre-existing
+      // group/world-accessible inbox would stay loose silently. Warn (do NOT
+      // auto-chmod a dir we didn't create); the watches still start.
+      try {
+        const st = statSync(root);
+        if ((st.mode & 0o077) !== 0) {
+          log.warn(
+            'watch root has loose permissions (group/world-accessible)',
+            {
+              root,
+              mode: (st.mode & 0o777).toString(8),
+            },
+          );
+        }
+      } catch {
+        // A stat failure here is non-fatal; proceed to arm the watches.
+      }
+      started = true;
       for (const t of deps.triggerStore.list()) {
         if (!t.enabled || t.type !== TriggerType.File) continue;
         watchTrigger(t, root);

@@ -1,7 +1,15 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Logger } from '../../src/log/logger.ts';
 import { JobKind } from '../../src/queue/types.ts';
 import type {
   FireContext,
@@ -77,6 +85,36 @@ function recordingFire(): {
   return { fire, calls };
 }
 
+/** A capturing Logger seam — records every log line so a test can assert a
+ *  warning was emitted (and read its fields). */
+function captureLogger(): {
+  log: Logger;
+  lines: Array<{
+    level: string;
+    msg: string;
+    fields?: Record<string, unknown>;
+  }>;
+} {
+  const lines: Array<{
+    level: string;
+    msg: string;
+    fields?: Record<string, unknown>;
+  }> = [];
+  const rec =
+    (level: string) => (msg: string, fields?: Record<string, unknown>) => {
+      lines.push({ level, msg, fields });
+    };
+  return {
+    log: {
+      debug: rec('debug'),
+      info: rec('info'),
+      warn: rec('warn'),
+      error: rec('error'),
+    },
+    lines,
+  };
+}
+
 // ---- tests ----------------------------------------------------------------
 
 test('an add event fires the matching file trigger with {{file.path}} in vars', () => {
@@ -134,6 +172,7 @@ test('passes chokidar the awaitWriteFinish + ignoreInitial + depth:0 options', (
     awaitWriteFinish: { stabilityThreshold: 400, pollInterval: 100 },
     ignoreInitial: true,
     depth: 0,
+    followSymlinks: false,
   });
 });
 
@@ -350,3 +389,98 @@ test('REAL chokidar: creating a file in the watched dir fires the trigger', asyn
     await w.stop();
   }
 }, 10000);
+
+// followSymlinks:false — an in-root symlink pointing OUTSIDE must not extend the
+// watch: a file created at the symlink TARGET (physically outside the root)
+// never fires. Real chokidar so the option is actually honored end-to-end.
+test('REAL chokidar: followSymlinks:false — a file at an in-root symlink target does not fire', async () => {
+  const root = realRoot();
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'outside-')));
+  symlinkSync(outside, join(root, 'link-out')); // in-root symlink → outside dir
+  const store = newStore();
+  store.create({
+    name: 'link-inbox',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: root }, // watch the confined dir itself (depth:0)
+  });
+  const { fire, calls } = recordingFire();
+  const w = createFileWatcher({ triggerStore: store, fire, watchRoot: root });
+  w.start();
+  try {
+    await new Promise((r) => setTimeout(r, 300)); // let chokidar arm
+    // Create a file at the OUTSIDE target of the in-root symlink.
+    const outsideFile = join(outside, 'evil.csv');
+    writeFileSync(outsideFile, 'x');
+    // Wait well past awaitWriteFinish — a fire (if any) would have happened.
+    await new Promise((r) => setTimeout(r, 900));
+    // followSymlinks:false must NOT descend into the symlink target: no fired
+    // path is the physically-outside file (chokidar treats the in-root symlink
+    // node itself as a plain entry, never following it outward).
+    const firedPaths = calls.map(([, ctx]) => ctx.vars?.['file.path']);
+    expect(firedPaths).not.toContain(outsideFile);
+    expect(firedPaths.some((p) => p?.startsWith(outside))).toBe(false);
+  } finally {
+    await w.stop();
+  }
+}, 10000);
+
+// FIX 3 — a pre-existing loosely-permissioned root is NOT re-chmod'd (we don't
+// own it) but MUST emit a warning naming the path + perms.
+test('warns (does not chmod) when a pre-existing root has loose perms', () => {
+  const parent = realpathSync(mkdtempSync(join(tmpdir(), 'loose-parent-')));
+  const root = join(parent, 'inbox');
+  mkdirSync(root, { mode: 0o755 }); // pre-existing group/world-accessible dir
+  const store = newStore();
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const cap = captureLogger();
+  createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+    log: cap.log,
+  }).start();
+  const warn = cap.lines.find(
+    (l) => l.level === 'warn' && l.msg.includes('loose permissions'),
+  );
+  expect(warn).toBeDefined();
+  expect(warn?.fields?.root).toBe(root);
+  expect(warn?.fields?.mode).toBe('755');
+  // Warn-only: the dir's perms are left untouched (not auto-chmod'd to 0700).
+  expect(statSync(root).mode & 0o777).toBe(0o755);
+});
+
+// FIX 4 — an unwritable/invalid root must NOT crash start(); it warns, skips the
+// watches, and leaves `started` false so a later start() can retry (proven by a
+// second start() re-attempting → emitting a second warning, not short-circuiting).
+test('an un-mkdir-able root: start() does not throw, started stays false (retry possible)', () => {
+  const parent = realpathSync(mkdtempSync(join(tmpdir(), 'bad-parent-')));
+  const asFile = join(parent, 'not-a-dir');
+  writeFileSync(asFile, ''); // a FILE where a dir parent is needed
+  const root = join(asFile, 'inbox'); // mkdir(recursive) → ENOTDIR
+  const store = newStore();
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const cap = captureLogger();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+    log: cap.log,
+  });
+  expect(() => w.start()).not.toThrow();
+  expect(chok.calls).toHaveLength(0); // no watches armed
+  const unavailable = () =>
+    cap.lines.filter(
+      (l) => l.level === 'warn' && l.msg.includes('watch root unavailable'),
+    );
+  expect(unavailable()).toHaveLength(1);
+  // `started` did NOT latch true → a second start() retries (guard would have
+  // silently returned without a second warning had it latched).
+  expect(() => w.start()).not.toThrow();
+  expect(unavailable()).toHaveLength(2);
+});
