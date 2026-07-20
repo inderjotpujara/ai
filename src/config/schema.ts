@@ -589,6 +589,32 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 0,
     doc: 'Max run-dir creations per fixed 60s window (server/run-rate.ts maxRunsPerWindow, gating createRun in jobs/enqueue.ts, crews/run.ts, workflows/run.ts, models/pull.ts). 0/unset = computed from worker concurrency (×10 headroom); a positive integer overrides. Over the rate → 429. Slice 24 Incr 5 item 2 (remote access can now spam run-dir creation — never hardcode).',
   },
+
+  // --- Triggers (Slice 25) ---
+  {
+    env: 'AGENT_TRIGGERS_POLL_MS',
+    kind: 'number',
+    def: 1_000,
+    doc: 'Scheduler tick cadence for due-trigger polling (triggers/scheduler.ts).',
+  },
+  {
+    env: 'AGENT_TRIGGERS_MAX_CHAIN_DEPTH',
+    kind: 'number',
+    def: 8,
+    doc: '§7.3 job-chain cycle cap: max chain depth a job-chain trigger may propagate before firing is refused (triggers/fire.ts).',
+  },
+  {
+    env: 'AGENT_TRIGGERS_WATCH_ROOT',
+    kind: 'string',
+    def: '~/.agent/inbox',
+    doc: "The file-watch confinement root; the leading '~' is expanded against the live home dir at the watcher read site (triggers/watcher.ts / triggers/confine.ts), the dir is created 0700 on first watcher start, and every file-trigger path is confined under it (§7.4).",
+  },
+  {
+    env: 'AGENT_TRIGGERS_ENABLED',
+    kind: 'boolean',
+    def: false,
+    doc: 'Governs ONLY whether a standalone startWebServer (no injected daemon queue) auto-constructs and starts its own triggers engine. Defaults OFF so an existing/ad-hoc startWebServer() (as every current server test calls it) never spins a scheduler, watches files, or leaves an open handle — the I3 invariant. The daemon always constructs+injects its engine explicitly (via opts.triggers, ignoring this flag), so the real deployment runs triggers unconditionally; the flag is the standalone-server opt-in (AGENT_TRIGGERS_ENABLED=1). (No AGENT_TRIGGERS_PATH knob — the repo registry is the compile-time triggers/index.ts import, so a path override would have no consumer.)',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in
