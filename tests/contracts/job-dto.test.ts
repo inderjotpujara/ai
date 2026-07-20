@@ -25,8 +25,30 @@ test('JobDtoSchema round-trips a full record', () => {
     finishedAt: 2,
     runId: 'run-1',
     result: { ok: true },
+    availableAt: 0,
+    retriedFrom: null,
   });
   expect(dto.runId).toBe('run-1');
+});
+
+test('JobDtoSchema round-trips availableAt + nullable retriedFrom', () => {
+  const dto = {
+    id: 'job-1',
+    kind: 'crew',
+    payload: { input: 'x' },
+    priority: 'normal',
+    status: 'queued',
+    attempts: 0,
+    maxAttempts: 3,
+    createdAt: 1,
+    updatedAt: 1,
+    availableAt: 0,
+    retriedFrom: null,
+  };
+  expect(JobDtoSchema.parse(dto).retriedFrom).toBeNull();
+  expect(JobDtoSchema.parse({ ...dto, retriedFrom: 'job-0' }).retriedFrom).toBe(
+    'job-0',
+  );
 });
 
 test('JobEnqueueRequestSchema rejects a missing kind', () => {

@@ -1,53 +1,56 @@
-# Task 5 Report: Gate DagView's fitView animation via useReducedMotion (D3)
+# Task 5 Report: Daemon logs query/response contract
 
-## Summary
-Followed the task brief verbatim (TDD). `DagView` (`web/src/shared/dag/dag-view.tsx`) now
-consumes the `useReducedMotion` hook (Task 4, `web/src/shared/a11y/use-reduced-motion.ts`)
-and passes `fitViewOptions={{ duration: reducedMotion ? 0 : 200 }}` to `@xyflow/react`'s
-`<ReactFlow>`, so the imperative fitView pan/zoom transition (untouched by the global CSS
-`prefers-reduced-motion` rule) goes instant instead of tweened when the user prefers
-reduced motion. No change to `DagView`'s public props.
+## Status: DONE
 
-## TDD steps followed
-1. Wrote `web/src/shared/dag/dag-view.reduced-motion.test.tsx` (new file, separate from
-   `dag-view.test.tsx`) — mocks `@xyflow/react`'s `ReactFlow` export to capture the props
-   passed to it, asserting `fitViewOptions` is `{ duration: 0 }` when
-   `matchMedia('(prefers-reduced-motion: reduce)').matches` is true, and a non-zero
-   duration when it's false.
-2. Ran the new test — confirmed RED: `lastProps?.fitViewOptions` was `undefined` (2 tests
-   failed, as expected — `DagView` didn't pass the prop yet).
-3. Implemented minimally: imported `useReducedMotion`, called it at the top of `DagView`,
-   added `fitViewOptions={{ duration: reducedMotion ? 0 : 200 }}` to the `<ReactFlow>`
-   element (right after the existing `fitView` prop).
-4. Ran `dag-view.reduced-motion.test.tsx` + the pre-existing `dag-view.test.tsx` together —
-   both GREEN (6 tests passed, 2 files) — confirming the new file's per-file `vi.mock`
-   scope doesn't leak into the existing full-render tests.
-5. Ran `cd web && bun run typecheck` — clean, no errors.
-6. Ran the full web test suite (`cd web && bun run test`) — 58 test files / 300 tests
-   passed. (Noise: one pre-existing, unrelated test produces expected
-   `ECONNREFUSED`/`AbortError` stderr output for a deliberate connection-refused case —
-   not a failure, not caused by this change.)
-7. Staged only the two task-5 files (`web/src/shared/dag/dag-view.tsx` and the new test
-   file) and committed. Pre-commit hook's `docs-check` passed (this is an internal-only
-   tweak to an already-documented module — no new `src/` subsystem introduced).
+## What was done
+Added two schemas to `src/contracts/requests.ts` per the brief, verbatim:
 
-## Files changed
-- Modified: `/Users/inderjotsingh/ai/web/src/shared/dag/dag-view.tsx` (+2 lines: import +
-  hook call + `fitViewOptions` prop)
-- Created: `/Users/inderjotsingh/ai/web/src/shared/dag/dag-view.reduced-motion.test.tsx`
+- `DaemonLogsQuerySchema` — `tail: z.coerce.number().int().positive().max(2000).default(200)`,
+  `stream: z.enum(['out', 'err']).default('out')`. Follows the existing
+  `RunListQuerySchema.limit` / `SessionListQuerySchema.limit` /
+  `JobListQuerySchema.limit` coercion idiom (all `z.coerce.number().int().positive().max(N).default(M)`).
+  The `stream` field uses an inline `z.enum([...])` literal, matching the
+  `EdgeDtoSchema.kind` precedent (`src/contracts/dto.ts:258`) for a
+  wire-only two-value enum with no engine-side mirror (no `enums.ts` addition).
+- `DaemonLogsResponseSchema` — `{ lines: z.array(z.string()) }`.
+- Both types exported via `z.infer`: `DaemonLogsQuery`, `DaemonLogsResponse`.
+
+New test file `tests/contracts/daemon-logs.test.ts` — the brief's exact
+test plus two additions (explicit `stream: 'err'` acceptance, and a
+response round-trip check) to cover both schemas per the "round-trip/coercion
+test" instruction.
+
+No endpoint wiring — pure schema + types + tests, as scoped.
+
+## TDD sequence
+1. Wrote failing test → confirmed `SyntaxError: Export named 'DaemonLogsQuerySchema' not found'`.
+2. Implemented both schemas in `requests.ts`.
+3. Re-ran → 3 pass, 0 fail.
+
+## Gate results
+- `bun run typecheck` — clean (`tsc --noEmit`, no output/errors).
+- `bun run lint:file -- src/contracts/requests.ts tests/contracts/daemon-logs.test.ts`
+  — one fixable issue (import order in the test file per the brief's literal
+  snippet: `{ test, expect }` → biome wants `{ expect, test }`); fixed manually,
+  then clean.
+- `bun test tests/contracts/` — **126 pass, 0 fail** across 33 files (was 32
+  files pre-task) — full contract-parity suite green, no regressions.
 
 ## Commit
-`d6065f7` — `feat(a11y): gate DagView's fitView animation via useReducedMotion (D3)`
-(branch `slice-30b-phase8-polish-a11y`)
-
-## Test results
-- New test file: 2/2 passed.
-- Full web suite: 58 test files, 300 tests, all passed.
-- Typecheck: clean.
+`4077cf0` — `feat(contracts): DaemonLogs query/response (Slice 25b Incr 1)`
+Files staged explicitly (`git add src/contracts/requests.ts
+tests/contracts/daemon-logs.test.ts`), not `git add -A` — unrelated
+ledger/scratch files (`.remember/`, `.superpowers/sdd/progress.md`, other
+task briefs/reports, plan doc) were left untouched in the working tree.
 
 ## Concerns
-None. The change is minimal and surgical, matches the brief's interface contract exactly
-(no public prop changes to `DagView`), and doesn't affect any other consumer of `fitView`.
-Note: this report file previously contained stale content from an earlier phase's
-different "Task 5" (the voice downsampler) — it has been overwritten with this task's
-report.
+None. Brief was unambiguous and matched existing code patterns exactly
+(verified `z.coerce.number()` idiom at `requests.ts:93,253,320` and the
+`EdgeDtoSchema` inline enum at `dto.ts:258` before implementing). This was
+the last of the four contract-seam tasks (Tasks 1-4 landed at
+6ffd9da/2e1daee/676fbdb/c8caf6a); Increment 1's contract layer is now
+complete pending downstream endpoint-wiring tasks.
+
+Note: this report file previously contained stale content from an unrelated
+earlier phase's different "Task 5" (Slice 30b Phase 8 DagView reduced-motion
+work) — it has been overwritten with this task's report.

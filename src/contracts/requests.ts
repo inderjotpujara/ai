@@ -16,6 +16,7 @@ import {
   JobPriorityWire,
   JobStatusWire,
   RunKind,
+  RunOrigin,
   RuntimeKind,
 } from './enums.ts';
 
@@ -75,8 +76,9 @@ export const FeedbackRequestSchema = z.object({
 });
 export type FeedbackRequest = z.infer<typeof FeedbackRequestSchema>;
 
-/** `GET /api/runs?search=&outcome=&degraded=&limit=&cursor=` query. Values are
- *  raw query strings, so `limit`/`degraded` coerce; `limit` carries a default. */
+/** `GET /api/runs?search=&outcome=&degraded=&kind=&origin=&limit=&cursor=`
+ *  query. Values are raw query strings, so `limit`/`degraded` coerce; `limit`
+ *  carries a default. */
 export const RunListQuerySchema = z.object({
   search: z.string().optional(),
   outcome: z.string().optional(),
@@ -85,6 +87,9 @@ export const RunListQuerySchema = z.object({
     .optional()
     .transform((v) => (v === undefined ? undefined : v === 'true')),
   kind: z.enum(RunKind).optional(),
+  /** Daemon-run filter (Slice 25b Incr 1) — the Jobs-tab `runId` deep-link
+   *  filter narrows to `?origin=daemon`. */
+  origin: z.enum(RunOrigin).optional(),
   limit: z.coerce.number().int().positive().max(200).default(25),
   cursor: z.string().optional(),
 });
@@ -324,3 +329,45 @@ export const JobListResponseSchema = z.object({
   total: z.number(),
 });
 export type JobListResponse = z.infer<typeof JobListResponseSchema>;
+
+/** `POST /api/devices` body — pairs a new device from the trusted local
+ *  browser. `label` is user-supplied display text (Slice 25b Incr 1, T4). */
+export const DevicePairRequestSchema = z.object({
+  label: z.string().min(1).max(120),
+});
+export type DevicePairRequest = z.infer<typeof DevicePairRequestSchema>;
+
+/** `POST /api/devices` response — the minted deviceId + session token +
+ *  phone-openable pairing URL. `token` is transmitted EXACTLY ONCE here;
+ *  the registry never persists or re-lists it (only `DeviceDtoSchema`'s
+ *  `{deviceId,label,createdAt,exp}` is durable). */
+export const DevicePairResponseSchema = z.object({
+  deviceId: z.string(),
+  token: z.string(),
+  pairingUrl: z.string(),
+});
+export type DevicePairResponse = z.infer<typeof DevicePairResponseSchema>;
+
+/** `POST /api/security/rotate-root` body — re-confirms possession of the
+ *  root secret (constant-time-compared server-side) before mass-invalidating
+ *  every non-local session + clearing the device registry. Slice 25b Incr 1 (T4). */
+export const RotateRootRequestSchema = z.object({ rootSecret: z.string() });
+export type RotateRootRequest = z.infer<typeof RotateRootRequestSchema>;
+
+/** `GET /api/daemon/logs?tail=&stream=` query — mirrors the
+ *  `RunListQuerySchema.limit`/`SessionListQuerySchema.limit` coercion idiom
+ *  for a raw query-string numeric param. `stream` is an inline
+ *  `z.enum(['out','err'])` literal, following the `EdgeDtoSchema` precedent
+ *  (`dto.ts:258`) for a wire-only two-value set with no engine-side mirror.
+ *  Slice 25b Incr 1 (final contract-seam task). */
+export const DaemonLogsQuerySchema = z.object({
+  tail: z.coerce.number().int().positive().max(2000).default(200),
+  stream: z.enum(['out', 'err']).default('out'),
+});
+export type DaemonLogsQuery = z.infer<typeof DaemonLogsQuerySchema>;
+
+/** `GET /api/daemon/logs` response — the requested tail of raw log lines. */
+export const DaemonLogsResponseSchema = z.object({
+  lines: z.array(z.string()),
+});
+export type DaemonLogsResponse = z.infer<typeof DaemonLogsResponseSchema>;

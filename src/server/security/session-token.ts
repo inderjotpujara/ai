@@ -63,9 +63,20 @@ function sigMatches(expected: string, candidate: string): boolean {
 
 export function createSessionTokenStore(config: {
   path: string;
-  rootToken: string;
+  rootToken: string | (() => string);
 }): SessionTokenStore {
-  const { path, rootToken } = config;
+  const { path } = config;
+
+  // Resolve the root PER CALL (never capture it by value). A captured string
+  // would keep signing/verifying with the STALE root after `rotate()` (which
+  // overwrites the file that `getOrCreateRoot` re-reads), making rotate-root a
+  // no-op on this live store — the AUDIT CRITICAL-1 seam. Existing callers pass
+  // a plain string, which the union still accepts and this collapses to a
+  // constant, so their behaviour is unchanged.
+  const currentRoot = (): string =>
+    typeof config.rootToken === 'function'
+      ? config.rootToken()
+      : config.rootToken;
 
   // Revocation set persisted at construction — survives restarts. An ABSENT
   // file is fine (nothing revoked yet, e.g. first boot) and collapses to an
@@ -86,7 +97,7 @@ export function createSessionTokenStore(config: {
       const payload = Buffer.from(JSON.stringify(payloadObj)).toString(
         'base64url',
       );
-      return `${payload}.${sign(rootToken, payload)}`;
+      return `${payload}.${sign(currentRoot(), payload)}`;
     },
 
     verifySessionToken(raw): SessionPrincipal | null {
@@ -98,7 +109,7 @@ export function createSessionTokenStore(config: {
 
       // Verify authenticity FIRST (constant-time) before trusting any field in
       // the payload — a forged/tampered token is rejected here.
-      if (!sigMatches(sign(rootToken, payload), candidateSig)) return null;
+      if (!sigMatches(sign(currentRoot(), payload), candidateSig)) return null;
 
       let parsed: Payload;
       try {

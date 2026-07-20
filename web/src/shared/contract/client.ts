@@ -10,8 +10,38 @@ export class ApiError extends Error {
   }
 }
 
-/** The BFF injects window.__AGENT_TOKEN__ into the served HTML (empty in Vite dev). */
+const PAIRED_TOKEN_KEY = 'agent.pairedToken';
+
+/** A phone that opens the pairing URL (`…/#token=<t>`) adopts that token once,
+ *  into localStorage, then strips the fragment (so it never lingers in history).
+ *  The token rode the URL FRAGMENT, never a query — fragments do not reach the
+ *  server or its access logs. Call once at app boot, before the first apiFetch.
+ *  Slice 25b Incr 7 (T36). */
+export function adoptPairingTokenFromHash(): void {
+  try {
+    const m = window.location.hash.match(/^#token=(.+)$/);
+    if (!m?.[1]) return;
+    localStorage.setItem(PAIRED_TOKEN_KEY, m[1]);
+    history.replaceState(
+      null,
+      '',
+      window.location.pathname + window.location.search,
+    );
+  } catch {
+    // no window/localStorage (SSR/tests without a DOM) — nothing to adopt
+  }
+}
+
+/** The BFF injects window.__AGENT_TOKEN__ into the served HTML (empty in Vite
+ *  dev). Prefers a paired-device token adopted via `adoptPairingTokenFromHash`
+ *  (a phone that opened the pairing URL authenticates as the paired device). */
 export function sessionToken(): string {
+  try {
+    const paired = localStorage.getItem(PAIRED_TOKEN_KEY);
+    if (paired) return paired;
+  } catch {
+    // fall through to the injected server token
+  }
   const w = globalThis as { window?: { __AGENT_TOKEN__?: string } };
   return w.window?.__AGENT_TOKEN__ ?? '';
 }

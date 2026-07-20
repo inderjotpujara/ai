@@ -18,12 +18,18 @@ import { handleCrewDetail } from './crews/detail.ts';
 import { handleCrewList } from './crews/list.ts';
 import type { RunCrewTurn } from './crews/run.ts';
 import { handleCrewRun } from './crews/run.ts';
+import { handleDaemonLogs } from './daemon/logs.ts';
+import { handleDaemonStatus } from './daemon/status.ts';
+import { handleDeviceList } from './devices/list.ts';
+import { handleDevicePair } from './devices/pair.ts';
+import { handleDeviceRevoke } from './devices/revoke.ts';
 import { handleFeedback } from './feedback.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleJobCancel } from './jobs/cancel.ts';
 import { handleJobDetail } from './jobs/detail.ts';
 import { handleJobEnqueue } from './jobs/enqueue.ts';
 import { handleJobList } from './jobs/list.ts';
+import { handleJobRetry } from './jobs/retry.ts';
 import { handleMcpAdd } from './mcp/add.ts';
 import { handleMcpList } from './mcp/list.ts';
 import type { McpMountOne } from './mcp/mount-one.ts';
@@ -35,11 +41,19 @@ import { handleMemorySpaces } from './memory/spaces.ts';
 import { handleModelList } from './models/list.ts';
 import type { RunModelPullTurn } from './models/pull.ts';
 import { handleModelPull } from './models/pull.ts';
+import { handleQueueStats } from './queue/stats.ts';
 import { handleRunDetail } from './runs/detail.ts';
 import { handleRunList } from './runs/list.ts';
 import { handleRunStream } from './runs/stream.ts';
+import type { DeviceRegistry } from './security/device-registry.ts';
 import { confineToDir, MediaPathError } from './security/media-path.ts';
-import { enforcePerimeter, type OriginPolicy } from './security/origin.ts';
+import {
+  enforcePerimeter,
+  isLoopbackHost,
+  type OriginPolicy,
+} from './security/origin.ts';
+import type { RootTokenStore } from './security/root-token.ts';
+import { handleRotateRoot } from './security/rotate-route.ts';
 import type { SessionTokenStore } from './security/session-token.ts';
 import {
   createSessionGuard,
@@ -80,6 +94,14 @@ export type ServerDeps = {
   staticDir?: string;
   recordIo: boolean;
   indexHtml: string;
+  /** The local-browser session token (deviceId 'local'). Injected into the
+   *  served index as window.__AGENT_TOKEN__ ONLY for a loopback request (see
+   *  serveStatic/indexFor). A remote client over an allowed tunnel host gets the
+   *  token-LESS base and must adopt a device-paired token via the #fragment
+   *  bootstrap — so a remote index load can never obtain the trusted-'local'
+   *  token and defeat requireTrustedLocal (Slice 25b §7.1b). Absent = never
+   *  inject (legacy fixtures whose indexHtml already carries a token). */
+  localToken?: string;
   runChatTurn: RunChatTurn;
   consent: ConsentRegistry;
   /** Durable dir confined-uploads are written to/read from (Task 16). */
@@ -130,7 +152,50 @@ export type ServerDeps = {
    *  this knob) — each handler's own `Deps.runLimiter` falls back to
    *  `ALWAYS_ALLOW`, so an unset limiter never blocks. */
   runLimiter?: { allow(): boolean };
+  /** Worker-pool concurrency for the Overview queue card (`computeConcurrency()`,
+   *  threaded from main.ts/daemon). Optional — the /api/queue/stats route degrades
+   *  to 503 when unset (legacy fixtures need not set it). */
+  queueConcurrency?: number;
+  /** Daemon pid-file path (for uptime from mtime, §7.3). Optional — the
+   *  /api/daemon/status route degrades to 503 when unset. */
+  daemonPidPath?: string;
+  /** Bind posture the Overview/Devices tabs render. Optional (as above). */
+  bindInfo?: {
+    bind: string;
+    allowedHosts: string[];
+    port: number;
+    sessionTtlMs: number;
+  };
+  /** Directory holding `agent.{out,err}.log` for the redacted tail. Optional —
+   *  the /api/daemon/logs route degrades to 503 when unset. */
+  daemonLogDir?: string;
+  /** Persisted positive device registry (T13). Optional: absent in legacy
+   *  fixtures; the pair/revoke/list/rotate routes degrade to 503 (via `need()`)
+   *  when unset, until T20 wires it. */
+  deviceRegistry?: DeviceRegistry;
+  /** The durable root-token store (root-token.ts). Optional (as above); the
+   *  rotate-root route degrades to 503 when unset. Shares ONE instance with the
+   *  session store's root getter (T20). */
+  rootTokens?: RootTokenStore;
+  /** Public base URL the pairing URL/QR (POST /api/devices) is built from —
+   *  `AGENT_WEB_PUBLIC_URL` or derived from the request origin. Optional. */
+  publicBaseUrl?: string;
 };
+
+/** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
+ *  legacy fixtures need not set it). A route that needs one degrades to 503 with
+ *  a clear message rather than throwing an opaque TypeError. */
+export class DepUnavailableError extends Error {
+  override name = 'DepUnavailableError';
+  constructor(readonly field: string) {
+    super(`server dependency not configured: ${field}`);
+  }
+}
+/** Narrow an optional ServerDeps field to its required type, or signal a 503. */
+export function need<T>(value: T | undefined, field: string): T {
+  if (value === undefined) throw new DepUnavailableError(field);
+  return value;
+}
 
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -285,6 +350,90 @@ async function handleApi(
           rec.status(res.status);
           return res;
         }
+        if (req.method === 'GET' && url.pathname === '/api/queue/stats') {
+          const res = handleQueueStats({
+            jobStore: deps.jobStore,
+            pool: deps.pool,
+            queueConcurrency: need(deps.queueConcurrency, 'queueConcurrency'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/daemon/status') {
+          const res = handleDaemonStatus({
+            daemonPidPath: need(deps.daemonPidPath, 'daemonPidPath'),
+            bindInfo: need(deps.bindInfo, 'bindInfo'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/daemon/logs') {
+          const res = handleDaemonLogs(new URLSearchParams(url.search), {
+            daemonLogDir: need(deps.daemonLogDir, 'daemonLogDir'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/devices') {
+          const res = handleDeviceList({
+            deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/devices') {
+          const res = await handleDevicePair(
+            req,
+            {
+              deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
+              sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
+              publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+              bindInfo: need(deps.bindInfo, 'bindInfo'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action sub-path match MUST precede any future bare `/api/devices/:id`
+        // detail route (there is none yet) — same action-before-detail
+        // discipline as `/api/jobs/:id/cancel` and `/api/runs/:id/stream`.
+        const deviceRevoke = url.pathname.match(
+          /^\/api\/devices\/([^/]+)\/revoke$/,
+        );
+        if (req.method === 'POST' && deviceRevoke?.[1]) {
+          const res = handleDeviceRevoke(
+            deviceRevoke[1],
+            req,
+            {
+              deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
+              sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/api/security/rotate-root'
+        ) {
+          const res = await handleRotateRoot(
+            req,
+            {
+              rootTokens: need(deps.rootTokens, 'rootTokens'),
+              sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
+              deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
+              bindInfo: need(deps.bindInfo, 'bindInfo'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
         if (req.method === 'POST' && url.pathname === '/api/jobs') {
           const res = await handleJobEnqueue(req, deps);
           rec.status(res.status);
@@ -302,6 +451,14 @@ async function handleApi(
         );
         if (req.method === 'POST' && cancelMatch?.[1]) {
           const res = handleJobCancel(cancelMatch[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        // Same action-before-detail discipline as `cancel` above: the retry
+        // sub-path must match before the bare-:id detail regex below.
+        const retryMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/retry$/);
+        if (req.method === 'POST' && retryMatch?.[1]) {
+          const res = await handleJobRetry(retryMatch[1], deps);
           rec.status(res.status);
           return res;
         }
@@ -412,6 +569,10 @@ async function handleApi(
         rec.status(404);
         return json({ error: 'not found' }, 404);
       } catch (err) {
+        if (err instanceof DepUnavailableError) {
+          rec.status(503);
+          return json({ error: err.message }, 503);
+        }
         // Never crash the handler: map the typed error to an actionable JSON body.
         rec.status(500);
         return json({ error: explain(err).title }, 500);
@@ -432,13 +593,43 @@ const INDEX_HTML_HEADERS = {
 // eligible for the fallback below.
 const HAS_EXTENSION = /\.[a-zA-Z0-9]+$/;
 
+// Matches the built SPA's ES-module entry tag (mirrors main.ts's MODULE_SCRIPT_TAG).
+const MODULE_SCRIPT_TAG = /<script\s+type="module"[^>]*>/i;
+
+/** Inject `window.__AGENT_TOKEN__` into a token-LESS base index, before the SPA
+ *  module script so it is defined before app code runs. `JSON.stringify` does
+ *  not escape `</`, so escape `<` to keep the value from breaking out of the
+ *  <script> (same guard as renderIndexHtml). */
+function injectLocalToken(baseHtml: string, token: string): string {
+  const safe = JSON.stringify(token).replace(/</g, '\\u003c');
+  const script = `<script>window.__AGENT_TOKEN__=${safe};</script>`;
+  if (MODULE_SCRIPT_TAG.test(baseHtml)) {
+    return baseHtml.replace(MODULE_SCRIPT_TAG, (m) => script + m);
+  }
+  return baseHtml.replace(/<head(\s[^>]*)?>/i, (m) => m + script);
+}
+
+/** The index HTML to serve THIS request. The local session token is injected
+ *  ONLY for a loopback Host (isLoopbackHost) — a remote client over an allowed
+ *  tunnel gets the token-less base and must pair a device (the #fragment
+ *  bootstrap) to authenticate, so it can never hold the trusted 'local' token
+ *  and defeat requireTrustedLocal. Injection is per-request over the immutable
+ *  `deps.indexHtml` base — a loopback load never stamps the shared base that a
+ *  later remote request receives. */
+function indexFor(req: Request, deps: ServerDeps): string {
+  if (deps.localToken !== undefined && isLoopbackHost(req)) {
+    return injectLocalToken(deps.indexHtml, deps.localToken);
+  }
+  return deps.indexHtml;
+}
+
 async function serveStatic(
   req: Request,
   url: URL,
   deps: ServerDeps,
 ): Promise<Response> {
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
+    return new Response(indexFor(req, deps), { headers: INDEX_HTML_HEADERS });
   }
   if (deps.staticDir) {
     try {
@@ -469,7 +660,7 @@ async function serveStatic(
     (req.method === 'GET' || req.method === 'HEAD') &&
     !HAS_EXTENSION.test(url.pathname)
   ) {
-    return new Response(deps.indexHtml, { headers: INDEX_HTML_HEADERS });
+    return new Response(indexFor(req, deps), { headers: INDEX_HTML_HEADERS });
   }
   return new Response('not found', {
     status: 404,

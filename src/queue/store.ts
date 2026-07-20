@@ -14,7 +14,7 @@ import {
   type JobKind,
   JobPriority,
   type JobRecord,
-  type JobStatus,
+  JobStatus,
   type JobStoreDeps,
 } from './types.ts';
 
@@ -34,6 +34,7 @@ type JobRowRaw = {
   run_id: string | null;
   result: string | null;
   error: string | null;
+  retried_from: string | null;
 };
 
 function toJobRecord(r: JobRowRaw): JobRecord {
@@ -53,6 +54,7 @@ function toJobRecord(r: JobRowRaw): JobRecord {
     runId: r.run_id ?? undefined,
     result: r.result === null ? undefined : (JSON.parse(r.result) as unknown),
     error: r.error ?? undefined,
+    retriedFrom: r.retried_from,
   };
 }
 
@@ -131,8 +133,8 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
       `INSERT OR IGNORE INTO jobs
        (id, kind, payload, priority, status, attempts, max_attempts,
         created_at, updated_at, started_at, finished_at, available_at,
-        run_id, result, error)
-       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL)`,
+        run_id, result, error, retried_from)
+       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?)`,
       [
         id,
         input.kind,
@@ -143,6 +145,7 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
         at,
         availableAt,
         runId,
+        input.retriedFrom ?? null,
       ],
     );
     const row = getJob(id);
@@ -343,6 +346,33 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     return { items, nextCursor, total: totalRow.n };
   }
 
+  function stats(): { counts: Record<JobStatus, number>; total: number } {
+    // Race-safety comes from this being a single synchronous, yield-free
+    // bun:sqlite read (no `await` in this body) — no pool write can interleave
+    // mid-read regardless of query shape. The single GROUP BY is chosen for
+    // single-statement clarity and to future-proof against a later move to
+    // async reads, where a multi-statement version genuinely could race.
+    const rows = db
+      .query(`SELECT status, COUNT(*) AS n FROM jobs GROUP BY status`)
+      .all() as { status: string; n: number }[];
+    // Zero-default EVERY status so the wire DTO always has all keys (the panel
+    // renders a fixed row set; a missing key would render as blank, not 0).
+    const counts = Object.fromEntries(
+      Object.values(JobStatus).map((s) => [s, 0]),
+    ) as Record<JobStatus, number>;
+    let total = 0;
+    for (const r of rows) {
+      // Guard an unknown status value defensively: only known buckets count
+      // toward total, so total === sum(counts) holds by construction even if
+      // a stray/unknown status row ever existed.
+      if (r.status in counts) {
+        counts[r.status as JobStatus] = r.n;
+        total += r.n;
+      }
+    }
+    return { counts, total };
+  }
+
   return {
     enqueue,
     getJob,
@@ -353,6 +383,7 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
     markCanceled,
     listJobs,
     reconcileOrphans,
+    stats,
     close: (): void => db.close(),
   };
 }

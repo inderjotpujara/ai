@@ -147,6 +147,93 @@ test('/api/health requires the bearer token', async () => {
   expect(await ok.json()).toEqual({ ok: true });
 });
 
+test('GET /api/queue/stats degrades to 503 when queueConcurrency is unwired', async () => {
+  // This fixture never sets the OPTIONAL `queueConcurrency` field, so the
+  // shared `need()` guard trips DepUnavailableError → the handleApi catch maps
+  // it to a clean 503 (never an opaque 500). Proves both the shared 503 seam
+  // and that the optional field keeps the legacy fixture compiling unedited.
+  const res = await fetch(`${base}/api/queue/stats`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: queueConcurrency',
+  });
+});
+
+test('GET /api/daemon/status requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the queue/stats 503 test above: this fixture never sets
+  // the OPTIONAL `daemonPidPath`/`bindInfo` fields, so `need()` trips a clean
+  // 503 rather than a crash — AND the route stays behind the session guard
+  // (401 with no token) like every other /api route.
+  const unauth = await fetch(`${base}/api/daemon/status`);
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/daemon/status`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: daemonPidPath',
+  });
+});
+
+test('GET /api/devices requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the queue/stats and daemon/status 503 tests above: this
+  // fixture never sets the OPTIONAL `deviceRegistry` field, so `need()` trips
+  // a clean 503 rather than a crash — AND the route stays behind the session
+  // guard (401 with no token) like every other /api route.
+  const unauth = await fetch(`${base}/api/devices`);
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/devices`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: deviceRegistry',
+  });
+});
+
+test('POST /api/devices/:id/revoke requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the GET /api/devices 503 test above: this fixture never
+  // wires the OPTIONAL deviceRegistry/sessionTokens, so the shared `need()`
+  // guard trips a clean 503 (not a crash) — AND the action-sub-path route stays
+  // behind the session guard (401 with no token) like every other /api route.
+  const unauth = await fetch(`${base}/api/devices/d1/revoke`, {
+    method: 'POST',
+  });
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/devices/d1/revoke`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: deviceRegistry',
+  });
+});
+
+test('POST /api/security/rotate-root requires the bearer token and degrades to 503 when unwired', async () => {
+  // Same discipline as the device 503 tests above: this fixture never wires the
+  // OPTIONAL rootTokens/sessionTokens/deviceRegistry, so the break-glass route
+  // trips a clean 503 (not a crash) — AND it stays behind the shared session
+  // guard (401 with no token) like every other /api route. `rootTokens` is the
+  // FIRST `need()` in the route, so that is the field named in the 503.
+  const unauth = await fetch(`${base}/api/security/rotate-root`, {
+    method: 'POST',
+    body: JSON.stringify({ rootSecret: 'x' }),
+  });
+  expect(unauth.status).toBe(401);
+  const res = await fetch(`${base}/api/security/rotate-root`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ rootSecret: 'x' }),
+  });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'server dependency not configured: rootTokens',
+  });
+});
+
 const validEvent = {
   kind: 'voice.transcribe.web',
   durationMs: 1200,

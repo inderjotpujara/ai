@@ -40,6 +40,7 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     runId: 'run-000000001-xyz',
     result: undefined,
     error: undefined,
+    retriedFrom: null,
     ...overrides,
   };
 }

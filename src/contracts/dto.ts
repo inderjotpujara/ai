@@ -143,6 +143,8 @@ export const JobDtoSchema = z.object({
   runId: z.string().optional(),
   result: z.unknown().optional(),
   error: z.string().optional(),
+  availableAt: z.number(),
+  retriedFrom: z.string().nullable(),
 });
 export type JobDTO = z.infer<typeof JobDtoSchema>;
 
@@ -458,3 +460,53 @@ export const McpServerDtoSchema = z.object({
   reason: z.string().optional(),
 });
 export type McpServerDTO = z.infer<typeof McpServerDtoSchema>;
+
+/** Daemon's HTTP bind posture — projects the `AGENT_WEB_*` env-derived
+ *  config (`src/server/security/origin.ts`) so the Overview/Devices tabs can
+ *  show where the daemon is actually listening. Slice 25b Incr 1 (T3). */
+export const DaemonBindDtoSchema = z.object({
+  bind: z.string(),
+  allowedHosts: z.array(z.string()),
+  port: z.number(),
+  sessionTtlMs: z.number(),
+});
+export type DaemonBindDTO = z.infer<typeof DaemonBindDtoSchema>;
+
+/** Daemon liveness snapshot — `pid`/`startedAt`/`uptimeMs` are absent when
+ *  `running` is false (no live pid file to read). Slice 25b Incr 1 (T3). */
+export const DaemonStatusDtoSchema = z.object({
+  running: z.boolean(),
+  pid: z.number().optional(),
+  startedAt: z.number().optional(),
+  uptimeMs: z.number().optional(),
+  bind: DaemonBindDtoSchema,
+});
+export type DaemonStatusDTO = z.infer<typeof DaemonStatusDtoSchema>;
+
+/** Queue health snapshot — `counts` is a per-`JobStatusWire` row-count
+ *  snapshot; `activeCount` (in-flight worker-pool controllers) is kept
+ *  distinct from `counts.running` (durable row status) deliberately —
+ *  they can diverge transiently. Slice 25b Incr 1 (T3). */
+export const QueueStatsDtoSchema = z.object({
+  counts: z.partialRecord(z.enum(JobStatusWire), z.number()),
+  total: z.number(),
+  activeCount: z.number(),
+  concurrency: z.number(),
+});
+export type QueueStatsDTO = z.infer<typeof QueueStatsDtoSchema>;
+
+/** A paired device row — the registry's persisted shape, never the token
+ *  itself (that is transmitted exactly once, in `DevicePairResponseSchema`).
+ *  `exp` is the device's session-token expiry (epoch-ms). Slice 25b Incr 1 (T4). */
+export const DeviceDtoSchema = z.object({
+  deviceId: z.string(),
+  label: z.string(),
+  createdAt: z.number(),
+  exp: z.number(),
+});
+export type DeviceDTO = z.infer<typeof DeviceDtoSchema>;
+
+export const DeviceListResponseSchema = z.object({
+  items: z.array(DeviceDtoSchema),
+});
+export type DeviceListResponse = z.infer<typeof DeviceListResponseSchema>;

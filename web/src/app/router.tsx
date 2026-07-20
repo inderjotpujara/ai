@@ -9,6 +9,7 @@ import { ChatArea } from '../features/chat/index.tsx';
 import { CrewDetail } from '../features/crews/crew-detail.tsx';
 import { CrewsArea } from '../features/crews/index.tsx';
 import { LibraryArea } from '../features/library/index.tsx';
+import { OpsArea } from '../features/ops/index.tsx';
 import { RunsArea } from '../features/runs/index.tsx';
 import { RunDetail } from '../features/runs/run-detail.tsx';
 import { SessionDetail } from '../features/sessions/session-detail.tsx';
@@ -47,6 +48,26 @@ const runDetailRoute = createRoute({
   }),
 });
 
+/** `/ops` console shell (Slice 25b): the active tab is a `?tab=` search
+ *  param — deep-linkable and ⌘K-targetable, same pattern as
+ *  `runDetailRoute`'s `graphKind`/`graphId`. Invalid/missing values fall
+ *  back to `'overview'`. */
+export type OpsSearch = { tab?: 'overview' | 'jobs' | 'triggers' | 'devices' };
+
+const opsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops',
+  component: OpsArea,
+  validateSearch: (search: Record<string, unknown>): OpsSearch => ({
+    tab:
+      search.tab === 'jobs' ||
+      search.tab === 'triggers' ||
+      search.tab === 'devices'
+        ? search.tab
+        : 'overview',
+  }),
+});
+
 export const routeTree = rootRoute.addChildren([
   route('/', ChatArea),
   route('/sessions', SessionsArea),
@@ -59,6 +80,7 @@ export const routeTree = rootRoute.addChildren([
   route('/runs', RunsArea),
   runDetailRoute,
   route('/library', LibraryArea),
+  opsRoute,
   route('/settings', SettingsArea),
 ]);
 

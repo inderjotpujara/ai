@@ -54,6 +54,7 @@ test('start reconciles BEFORE pool.start, then injects its OWN pool into the ser
     }) as never,
     queue: wrappedStore as never,
     pool: pool as never,
+    concurrency: 1,
     pidPath,
     installSignals: () => {},
   });
@@ -98,6 +99,7 @@ test('start refuses when a live daemon pid is already present (double-start guar
       },
       stop: async () => {},
     } as never,
+    concurrency: 1,
     pidPath,
     installSignals: () => {},
   });
@@ -127,6 +129,7 @@ test('stop drains the pool, clears the pid, and is idempotent (double-stop safe)
         stopCount += 1;
       },
     } as never,
+    concurrency: 1,
     pidPath,
     installSignals: () => {},
   });

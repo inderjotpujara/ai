@@ -51,6 +51,34 @@ describe('runCommand (D8 — widened Command dispatch)', () => {
   });
 });
 
+describe('Ops ⌘K commands (Task 24 — per-tab nav)', () => {
+  it('includes go-ops-overview/jobs/triggers/devices, each navigating to /ops with the right tab', () => {
+    const nav = vi.fn();
+    const cases: Array<[string, string]> = [
+      ['go-ops-overview', 'overview'],
+      ['go-ops-jobs', 'jobs'],
+      ['go-ops-triggers', 'triggers'],
+      ['go-ops-devices', 'devices'],
+    ];
+    for (const [id, tab] of cases) {
+      const cmd = commands.find((c) => c.id === id);
+      expect(cmd?.kind).toBe(CommandKind.Nav);
+      runCommand(
+        cmd as Command,
+        nav as unknown as Parameters<typeof runCommand>[1],
+      );
+      expect(nav).toHaveBeenCalledWith({ to: '/ops', search: { tab } });
+      nav.mockClear();
+    }
+  });
+
+  it("labels the Devices & Access tab clearly (matches the tab's own display name)", () => {
+    expect(commands.find((c) => c.id === 'go-ops-devices')?.label).toMatch(
+      /devices/i,
+    );
+  });
+});
+
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,

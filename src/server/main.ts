@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { getCrew } from '../../crews/index.ts';
 import { getWorkflow } from '../../workflows/index.ts';
 import { loadConfig } from '../config/schema.ts';
 import { RuntimeKind } from '../core/types.ts';
+import { defaultPidPath } from '../daemon/pid.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
@@ -30,8 +31,13 @@ import { createRealMcpMountOne } from './mcp/mount-one.ts';
 import { createMcpMountStatus } from './mcp/mount-status.ts';
 import { createProcessRunLimiter } from './run-rate.ts';
 import {
+  createDeviceRegistry,
+  defaultDeviceRegistryPath,
+} from './security/device-registry.ts';
+import {
   createRootTokenStore,
   defaultRootTokenPath,
+  type RootTokenStore,
 } from './security/root-token.ts';
 import {
   createSessionTokenStore,
@@ -90,7 +96,7 @@ const DEFAULT_VOICE_CONFIG: VoiceWindowConfig = {
 };
 
 export function renderIndexHtml(
-  token: string,
+  token: string | undefined,
   distIndexHtml?: string,
   notify: NotifyConfig = DEFAULT_NOTIFY_CONFIG,
   voice: VoiceWindowConfig = DEFAULT_VOICE_CONFIG,
@@ -103,8 +109,14 @@ export function renderIndexHtml(
   // as new globals are added (it did for `voice.defaultModel`, a STRING
   // value, before this fix — the numeric globals were never at risk).
   const safeJson = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
+  // Token-LESS base when `token` is undefined: main.ts now renders the base
+  // WITHOUT the trusted-'local' token and lets serveStatic inject it per-request
+  // ONLY for loopback Hosts (Slice 25b §7.1b). The notify/voice globals are
+  // non-secret and stay in the base for every client.
+  const tokenLine =
+    token === undefined ? '' : `window.__AGENT_TOKEN__=${safeJson(token)};`;
   const tokenScript =
-    `<script>window.__AGENT_TOKEN__=${safeJson(token)};` +
+    `<script>${tokenLine}` +
     `window.__AGENT_NOTIFY_POLL_MS__=${safeJson(notify.pollMs)};` +
     `window.__AGENT_NOTIFY_MIN_DURATION_MS__=${safeJson(notify.minDurationMs)};` +
     `window.__AGENT_VOICE_DEFAULT_MODEL__=${safeJson(voice.defaultModel)};` +
@@ -163,14 +175,45 @@ export type StartOptions = {
    *  instance, so revoke/rotate operate on the SAME store the guard verifies).
    *  Absent = build one from the root store below. */
   sessionTokens?: SessionTokenStore;
+  /** Inject the durable root-token store (security/root-token.ts). Absent =
+   *  build one from `rootTokenPath` below. A fixture that injects its OWN
+   *  `sessionTokens` should inject the SAME `rootStore` its session store was
+   *  constructed over, so rotate-root rotates the key that store actually
+   *  signs/verifies with (the getter/same-instance invariant — T20). */
+  rootTokens?: RootTokenStore;
+  /** Path of the persisted positive device registry (security/device-registry.ts).
+   *  Defaults to `~/.agent/devices.json`; overridable so tests stay hermetic. */
+  deviceRegistryPath?: string;
+  /** Public base URL the pairing URL/QR (POST /api/devices) is built from.
+   *  Defaults to `AGENT_WEB_PUBLIC_URL`, then the loopback bind fallback. */
+  publicBaseUrl?: string;
   /** Injected, pre-reconciled queue owned by the caller (the daemon, T27). When
    *  present, startWebServer does NOT construct or start/stop a pool — the
    *  caller already ran reconcileOrphans() then pool.start() in the correct
    *  §7.3 order and owns the drain. Absent = standalone: startWebServer
    *  self-hosts one pool (`bun run web` / all-in-one tests). Running a second
    *  pool on the same AGENT_QUEUE_PATH DB would double concurrency and bypass
-   *  the reconcile-before-claim guarantee — the bug this dual mode closes. */
-  queue?: { jobStore: JobStore; pool: WorkerPool };
+   *  the reconcile-before-claim guarantee — the bug this dual mode closes.
+   *  `concurrency` (Slice 25b Task 11) is the SAME `computeConcurrency()` value
+   *  the caller built `pool` with — threaded through so `/api/queue/stats`
+   *  (T8) and `/api/daemon/status` never report a number that disagrees with
+   *  the pool actually draining jobs. Required (not re-derived here) so this
+   *  file can never call `computeConcurrency()` a second time and silently
+   *  diverge from the daemon's own value. */
+  queue?: { jobStore: JobStore; pool: WorkerPool; concurrency: number };
+  /** Daemon pid-file path (Slice 25b Task 11), surfaced on `ServerDeps.daemonPidPath`
+   *  for `/api/daemon/status`'s uptime-from-mtime read. Defaults to the same
+   *  `defaultPidPath()` the daemon itself writes (`daemon/pid.ts`), so standalone
+   *  boot and daemon-injected boot report the identical path unless a test
+   *  overrides it. */
+  daemonPidPath?: string;
+  /** Directory holding `agent.{out,err}.log` (Slice 25b Task 11), surfaced on
+   *  `ServerDeps.daemonLogDir` for `/api/daemon/logs`. Defaults to the sibling
+   *  `logs/` dir next to the pid file — the SAME directory `defaultLogDir()`
+   *  in `src/cli/daemon.ts` resolves to (kept as two independent expressions
+   *  of the same default rather than a shared import, since `cli/daemon.ts`'s
+   *  version isn't exported; both derive from `defaultPidPath()`). */
+  daemonLogDir?: string;
 };
 
 /** Boot the local web BFF. Returns the server handle for tests/shutdown. */
@@ -210,6 +253,17 @@ export function startWebServer(opts: StartOptions = {}): {
   // For the localhost browser we mint a SESSION token for the `'local'` device
   // (short TTL) and inject THAT as window.__AGENT_TOKEN__ — the root NEVER
   // leaves the server (nit #6). `opts.token` is a legacy bypass only.
+  // The ONE root store per server — hoisted so it is ALWAYS in scope: it becomes
+  // BOTH the session store's root source (the getter below) AND `deps.rootTokens`
+  // (the rotate-root route). Those MUST be the same instance, or rotate-root
+  // becomes a silent no-op (200 while revoked/rotated devices keep verifying) —
+  // the AUDIT CRITICAL-1 seam. A fixture may inject its own (paired with its own
+  // injected `sessionTokens`); production/daemon boot never does.
+  const rootStore =
+    opts.rootTokens ??
+    createRootTokenStore({
+      path: opts.rootTokenPath ?? defaultRootTokenPath(),
+    });
   let sessionTokens: SessionTokenStore | undefined;
   let token: string;
   if (opts.token !== undefined) {
@@ -221,20 +275,43 @@ export function startWebServer(opts: StartOptions = {}): {
       ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
     });
   } else {
-    const rootStore = createRootTokenStore({
-      path: opts.rootTokenPath ?? defaultRootTokenPath(),
-    });
     sessionTokens = createSessionTokenStore({
       path: opts.sessionRevocationPath ?? defaultRevocationPath(),
-      rootToken: rootStore.getOrCreateRoot(),
+      // Root GETTER, not a captured string: the live store re-reads the CURRENT
+      // root on every sign/verify, so `rotate()` on `rootStore` (via the
+      // rotate-root route, which holds this SAME instance as `deps.rootTokens`)
+      // immediately invalidates every outstanding session. A captured
+      // `rootStore.getOrCreateRoot()` string here would keep verifying against
+      // the stale root — the no-op rotate bug this getter closes.
+      rootToken: () => rootStore.getOrCreateRoot(),
     });
     token = sessionTokens.mintSessionToken({
       deviceId: 'local',
       ttlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
     });
   }
+  // Positive device registry + pairing base URL for the device routes. The
+  // registry shares the `~/.agent` secure-file convention; the base URL falls
+  // back to the loopback bind (fine for a same-box pair — a real tunnel sets
+  // AGENT_WEB_PUBLIC_URL / opts.publicBaseUrl).
+  const deviceRegistry = createDeviceRegistry({
+    path: opts.deviceRegistryPath ?? defaultDeviceRegistryPath(),
+  });
+  const publicBaseUrl =
+    opts.publicBaseUrl ??
+    ((cfg.AGENT_WEB_PUBLIC_URL as string) || `http://${bind}:${port}`);
 
   const policy = { port, allowedOrigins, allowedHosts };
+  // Bind posture surfaced on `ServerDeps.bindInfo` for the Overview/Devices
+  // tabs (Slice 25b Task 11). A separate mutable local (not inlined into
+  // `deps` below) mirrors `policy` just above: `port` is reconciled to the
+  // real bound port after `Bun.serve()` resolves an ephemeral `port: 0`.
+  const bindInfo = {
+    bind,
+    allowedHosts,
+    port,
+    sessionTtlMs: opts.sessionTtlMs ?? (cfg.AGENT_WEB_SESSION_TTL_MS as number),
+  };
   // Honor AGENT_RUNS_ROOT (same expression as the CLI runs/usage/archive
   // readers, src/cli/{runs,usage,archive}.ts) so the server writer and those
   // readers agree — never hardcode the path (repo no-hardcode rule).
@@ -320,9 +397,18 @@ export function startWebServer(opts: StartOptions = {}): {
     injected?.jobStore ??
     createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
   let pool: WorkerPool;
+  // Worker-pool concurrency surfaced on the Overview queue card (T8's
+  // /api/queue/stats) and the daemon status card. In standalone mode we own
+  // the pool and thread the exact value it was built with; in injected
+  // (daemon) mode the daemon owns the pool and passes ITS OWN
+  // `computeConcurrency()` value through `injected.concurrency` (T11) — this
+  // file never calls `computeConcurrency()` in that branch, so the reported
+  // number and the pool's real concurrency can never diverge.
+  let queueConcurrency: number;
   if (injected) {
     // Caller (daemon) owns lifecycle: do NOT start/stop or close here.
     pool = injected.pool;
+    queueConcurrency = injected.concurrency;
   } else {
     const dispatch = createJobDispatch({
       runCrewTurn,
@@ -334,9 +420,10 @@ export function startWebServer(opts: StartOptions = {}): {
       runBuilderTurn,
       runsRoot,
     });
+    queueConcurrency = computeConcurrency();
     pool = createWorkerPool({
       store: jobStore,
-      concurrency: computeConcurrency(),
+      concurrency: queueConcurrency,
       dispatch,
       pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
     });
@@ -359,7 +446,7 @@ export function startWebServer(opts: StartOptions = {}): {
     recordIo,
     staticDir,
     indexHtml: renderIndexHtml(
-      token,
+      undefined, // token-LESS base; the local token is injected per-request in serveStatic (loopback-only)
       distIndexHtml,
       {
         pollMs: cfg.AGENT_WEB_NOTIFY_POLL_MS as number,
@@ -370,6 +457,7 @@ export function startWebServer(opts: StartOptions = {}): {
         vadSilenceMs: cfg.AGENT_WEB_VOICE_VAD_SILENCE_MS as number,
       },
     ),
+    localToken: token, // injected as window.__AGENT_TOKEN__ ONLY for loopback requests (serveStatic)
     runChatTurn,
     consent,
     uploadsDir,
@@ -387,6 +475,17 @@ export function startWebServer(opts: StartOptions = {}): {
     jobStore,
     pool,
     runLimiter,
+    queueConcurrency,
+    daemonPidPath: opts.daemonPidPath ?? defaultPidPath(),
+    bindInfo,
+    daemonLogDir: opts.daemonLogDir ?? join(dirname(defaultPidPath()), 'logs'),
+    // Device/security surface (T20, audit CRITICAL-1 completion): the device
+    // routes (list/pair/revoke) + rotate-root stop 503-ing. `rootTokens` is the
+    // SAME hoisted `rootStore` the session store's getter reads, so a rotate on
+    // it invalidates the live guard rather than being a silent no-op.
+    deviceRegistry,
+    rootTokens: rootStore,
+    publicBaseUrl,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB
@@ -414,6 +513,7 @@ export function startWebServer(opts: StartOptions = {}): {
     throw new Error('Bun.serve() did not report a bound port');
   }
   policy.port = boundPort; // reconcile when port === 0 (ephemeral)
+  bindInfo.port = boundPort; // same reconcile for the daemon-status DTO
   return { server, token, port: boundPort, jobStore, pool };
 }
 
