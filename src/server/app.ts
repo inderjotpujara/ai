@@ -25,6 +25,7 @@ import { handleDeviceList } from './devices/list.ts';
 import { handleDevicePair } from './devices/pair.ts';
 import { handleDeviceRevoke } from './devices/revoke.ts';
 import { handleFeedback } from './feedback.ts';
+import { handleWebhook } from './hooks/webhook.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleJobCancel } from './jobs/cancel.ts';
 import { handleJobDetail } from './jobs/detail.ts';
@@ -233,6 +234,32 @@ export function buildFetch(
       if (blocked) return blocked;
 
       const url = new URL(req.url);
+
+      // §7.1 inbound webhook receiver — the ONLY unauthenticated route class.
+      // Placed AFTER the Host/Origin perimeter (still enforced above) but
+      // BEFORE the /api session-guard block: a third-party sender reaches it
+      // without our bearer token, yet cannot touch any /api route. Its own
+      // token/HMAC/replay/cap/rate-limit checks (handleWebhook) ARE the whole
+      // security boundary. Only POST matches; any other method/verb falls
+      // through to serveStatic (so /hooks exposes nothing else). Absent
+      // triggers engine → 503 (matches the /api need() degrade shape) rather
+      // than the outer catch's opaque 500.
+      const hookMatch = url.pathname.match(/^\/hooks\/([^/]+)$/);
+      if (req.method === 'POST' && hookMatch?.[1]) {
+        if (!deps.triggers) {
+          return json(
+            { error: new DepUnavailableError('triggers').message },
+            503,
+          );
+        }
+        return await handleWebhook(decodeURIComponent(hookMatch[1]), req, {
+          triggerStore: deps.triggers.store,
+          secretStore: deps.triggers.secretStore,
+          fire: deps.triggers.fire,
+          runLimiter: deps.runLimiter,
+        });
+      }
+
       if (url.pathname.startsWith('/api')) {
         // `navigator.sendBeacon` can't set an Authorization header, so the
         // beacon carries its token in the request BODY (not the URL — a query
