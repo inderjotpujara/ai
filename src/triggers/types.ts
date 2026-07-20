@@ -90,3 +90,8 @@ export type TriggerInput = {
   secretRef?: string;
   nextRunAt?: number;
 };
+
+/** Injected dependencies for `createTriggerStore` (mirrors `JobStoreDeps`).
+ *  Empty today — the store owns its DB; the scheduler injects `computeNext`
+ *  per-call into `claimDueCron`, not via construction. */
+export type TriggerStoreDeps = Record<string, never>;
