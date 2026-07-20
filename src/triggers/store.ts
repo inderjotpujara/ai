@@ -250,8 +250,11 @@ export function createTriggerStore(
     const claim = db.transaction((): Trigger[] => {
       const rows = db
         .query(
+          // `enabled != 0` (not `= 1`) to match toTrigger's read mapping
+          // (`enabled !== 0`) — keeps the due-scan predicate aligned with any
+          // truthy non-1 value an external writer might ever store.
           `SELECT * FROM triggers
-           WHERE enabled = 1 AND type = 'cron'
+           WHERE enabled != 0 AND type = 'cron'
              AND next_run_at IS NOT NULL AND next_run_at <= ?
            ORDER BY next_run_at ASC, id ASC`,
         )

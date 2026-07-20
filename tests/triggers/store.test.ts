@@ -74,3 +74,37 @@ test('firings keyset list is newest-first and paginates', () => {
   expect(store.latestFiring(t.id)?.firedAt).toBe(3);
   store.close();
 });
+
+test('firings keyset list page 2 continues from the cursor with no overlap/gap', () => {
+  const store = createTriggerStore({
+    path: mkdtempSync(join(tmpdir(), 'trg-')),
+  });
+  const t = store.create(cronInput('f2', 100));
+  for (let i = 1; i <= 3; i++) {
+    store.recordFiring({
+      triggerId: t.id,
+      firedAt: i,
+      jobId: `j${i}`,
+      runId: `r${i}`,
+      outcome: TriggerOutcome.Fired,
+    });
+  }
+  const page1 = store.listFirings(t.id, { limit: 2 });
+  expect(page1.items.map((f) => f.firedAt)).toEqual([3, 2]);
+  expect(page1.nextCursor).toBeDefined();
+  expect(page1.total).toBe(3);
+
+  const page2 = store.listFirings(t.id, {
+    cursor: page1.nextCursor,
+    limit: 2,
+  });
+  // Only the oldest firing remains, no cursor for a further page, and no
+  // overlap with page 1's items.
+  expect(page2.items.map((f) => f.firedAt)).toEqual([1]);
+  expect(page2.nextCursor).toBeUndefined();
+  expect(page2.total).toBe(3);
+  const allFiredAt = [...page1.items, ...page2.items].map((f) => f.firedAt);
+  expect(allFiredAt).toEqual([3, 2, 1]);
+  expect(new Set(allFiredAt).size).toBe(allFiredAt.length);
+  store.close();
+});
