@@ -1,6 +1,8 @@
 import type { TriggerDTO } from '@contracts';
 import { TriggerOriginWire, TriggerTypeWire } from '@contracts';
+import { useState } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
+import { TriggerCreateDialog } from './trigger-create-dialog.tsx';
 import { useTriggers } from './use-triggers.ts';
 
 const CARD_CLASS =
@@ -44,14 +46,28 @@ function scheduleLabel(trigger: TriggerDTO): string {
  *  repo-origin trigger's row renders ONLY the pause/resume toggle and the
  *  manual-fire button, plus a "repo-defined" badge — no delete/edit control,
  *  since the server 403s a repo delete anyway. Console-origin rows render
- *  the full set (toggle · fire · delete). */
+ *  the full set (toggle · fire · delete).
+ *
+ *  A "New trigger" button mounts `TriggerCreateDialog` (Task 29) — its
+ *  `onCreated` is wired to THIS tab's own `refresh()` so a created trigger
+ *  appears in the list without a page reload (the `PairDeviceDialog`/
+ *  `onPaired` precedent, Slice 25b T38). */
 export function TriggersTab() {
-  const { triggers, error, setEnabled, fire, remove } = useTriggers();
+  const { triggers, error, refresh, setEnabled, fire, remove } = useTriggers();
+  const [createOpen, setCreateOpen] = useState(false);
 
   return (
     <section data-testid="ops-triggers" className="flex flex-col gap-4">
       <div className={CARD_CLASS}>
-        <h2 className={CARD_TITLE_CLASS}>Triggers</h2>
+        <div className="flex items-center justify-between">
+          <h2 className={CARD_TITLE_CLASS}>Triggers</h2>
+          <Button
+            data-testid="ops-triggers-create-open"
+            onClick={() => setCreateOpen(true)}
+          >
+            New trigger
+          </Button>
+        </div>
 
         {error && (
           <p role="alert" className="mt-2 text-sm text-[var(--color-muted)]">
@@ -153,6 +169,12 @@ export function TriggersTab() {
             </tbody>
           </table>
         )}
+
+        <TriggerCreateDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          onCreated={refresh}
+        />
       </div>
     </section>
   );

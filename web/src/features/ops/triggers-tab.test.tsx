@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { renderAt } from '../../test/render.tsx';
 
@@ -133,6 +133,24 @@ describe('TriggersTab', () => {
     expect(
       screen.queryByTestId('ops-trigger-delete-trg-repo'),
     ).not.toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('a "New trigger" button opens the create dialog (Task 29)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ items: [] })),
+    );
+    renderAt('/ops?tab=triggers');
+
+    expect(await screen.findByTestId('ops-triggers')).toBeInTheDocument();
+    expect(screen.queryByTestId('trigger-name')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('ops-triggers-create-open'));
+
+    expect(screen.getByTestId('trigger-name')).toBeInTheDocument();
+    expect(screen.getByTestId('trigger-config-cron')).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });
