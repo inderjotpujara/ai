@@ -3996,6 +3996,18 @@ positive device registry `~/.agent/devices.json` (all `0600` in a `0700` dir;
 not env-tunable knobs, but overridable through the injected store options for
 tests).
 
+### `src/triggers/` — trigger engine (Slice 25, stub)
+
+A durable poll-tick trigger engine that lives in the daemon: four sources —
+cron, webhook, file-watch, and job-chain — converge on `fire.ts`, which
+enqueues a target `JobKind`+payload via `JobStore.enqueue` (threading `origin`
+provenance) and writes a `trigger_firings` audit row. Triggers are authored
+from repo TS defs (`triggers/index.ts`, `origin=repo`) and console/API CRUD
+(`origin=console`), persisted in `jobs.db`.
+
+> Stub — expanded into the full subsystem writeup (module map, data-flow
+> edges, `/hooks/:token` route class) in this slice's docs task (Task 34).
+
 ---
 
 ## Jobs & Triggers Ops Console (web UI — Slice 25b)
