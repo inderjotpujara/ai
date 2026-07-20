@@ -65,6 +65,23 @@ test('a non-object secrets file fails closed (throws at construction)', () => {
   expect(() => createTriggerSecretStore({ path })).toThrow();
 });
 
+test('an empty or whitespace-only secret value is dropped at load, not served as a key (§7.1 fail-closed)', () => {
+  // A tampered/corrupt file with `{"ref":""}` or `{"ref":"   "}` must not
+  // survive load — serving an empty string as an HMAC key makes the
+  // signature forgeable by anyone, mirroring root-token.ts's readNonEmpty.
+  const emptyPath = tempPath();
+  writeFileSync(emptyPath, JSON.stringify({ ref: '' }));
+  expect(
+    createTriggerSecretStore({ path: emptyPath }).get('ref'),
+  ).toBeUndefined();
+
+  const whitespacePath = tempPath();
+  writeFileSync(whitespacePath, JSON.stringify({ ref: '   ' }));
+  expect(
+    createTriggerSecretStore({ path: whitespacePath }).get('ref'),
+  ).toBeUndefined();
+});
+
 test('the file holds exactly {ref: secret} — the only at-rest copy of the secret (§7.1)', () => {
   const path = tempPath();
   const store = createTriggerSecretStore({ path });

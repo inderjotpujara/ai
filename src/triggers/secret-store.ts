@@ -103,8 +103,10 @@ export function createTriggerSecretStore(config: {
  * A PRESENT-but-corrupt file (unparseable JSON, or not a JSON object) THROWS —
  * fail closed, matching `device-registry.ts` load: silently collapsing a
  * tampered/unreadable secret store to "no secrets" would drop every trigger's
- * verification key. Non-string values are dropped so a malformed row can never
- * masquerade as a secret.
+ * verification key. Non-string values, and empty/whitespace-only strings, are
+ * dropped so a malformed row can never masquerade as a secret — mirroring
+ * `root-token.ts`'s `readNonEmpty`, which rejects the same empty-HMAC-key
+ * forgery vector.
  */
 function load(path: string): SecretMap {
   let raw: string;
@@ -133,7 +135,14 @@ function load(path: string): SecretMap {
   for (const [ref, secret] of Object.entries(
     parsed as Record<string, unknown>,
   )) {
-    if (typeof secret === 'string') out[ref] = secret;
+    // Reject empty/whitespace-only values (mirrors root-token.ts's
+    // `readNonEmpty`): a tampered/corrupt `{"ref":""}` or `{"ref":"   "}` row
+    // must never survive to become an HMAC key `get()` hands back — an empty
+    // key makes the HMAC signature computable by anyone, the exact
+    // forgeable-signature vector root-token.ts already defends against.
+    if (typeof secret === 'string' && secret.trim().length > 0) {
+      out[ref] = secret;
+    }
   }
   return out;
 }
