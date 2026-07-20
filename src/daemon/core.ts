@@ -25,6 +25,7 @@
  * is safe. `status()` reports liveness straight from the pid file.
  */
 
+import { createLogger } from '../log/logger.ts';
 import { installSignalHandlers, onShutdown } from '../process/lifecycle.ts';
 import type { WorkerPool } from '../queue/pool.ts';
 import type { JobStore } from '../queue/store.ts';
@@ -33,6 +34,8 @@ import type { startWebServer as StartWebServer } from '../server/main.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
 import { clearPid, defaultPidPath, readLivePid, writePid } from './pid.ts';
 import { recordDaemonStart, recordDaemonStop } from './spans.ts';
+
+const log = createLogger('daemon.core');
 
 export type Daemon = {
   install(): void;
@@ -93,8 +96,16 @@ export function createDaemon(opts: CreateDaemonOptions): Daemon {
     started = false;
     // Stop the PRODUCER first (D2): halt the scheduler/watcher/chain so no new
     // job is enqueued while the pool drains. Must precede pool.stop() — stop
-    // producing before draining consumers.
-    await opts.triggers?.stop();
+    // producing before draining consumers. A throwing engine.stop() (e.g. a
+    // rejecting chokidar/sqlite close) must NOT skip the drain below — degrade
+    // (log + swallow) and always proceed, mirroring the T13 chain.ts norm.
+    try {
+      await opts.triggers?.stop();
+    } catch (err) {
+      log.error('triggers.stop failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     // Drain: stop claiming, await in-flight, interrupt stragglers (bounded by
     // drainTimeoutMs when set, else the pool's unbounded graceful drain).
     await opts.pool.stop(opts.drainTimeoutMs);

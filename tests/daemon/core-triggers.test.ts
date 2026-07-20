@@ -75,6 +75,63 @@ test('daemon starts triggers AFTER server and stops them BEFORE the pool', async
   expect(receivedTriggers).toBe(triggers);
 });
 
+// Task 16 fix (MEDIUM, review): a throwing producer engine.stop() must not
+// skip the consumer drain — `pool.stop()` must still run, and `stop()` itself
+// must degrade (log + swallow) rather than reject, so a chokidar/sqlite close
+// hiccup can never wedge graceful shutdown.
+test('a rejecting triggers.stop() still lets the pool drain and does not reject daemon.stop()', async () => {
+  const order: string[] = [];
+  const triggers = {
+    start: () => {
+      order.push('trg.start');
+    },
+    stop: async () => {
+      order.push('trg.stop');
+      throw new Error('chokidar close failed');
+    },
+  } as unknown as TriggersEngine;
+  const pool = {
+    start: () => {
+      order.push('pool.start');
+    },
+    stop: async () => {
+      order.push('pool.stop');
+    },
+  } as never;
+  const queue = {
+    reconcileOrphans: () => {
+      order.push('reconcile');
+    },
+  } as never;
+
+  const pidPath = join(mkdtempSync(join(tmpdir(), 'pid-')), 'daemon.pid');
+  const daemon = createDaemon({
+    startWebServer: (() => {
+      order.push('server.start');
+      return { server: { stop() {} }, token: 't', port: 0 };
+    }) as never,
+    queue,
+    pool,
+    triggers,
+    concurrency: 1,
+    pidPath,
+    installSignals: () => {},
+  });
+
+  await daemon.start();
+  await expect(daemon.stop()).resolves.toBeUndefined();
+
+  // The pool drained despite the engine's stop() rejecting.
+  expect(order).toEqual([
+    'reconcile',
+    'pool.start',
+    'server.start',
+    'trg.start',
+    'trg.stop',
+    'pool.stop',
+  ]);
+});
+
 // I3 invariant: a standalone startWebServer with the flag OFF (the default, as
 // every existing server test) does NOT construct/start a triggers engine — no
 // scheduler interval, no chokidar watcher, no open handle.

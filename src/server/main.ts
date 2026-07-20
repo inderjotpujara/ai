@@ -5,6 +5,7 @@ import { getWorkflow } from '../../workflows/index.ts';
 import { loadConfig } from '../config/schema.ts';
 import { RuntimeKind } from '../core/types.ts';
 import { defaultPidPath } from '../daemon/pid.ts';
+import { createLogger } from '../log/logger.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
@@ -49,6 +50,8 @@ import {
   defaultRevocationPath,
   type SessionTokenStore,
 } from './security/session-token.ts';
+
+const log = createLogger('server.main');
 
 // The built web/ SPA (`cd web && bun run build`) lands at web/dist/, two
 // directories up from this file (src/server/ -> src/ -> repo root).
@@ -478,7 +481,18 @@ export function startWebServer(opts: StartOptions = {}): {
       // Stop producing FIRST (D2), before draining the pool — so no scheduler/
       // watcher/chain fire enqueues onto an already-draining pool. Only the
       // engine we constructed is torn down here; an injected one is caller-owned.
-      if (opts.triggers === undefined) await triggers?.stop();
+      // A throwing engine.stop() (e.g. a rejecting chokidar/sqlite close) must
+      // NOT skip the drain below — degrade (log + swallow) and always proceed,
+      // mirroring the T13 chain.ts norm.
+      if (opts.triggers === undefined) {
+        try {
+          await triggers?.stop();
+        } catch (err) {
+          log.error('triggers.stop failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       await pool.stop();
       jobStore.close();
     });
