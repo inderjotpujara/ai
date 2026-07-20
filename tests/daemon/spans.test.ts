@@ -41,6 +41,8 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     result: undefined,
     error: undefined,
     retriedFrom: null,
+    origin: undefined,
+    chainDepth: 0,
     ...overrides,
   };
 }

@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { RunOrigin } from '../contracts/enums.ts';
 import { migrate } from '../db/migrate.ts';
 import {
   maxAttempts as defaultMaxAttempts,
@@ -35,6 +36,8 @@ type JobRowRaw = {
   result: string | null;
   error: string | null;
   retried_from: string | null;
+  origin: string | null;
+  chain_depth: number;
 };
 
 function toJobRecord(r: JobRowRaw): JobRecord {
@@ -55,6 +58,8 @@ function toJobRecord(r: JobRowRaw): JobRecord {
     result: r.result === null ? undefined : (JSON.parse(r.result) as unknown),
     error: r.error ?? undefined,
     retriedFrom: r.retried_from,
+    origin: (r.origin ?? undefined) as RunOrigin | undefined,
+    chainDepth: r.chain_depth,
   };
 }
 
@@ -133,8 +138,8 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
       `INSERT OR IGNORE INTO jobs
        (id, kind, payload, priority, status, attempts, max_attempts,
         created_at, updated_at, started_at, finished_at, available_at,
-        run_id, result, error, retried_from)
-       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?)`,
+        run_id, result, error, retried_from, origin, chain_depth)
+       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?, ?, ?)`,
       [
         id,
         input.kind,
@@ -146,6 +151,8 @@ export function createJobStore(config: { path?: string }, _deps: JobStoreDeps) {
         availableAt,
         runId,
         input.retriedFrom ?? null,
+        input.origin ?? null,
+        input.chainDepth ?? 0,
       ],
     );
     const row = getJob(id);
