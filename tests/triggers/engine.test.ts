@@ -14,7 +14,11 @@ import type { TriggerDef } from '../../triggers/index.ts';
 
 // ---- seams ----------------------------------------------------------------
 
-const secretStore: TriggerSecretStore = { resolve: (): undefined => undefined };
+const secretStore: TriggerSecretStore = {
+  mint: () => ({ secretRef: 'ref', hmacSecret: 'secret' }),
+  get: (): undefined => undefined,
+  remove: (): void => {},
+};
 
 /** A fake `setInterval`/`clearInterval` pair that records arming and clearing,
  *  so a test can assert stop() clears exactly the id start() armed — no real

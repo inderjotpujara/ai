@@ -48,14 +48,20 @@ import { syncRepoTriggers } from './sync.ts';
 import { createFileWatcher } from './watcher.ts';
 
 /**
- * Minimal secret-store seam. The real `createTriggerSecretStore` lands in
- * Task 18; the engine only HOLDS and EXPOSES the store (webhook HMAC
- * verification on the API surface consumes it downstream), so this task takes
- * it injected and depends on nothing from Task 18. Task 18 aligns/extends this
- * interface when it lands.
+ * Webhook secret-store seam (§7.1). The engine only HOLDS and EXPOSES the store
+ * — webhook HMAC verification on the API surface (Task 19) consumes `get()`
+ * downstream — so the engine depends on nothing from the store's internals.
+ * The concrete `createTriggerSecretStore` (Task 18) persists these secrets to
+ * `~/.agent/trigger-secrets.json` (0600). This declaration is the single source
+ * of truth for the shape; the store imports it rather than forking it.
  */
 export type TriggerSecretStore = {
-  resolve(secretRef: string): string | undefined;
+  /** Mint a new HMAC secret, persist under a fresh secretRef, return both. */
+  mint(): { secretRef: string; hmacSecret: string };
+  /** Look up the HMAC secret for a secretRef (undefined if absent). */
+  get(secretRef: string): string | undefined;
+  /** Drop a secret (on trigger delete). */
+  remove(secretRef: string): void;
 };
 
 export type TriggersEngine = {
