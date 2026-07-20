@@ -529,3 +529,71 @@ test('serveStatic confineToDir blocks symlink escapes (real regression guard)', 
     symlinkServer.stop(true);
   }
 });
+
+test('POST /hooks/:token with malformed percent-encoding → 404, same shape as an unknown token (not a 500)', async () => {
+  // `decodeURIComponent('%zz')` throws a URIError. Before this fix, that
+  // throw escaped to the outer try/catch and surfaced as an opaque 500 — a
+  // 500-vs-404 status oracle that let a caller distinguish "malformed token"
+  // from "well-formed but unknown token" (both should look identical: 404,
+  // `{ error: 'not found' }`). The triggerStore/secretStore/fire stubs below
+  // all throw if invoked — the decode failure must short-circuit BEFORE any
+  // lookup, exactly like the unknown-token miss path in handleWebhook.
+  const hooksPolicy = { port: 0, allowedOrigins: [] as string[] };
+  const hooksDeps: ServerDeps = {
+    token: TOKEN,
+    policy: hooksPolicy,
+    recordIo: false,
+    indexHtml: '<!doctype html><title>t</title>',
+    runChatTurn: unusedRunChatTurn,
+    consent: createConsentRegistry(),
+    uploadsDir,
+    runsRoot,
+    runCrewTurn: unusedRunCrewTurn,
+    runWorkflowTurn: unusedRunWorkflowTurn,
+    runBuilderTurn: unusedRunBuilderTurn,
+    runModelPull: async () => {},
+    freeDiskBytes: async () => Number.MAX_SAFE_INTEGER,
+    mcpConfigPath,
+    mcpMountStatus: createMcpMountStatus(),
+    mountOne: unusedMountOne,
+    memoryStore: unusedMemoryStore,
+    sessionStore: unusedSessionStore,
+    jobStore: unusedJobStore,
+    pool: unusedPool,
+    triggers: {
+      store: {
+        getByTokenHash: () => {
+          throw new Error('triggerStore should not be invoked by this test');
+        },
+      },
+      secretStore: {
+        get: () => {
+          throw new Error('secretStore should not be invoked by this test');
+        },
+      },
+      fire: async () => {
+        throw new Error('fire should not be invoked by this test');
+      },
+    } as unknown as ServerDeps['triggers'],
+  };
+  const hooksServer = Bun.serve({
+    port: 0,
+    fetch: buildFetch(hooksDeps),
+    idleTimeout: 0,
+  });
+  try {
+    const { port } = hooksServer;
+    if (port === undefined) throw new Error('server did not bind a port');
+    hooksPolicy.port = port;
+    const hooksBase = `http://localhost:${port}`;
+
+    const res = await fetch(`${hooksBase}/hooks/%zz`, {
+      method: 'POST',
+      body: 'irrelevant',
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'not found' });
+  } finally {
+    hooksServer.stop(true);
+  }
+});

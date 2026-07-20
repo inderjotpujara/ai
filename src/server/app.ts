@@ -252,7 +252,18 @@ export function buildFetch(
             503,
           );
         }
-        return await handleWebhook(decodeURIComponent(hookMatch[1]), req, {
+        let token: string;
+        try {
+          token = decodeURIComponent(hookMatch[1]);
+        } catch {
+          // Malformed percent-encoding (`%zz`) is just another shape of "not
+          // a real token" — same 404 body/status as an unknown/disabled
+          // trigger (handleWebhook's own miss path), so a decode failure
+          // never surfaces as an opaque 500 that would break the uniform
+          // "any invalid token → 404" contract (a status oracle).
+          return json({ error: 'not found' }, 404);
+        }
+        return await handleWebhook(token, req, {
           triggerStore: deps.triggers.store,
           secretStore: deps.triggers.secretStore,
           fire: deps.triggers.fire,

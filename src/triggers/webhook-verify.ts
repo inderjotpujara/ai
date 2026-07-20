@@ -49,6 +49,14 @@ export type VerifyHmacResult = { ok: true } | { ok: false; status: 401 | 409 };
  * The signature is HMAC-SHA256 over `${timestampHeader}.${rawBody}` (Stripe
  * signs the header value verbatim) against the RAW body bytes exactly as
  * received — never a re-serialized parse — compared constant-time.
+ *
+ * CONTRACT: the caller MUST pass a non-empty `secret` — an empty HMAC key is
+ * attacker-computable (`HMAC('', m)` needs no secret knowledge), so this
+ * function does NOT itself validate that `secret` is non-empty. It is guarded
+ * upstream at two layers: the webhook handler's `if (!secret)` → 500 before
+ * calling here, and the secret store's `load()` dropping any empty/whitespace
+ * secret at rest — so an empty secret can never reach this function in
+ * practice.
  */
 export function verifyHmac(opts: {
   rawBody: string;
@@ -61,6 +69,15 @@ export function verifyHmac(opts: {
   const seconds = Number(opts.timestampHeader);
   const tsMs = seconds * 1000;
   // Replay check FIRST (also rejects wrong-unit/garbage/absent timestamps).
+  //
+  // SECURITY POSTURE — in-window replay is NOT deduped: this only rejects a
+  // STALE timestamp (outside ±windowMs). A signature replayed with its
+  // ORIGINAL timestamp inside the window verifies again — there is no
+  // nonce/delivery-id store to catch it. This mirrors GitHub/Stripe (both
+  // rely on the CONSUMER for idempotency) and is accepted here for a local,
+  // single-owner daemon. The window bounds the exposure to ±windowMs, not
+  // zero. Tightening this would need an LRU of recently-seen signatures —
+  // deferred as out-of-scope (Slice 25, Task 19).
   if (!Number.isFinite(seconds) || Math.abs(opts.now - tsMs) > opts.windowMs) {
     return { ok: false, status: 409 };
   }
