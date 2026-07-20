@@ -10,7 +10,6 @@ import {
   type CronConfig,
   type Trigger,
   TriggerOrigin,
-  TriggerOutcome,
   TriggerType,
 } from '../../src/triggers/types.ts';
 
@@ -239,7 +238,129 @@ test('start() reconciles before the first interval tick, stop() clears it', () =
   expect(cleared).toBe(true);
 });
 
-// Provenance/outcome enum import keeps the reason string in sync with fire.ts.
-test('the outcome enum is available for reason mapping sanity', () => {
-  expect(TriggerOutcome.Fired).toBe('fired' as TriggerOutcome);
+test('start() is idempotent — a double-start arms only ONE interval', () => {
+  const { store, fire } = harness();
+  track(store);
+  makeCron(store, { nextRunAt: NOW - 5 * 60_000 });
+
+  let armed = 0;
+  let cleared = 0;
+  const intervalCbs: Array<() => void> = [];
+  const fakeSetInterval = ((cb: () => void) => {
+    armed += 1;
+    intervalCbs.push(cb);
+    return armed as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  const fakeClearInterval = ((_id: unknown) => {
+    cleared += 1;
+  }) as typeof clearInterval;
+
+  const sched = createScheduler({
+    triggerStore: store,
+    fire,
+    pollMs: 1000,
+    now: () => NOW,
+    setInterval: fakeSetInterval,
+    clearInterval: fakeClearInterval,
+  });
+
+  sched.start();
+  sched.start();
+  sched.start();
+  // Only the FIRST start() armed a loop — the guard short-circuits the rest,
+  // so no second (leaked) timer was ever created.
+  expect(armed).toBe(1);
+  expect(intervalCbs.length).toBe(1);
+
+  sched.stop();
+  expect(cleared).toBe(1);
+});
+
+test('stop() is idempotent — double-stop does not throw and clears the interval once', () => {
+  const { store, fire } = harness();
+  track(store);
+
+  let cleared = 0;
+  const fakeSetInterval = ((cb: () => void) => {
+    void cb;
+    return 7 as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  const fakeClearInterval = ((_id: unknown) => {
+    cleared += 1;
+  }) as typeof clearInterval;
+
+  const sched = createScheduler({
+    triggerStore: store,
+    fire,
+    pollMs: 1000,
+    now: () => NOW,
+    setInterval: fakeSetInterval,
+    clearInterval: fakeClearInterval,
+  });
+
+  sched.start();
+  expect(() => {
+    sched.stop();
+    sched.stop();
+  }).not.toThrow();
+  // The guard (`interval !== undefined`) means clear only ever fires for the
+  // first stop() — the second is a no-op, not a second clear call.
+  expect(cleared).toBe(1);
+});
+
+test('reconcile per-row liveness guard — one throwing row does not abort seeding the rest', () => {
+  const { store, fire } = harness();
+  track(store);
+  const t1 = makeCron(store);
+  const t2 = makeCron(store);
+  const t3 = makeCron(store);
+
+  const flaky = {
+    ...store,
+    update: (
+      id: string,
+      patch: Parameters<typeof store.update>[1],
+    ): ReturnType<typeof store.update> => {
+      if (id === t2.id) {
+        throw new Error('SQLITE_IOERR: disk I/O error');
+      }
+      return store.update(id, patch);
+    },
+  } as ReturnType<typeof createTriggerStore>;
+
+  const sched = createScheduler({
+    triggerStore: flaky,
+    fire,
+    pollMs: 1000,
+    now: () => NOW,
+  });
+
+  expect(() => sched.reconcile(NOW)).not.toThrow();
+  // 1st and 3rd triggers still got seeded despite the 2nd row's update throwing.
+  expect(store.get(t1.id)?.nextRunAt).toBeGreaterThan(NOW);
+  expect(store.get(t3.id)?.nextRunAt).toBeGreaterThan(NOW);
+  // The throwing row itself never got seeded — the loop moved past it, not
+  // through it.
+  expect(store.get(t2.id)?.nextRunAt).toBeUndefined();
+});
+
+test('reconcile does not guard the initial store.list() call — a dead DB still fails boot fast', () => {
+  const { store, fire } = harness();
+  track(store);
+
+  const dead = {
+    ...store,
+    list: (): Trigger[] => {
+      throw new Error('SQLITE_IOERR: disk I/O error');
+    },
+  } as ReturnType<typeof createTriggerStore>;
+
+  const sched = createScheduler({
+    triggerStore: dead,
+    fire,
+    pollMs: 1000,
+    now: () => NOW,
+  });
+
+  expect(() => sched.reconcile(NOW)).toThrow(/SQLITE_IOERR/);
 });

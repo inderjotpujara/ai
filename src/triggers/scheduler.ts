@@ -14,7 +14,7 @@
  *
  * Misfire policy is AT-MOST-ONCE, "fire-once-on-boot": if a trigger's due time
  * passed while the daemon was down, `reconcile()` leaves the past `next_run_at`
- * in place so the FIRST tick claims it exactly once (then claimDueCron advances
+ * in place so the FIRST tick claims it a single time (then claimDueCron advances
  * it to the next FUTURE occurrence — never one fire per missed interval). A
  * per-trigger `catchUp:false` opts out and skips straight to the next future
  * occurrence. Do not describe this as "exactly once" — a crash between claim
@@ -53,6 +53,7 @@ export function createScheduler(deps: {
   // a rejecting fire is diagnosable without killing the loop.
   let tickErrors = 0;
   let fireErrors = 0;
+  let reconcileErrors = 0;
 
   /**
    * One poll pass. Claims the due cron rows and fires each fire-and-forget.
@@ -95,41 +96,61 @@ export function createScheduler(deps: {
    * Boot reconciliation over every cron trigger. Runs BEFORE the first interval
    * tick (see `start`) so a missed occurrence is caught up on the very first
    * tick rather than a poll interval later.
+   *
+   * Liveness guard (symmetric with tick's T7 contract): the initial
+   * `triggerStore.list()` call is NOT guarded — a dead DB should fail boot
+   * fast. But once we have the list, a throw from a SINGLE row's seeding
+   * (e.g. `store.update` hitting a transient SQLITE_IOERR) must not abort the
+   * whole reconcile pass — we log+count and continue so every other trigger
+   * still gets seeded/caught-up.
    */
   function reconcile(now = clock()): void {
     for (const t of deps.triggerStore.list()) {
-      if (t.type !== TriggerType.Cron) continue;
-      const next = computeNextRun(t, now);
-      if (next == null) {
-        // I1: an unparseable pattern / bad zone must never throw out of
-        // reconcile and must never loop a tick. Disable the row and move on —
-        // the daemon boot survives a bad repo cron. (`update` on an
-        // already-disabled row is idempotent.)
-        deps.triggerStore.update(t.id, { enabled: false });
-        log.warn('disabled trigger with an uncomputable cron', {
-          triggerId: t.id,
-        });
-        continue;
-      }
-      if (t.nextRunAt == null) {
-        // Fresh trigger (never scheduled) — seed its next fire time.
-        deps.triggerStore.update(t.id, { nextRunAt: next });
-      } else if (t.nextRunAt < now) {
-        // Its due time passed while the daemon was down (a "misfire").
-        if ((t.config as CronConfig).catchUp === false) {
-          // catchUp:false → skip the missed occurrence, advance to the future.
-          deps.triggerStore.update(t.id, { nextRunAt: next });
+      try {
+        if (t.type !== TriggerType.Cron) continue;
+        const next = computeNextRun(t, now);
+        if (next == null) {
+          // I1: an unparseable pattern / bad zone must never throw out of
+          // reconcile and must never loop a tick. Disable the row and move on
+          // — the daemon boot survives a bad repo cron. (`update` on an
+          // already-disabled row is idempotent.)
+          deps.triggerStore.update(t.id, { enabled: false });
+          log.warn('disabled trigger with an uncomputable cron', {
+            triggerId: t.id,
+          });
+          continue;
         }
-        // else: LEAVE the past next_run_at in place. The first `tick` claims it
-        // once (one catch-up fire), then claimDueCron advances it to the next
-        // FUTURE occurrence — at-most-once, never one fire per missed interval.
+        if (t.nextRunAt == null) {
+          // Fresh trigger (never scheduled) — seed its next fire time.
+          deps.triggerStore.update(t.id, { nextRunAt: next });
+        } else if (t.nextRunAt < now) {
+          // Its due time passed while the daemon was down (a "misfire").
+          if ((t.config as CronConfig).catchUp === false) {
+            // catchUp:false → skip the missed occurrence, advance to the future.
+            deps.triggerStore.update(t.id, { nextRunAt: next });
+          }
+          // else: LEAVE the past next_run_at in place. The first `tick` claims
+          // it a single time (one catch-up fire), then claimDueCron advances it
+          // to the next FUTURE occurrence — at-most-once, never one fire per
+          // missed interval.
+        }
+        // else (next_run_at in the future): nothing to do.
+      } catch (err) {
+        reconcileErrors += 1;
+        log.error('reconcile failed for trigger — seeding the rest', {
+          triggerId: t.id,
+          reconcileErrors,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
-      // else (next_run_at in the future): nothing to do.
     }
   }
 
   return {
     start(): void {
+      // Idempotency guard: a double-start must not arm a second loop (which
+      // would leak the first timer and double-fire every due trigger).
+      if (interval !== undefined) return;
       // reconcile FIRST so the boot catch-up is decided before any tick claims.
       reconcile();
       interval = set(() => tick(), deps.pollMs);
