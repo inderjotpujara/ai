@@ -34,7 +34,7 @@ export type JobDispatchDeps = {
   runChatTurn: RunChatTurn;
   runBuilderTurn: RunBuilderTurn;
   /** Runs root the dispatched job's runId lives under (Task 24, item 17) —
-   *  used ONLY to stamp the `origin=daemon` provenance marker `run-dto.ts`'s
+   *  used ONLY to stamp the job's `origin` provenance marker `run-dto.ts`'s
    *  `readRunOrigin` later reads. Optional so existing dispatch-unit fixtures
    *  (which fake the turn functions and never touch disk) keep working
    *  unchanged; omitting it just skips the marker write. */
@@ -87,22 +87,27 @@ function requireRunId(job: { runId: string | undefined }): string {
   return job.runId;
 }
 
-/** Stamp `runs/<runId>/origin` = `daemon` BEFORE the turn runs, so the marker
- *  exists by the time any span/artifact does — `run-dto.ts`'s `readRunOrigin`
- *  then projects `RunDTO.origin === RunOrigin.Daemon` for this run instead of
- *  the manual-launch default. Every queue-dispatched job (chat/crew/workflow/
- *  pull/build) goes through this one seam, so no per-kind duplication. A
- *  missing `runsRoot` (dispatch-unit fixtures that never touch disk) just
- *  skips the write — the run then falls back to `Manual`, which is honest for
- *  a fixture that never dispatched through the real queue anyway.
+/** Stamp `runs/<runId>/origin` = the job's provenance BEFORE the turn runs, so
+ *  the marker exists by the time any span/artifact does — `run-dto.ts`'s
+ *  `readRunOrigin` then projects `RunDTO.origin` (Schedule/Webhook/Api/Daemon)
+ *  for this run instead of the manual-launch default, and the runs `?origin=`
+ *  facet (Slice 25b) filters trigger-fired runs for free. `fire.ts` already sets
+ *  `job.origin` per source (cron→Schedule, webhook→Webhook, file/chain→Api); a
+ *  directly-enqueued job with no origin stamps `Daemon` (unchanged behavior).
+ *  Every queue-dispatched job (chat/crew/workflow/pull/build) goes through this
+ *  one seam, so no per-kind duplication. A missing `runsRoot` (dispatch-unit
+ *  fixtures that never touch disk) just skips the write — the run then falls
+ *  back to `Manual`, which is honest for a fixture that never dispatched through
+ *  the real queue anyway.
  */
-async function markDaemonOrigin(
+async function markJobOrigin(
   runsRoot: string | undefined,
   runId: string,
+  origin: RunOrigin,
 ): Promise<void> {
   if (!runsRoot) return;
   const run = await createRun(runsRoot, runId);
-  await writeArtifact(run, 'origin', RunOrigin.Daemon);
+  await writeArtifact(run, 'origin', origin);
 }
 
 /**
@@ -112,8 +117,11 @@ async function markDaemonOrigin(
  * pre-minted `runId` and the pool-provided `AbortSignal`, returning its result
  * (so the pool calls `markDone`) or throwing (so it calls `markFailed`). No
  * execution logic is duplicated — this is only the queue→turn seam. Every
- * kind's executor is wrapped so `markDaemonOrigin` runs first (Task 24, item
- * 17) — one seam covering all five kinds rather than five call sites.
+ * kind's executor is wrapped so `markJobOrigin` runs first (Task 24, item 17;
+ * generalized in Slice 25 Task 20) — one seam covering all five kinds rather
+ * than five call sites, stamping the JOB's own `origin` (falling back to
+ * `Daemon` for a directly-enqueued job) so trigger-fired runs are attributed
+ * to their source.
  */
 export function createJobDispatch(
   deps: JobDispatchDeps,
@@ -121,7 +129,11 @@ export function createJobDispatch(
   return (kind) => {
     const executor = buildExecutor(kind, deps);
     return async (job, signal) => {
-      await markDaemonOrigin(deps.runsRoot, requireRunId(job));
+      await markJobOrigin(
+        deps.runsRoot,
+        requireRunId(job),
+        job.origin ?? RunOrigin.Daemon,
+      );
       return executor(job, signal);
     };
   };
