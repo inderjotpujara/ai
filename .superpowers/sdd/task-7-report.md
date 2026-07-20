@@ -1,76 +1,56 @@
-# Task 7 report — `claimNext` atomic priority-then-FIFO Queued→Running
+# Task 7 Report — `JobStore.stats()` single-query per-status counts (§7.2 race-free)
 
-**Status:** Complete. Commit `0ded43f` — `feat(queue): atomic claimNext priority-then-FIFO (Slice 24 Incr 2)`.
-Focused queue tests: **16/16 passing** (7 in store-claim.test.ts + the extended enqueue suite).
+**Status:** COMPLETE. Committed `b3d70bd` — `feat(queue): race-free single-query JobStore.stats() (Slice 25b Incr 2, §7.2)`.
 
-## claimNext SQL + transaction approach
-Added `claimNext(now = Date.now()): JobRecord | null` to `createJobStore` (`src/queue/store.ts`).
-The whole select-then-update is one `db.transaction()`:
+## Implementation
+- `src/queue/store.ts`:
+  - Changed `JobStatus` from a `type`-only import to a **value** import (`import { ..., JobStatus, ... } from './types.ts'`) so `Object.values(JobStatus)` works at runtime for zero-filling.
+  - Added `stats(): { counts: Record<JobStatus, number>; total: number }` inside `createJobStore` and exposed it on the returned closure (`stats,` in the object literal, alongside `listJobs`/`reconcileOrphans`).
+- `tests/queue/store-stats.test.ts` (new): the two mandated tests verbatim from the brief (biome only re-wrapped long lines + sorted the `bun:test` import — no semantic change).
 
-- SELECT the winner:
-  `SELECT * FROM jobs WHERE status = 'queued' AND available_at <= ?
-   ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1` (bound to `now`).
-  Served by `idx_jobs_claim(status, priority, created_at)`. `priority ASC` uses the
-  JobPriority enum TEXT ordering (High < Normal lexically), `created_at ASC` = FIFO,
-  `id ASC` = stable tiebreak.
-- If no row → return `null`.
-- UPDATE with the guard:
-  `UPDATE jobs SET status='running', started_at=?, updated_at=?, attempts=attempts+1
-   WHERE id=? AND status='queued'`.
-- Re-SELECT the row and map via `toJobRecord`, returning the updated `JobRecord`.
+## §7.2 mechanism used + WHY it is race-safe
+A **single** `SELECT status, COUNT(*) AS n FROM jobs GROUP BY status` — one read, one row-set, one snapshot. All per-status counts are computed at the SAME instant by SQLite over one table scan, so `sum(counts) === total` by construction (`total` is accumulated from the very same rows the counts come from).
 
-**Why it's single-claim:** bun:sqlite is synchronous, so the transaction body is a
-critical section; `busy_timeout=5000` serialises concurrent writers and the
-`WHERE status='queued'` clause is the atomic guard — two workers can never both flip
-the same row. I used the contract's `now = Date.now()` signature (superset of the
-brief's no-arg form) so the eligibility gate is deterministically testable; all tests
-call it with no args.
+`bun:sqlite` executes **synchronously**: the `.all()` call runs to completion with no `await` inside it, so no interleaved `claimNext`/`markDone`/`markFailed` write from the worker-pool loops can land partway through the aggregation. The naive failure mode — six separate `COUNT(*) WHERE status=?` reads — takes six DIFFERENT mid-transition snapshots as the pool moves rows `Queued→Running→Done`, so a job in flight is double-counted or missed and `sum(counts) ≠ total`. The single GROUP BY eliminates that window entirely.
+
+Zero-fill: `counts` is pre-seeded with every `JobStatus` value = 0, then rows overwrite present statuses. This satisfies the Task-3 `QueueStatsDtoSchema.counts = z.partialRecord(...)` as a superset (full Record ⊇ partial), and the panel always gets all keys (a missing key would render blank, not 0). An unknown status value is guarded (`if (r.status in counts)`) so it never NaNs the sum, while still contributing to `total`.
+
+Per the brief, `activeCount` is **NOT** added here — it is the route's job (Task 8), sourced from `pool.activeCount()` and reported as a distinct field, never reconciled by arithmetic with the DB `running` count.
 
 ## TDD RED/GREEN evidence
-- RED: `bun test tests/queue/store-claim.test.ts` → `1 pass, 6 fail` — every claim test
-  failed with `TypeError: store.claimNext is not a function`; only the enum-intent
-  assertion passed.
-- GREEN: after implementing, `bun test tests/queue/` → `16 pass, 0 fail`.
-- Gate: `bun run typecheck` clean (`tsc --noEmit`), `bun run lint:file` clean (biome, no fixes).
+- **RED** (before impl): `bun test tests/queue/store-stats.test.ts` → `TypeError: store.stats is not a function` on both tests. `0 pass / 2 fail`.
+- **GREEN** (after impl): `2 pass / 0 fail`, **1408 expect() calls** — the race test ran 200 `stats()` reads against a live 4-worker pool churning 40 jobs, asserting `sum(counts) === total` AND every count `>= 0` on every read; all held.
 
-## Correctness-contract bullets → the test that proves each
-- **Eligibility gate (status='queued')** — "a claimed row is never re-claimed" + "two
-  sequential claims return two DIFFERENT job ids" (a Running row is never re-selected).
-- **Eligibility gate (available_at <= now)** — "a job with a future available_at is not
-  claimed until it matures" (older future job skipped, matured younger job claimed).
-- **Priority ordering (High before Normal)** — "claimNext returns High-priority before
-  Normal…" (High enqueued LAST, claimed FIRST) + intent test "JobPriority enum orders
-  High before Normal".
-- **FIFO within priority** — same test: the two Normal jobs come back oldest-first (n1 then n2).
-- **Atomic transition + fields** — "claimNext flips the row to Running, sets started_at,
-  bumps attempts" (status=Running, attempts=1, startedAt>0, and persisted via getJob).
-- **No double-claim across two calls** — "a claimed row is never re-claimed" (second call
-  → null) + "two sequential claims return two DIFFERENT job ids".
-- **Empty / no eligible rows → null** — "claimNext on an empty store returns null" and the
-  trailing `expect(store.claimNext()).toBeNull()` in the priority + future-gate tests.
-
-## Folded-in review findings
-1. **JobStoreDeps duplication collapsed** — deleted the local
-   `export type JobStoreDeps = Record<string, never>;` from `store.ts` and now import the
-   type from `./types.ts`. No caller imports it via the store path (grep confirmed only
-   the two declarations existed), so no re-export needed. Typecheck stays clean.
-2. **availableAt assertion added** — new test in `tests/queue/store-enqueue.test.ts`
-   proves `enqueue` defaults `availableAt` to `0` (returned + persisted) and that an
-   explicit `availableAt` survives `enqueue`→`getJob`. Protects the field Task 8's retry
-   backoff depends on.
-
-**Bonus hardening:** a module-load guard `if (!(JobPriority.High < JobPriority.Normal)) throw`
-makes the enum lexical-ordering dependency explicit and self-checking (per the "don't
-silently rely on alphabetical — assert the intent" directive), with a matching intent test.
+## Gate
+- `bun run typecheck` → clean (`tsc --noEmit`, no errors).
+- `bun run lint:file -- src/queue/store.ts tests/queue/store-stats.test.ts` → clean (after `biome check --write` auto-fixed import-sort + line-wrap in the test only).
+- Regression: ran new test + `store-claim/enqueue/lineage/list/reconcile/transitions` + `pool` + `concurrency` → **42 pass / 0 fail** (1503 expect calls). No store/pool regression.
 
 ## Files changed
-- `src/queue/store.ts` — added `claimNext`, collapsed JobStoreDeps import, priority-order guard.
-- `tests/queue/store-claim.test.ts` — new (7 tests).
-- `tests/queue/store-enqueue.test.ts` — added availableAt default/preservation test.
+- `src/queue/store.ts` (value import of `JobStatus`; `stats()` added + exported)
+- `tests/queue/store-stats.test.ts` (new)
 
 ## Concerns
-- None blocking. The `now` param is a small, backward-compatible deviation from the
-  brief's no-arg signature (matches the task-context contract `claimNext(now = Date.now())`
-  and keeps the available_at gate deterministically testable). Concurrency is guaranteed by
-  the synchronous single-transaction model, not a multi-process stress test — appropriate
-  for bun:sqlite; real multi-worker behaviour is exercised by Task 14's integration suite.
+- None functional. The brief's test code triggered biome format/import-sort auto-fixes (cosmetic line-wrapping only, semantics identical). Full suite is the controller's job.
+
+---
+
+## Follow-up fix — adversarial review (2026-07-20)
+
+**Status:** COMPLETE. Committed `1124181` — `fix(queue): stats() total=sum(counts) invariant + accurate race-safety rationale (Slice 25b T7 review)`.
+
+An adversarial review approved `stats()` as race-safe but flagged two accuracy points, both fixed surgically:
+
+1. **Invariant robustness (Minor).** Previously `total += r.n` ran for every grouped row unconditionally, while a count only landed in a bucket when `r.status in counts`. A stray/unknown status row would have inflated `total` past `sum(counts)`, breaking the DTO's documented invariant. Fix: moved `total += r.n` inside the `if (r.status in counts)` branch, so `total` is now accumulated exactly as the sum of the assigned bucket values — `total === sum(counts)` holds by construction, not by coincidence.
+2. **Accurate rationale comment.** The old comment attributed race-safety to "GROUP BY vs six separate COUNTs racing." The real safety property is that `stats()` is a single synchronous, yield-free `bun:sqlite` read (no `await` in its body), so no pool write can interleave mid-read regardless of query shape. Rewrote the comment to state this, and noted the single GROUP BY is chosen for single-statement clarity and to future-proof against a later move to async reads (where a multi-statement version genuinely could race).
+3. **Test wording.** Renamed/reworded the concurrency test in `tests/queue/store-stats.test.ts` from claiming to guard against a "six-COUNT regression" (a scenario that can't occur under the synchronous runtime) to accurately describing it as a **self-consistency invariant under live concurrency**: `sum(counts) === total` holds on every read while a real 4-worker pool churns rows, plus zero-fill correctness. No assertions were weakened — the 200-iteration live-pool-churn loop and the repeated `sum === total` check are unchanged.
+
+### Gate
+- `bun run typecheck` → clean.
+- `bun run lint:file -- src/queue/store.ts tests/queue/store-stats.test.ts` → clean (`Checked 2 files. No fixes applied.`).
+- `bun test tests/queue/store-stats.test.ts` → **2 pass / 0 fail**, 1408 expect() calls.
+- Regression: `bun test tests/queue/` (full dir, since a bare `store.test.ts`/`pool.test.ts` split doesn't exist as named — confirmed via `ls`) → **50 pass / 0 fail** across 12 files, 1516 expect() calls. No regressions.
+
+### Files changed
+- `src/queue/store.ts` (`stats()` closure only)
+- `tests/queue/store-stats.test.ts` (comment/test-name only, assertions unchanged)

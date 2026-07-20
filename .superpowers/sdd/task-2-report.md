@@ -1,142 +1,111 @@
-# Task 2 report — Spike: WorkflowAgent mid-DAG resume against a filesystem store
+# Task 2 report — `RunListQuery.origin` facet
 
-**Slice 24, Increment 1 — decides D5c: adopt `@ai-sdk/workflow` `WorkflowAgent` as the
-durable-execution substrate, or fall back to a custom checkpoint store.**
+## Summary
 
-## Verdict: ADOPT NOT VIABLE → custom checkpoint-store fallback selected
+Added an `origin` facet to `RunListQuerySchema` (`src/contracts/requests.ts`)
+mirroring the existing `kind` facet exactly (`z.enum(RunOrigin).optional()`),
+and threaded `query.origin` into `handleRunList`'s existing filter chain
+(`src/server/runs/list.ts`) as a straight equality filter over
+`RunListItemDTO.origin` — the same field `summarizeRunListItem`
+(`src/run/run-dto.ts`) already populates from the run dir's `origin` marker
+file via `readRunOrigin`.
 
-One line: the installed `@ai-sdk/workflow` package exposes **no filesystem store, no
-DAG/step builder, and no resume entry point** — its durability lives in a *separate*,
-uninstalled, build-time-compiler-bound package (the Vercel Workflow DevKit), so a
-plain `bun worker.ts` killed mid-DAG **re-executes the completed node `a` on resume**
-(the spike's key no-re-execution assertion fails: `a` appears twice).
+## Implementation
 
----
+- `src/contracts/requests.ts`:
+  - Added `RunOrigin` to the `enums.ts` import list.
+  - Added `origin: z.enum(RunOrigin).optional()` to `RunListQuerySchema`,
+    placed after `kind` per the brief.
+  - Updated the two doc comments that enumerate the query's facets/filters
+    (`RunListQuerySchema`'s own comment and `handleRunList`'s doc comment)
+    to include `origin` — kept accurate per the repo's doc-truth bar.
+- `src/server/runs/list.ts`:
+  - Read `params.get('origin')` into the `RunListQuerySchema.parse` call
+    alongside the other raw query params.
+  - Added `.filter((s) => (query.origin ? s.origin === query.origin : true))`
+    to the existing filter chain, positioned right after the `kind` filter —
+    no run-store list function exists to pass a param into; this is a
+    purely in-mapper facet like `kind`, exactly as the brief anticipated.
 
-## The real API surface discovered
+No changes were needed to `RunListItemDTO`/`summarizeRunListItem` — the
+`origin` field and its `RunOrigin.Manual` degrade-on-missing-marker behavior
+already existed (Slice 24 Incr 3 / this file's `readRunOrigin`).
 
-Read from `node_modules/@ai-sdk/workflow/{dist/index.d.ts,src/*,package.json,README.md}`
-and verified at runtime.
+## TDD evidence
 
-### Runtime exports (probed, from within the project)
+**RED** (`tests/contracts/run-list-query.test.ts`, written verbatim from the
+brief):
 ```
-EXPORTS: Output, WorkflowAgent, WorkflowChatTransport,
-         createModelCallToUIChunkTransform, normalizeUIMessageStreamParts, toUIMessageChunk
-STORE/RESUME-LIKE EXPORTS: NONE
-workflow DevKit import: FAILED -> ERR_MODULE_NOT_FOUND
-```
-
-- **`WorkflowAgent`** — an **LLM agent**, not a DAG runner. `WorkflowAgentOptions`
-  *requires* `model: LanguageModel`; its only run method is
-  `stream(options): Promise<WorkflowAgentStreamResult>`. Its "steps" are **LLM-driven
-  tool calls** (`tools: ToolSet`, each with an `execute`), not user-declared graph
-  nodes. There is **no** `store`/`persist`/`checkpoint` option anywhere in
-  `WorkflowAgentOptions` or `WorkflowAgentStreamOptions`, and **no** `resume`/`replay`/
-  `fromStore` method on the class or prototype (probed directly).
-- **`WorkflowChatTransport`** — a client-side `ChatTransport` for reconnecting a
-  *browser* chat stream to a server endpoint (`/api/chat`) after a network/Function
-  timeout. It is HTTP-reconnect plumbing, not a durable step store.
-- **`Output` / stream helpers** — structured-output spec + UI-chunk transforms.
-
-### Where the durability actually lives (and why it is out of reach here)
-The `'use workflow'` / `'use step'` directives (found in `@ai-sdk/workflow/src/**` and
-its `src/test/calculate-workflow.ts`) are the authoring model of the **Vercel Workflow
-DevKit** — the separate `workflow` package (a *devDependency* of `@ai-sdk/workflow`,
-**not installed** in this repo). Web-verified (Vercel docs / blog, July 2026):
-
-- WDK compiles each `'use step'` into an **isolated HTTP API route** and each
-  `'use workflow'` into a sandboxed orchestrator **during an esbuild build phase** —
-  the directives are **inert no-op string statements without that compiler**.
-- Durability is **event sourcing**: step inputs/outputs persist to an append-only log
-  and are **deterministically replayed** on crash/redeploy.
-- Local dev has a filesystem store — the **"Local World"** persists events as JSON in
-  `.workflow-data/` — **but it runs an in-memory queue behind a dev server**. That is a
-  build-tool + framework/dev-server integration, **not** a plain importable runtime
-  store a standalone `bun` process can construct and **cold-resume after
-  `process.exit(137)`**.
-
-Net: expressing the exact 3-node kill/resume shape against the *installed* API is
-impossible — no store to write, no node graph to declare, no resume to call. Per the
-brief, the harness was adapted to the closest faithful test of "does state persist
-across a process kill and does resume skip completed work," which the installed API
-answers **no** to.
-
-## What `worker.ts` does
-
-`spikes/workflow-agent/worker.ts` (written to the real surface):
-1. Imports the real `WorkflowAgent` and **probes it** for any store/resume capability
-   (own + prototype keys matching store/persist/checkpoint/durable/resume/replay/…).
-2. Attempts to load the real durable substrate via `import('workflow')` (the DevKit).
-3. Runs the smallest deterministic 3-node DAG `a → b → c` — each node appends its name
-   to `WF_LOG` then sleeps; nodes authored in DevKit `'use step'` style (directive inert
-   here). `--kill-after <node>` self-`process.exit(137)`s right after that node's append;
-   `--resume` re-enters the same worker pointed at the same `WF_STORE`.
-4. Because the probe finds **no store, no resume, and no DevKit**, the `--resume` run has
-   nothing to replay and honestly re-runs the DAG from `a`. No real model is called.
-
-Worker self-diagnostics (verbatim):
-```
-worker[fresh]:  @ai-sdk/workflow store=false resume=false devkit=false        (exit 137)
-worker[resume]: @ai-sdk/workflow store=false resume=false devkit=false
-worker[resume]: no durable store/resume in the installed API → re-executing DAG from node a   (exit 0)
+error: expect(received).toBe(expected)
+Expected: "daemon"
+Received: undefined
+  at .../tests/contracts/run-list-query.test.ts:6:65
+error: expect(received).toThrow()
+Received function did not throw
+Received value: { limit: 25 }
+ 0 pass / 2 fail
 ```
 
-## Verbatim spike transcript (the evidence for Task 3)
-
-Command: `rm -rf spikes/workflow-agent/.wf-store && bun test spikes/workflow-agent/resume.spike.test.ts`
-
+**GREEN** after adding the schema field:
 ```
-bun test v1.3.11 (af24e281)
-
-spikes/workflow-agent/resume.spike.test.ts:
-30 |   });
-31 |   expect(second.status).toBe(0);
-32 |   const finalLog = readFileSync(LOG, 'utf8').trim().split('\n');
-33 |   expect(finalLog).toContain('c'); // completed
-34 |   // The KEY assertion: "a" appears EXACTLY ONCE across both runs (no re-exec).
-35 |   expect(finalLog.filter((l) => l === 'a')).toHaveLength(1);
-                                                 ^
-error: expect(received).toHaveLength(expected)
-
-Expected length: 1
-Received length: 2
-
-      at <anonymous> (/Users/inderjotsingh/ai/spikes/workflow-agent/resume.spike.test.ts:35:45)
-(fail) WorkflowAgent resumes mid-DAG from a filesystem store with no re-execution [1152.28ms]
-
- 0 pass
- 1 fail
- 7 expect() calls
-Ran 1 test across 1 file. [1179.00ms]
+bun test tests/contracts/run-list-query.test.ts
+ 2 pass / 0 fail
 ```
 
-Final `nodes.log` after both runs:
+**Server-side test** (`tests/server/runs/list-origin.test.ts`, new — seeds a
+daemon-origin run via an `origin` marker file containing `daemon` and a
+manual run with no marker, reusing the `writeRun`/`span` fixture idiom from
+`tests/server/runs-list.test.ts`):
 ```
-a      <- run 1 (killed after a)
-a      <- run 2 (resume) RE-EXECUTED a  ← the defect
-b
-c
+bun test tests/server/runs/list-origin.test.ts
+ 1 pass / 0 fail  (asserts only 'daemon-run' returns for ?origin=daemon)
 ```
 
-### How to read it
-- **6 of 7 assertions passed** — run 1 killed (`status 137 ≠ 0`), `LOG` had `a` and not
-  `c`; run 2 exited `0` and reached `c`.
-- **The one failing assertion is the durability crux**: `a` appears **twice** →
-  the installed substrate does **not** persist completed-node state across a process
-  kill and does **not** skip completed work on resume.
+**Full parity check** — `bun test tests/contracts` (all 30 contract test
+files, including the existing `RunListQuery`/`requests.test.ts` parity
+tests): 119 pass / 0 fail. `tests/server/runs-list.test.ts` (existing
+outcome/degraded/kind/search/pagination tests) plus the two new test files
+run together: 12 pass / 0 fail.
 
-## Decision
+## Gate
 
-**Adopt path NOT viable.** `@ai-sdk/workflow`'s `WorkflowAgent` is an LLM-agent wrapper
-with no durable step store or resume of its own; the real durability (Workflow DevKit)
-is a separate, uninstalled, **build-time-compiler + dev-server/framework-bound** system
-whose local store cannot be driven from — or cold-resumed by — a standalone process.
-**Select the custom checkpoint-store fallback** for the Slice 24 daemon/queue durable
-execution. (This does not condemn `@ai-sdk/workflow` for its actual purpose — durable
-*LLM agent* turns inside a WDK/Vercel deployment — only for the local-first,
-process-kill-durable, deterministic multi-node DAG this slice needs.)
+```
+bun run typecheck        → clean (tsc --noEmit, no errors)
+bun run lint:file -- src/contracts/requests.ts src/server/runs/list.ts \
+  tests/contracts/run-list-query.test.ts tests/server/runs/list-origin.test.ts
+                          → clean after one `biome check --write` auto-format
+                            pass on the test file (import order + line wrap;
+                            the brief's literal snippet wasn't pre-formatted
+                            to this repo's biome config)
+```
 
-## Files
-- `spikes/workflow-agent/resume.spike.test.ts` — the (failing, honest) spike test.
-- `spikes/workflow-agent/worker.ts` — probes the real surface + runs the deterministic DAG.
-- `spikes/workflow-agent/.wf-store/` — gitignored scratch (teardown: `rm -rf`).
+Pre-commit hook (`bun run docs:check`) passed on commit — no
+`docs/architecture.md` change was needed since this is a same-subsystem
+contract-seam addition (extends an existing query schema + filter chain),
+not a new subsystem.
+
+## Files changed
+
+- `/Users/inderjotsingh/ai/src/contracts/requests.ts`
+- `/Users/inderjotsingh/ai/src/server/runs/list.ts`
+- `/Users/inderjotsingh/ai/tests/contracts/run-list-query.test.ts` (new)
+- `/Users/inderjotsingh/ai/tests/server/runs/list-origin.test.ts` (new)
+
+## Commit
+
+`6ffd9da` — `feat(contracts): RunListQuery.origin facet for daemon-run filtering (Slice 25b Incr 1)`
+
+Only these four files were staged/committed (`git add` by explicit path,
+never `-A`); the unrelated uncommitted ledger/memory files already in the
+tree (`.remember/now.md`, `.remember/today-2026-07-19.md`,
+`.superpowers/sdd/progress.md`, `task-1-brief.md`, `task-1-report.md`,
+`task-2-brief.md`) were left untouched.
+
+## Concerns
+
+None. The brief matched real code exactly (`RunOrigin` enum,
+`RunListItemDTO.origin`, `kind`-facet pattern) — no ambiguity or
+contradiction encountered, no NEEDS_CONTEXT. Note: this report file
+previously contained stale content from an unrelated Slice-24 spike task
+(also numbered "Task 2" in that slice's ledger); it has been overwritten
+with this task's actual report.

@@ -1,106 +1,84 @@
-# Task 18 report: "Jump to a recent run" deep-link (Slice 30b Phase 8, D8, closes Increment 3)
+# Task 18 Report — `POST /api/devices/:id/revoke` (Slice 25b Incr 3, §7.1)
 
-> Note: this report path previously held Slice 30b Phase 5's Task-18 report
-> ("web Models tab — inventory table + per-row Pull + live progress bar",
-> commit `9d05173`), which itself had overwritten earlier Phase-4/Phase-3
-> Task-18 reports. That work is still landed on `main`; only this file is
-> overwritten to match the current task numbering (Phase 8, Task 18: ⌘K
-> jump-to-recent-run), per the same convention the prior notes used.
+> Note: this report path previously held Slice 30b's Task-18 report; overwritten
+> here for Slice 25b Task 18 (device revocation).
 
-## Status: DONE
+## Status: COMPLETE — committed `250c369`
 
-Commit `d6bab2a` — "feat(cmdk): jump-to-recent-run deep-links to a specific runId, with graceful fallback (D8)"
-
-## What shipped
-Per the brief, implemented verbatim with no deviations — every interface
-the brief assumed matched the real codebase exactly:
-- `web/src/app/router.tsx:39` already defines `path: '/runs/$runId'` (the
-  brief's target route existed as-is).
-- `web/src/features/notifications/use-run-notifications.ts` already
-  demonstrates the exact `apiFetch(path, { schema: RunListResponseSchema })`
-  pattern this task reuses — confirming "reuse existing data-fetch
-  patterns, don't invent a new store" required no new abstraction.
-
-**`web/src/app/commands.ts`**
-- Added `import { RunListResponseSchema } from '@contracts'` and
-  `import { apiFetch } from '../shared/contract/client.ts'`.
-- Appended a new Nav-kind command, `jump-to-recent-run` (after `go-sessions`,
-  before `toggle-voice-input`), whose async `run` fetches
-  `GET /api/runs?limit=1`, and:
-  - if a most-recent run exists, navigates to
-    `{ to: '/runs/$runId', params: { runId } }` (the real deep-link, distinct
-    from the old bare-list `jump-to-run` that Task 17 dropped as a
-    duplicate);
-  - otherwise (empty `items`, or the fetch/parse throwing) falls back to
-    `{ to: '/runs' }` inside a try/catch that never rethrows.
-
-**`web/src/app/commands.test.ts`**
-- Added `afterEach` and `Command` to the existing vitest/`./commands.ts`
-  imports.
-- Appended the brief's `jump-to-recent-run` describe block verbatim: (1)
-  happy path — stubs `fetch` to return one run (`run-42`), asserts
-  `nav` called with `{ to: '/runs/$runId', params: { runId: 'run-42' } }`;
-  (2) empty list — asserts fallback to `{ to: '/runs' }`; (3) fetch failure
-  (500 response) — asserts the promise resolves (never throws) and still
-  falls back to `{ to: '/runs' }`.
-
-## TDD evidence
-- RED: `cd web && bun run test -- app/commands.test.ts` before the
-  implementation → 3 new failures (`cmd?.kind` was `undefined`;
-  `runCommand` threw `TypeError: Cannot read properties of undefined
-  (reading 'kind')` on the other two), 7 pre-existing tests still passed.
-- GREEN (targeted): `cd web && bun run test -- app/commands.test.ts
-  app/command-palette.test.tsx` → **16 passed (16)**, both files green.
-- GREEN (typecheck): `cd web && bun run typecheck` → clean (`tsc --noEmit`,
-  no output).
-- Biome format guard (run from `/Users/inderjotsingh/ai`):
-  `bunx biome check --write web/src/app/commands.ts
-  web/src/app/commands.test.ts` → "Checked 2 files in 10ms. Fixed 2 files."
-  (import-order + long-line wraps only — e.g. wrapped the
-  `await runCommand(cmd as Command, nav as unknown as ...)` calls onto
-  multiple lines; no logic changed). Re-ran typecheck + targeted tests
-  after the reformat — still clean/green.
-- GREEN (full suite): `cd web && bun run test` → **342 passed (342)** across
-  **61 test files**. (An unrelated stderr `ECONNREFUSED ::1:3000` /
-  `127.0.0.1:3000` trace appears from a pre-existing e2e test that
-  optionally probes a live server — not a failure; all 61 files reported
-  passed, exit 0.)
+## Gate (run inline before reporting)
+- `bun run typecheck` → clean (`tsc --noEmit`, no output).
+- `bun run lint:file -- src/server/devices/revoke.ts src/server/app.ts tests/server/devices/revoke.test.ts tests/server/app.test.ts` → "Checked 4 files. No fixes applied."
+- `bun test tests/server/devices/revoke.test.ts` → **8 pass / 0 fail, 25 expect()**.
+- `bun test tests/server/` sanity → **363 pass / 0 fail, 922 expect()** across 77 files.
+- Full suite = controller at increment boundary (not run here).
 
 ## Files changed
-- `web/src/app/commands.ts` (modified — new `jump-to-recent-run` command +
-  two new imports)
-- `web/src/app/commands.test.ts` (modified — new describe block + import
-  additions)
+- **Create** `src/server/devices/revoke.ts` — `handleDeviceRevoke(id, req, deps, guard)`.
+- **Modify** `src/server/app.ts` — import + action-sub-path route `POST /api/devices/:id/revoke`, placed AFTER `POST /api/devices` (pair) and BEFORE `/api/jobs` (no bare `/api/devices/:id` exists; action-before-detail discipline preserved). Removed the stale "lands beside these later" TODO comment.
+- **Test (new)** `tests/server/devices/revoke.test.ts` — 8 security-bar unit tests.
+- **Test (mod)** `tests/server/app.test.ts` — added route-level 503-unwired + 401-unauth test mirroring the GET /api/devices one.
 
-2 files changed, 107 insertions(+), 2 deletions(-).
+## TDD RED → GREEN
+- RED: wrote `revoke.test.ts` first → `Cannot find module '.../revoke.ts'` (1 fail, 1 error).
+- GREEN: implemented handler + wired route → 8/8 pass.
 
-## Self-review
-- Confirmed `RunListResponseSchema`'s shape (`items`/`total`) and each run
-  item's fields (`id`, `kind`, `startMs`, `durationMs`, `outcome`,
-  `lifecycle`, `origin`, `models`, `degraded`, `spanCount`) against
-  `src/contracts` — matches the test fixture and `page.items[0].id` usage
-  with no drift.
-- Confirmed `/runs/$runId` is the correct TanStack Router param route (not
-  a query-string variant) by reading `router.tsx` directly rather than
-  assuming from the brief.
-- Confirmed the try/catch never rethrows and always calls `n({ to: '/runs'
-  })` on any failure path (empty result falls through the same final `n`
-  call; thrown error is caught then falls through to the same line) —
-  single fallback call site, no duplicated navigation logic.
-- Pre-commit `docs:check` hook passed on commit — no `docs/architecture.md`
-  update was required (this is a leaf-level command addition inside the
-  already-documented ⌘K/command-palette subsystem, not a new subsystem or
-  mechanism).
+## Security-bar proof
+
+### 1. Trusted-local gate FIRST, zero side-effect on 403
+`requireTrustedLocal(req, guard, deps.policy)` runs BEFORE any `revokeDevice`/`remove`; on failure returns 403 immediately, NO mutation executes. Two failure-mode tests:
+- **remote principal** (`'uuid-remote'`) → 403; after: registry still `['d1']` AND `verifySessionToken(token).deviceId==='d1'` (NOT in negative set).
+- **non-loopback Host** (`'local'` principal over `agent.ts.net`) → 403, same zero-side-effect asserts. Tunnel-replay defense: `isLoopbackHost` false for a tunnel host even with the `'local'` token.
+
+### 2. Revocation real + complete (BOTH effects)
+After successful revoke of `d1`:
+- (a) `deviceRegistry.list()` → `[]` (positive-list prune via `remove`).
+- (b) `verifySessionToken(token)` → `null` (negative-set add via `revokeDevice`; token valid the line before now fails). Closes the naive-failure-mode (prune row, leave token alive).
+
+### 3. Idempotent / unknown id
+Per the brief's Set.add/filter semantics, unknown or already-revoked id → safe **200 `{revoked:true}`** (idempotent — the brief's contract, not 404):
+- unknown `does-not-exist` → 200, d1 untouched.
+- revoke `d1` twice → both 200, stays revoked, no crash.
+
+### 4. Forged / traversal id
+`:id` captured by `/^\/api\/devices\/([^/]+)\/revoke$/` — one non-`/` segment — used ONLY as a Set key and registry filter value; never touches the filesystem. Test: `'../../etc/passwd'` → 200, no crash, d1 untouched.
+
+## Self-revoke of `'local'` — DECISION + FLAG
+**Brief is SILENT.** Following the brief's exact code (no special-case), revoking `'local'` is permitted:
+- `'local'` is never in the POSITIVE registry (only paired remotes are appended), so `remove('local')` is a no-op.
+- `revokeDevice('local')` adds `'local'` to the negative set → the local browser's session token stops verifying. Stateless HMAC means even a freshly-minted `'local'` token would then fail — a **self-lockout**, recoverable only via hand-editing `revoked-devices.json` or the T19 break-glass root rotate.
+
+**Assessment: self-inflicted AVAILABILITY footgun, NOT attacker capability** — reaching it requires already being the authenticated trusted-local operator (remote/tunnel 403'd first). Does not breach security-bar 1–4. Implemented per brief and **PINNED in a test** rather than silently adding an out-of-contract guard (a `'local'` special-case would introduce behavior T21's acceptance doesn't expect).
+
+**Recommendation (follow-up, not this task):** if belt-and-suspenders wanted, add an early guard rejecting `id==='local'` — mirrors pair.ts's "never overwrite `'local'`" IDOR stance. Flagged for increment review / T21.
+
+## 503 / 401 wiring
+Route builds deps via `need(...)` (T8) → `DepUnavailableError` → `handleApi` catch → clean **503** until T20 wires stores. `app.test.ts`: no token → **401**; token + unwired → **503** `{error:'server dependency not configured: deviceRegistry'}`. `need()` fires while building the deps object, BEFORE the handler, so 503 is correct even though the route is also trusted-local-gated.
+
+## Span
+`recordDeviceRevoke(id, 'local')` emits `ops.devices.revoke` (T15) with `SERVER_PRINCIPAL='local'` + `DEVICE_ID=id`, no token/secret; only after a successful (non-403) revoke.
 
 ## Concerns
-- None blocking. The brief's assumed interfaces (route, schema, apiFetch
-  pattern, prior `CommandKind`/`Command`/`runCommand` from Tasks 15–17) all
-  matched the real code exactly — no conflicts between the brief and the
-  actual runs-feature data flow to reconcile.
-- Left a pile of unrelated pre-existing modified files
-  (`.superpowers/sdd/task-*.md`, etc., visible in `git status` before this
-  commit) unstaged, per the brief's explicit `git add` file list — only
-  the two task-scoped files were staged and committed.
-- This closes Increment 3 (⌘K completeness) per the brief's own framing;
-  Increment 4 (Tasks 19–24, correctness + observability, D9 blast-radius
-  flagged for Opus) is next per the brief.
+1. **Self-revoke `'local'` footgun** (above) — FLAGGED for T21/increment-review; implemented per brief.
+2. Span principal hardcoded `'local'` (matches pair.ts + brief) — correct because `requireTrustedLocal` guarantees `principal==='local'` by the time the span fires.
+
+---
+
+## Fix follow-up (review): reject self-revoke of the local session
+
+**Status:** COMPLETE — committed `75ff8633b3af6f3de6aa292301372b069e3f0d88` (`fix(devices): reject self-revoke of the local session (Slice 25b T18 review)`)
+
+The original revoke route permitted revoking the `'local'` device, letting the local operator self-lock-out. Not attacker/UI-reachable (Minor), but it broke the symmetric invariant that `'local'` is sacrosanct (pairing never mints it, so revoke should not remove it either). Added an early guard in `handleDeviceRevoke` (`src/server/devices/revoke.ts`), placed AFTER the `requireTrustedLocal` gate (so a remote/tunnel caller still gets 403, not this 400) and BEFORE any mutation:
+
+```
+if (id === 'local') return json({ error: 'cannot revoke the local session' }, 400);
+```
+
+Updated the test that previously PINNED the self-lockout behavior (`tests/server/devices/revoke.test.ts`) to instead assert the new contract: a trusted-local caller revoking `'local'` now gets 400 with `{error:'cannot revoke the local session'}`, and the `'local'` session token still verifies afterward (not added to the negative set). All other revoke tests (remote→403, unknown-id idempotent, real-device revoke, traversal-id safe) unchanged.
+
+**Gate:**
+- `bun run typecheck` → clean.
+- `bun run lint:file -- src/server/devices/revoke.ts tests/server/devices/revoke.test.ts` → "Checked 2 files. No fixes applied."
+- `bun test tests/server/devices/revoke.test.ts` → 8 pass / 0 fail, 26 expect().
+- `bun test tests/server/` sanity → 363 pass / 0 fail, 923 expect() across 77 files.
+
+**Files:** `src/server/devices/revoke.ts`, `tests/server/devices/revoke.test.ts`.

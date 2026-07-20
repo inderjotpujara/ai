@@ -1,84 +1,94 @@
-# Task 4 Report — use-reduced-motion.ts (Phase 8, Increment 1)
+# Task 4 Report — Device DTOs + pairing requests + rotate-root request (Slice 25b Incr 1)
 
 ## Status: DONE
 
-Note: this report file previously held a stale Phase-7 Task 4 report (Settings
-UI voice-enable toggle). That content is unrelated to this Phase-8 Task 4 and
-has been replaced below; the earlier work it described was already committed
-under its own SHA in an earlier phase and is unaffected by this overwrite.
+Note: this report file previously held a stale Phase-8 Task 4 report
+(`useReducedMotion` hook, unrelated slice/phase). That content was already
+committed under its own SHA in that phase and is unaffected by this overwrite.
 
-## What was done
-Followed `.superpowers/sdd/task-4-brief.md` verbatim, TDD steps 1-5.
+## Summary
+Added the device-management + security request/response DTOs for the Devices &
+Access tab, per the brief and the "Shared contracts" snippet in
+`docs/superpowers/plans/2026-07-19-slice-25b-ops-console.md:77-104`. Pure
+schema declarations + inferred types + round-trip tests only — no endpoint
+wiring (that's future Task 13/14/T21 work per the plan).
 
-1. **RED**: Created `web/src/shared/a11y/use-reduced-motion.test.ts` (new
-   `web/src/shared/a11y/` module directory) with the brief's exact 3 tests
-   (mount-true, mount-false/default, change-event update) and its
-   `stubMatchMedia` helper. Ran
-   `cd web && bun run test -- a11y/use-reduced-motion.test.ts` → confirmed
-   failure: `Cannot find module './use-reduced-motion.ts'`, matching the
-   brief's expected output exactly.
-2. **GREEN**: Created `web/src/shared/a11y/use-reduced-motion.ts` with the
-   brief's verbatim implementation — `useReducedMotion(): boolean` reads
-   `matchMedia('(prefers-reduced-motion: reduce)')` via a lazy `useState`
-   initializer, subscribes to the `change` event in `useEffect`, cleans up
-   the listener on unmount, and guards `typeof matchMedia !== 'function'` for
-   non-browser safety.
-3. Re-ran the scoped test → 3/3 passed.
-4. Committed both files with the exact conventional-commit subject from the
-   brief (`feat(a11y): matchMedia-backed useReducedMotion hook (D3)`), body
-   expanded with a short rationale and the Task-5 consumer note.
+## Implementation
+- **`src/contracts/dto.ts`** — appended after `QueueStatsDtoSchema` (Task 3's
+  addition, 2e1daee):
+  - `DeviceDtoSchema { deviceId: string, label: string, createdAt: number, exp: number }`
+    + `DeviceDTO` inferred type. `exp` is the device's session-token expiry
+    (epoch-ms) — the registry never stores the token itself.
+  - `DeviceListResponseSchema { items: DeviceDtoSchema[] }` + `DeviceListResponse`.
+- **`src/contracts/requests.ts`** — appended after `JobListResponseSchema`
+  (Task 3's addition):
+  - `DevicePairRequestSchema { label: z.string().min(1).max(120) }` +
+    `DevicePairRequest`.
+  - `DevicePairResponseSchema { deviceId: string, token: string, pairingUrl: string }`
+    + `DevicePairResponse`.
+  - `RotateRootRequestSchema { rootSecret: z.string() }` + `RotateRootRequest`.
+- No change needed to `src/contracts/index.ts` — it re-exports via
+  `export * from './dto.ts'` / `'./requests.ts'`, so the new schemas are
+  already reachable from `@contracts`.
+- Doc comments added above each schema explaining the wire contract (token
+  transmitted exactly once, `exp` vs token, root-secret re-confirm) matching
+  the file's existing comment density/style (e.g. `DaemonBindDtoSchema`,
+  `JobEnqueueRequestSchema`).
 
-## Files touched
-- `web/src/shared/a11y/use-reduced-motion.ts` (new)
-- `web/src/shared/a11y/use-reduced-motion.test.ts` (new)
+## TDD
+- **RED**: wrote `tests/contracts/device-dto.test.ts` verbatim from the brief
+  first; ran `bun test tests/contracts/device-dto.test.ts` → failed with
+  `SyntaxError: Export named 'DeviceListResponseSchema' not found in module
+  '.../src/contracts/dto.ts'` (confirms missing export, not a typo/import path
+  bug).
+- **GREEN**: added the schemas; re-ran → `2 pass, 0 fail, 4 expect() calls`.
+- One deviation from the brief's literal test text: the line
+  `expect(() => DevicePairRequestSchema.parse({ label: 'x'.repeat(121) })).toThrow();`
+  exceeds Biome's line-length wrap rule under `lint:file`. Reformatted to
+  Biome's required multi-line form (identical assertion/behavior) — required
+  to pass the gate; no other deviation.
+
+## Files changed
+- `src/contracts/dto.ts` (modified)
+- `src/contracts/requests.ts` (modified)
+- `tests/contracts/device-dto.test.ts` (new)
 
 ## Gate results (all inline, all green)
-- `cd web && bun run test -- a11y/use-reduced-motion.test.ts` → RED first
-  (module-not-found), then GREEN (3 passed / 3).
-- `cd web && bun run typecheck` (`tsc --noEmit`) → clean, no errors.
-- `cd web && bun run test` (full suite) → **57 files, 298 tests, all passed**
-  (no regressions). One unrelated `ECONNREFUSED` stderr line from a
-  pre-existing connection-retry test — not a failure, no test reported red.
-- `bun run lint:file -- "web/src/shared/a11y/use-reduced-motion.ts" "web/src/shared/a11y/use-reduced-motion.test.ts"`
-  (run from repo root, per project's `lint:file` script location) → clean, 0
-  errors, no fixes needed.
-- Root `bun run docs:check` ran automatically as the pre-commit hook →
-  passed (`✔ docs-check: living docs present + linked; every src subsystem
-  documented.`). This granular hook module under `web/src/shared/a11y/`
-  didn't trigger the root `src/<subsystem>`-undocumented gate; no
-  `docs/architecture.md` edit was required or made for this atomic subtask.
+- `bun run typecheck` → clean (`tsc --noEmit`, no errors).
+- `bun run lint:file -- src/contracts/dto.ts src/contracts/requests.ts tests/contracts/device-dto.test.ts`
+  → clean after the formatting fix above (`Checked 3 files in 6ms. No fixes applied.`).
+- `bun test tests/contracts/device-dto.test.ts` → `2 pass, 0 fail`.
+- `bun test tests/contracts/` (full contract-parity suite, all 32 files) →
+  `123 pass, 0 fail, 192 expect() calls` — no regressions from Tasks 1-3's
+  additions (job/run/daemon/queue contracts).
 
 ## Commit
-- `d38e67b` — `feat(a11y): matchMedia-backed useReducedMotion hook (D3)`
-  on branch `slice-30b-phase8-polish-a11y` (2 files changed, 78 insertions).
-  Only the two intended files were staged/committed; other working-tree
-  modifications present at commit time (`.remember/`,
-  `.superpowers/sdd/task-{1,2,3}-*`) belong to sibling tasks and were
-  deliberately left untouched/unstaged.
+`c8caf6a` — `feat(contracts): Device DTOs + pair/rotate-root requests (Slice 25b Incr 1)`
+on branch `slice-25b-ops-console` (3 files changed, 57 insertions). Only the
+three intended files were staged (`git add` by explicit path, not `-A`); other
+working-tree modifications present at commit time (`.remember/`,
+`.superpowers/sdd/task-{1,2,3}-*`, plan doc) belong to sibling tasks/history
+and were deliberately left untouched/unstaged. Pre-commit `docs-check` hook
+passed automatically (`✔ docs-check: living docs present + linked; every src
+subsystem documented.`) — no `docs/architecture.md` edit was needed since
+`src/contracts/` was already a documented subsystem before this task.
 
 ## Self-review
-- Implementation and test file match the brief's code blocks verbatim —
-  no deviation, no judgment calls needed.
-- Hook correctly separates the initial synchronous read (lazy `useState`
-  initializer, avoids a redundant re-render on mount) from the reactive
-  subscription (`useEffect` + `addEventListener('change', ...)` with proper
-  cleanup on unmount) — standard React media-query-hook shape.
-- Doc comment on the hook explicitly states *why* it exists: `tokens.css`'s
-  CSS `@media (prefers-reduced-motion: reduce)` rule only zeroes
-  transition/animation durations and has no effect on JS/library-driven
-  motion (e.g. `@xyflow/react`'s imperative `fitView` pan/zoom, D3) — this
-  hook is how such consumers gate that motion instead.
-- No `console.log`, no `any`, no deviation from repo code style
-  (`type` preferred, early returns, small focused function).
+- Schema field names/types match the plan's "Shared contracts" snippet
+  (`docs/superpowers/plans/2026-07-19-slice-25b-ops-console.md:80-103`) and
+  the design spec
+  (`docs/superpowers/specs/2026-07-19-slice-25b-ops-console-design.md:44`)
+  verbatim — no deviation, no judgment calls needed on shape.
+- `enum` over unions / `type` over `interface` — n/a here (no new enums or
+  object-shape types beyond the inferred DTO types, consistent with every
+  sibling schema in the file).
+- No `z.record` over an enum used in this task (the Task-3
+  `z.partialRecord`-vs-exhaustive-`z.record` pitfall doesn't apply — no
+  enum-keyed record was needed for device/security DTOs).
+- No `console.log`, no `any`, no deviation from repo code style.
 
-## Notes / concerns
-- None. This is a small, self-contained, dependency-free hook; Task 5
-  (DagView) is expected to `import { useReducedMotion } from
-  '../../shared/a11y/use-reduced-motion.ts'` (or equivalent relative path)
-  and skip/shorten its imperative `fitView` animation when the hook returns
-  `true`.
-- `web/src/test/setup.ts`'s default `beforeEach` matchMedia stub (added for
-  Task 3's ThemeProvider) always returns `matches: false` — this task's own
-  tests correctly override that default locally per-test via
-  `vi.stubGlobal('matchMedia', ...)` and clean up with
-  `vi.unstubAllGlobals()` in `afterEach`, so no cross-test leakage.
+## Concerns
+None. Endpoint wiring (`POST /api/devices`, `/api/devices/:id/revoke`,
+`POST /api/security/rotate-root`, `requireTrustedLocal`, `DeviceRegistry`) is
+explicitly out of scope per the brief and belongs to later tasks (T13/T14/T21
+per the plan) that will consume these schemas.

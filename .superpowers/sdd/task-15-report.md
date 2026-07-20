@@ -1,73 +1,83 @@
-# Task 15 report — Widen `Command` for action commands + a `runCommand` dispatcher (D8)
+# Task 15 report — Ops telemetry + ServerDeps security seam (Slice 25b Incr 3)
 
-## Status: Done
+**Commit:** `ff0f90a` — feat(telemetry): DEVICE_ID + pair/revoke/rotate-root spans + session-root getter + security seam (Slice 25b Incr 3)
+**Branch:** slice-25b-ops-console
 
-## What was done
-Followed the brief's TDD steps verbatim (repo: `/Users/inderjotsingh/ai`, work under `web/`).
+> Note: this file previously held a stale Slice-30b "Task 15" report (Command
+> dispatcher, D8) reusing the same filename — overwritten with the current
+> Slice-25b Task 15 report.
 
-1. **Step 1 (failing tests)** — updated `web/src/app/commands.test.ts` import to
-   `{ CommandKind, commands, runCommand }` (renamed from `navCommands`), and
-   appended the `runCommand (D8 — widened Command dispatch)` describe block
-   (2 new tests). Appended the new e2e test to
-   `web/src/app/command-palette.test.tsx` (selecting "settings" and hitting
-   Enter routes via `runCommand`).
-2. **Step 2 (verify red)** — ran `bun run test -- app/commands.test.ts
-   app/command-palette.test.tsx`: 7 failures (undefined `commands`/`CommandKind`/
-   `runCommand` — only `navCommands` + narrow `Command` existed), 5 pre-existing
-   passes, confirming the tests exercise the not-yet-built surface.
-3. **Step 3 (implementation)** — replaced `web/src/app/commands.ts` with the
-   brief's exact content: `export enum CommandKind { Nav = 'nav', Action =
-   'action' }`; `NavCommand`/`ActionCommand` types; `export type Command =
-   NavCommand | ActionCommand`; `export function runCommand(cmd, nav)` dispatching
-   `cmd.kind === CommandKind.Action ? cmd.run() : cmd.run(nav)`; renamed
-   `navCommands` → `export const commands: Command[]`, adding `kind:
-   CommandKind.Nav` to every existing entry (no new entries — dedupe/`go-agents`
-   is Task 17, jump-to-recent-run is Task 18). Updated
-   `web/src/app/command-palette.tsx`: import `{ type Command, commands,
-   runCommand }`; the `results` memo now filters/reads `commands`; both the
-   Enter-key handler and the option `onClick` now call `runCommand(cmd, navigate)`
-   / `runCommand(c, navigate)` instead of `.run(...)` directly.
-4. **Step 4 (verify green)** — targeted tests: 12/12 pass. Full web suite:
-   `bun run test` → **61 test files / 336 tests, all passed** (one unrelated
-   `ECONNREFUSED ::1:3000` stack trace printed mid-run belongs to an existing
-   test exercising a connection-failure path — not a failure, summary confirms
-   all green). `bun run typecheck` → clean, no errors.
-5. **Format guard** — `bunx biome check --write` on the 4 changed files (run
-   from repo root `/Users/inderjotsingh/ai`): "Checked 4 files in 40ms. Fixed 1
-   file" (`commands.ts` — reformatted long object literals across multiple
-   lines; purely cosmetic, re-verified typecheck + targeted tests still green
-   after the reformat).
-6. **Commit** — staged only the 4 files named in the brief (the working tree
-   had unrelated pre-existing modifications to `.superpowers/sdd/task-*.md`
-   files and `.remember/now.md` from earlier tasks in this sequence — left
-   untouched/uncommitted since they're out of this task's scope).
+## What landed
 
-## Verified
-- `cd web && bun run test -- app/commands.test.ts app/command-palette.test.tsx` → 12/12 pass.
-- `cd web && bun run test` (full suite) → 61 files / 336 tests pass.
-- `cd web && bun run typecheck` → clean.
-- `bunx biome check --write web/src/app/commands.ts web/src/app/command-palette.tsx web/src/app/commands.test.ts web/src/app/command-palette.test.tsx` → 4 checked, 1 fixed (formatting only).
-- `git commit` → pre-commit `docs-check` passed (no `docs/architecture.md` change needed — no new subsystem, just a type widening inside the existing `web/src/app` surface already documented).
+### AUDIT CRITICAL-1 — session-root getter (the core security fix)
+`src/server/security/session-token.ts`: `createSessionTokenStore`'s `rootToken`
+param is now `string | (() => string)`. A module-local `currentRoot()` resolves
+it PER CALL (`typeof … === 'function' ? config.rootToken() : config.rootToken`)
+and is called inside BOTH `sign()` sites — `mintSessionToken` (mint) and
+`verifySessionToken` (verify). The captured `const { rootToken }` is gone; the
+getter re-reads the live root on every sign/verify, so a `rotate()` on the
+underlying `RootTokenStore` takes effect immediately on the same live store.
+`sign(rootToken: string, …)` is unchanged (still takes a resolved string).
+Backward compatible: existing callers pass a `string`, which the union accepts
+and collapses to a constant — behaviour unchanged.
+
+**Proof test** (added to `tests/server/security/session-token.test.ts`): builds
+the store with `rootToken: () => rootStore.getOrCreateRoot()`, mints a token
+(verifies OK), calls `rootStore.rotate()`, then asserts the PRE-rotate token now
+verifies `null` (its sig was over the old root) AND a token minted POST-rotate
+verifies OK (deviceId returned) — proving mint + verify both resolve per-call,
+not once at build. All 12 pre-existing session-token tests (the string-passing
+regression guard) stay green.
+
+### Telemetry — ATTR.DEVICE_ID + ops spans
+- `src/telemetry/spans.ts`: added `ATTR.DEVICE_ID = 'device.id'` next to
+  `SERVER_PRINCIPAL`.
+- `src/server/devices/spans.ts` (new): `recordDevicePair(deviceId, principal)` →
+  `ops.devices.pair`, `recordDeviceRevoke(deviceId, principal)` →
+  `ops.devices.revoke` (both set `SERVER_PRINCIPAL` + `DEVICE_ID`), and
+  `recordRotateRoot(principal)` → `security.rotate-root` (sets `SERVER_PRINCIPAL`,
+  adds an `all-sessions-invalidated` event, NO `DEVICE_ID` — rotate targets no
+  single device). Each is a one-shot start/end span, no-op without a tracer,
+  following the `daemon/spans.ts` convention.
+
+**No-secret confirmation:** the pair test iterates every attribute key on the
+finished span and asserts none contains `token`/`secret` — spans carry only
+principal + opaque deviceId. The rotate test asserts `device.id` is `undefined`.
+
+### ServerDeps security seam
+`src/server/app.ts`: added three OPTIONAL fields — `deviceRegistry?:
+DeviceRegistry`, `rootTokens?: RootTokenStore`, `publicBaseUrl?: string` — with
+`DeviceRegistry`/`RootTokenStore` type imports. All optional (matching the
+`runLimiter?`/`daemonPidPath?` precedent) so the ≥12 legacy fixtures compile
+unchanged; the T16-19 routes will 503 via the shared `need()` until T20 wires
+real values. No `main.ts` construction change (that is T20's job).
+
+## TDD
+- RED: devices spans test failed on missing module; getter test failed with a
+  `createHmac` "key must be string … received function" TypeError (an unresolved
+  function reached `sign`) — confirming the old store could not accept a getter.
+- GREEN: 19/19 across the two files after implementation.
+
+## Gate (all green)
+- `bun run typecheck` — clean.
+- `bun run lint:file` (all 6 changed files) — clean (fixed one biome
+  format + import-sort after writing the test).
+- `bun test tests/server/ tests/telemetry/` — 394 pass / 0 fail (92 files).
+- pre-commit docs-check passed on commit.
 
 ## Files changed
-- `/Users/inderjotsingh/ai/web/src/app/commands.ts`
-- `/Users/inderjotsingh/ai/web/src/app/command-palette.tsx`
-- `/Users/inderjotsingh/ai/web/src/app/commands.test.ts`
-- `/Users/inderjotsingh/ai/web/src/app/command-palette.test.tsx`
+- `src/server/security/session-token.ts` (getter)
+- `src/telemetry/spans.ts` (ATTR.DEVICE_ID)
+- `src/server/devices/spans.ts` (new)
+- `src/server/app.ts` (3 optional ServerDeps fields + imports)
+- `tests/server/devices/spans.test.ts` (new)
+- `tests/server/security/session-token.test.ts` (getter proof test appended)
 
-## Commit
-- `f9688fc` — `feat(cmdk): widen Command to support action (no-nav) entries, via a runCommand dispatcher (D8)` on branch `slice-30b-phase8-polish-a11y`
-
-## Concerns / notes for Tasks 16–18
-- `commands` array and `runCommand` are exported exactly as the interface spec
-  requires; Task 16 can append `Action`-kind entries directly to the same
-  array without further type changes.
-- No `docs/architecture.md` edit was made — this is an internal type/dispatch
-  change to an already-documented module (`web/src/app` ⌘K palette), not a new
-  subsystem; `docs:check` confirmed no gap. If a later task (16-18) adds a
-  new subsystem-level concept (e.g. a distinct action-registry module), that
-  task should evaluate whether `architecture.md` needs an update at that
-  point.
-- Left unrelated pre-existing working-tree modifications (other `.superpowers/sdd/task-*`
-  briefs/reports, `.remember/now.md`, an untracked `.remember/today-2026-07-19.md`)
-  untouched and uncommitted — they predate this task and are outside its scope.
+## Concerns
+- None blocking. `deviceRegistry`/`rootTokens`/`publicBaseUrl` are unwired seams
+  — the T16-20 routes/main.ts wiring must populate `rootTokens` as the SAME
+  instance the session store's root getter reads (T20), or rotate-root's live
+  invalidation won't be observable end-to-end. That is the documented T20 job.
+- The rotate-root span deliberately carries no `deviceId`; a future per-session
+  invalidated-count would be an added attribute on the same span, not a schema
+  change.
