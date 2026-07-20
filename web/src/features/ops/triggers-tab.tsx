@@ -3,6 +3,7 @@ import { TriggerOriginWire, TriggerTypeWire } from '@contracts';
 import { useState } from 'react';
 import { Button } from '../../shared/ui/button.tsx';
 import { TriggerCreateDialog } from './trigger-create-dialog.tsx';
+import { TriggerFiringsDrawer } from './trigger-firings-drawer.tsx';
 import { useTriggers } from './use-triggers.ts';
 
 const CARD_CLASS =
@@ -51,10 +52,28 @@ function scheduleLabel(trigger: TriggerDTO): string {
  *  A "New trigger" button mounts `TriggerCreateDialog` (Task 29) — its
  *  `onCreated` is wired to THIS tab's own `refresh()` so a created trigger
  *  appears in the list without a page reload (the `PairDeviceDialog`/
- *  `onPaired` precedent, Slice 25b T38). */
+ *  `onPaired` precedent, Slice 25b T38).
+ *
+ *  Row click opens `TriggerFiringsDrawer` (Task 30 — the LAST console
+ *  task), mirroring `JobsTab`'s row→`JobDetailDrawer` wiring. The toggle/
+ *  fire/delete action buttons sit INSIDE the clickable row, so each one
+ *  stops propagation in its own handler — otherwise clicking an action
+ *  would also fire the row's `onClick` and pop the drawer open underneath
+ *  it. `fire` additionally opens the drawer (on the fired trigger) once the
+ *  mutation settles, so the operator lands straight on the new firing. */
 export function TriggersTab() {
   const { triggers, error, refresh, setEnabled, fire, remove } = useTriggers();
   const [createOpen, setCreateOpen] = useState(false);
+  const [openTriggerId, setOpenTriggerId] = useState<string | undefined>(
+    undefined,
+  );
+
+  async function fireAndOpen(id: string) {
+    await fire(id);
+    setOpenTriggerId(id);
+  }
+
+  const openTrigger = triggers?.find((t) => t.id === openTriggerId);
 
   return (
     <section data-testid="ops-triggers" className="flex flex-col gap-4">
@@ -109,7 +128,8 @@ export function TriggersTab() {
                   <tr
                     key={trigger.id}
                     data-testid={`ops-trigger-row-${trigger.id}`}
-                    className="text-[var(--color-muted)]"
+                    onClick={() => setOpenTriggerId(trigger.id)}
+                    className="cursor-pointer text-[var(--color-muted)] hover:text-[var(--color-fg)]"
                   >
                     <td className="px-3 py-1.5 text-[var(--color-fg)]">
                       {/* SECURITY: plain interpolation only — see file-level note. */}
@@ -138,15 +158,19 @@ export function TriggersTab() {
                       <div className="flex items-center gap-2">
                         <Button
                           data-testid={`ops-trigger-toggle-${trigger.id}`}
-                          onClick={() =>
-                            void setEnabled(trigger.id, !trigger.enabled)
-                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void setEnabled(trigger.id, !trigger.enabled);
+                          }}
                         >
                           {trigger.enabled ? 'Pause' : 'Resume'}
                         </Button>
                         <Button
                           data-testid={`ops-trigger-fire-${trigger.id}`}
-                          onClick={() => void fire(trigger.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void fireAndOpen(trigger.id);
+                          }}
                         >
                           Fire now
                         </Button>
@@ -156,7 +180,10 @@ export function TriggersTab() {
                         {!repoOrigin && (
                           <Button
                             data-testid={`ops-trigger-delete-${trigger.id}`}
-                            onClick={() => void remove(trigger.id)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void remove(trigger.id);
+                            }}
                           >
                             Delete
                           </Button>
@@ -176,6 +203,14 @@ export function TriggersTab() {
           onCreated={refresh}
         />
       </div>
+
+      {openTriggerId && (
+        <TriggerFiringsDrawer
+          triggerId={openTriggerId}
+          triggerName={openTrigger?.name}
+          onClose={() => setOpenTriggerId(undefined)}
+        />
+      )}
     </section>
   );
 }
