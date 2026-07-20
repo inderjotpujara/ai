@@ -241,3 +241,26 @@ export enum JobKindWire {
   Pull = 'pull',
   Build = 'build',
 }
+
+/** Wire mirror of `src/triggers/types.ts` TriggerType (isomorphic — no engine
+ *  import). `tests/contracts/trigger-enum-parity.test.ts` guards value
+ *  parity, same precedent as the `JobKindWire` mirror above. Slice 25. */
+export enum TriggerTypeWire {
+  Cron = 'cron',
+  Webhook = 'webhook',
+  File = 'file',
+  JobChain = 'jobchain',
+}
+
+/** Wire mirror of `src/triggers/types.ts` TriggerOrigin. Slice 25. */
+export enum TriggerOriginWire {
+  Repo = 'repo',
+  Console = 'console',
+}
+
+/** Wire mirror of `src/triggers/types.ts` TriggerOutcome. Slice 25. */
+export enum TriggerOutcomeWire {
+  Fired = 'fired',
+  SkippedOverlap = 'skipped-overlap',
+  Failed = 'failed',
+}
