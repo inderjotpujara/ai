@@ -68,6 +68,13 @@ import { handleSessionExport } from './sessions/export.ts';
 import { handleSessionList } from './sessions/list.ts';
 import { handleSessionRename } from './sessions/rename.ts';
 import { handleTelemetry } from './telemetry/handler.ts';
+import { handleTriggerCreate } from './triggers/create.ts';
+import { handleTriggerDelete } from './triggers/delete.ts';
+import { handleTriggerDetail } from './triggers/detail.ts';
+import { handleTriggerFire } from './triggers/fire.ts';
+import { handleTriggerFirings } from './triggers/firings.ts';
+import { handleTriggerList } from './triggers/list.ts';
+import { handleTriggerPatch } from './triggers/patch.ts';
 import { handleUpload } from './upload.ts';
 import { handleWorkflowDetail } from './workflows/detail.ts';
 import { handleWorkflowList } from './workflows/list.ts';
@@ -511,6 +518,99 @@ async function handleApi(
         const jobDetail = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
         if (req.method === 'GET' && jobDetail?.[1]) {
           const res = handleJobDetail(jobDetail[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/triggers') {
+          const res = handleTriggerList({
+            triggers: need(deps.triggers, 'triggers'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/triggers') {
+          // Behind the /api session guard AND (inside the handler)
+          // requireTrustedLocal. publicBaseUrl threads the webhookUrl into the
+          // created DTO (T23 carry) — same AGENT_WEB_PUBLIC_URL source as the
+          // device-pairing route.
+          const res = await handleTriggerCreate(
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+              publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action sub-path matches (`/firings`, `/fire`) MUST precede the bare
+        // `:id` detail/patch/delete match below — same action-before-detail
+        // discipline as `/api/jobs/:id/cancel` and `/api/devices/:id/revoke`.
+        const triggerFirings = url.pathname.match(
+          /^\/api\/triggers\/([^/]+)\/firings$/,
+        );
+        if (req.method === 'GET' && triggerFirings?.[1]) {
+          const res = handleTriggerFirings(
+            triggerFirings[1],
+            new URLSearchParams(url.search),
+            { triggers: need(deps.triggers, 'triggers') },
+          );
+          rec.status(res.status);
+          return res;
+        }
+        const triggerFire = url.pathname.match(
+          /^\/api\/triggers\/([^/]+)\/fire$/,
+        );
+        if (req.method === 'POST' && triggerFire?.[1]) {
+          const res = await handleTriggerFire(
+            triggerFire[1],
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Bare `:id` match shared by GET (detail) / PATCH / DELETE.
+        const triggerDetail = url.pathname.match(/^\/api\/triggers\/([^/]+)$/);
+        if (req.method === 'GET' && triggerDetail?.[1]) {
+          const res = handleTriggerDetail(triggerDetail[1], {
+            triggers: need(deps.triggers, 'triggers'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'PATCH' && triggerDetail?.[1]) {
+          const res = await handleTriggerPatch(
+            triggerDetail[1],
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+              // Optional here (matches TriggerPatchDeps) — threads the
+              // webhookUrl back into a patched webhook trigger's DTO (T23 carry).
+              publicBaseUrl: deps.publicBaseUrl,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'DELETE' && triggerDetail?.[1]) {
+          const res = handleTriggerDelete(
+            triggerDetail[1],
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+            },
+            guard,
+          );
           rec.status(res.status);
           return res;
         }
