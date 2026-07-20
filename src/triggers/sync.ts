@@ -12,6 +12,14 @@
  * An invalid pattern/timezone is registered anyway (so the operator can see
  * and fix it in the console) but forced `enabled: false` — never thrown. A
  * bad repo cron file must not be able to crash daemon boot.
+ *
+ * T7 carry: a repo TS file must not hold a raw webhook secret, so repo
+ * webhooks can't be server-token-minted the way console-authored ones are —
+ * they are console-authored only. A repo `TriggerType.Webhook` def is
+ * therefore registered visibly-disabled (never silently non-functional):
+ * `upsertRepo` never sets `token_hash` for it, so `getByTokenHash` could
+ * never match it anyway; forcing `enabled: false` + a warn makes that
+ * explicit instead of leaving a dead row that looks live in the console.
  */
 import type { TriggerDef } from '../../triggers/index.ts';
 import { createLogger } from '../log/logger.ts';
@@ -36,9 +44,18 @@ export function syncRepoTriggers(
           origin: TriggerOrigin.Repo,
           enabled: false,
         });
-        log.warn('trigger.sync.invalid-cron', { name });
+        log.warn('trigger.sync.invalid-cron', { triggerName: name });
         continue;
       }
+    }
+    if (def.type === TriggerType.Webhook) {
+      store.upsertRepo({
+        ...def,
+        origin: TriggerOrigin.Repo,
+        enabled: false,
+      });
+      log.warn('trigger.sync.webhook-unsupported', { triggerName: name });
+      continue;
     }
     store.upsertRepo({ ...def, origin: TriggerOrigin.Repo });
   }

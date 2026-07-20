@@ -1,12 +1,17 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setLogSink } from '../../src/log/logger.ts';
 import { JobKind } from '../../src/queue/types.ts';
 import { createTriggerStore } from '../../src/triggers/store.ts';
 import { syncRepoTriggers } from '../../src/triggers/sync.ts';
 import { TriggerOrigin, TriggerType } from '../../src/triggers/types.ts';
 import type { TriggerDef } from '../../triggers/index.ts';
+
+afterEach(() => {
+  setLogSink(undefined);
+});
 
 function openStore() {
   return createTriggerStore({ path: mkdtempSync(join(tmpdir(), 'trg-sync-')) });
@@ -110,6 +115,43 @@ test('sync leaves non-cron trigger types untouched by cron validation', () => {
   const onFile = store.getByName('on-file', TriggerOrigin.Repo);
   expect(onFile).toBeDefined();
   expect(onFile?.enabled).toBe(true);
+
+  store.close();
+});
+
+// T7 carry: a repo-defined webhook can't be server-token-minted (a repo TS
+// file must not hold a raw secret), so it must land visibly-disabled rather
+// than as a silently-dead "enabled" row that can never actually fire.
+test('sync registers a repo webhook def as disabled with a warning', () => {
+  const store = openStore();
+  const lines: string[] = [];
+  setLogSink((l) => lines.push(l));
+
+  const defs: Record<string, TriggerDef> = {
+    'repo-hook': {
+      name: 'repo-hook',
+      type: TriggerType.Webhook,
+      target: { kind: JobKind.Chat, payload: {} },
+      config: {},
+    },
+  };
+
+  syncRepoTriggers(store, defs);
+
+  const hook = store.getByName('repo-hook', TriggerOrigin.Repo);
+  expect(hook).toBeDefined();
+  expect(hook?.enabled).toBe(false);
+
+  const records = lines.map((l) => JSON.parse(l));
+  const warning = records.find(
+    (r) => r.msg === 'trigger.sync.webhook-unsupported',
+  );
+  expect(warning).toBeDefined();
+  expect(warning?.triggerName).toBe('repo-hook');
+  // The collision this guards against: `name` is the logger's own SOURCE
+  // field (stamped by `createLogger('triggers.sync')` in emit()), so it must
+  // never be overwritten by the trigger's name.
+  expect(warning?.name).toBe('triggers.sync');
 
   store.close();
 });
