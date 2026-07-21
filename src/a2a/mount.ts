@@ -26,9 +26,11 @@
 import { randomUUID } from 'node:crypto';
 import { type ToolSet, tool } from 'ai';
 import { z } from 'zod';
+import { loadConfig } from '../config/schema.ts';
 import {
   type A2aArtifact,
   A2aMethod,
+  type A2aTask,
   TaskSchema,
   TaskStateWire,
 } from '../contracts/index.ts';
@@ -36,6 +38,31 @@ import { wrapToolsWithBreaker } from '../mcp/client.ts';
 import type { createA2aClient, RemoteAgent } from './client.ts';
 
 type A2aClient = ReturnType<typeof createA2aClient>;
+
+/**
+ * Tunables for the send→poll-to-terminal delegation loop. Both default to the
+ * `AGENT_A2A_TASK_TIMEOUT_MS` / `AGENT_A2A_POLL_INTERVAL_MS` config knobs
+ * (env-fallback only, never hardcoded at a call site); `sleep` is injectable so
+ * a test can drive the loop with tiny values / fake timers without hanging the
+ * suite.
+ */
+export type MountDeps = {
+  taskTimeoutMs?: number;
+  pollIntervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+/** Non-terminal states the peer's task can sit in — the loop KEEPS polling
+ *  while the task is one of these, and stops (returns/errors) on anything else.
+ *  This is the "still working vs terminal" distinction: we never conflate a
+ *  merely-in-progress task with a failure. */
+const POLLING_STATES = new Set<TaskStateWire>([
+  TaskStateWire.Submitted,
+  TaskStateWire.Working,
+]);
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The orchestrator-facing tool name for delegating to a remote peer — mirrors
  *  `delegateToolName` (`src/core/delegate.ts`) so a remote reads identically to
@@ -55,31 +82,37 @@ function artifactsText(artifacts: readonly A2aArtifact[]): string {
     .join('\n');
 }
 
-/**
- * Extract the completed-artifact text from a remote `message/send` result, or
- * THROW so the breaker counts the failure. A throw here is intentional: it is
- * caught by the outer wrapper (below) and converted to a structured `{ error }`,
- * exactly as `runGuardedAgent`'s try/catch does for a local specialist — the
- * throw is what lets a persistently-dead peer trip its circuit.
- */
-function completedArtifactText(result: unknown): string {
+/** Parse a raw JSON-RPC result into a validated task, or THROW so the breaker
+ *  counts a malformed peer response. */
+function parseTask(result: unknown): A2aTask {
   const parsed = TaskSchema.safeParse(result);
   if (!parsed.success) {
     throw new Error('remote returned a malformed task');
   }
-  const task = parsed.data;
-  const state = task.status.state;
-  if (state !== TaskStateWire.Completed) {
-    // A Failed/Rejected/Canceled peer task is a remote failure — surface it AND
-    // let it count toward the breaker (Working/Submitted here means the peer
-    // answered without a terminal artifact, which we likewise cannot use).
-    const detail = task.status.message
-      ? artifactsText([{ artifactId: '', parts: task.status.message.parts }])
-      : '';
-    throw new Error(
-      `remote task did not complete (state=${state})${detail ? `: ${detail}` : ''}`,
-    );
-  }
+  return parsed.data;
+}
+
+/** Human-readable detail from a terminal-but-not-completed task's status
+ *  message. Handles both a text part and the produce-side data-error part
+ *  (`{ kind: 'data', data: { error } }`, e.g. a consent-declined run). */
+function terminalDetail(task: A2aTask): string {
+  const message = task.status.message;
+  if (message === undefined) return '';
+  const pieces = message.parts.map((part) => {
+    if (part.kind === 'text') return part.text;
+    if (part.kind === 'data') {
+      const err = part.data.error;
+      if (err === undefined) return '';
+      return typeof err === 'string' ? err : JSON.stringify(err);
+    }
+    return '';
+  });
+  return pieces.filter((piece) => piece.length > 0).join('\n');
+}
+
+/** Extract the completed-artifact text, or THROW if a Completed task carries no
+ *  text artifact (a completed-but-empty peer answer is unusable). */
+function completedText(task: A2aTask): string {
   const text = artifactsText(task.artifacts);
   if (text.length === 0) {
     throw new Error('remote task completed with no text artifact');
@@ -88,12 +121,74 @@ function completedArtifactText(result: unknown): string {
 }
 
 /**
+ * The send→poll-to-terminal delegation. `message/send` returns a `submitted`
+ * task (the peer just ENQUEUED the job — see `handleMessageSend`), whose answer
+ * is only reachable by polling `tasks/get` until the task reaches a terminal
+ * state. This loop does exactly that, bounded by an overall wall-clock budget:
+ *  - `completed` → return the artifact text (`completedText`);
+ *  - `failed`/`rejected`/`canceled` (or any other non-polling terminal, e.g.
+ *    `input-required`/`auth-required` we cannot satisfy) → THROW the task's
+ *    detail so it surfaces as a structured error AND counts toward the breaker;
+ *  - budget exhausted while still `submitted`/`working` → THROW
+ *    `remote task timed out` (never hangs).
+ * Every throw is intentional: the outer wrapper converts it to `{ error }`, so
+ * the tool NEVER throws — matching the `asDelegateTool` contract — while a
+ * persistently-dead/slow peer still trips its per-remote circuit.
+ */
+async function delegateAndPoll(
+  remote: RemoteAgent,
+  client: A2aClient,
+  task: string,
+  cfg: {
+    taskTimeoutMs: number;
+    pollIntervalMs: number;
+    sleep: (ms: number) => Promise<void>;
+  },
+): Promise<string> {
+  const message = {
+    role: 'user' as const,
+    parts: [{ kind: 'text' as const, text: task }],
+    messageId: randomUUID(),
+  };
+  const sent = parseTask(
+    await client.invoke(remote, A2aMethod.MessageSend, { message }),
+  );
+
+  const deadline = Date.now() + cfg.taskTimeoutMs;
+  let current = sent;
+  for (;;) {
+    const state = current.status.state;
+    if (state === TaskStateWire.Completed) {
+      return completedText(current);
+    }
+    if (!POLLING_STATES.has(state)) {
+      // Terminal but not completed — a remote failure. Surface + count it.
+      const detail = terminalDetail(current);
+      throw new Error(
+        `remote task did not complete (state=${state})${detail ? `: ${detail}` : ''}`,
+      );
+    }
+    // Still submitted/working — poll again if the budget allows.
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('remote task timed out');
+    }
+    await cfg.sleep(Math.min(cfg.pollIntervalMs, remaining));
+    current = parseTask(
+      await client.invoke(remote, A2aMethod.TasksGet, { id: sent.id }),
+    );
+  }
+}
+
+/**
  * Mount ONE remote peer as a `delegate_to_<name>` `ToolSet`. The tool's
  * `inputSchema` is `{ task: z.string() }` — identical to `asDelegateTool` — and
- * its `execute` sends the task as a `message/send` and returns the completed
- * artifact text. Layering (why three levels):
+ * its `execute` sends the task as a `message/send`, then POLLS `tasks/get` to a
+ * terminal state (`delegateAndPoll`) and returns the completed artifact text —
+ * because `message/send` only returns a `submitted` shell, never the answer.
+ * Layering (why three levels):
  *   1. the RAW execute throws on any remote failure (rejected invoke / malformed
- *      / non-completed / empty) so the breaker can observe it;
+ *      / terminal-not-completed / empty / timed out) so the breaker can observe it;
  *   2. `wrapToolsWithBreaker('a2a:<name>', …)` counts those throws and, once the
  *      circuit is open, fast-fails with `CircuitOpenError` WITHOUT calling the
  *      peer;
@@ -104,27 +199,29 @@ function completedArtifactText(result: unknown): string {
 export function remoteAsToolSet(
   remote: RemoteAgent,
   client: A2aClient,
+  deps?: MountDeps,
 ): ToolSet {
   const name = delegateRemoteToolName(remote);
+  const values = loadConfig().values;
+  const cfg = {
+    taskTimeoutMs:
+      deps?.taskTimeoutMs ?? Number(values.AGENT_A2A_TASK_TIMEOUT_MS),
+    pollIntervalMs:
+      deps?.pollIntervalMs ?? Number(values.AGENT_A2A_POLL_INTERVAL_MS),
+    sleep: deps?.sleep ?? defaultSleep,
+  };
 
-  // (1) Raw tool — throws on failure so the breaker (2) can count it.
+  // (1) Raw tool — sends then polls tasks/get to a terminal state, throwing on
+  //     any failure (rejected invoke / malformed / terminal-not-completed /
+  //     timeout) so the breaker (2) can count it.
   const raw: ToolSet = {
     [name]: tool({
       description: `Delegate a task to the remote agent "${remote.name}" over A2A.`,
       inputSchema: z.object({
         task: z.string().describe('The task for the remote agent'),
       }),
-      execute: async ({ task }: { task: string }) => {
-        const message = {
-          role: 'user' as const,
-          parts: [{ kind: 'text' as const, text: task }],
-          messageId: randomUUID(),
-        };
-        const result = await client.invoke(remote, A2aMethod.MessageSend, {
-          message,
-        });
-        return completedArtifactText(result);
-      },
+      execute: ({ task }: { task: string }) =>
+        delegateAndPoll(remote, client, task, cfg),
     }),
   };
 
@@ -165,11 +262,12 @@ export function mountRemotes(
   remotes: RemoteAgent[],
   client: A2aClient,
   warn: (msg: string) => void = (m) => console.warn(m),
+  deps?: MountDeps,
 ): ToolSet {
   const merged: ToolSet = {};
   for (const remote of remotes) {
     for (const [toolName, t] of Object.entries(
-      remoteAsToolSet(remote, client),
+      remoteAsToolSet(remote, client, deps),
     )) {
       if (merged[toolName]) {
         warn(

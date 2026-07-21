@@ -659,6 +659,18 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 262_144,
     doc: '§7.3 malicious-peer DoS guard: hard byte cap on any remote response body (agent card or invoke result). A body exceeding it — by declared Content-Length OR by streamed byte count for a lying/absent header — is rejected before it can be buffered whole, preventing a memory-exhaustion DoS (`a2a/client.ts`). Default 262144 = 256 KiB (a card is small).',
   },
+  {
+    env: 'AGENT_A2A_TASK_TIMEOUT_MS',
+    kind: 'number',
+    def: 120_000,
+    doc: "Overall wall-clock budget (ms) for a `delegate_to_<name>` consume-side delegation: `message/send` returns a `submitted` task, then `a2a/mount.ts` polls `tasks/get` until the remote task reaches a terminal state or this budget is exhausted (→ structured `{ error: 'remote task timed out' }`, never a hang). Default 120000 = 2 min.",
+  },
+  {
+    env: 'AGENT_A2A_POLL_INTERVAL_MS',
+    kind: 'number',
+    def: 1_000,
+    doc: 'Interval (ms) between `tasks/get` polls in the `delegate_to_<name>` send→poll-to-terminal loop (`a2a/mount.ts`), while the remote task is still `submitted`/`working`. Default 1000 = 1s.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in

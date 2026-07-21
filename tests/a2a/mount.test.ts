@@ -13,6 +13,10 @@ type A2aClient = ReturnType<typeof createA2aClient>;
 
 const OPTS = { toolCallId: 't', messages: [] } as never;
 
+// Tiny poll budget so the send→poll loop is exercised fast and never hangs the
+// suite (the real config defaults are 120s / 1s).
+const FAST = { taskTimeoutMs: 1_000, pollIntervalMs: 1 };
+
 function remote(name: string): RemoteAgent {
   return {
     name,
@@ -23,13 +27,57 @@ function remote(name: string): RemoteAgent {
   };
 }
 
-/** A completed A2A task carrying one text-part artifact. */
-function completedTask(text: string): A2aTask {
+/** A `submitted` task — what `message/send` returns from the produce side. */
+function submittedTask(id = 'task-1'): A2aTask {
   return {
-    id: 'task-1',
+    id,
+    contextId: 'ctx-1',
+    status: { state: TaskStateWire.Submitted },
+    artifacts: [],
+    history: [],
+    kind: 'task',
+  };
+}
+
+/** A still-`working` task — a `tasks/get` poll before the job finishes. */
+function workingTask(id = 'task-1'): A2aTask {
+  return {
+    id,
+    contextId: 'ctx-1',
+    status: { state: TaskStateWire.Working },
+    artifacts: [],
+    history: [],
+    kind: 'task',
+  };
+}
+
+/** A completed A2A task carrying one text-part artifact. */
+function completedTask(text: string, id = 'task-1'): A2aTask {
+  return {
+    id,
     contextId: 'ctx-1',
     status: { state: TaskStateWire.Completed },
     artifacts: [{ artifactId: 'a-0', parts: [{ kind: 'text', text }] }],
+    history: [],
+    kind: 'task',
+  };
+}
+
+/** A terminal `failed` task carrying an error message (as the produce side does
+ *  for a consent-declined run). */
+function failedTask(reason: string, id = 'task-1'): A2aTask {
+  return {
+    id,
+    contextId: 'ctx-1',
+    status: {
+      state: TaskStateWire.Failed,
+      message: {
+        role: 'agent',
+        messageId: `${id}-error`,
+        parts: [{ kind: 'data', data: { error: reason } }],
+      },
+    },
+    artifacts: [],
     history: [],
     kind: 'task',
   };
@@ -51,6 +99,22 @@ function fakeClient(
   return { client, calls };
 }
 
+/** Model the REAL A2A lifecycle: `message/send` → `submitted`; the first N
+ *  `tasks/get` polls → `working`; the poll after that → `completed`. */
+function lifecycleClient(text: string, workingPolls = 1) {
+  let gets = 0;
+  return fakeClient((_r, method) => {
+    if (method === A2aMethod.MessageSend) {
+      return Promise.resolve(submittedTask());
+    }
+    // tasks/get
+    gets += 1;
+    return Promise.resolve(
+      gets <= workingPolls ? workingTask() : completedTask(text),
+    );
+  });
+}
+
 beforeEach(() => {
   resetBreakers();
 });
@@ -59,11 +123,9 @@ afterEach(() => {
   delete process.env.AGENT_BREAKER_THRESHOLD;
 });
 
-test('a remote mounts as delegate_to_<name> and calls message/send on execute', async () => {
-  const { client, calls } = fakeClient(() =>
-    Promise.resolve(completedTask('the remote answer')),
-  );
-  const set = remoteAsToolSet(remote('peer'), client);
+test('delegate polls tasks/get from submitted → working → completed and returns the artifact text', async () => {
+  const { client, calls } = lifecycleClient('the remote answer', 1);
+  const set = remoteAsToolSet(remote('peer'), client, FAST);
 
   const t = set.delegate_to_peer;
   expect(t).toBeDefined();
@@ -72,16 +134,67 @@ test('a remote mounts as delegate_to_<name> and calls message/send on execute', 
     text?: string;
     error?: string;
   };
-  // it invoked message/send, with the task text carried in a message part
-  expect(calls).toHaveLength(1);
+
+  // First call is message/send carrying the task text in a message part…
   expect(calls[0]?.method).toBe(A2aMethod.MessageSend);
   const params = calls[0]?.params as {
     message: { parts: { text?: string }[] };
   };
   expect(params.message.parts[0]?.text).toBe('do the thing');
-  // and returned the completed artifact text (no throw)
+
+  // …then the loop polled tasks/get (with the submitted task's id) until Completed.
+  const getCalls = calls.filter((c) => c.method === A2aMethod.TasksGet);
+  expect(getCalls.length).toBeGreaterThanOrEqual(2); // >=1 working + 1 completed
+  expect((getCalls[0]?.params as { id?: string }).id).toBe('task-1');
+
+  // The remote's COMPLETED answer is returned (pre-fix code returned {error}).
   expect(out.text).toBe('the remote answer');
   expect(out.error).toBeUndefined();
+});
+
+test('a terminal failed remote task returns a structured error (never the text, never a throw)', async () => {
+  const { client } = fakeClient((_r, method) =>
+    Promise.resolve(
+      method === A2aMethod.MessageSend
+        ? submittedTask()
+        : failedTask('the remote blew up'),
+    ),
+  );
+  const set = remoteAsToolSet(remote('peer'), client, FAST);
+  const t = set.delegate_to_peer;
+
+  const out = (await t?.execute?.({ task: 'x' }, OPTS)) as {
+    text?: string;
+    error?: string;
+  };
+  expect(out.text).toBeUndefined();
+  expect(out.error).toBeDefined();
+  expect(out.error).toContain('the remote blew up');
+});
+
+test('a remote that never completes times out with a structured error and does NOT hang', async () => {
+  // Always `working` → the loop can only exit on the wall-clock budget.
+  const { client, calls } = fakeClient((_r, method) =>
+    Promise.resolve(
+      method === A2aMethod.MessageSend ? submittedTask() : workingTask(),
+    ),
+  );
+  const set = remoteAsToolSet(remote('slowpeer'), client, {
+    taskTimeoutMs: 25,
+    pollIntervalMs: 1,
+  });
+  const t = set.delegate_to_slowpeer;
+
+  const out = (await t?.execute?.({ task: 'x' }, OPTS)) as {
+    text?: string;
+    error?: string;
+  };
+  expect(out.text).toBeUndefined();
+  expect(out.error).toContain('timed out');
+  // The loop actually polled before giving up (didn't bail on the first check).
+  expect(
+    calls.filter((c) => c.method === A2aMethod.TasksGet).length,
+  ).toBeGreaterThanOrEqual(1);
 });
 
 test('a failing remote returns a structured error (never throws) + trips the breaker', async () => {
@@ -89,7 +202,7 @@ test('a failing remote returns a structured error (never throws) + trips the bre
   const { client, calls } = fakeClient(() =>
     Promise.reject(new Error('peer is down')),
   );
-  const set = remoteAsToolSet(remote('deadpeer'), client);
+  const set = remoteAsToolSet(remote('deadpeer'), client, FAST);
   const t = set.delegate_to_deadpeer;
 
   // Each failing call RETURNS a structured error rather than throwing.
