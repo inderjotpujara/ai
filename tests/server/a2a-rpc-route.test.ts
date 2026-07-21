@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { A2aAllowlist, ResolvedTarget } from '../../src/a2a/allowlist.ts';
+import { createA2aEnrollment } from '../../src/a2a/enroll.ts';
 import { createTaskIndex } from '../../src/a2a/task-index.ts';
 import type { MemoryStore } from '../../src/memory/store.ts';
 import type { JobStore } from '../../src/queue/store.ts';
@@ -19,6 +21,7 @@ import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
 import { createConsentRegistry } from '../../src/server/consent/registry.ts';
 import type { RunCrewTurn } from '../../src/server/crews/run.ts';
 import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
+import { createRootTokenStore } from '../../src/server/security/root-token.ts';
 import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
 import type { SessionStore } from '../../src/session/store.ts';
 import { makeFakePool } from './_fake-pool.ts';
@@ -72,6 +75,15 @@ function fakeJobStore(): JobStore {
   return store as unknown as JobStore;
 }
 
+// A real A2A enrollment so the route's Task-16 Bearer gate can be satisfied with
+// a genuinely-issued token (the gate now fronts every request).
+const credDir = mkdtempSync(join(tmpdir(), 'a2a-rpc-cred-'));
+const enrollment = createA2aEnrollment({
+  rootTokens: createRootTokenStore({ path: join(credDir, 'daemon-token') }),
+  registryPath: join(credDir, 'a2a-tokens.json'),
+});
+const bearer = enrollment.issue('rpc-route-test').token;
+
 const uploadsDir = mkdtempSync(join(tmpdir(), 'a2a-rpc-uploads-'));
 const runsRoot = mkdtempSync(join(tmpdir(), 'a2a-rpc-runs-'));
 const mcpConfigPath = join(
@@ -86,6 +98,7 @@ const unusedThrow = (label: string) => async (): Promise<never> => {
 
 const a2aDeps = {
   allowlist: fakeAllowlist({ ask: { kind: JobKind.Chat, ref: 'file_qa' } }),
+  enrollment,
   jobStore: fakeJobStore(),
   runsRoot,
   taskIndex: createTaskIndex(),
@@ -135,15 +148,26 @@ afterEach(() => {
 const rpc = (method: string, params?: unknown): string =>
   JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
 
-test('POST /api/a2a is reachable WITHOUT a device session token (owns its own auth)', async () => {
+/** A valid A2A Bearer + fresh replay proof — what an authenticated inbound
+ *  request carries past the Task-16 gate. */
+function authHeaders(): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    authorization: `Bearer ${bearer}`,
+    'x-a2a-timestamp': String(Math.floor(Date.now() / 1000)),
+    'x-a2a-nonce': randomUUID(),
+  };
+}
+
+test('POST /api/a2a is reachable with an A2A Bearer but NO device session token (owns its own auth)', async () => {
   process.env.AGENT_A2A_ENABLED = '1';
-  // No Authorization header on purpose: the route is let past the DEVICE
-  // session guard (D5 two-stores split). An invalid envelope must therefore
-  // reach the handler and come back as a JSON-RPC error (HTTP 200), NEVER a
-  // 401-from-the-session-guard.
+  // Authenticated by the A2A Bearer (NOT a device session token — D5 two-stores
+  // split): the route is let past the DEVICE session guard, so a valid A2A
+  // Bearer + a bad envelope reaches the handler and comes back as a JSON-RPC
+  // error (HTTP 200), NEVER a 401-from-the-session-guard.
   const res = await fetch(`${base}${A2A_PATH}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify({ not: 'a valid json-rpc envelope' }),
   });
   expect(res.status).toBe(200);
@@ -160,7 +184,7 @@ test('POST /api/a2a message/send returns a JSON-RPC response with a submitted ta
   process.env.AGENT_A2A_ENABLED = '1';
   const res = await fetch(`${base}${A2A_PATH}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders(),
     body: rpc('message/send', {
       message: {
         role: 'user',

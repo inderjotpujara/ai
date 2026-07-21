@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createA2aAllowlist } from '../../src/a2a/allowlist.ts';
+import type { A2aEnrollment } from '../../src/a2a/enroll.ts';
 import { createTaskIndex } from '../../src/a2a/task-index.ts';
 import type { MemoryStore } from '../../src/memory/store.ts';
 import type { JobStore } from '../../src/queue/store.ts';
@@ -41,6 +42,15 @@ const unusedThrow = (label: string) => async (): Promise<never> => {
 // is all these route-level tests need; skill exposure is exercised in Task 4/5.
 const allowlist = createA2aAllowlist({ path: skillsPath });
 
+// The card route reads only `allowlist`; enrollment is a required A2aServerDeps
+// field (Task 16, consumed only by POST /api/a2a) so a stub keeps the shape.
+const enrollment: A2aEnrollment = {
+  issue: () => ({ id: 'x', token: 'x' }),
+  verify: () => false,
+  revoke: () => {},
+  list: () => [],
+};
+
 const baseDeps = {
   token: 'a'.repeat(64),
   policy,
@@ -72,6 +82,7 @@ const deps: ServerDeps = {
   ...baseDeps,
   a2a: {
     allowlist,
+    enrollment,
     jobStore: baseDeps.jobStore,
     runsRoot,
     taskIndex: createTaskIndex(),

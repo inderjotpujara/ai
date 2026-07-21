@@ -38,6 +38,7 @@ import { newRunId } from '../run/run-id.ts';
 import { createRun } from '../run/run-store.ts';
 import { delimitUntrusted } from '../server/chat/task.ts';
 import type { A2aAllowlist, ResolvedTarget } from './allowlist.ts';
+import type { A2aEnrollment } from './enroll.ts';
 import { withA2aServerTaskSpan } from './spans.ts';
 import type { createTaskIndex } from './task-index.ts';
 import {
@@ -65,6 +66,10 @@ const SKILL_NOT_ALLOWED = -32004;
 
 export type A2aServerDeps = {
   allowlist: A2aAllowlist;
+  /** The D5 A2A-Bearer store the `POST /api/a2a` gate verifies inbound requests
+   *  against (Task 16). A SEPARATE credential domain from the browser device
+   *  session store — the RPC route never consults or accepts a device token. */
+  enrollment: A2aEnrollment;
   jobStore: JobStore;
   runsRoot: string;
   taskIndex: ReturnType<typeof createTaskIndex>;

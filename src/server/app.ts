@@ -205,8 +205,11 @@ export type ServerDeps = {
    *  when unset. Grown in Increment 3 (Task 10) from just `{ allowlist }` to the
    *  full `A2aServerDeps` (allowlist + jobStore + runsRoot + taskIndex, plus the
    *  optional running-job `pool` the route wires in Task 12) so the JSON-RPC
-   *  handler can enqueue/resolve/project tasks. The card route reads only
-   *  `allowlist`. NOTE: absence is a 503, but both A2A routes ALSO 404 whenever
+   *  handler can enqueue/resolve/project tasks — and in Increment 5 (Task 16)
+   *  with `enrollment`, the D5 A2A-Bearer store the `POST /api/a2a` gate
+   *  verifies inbound requests against (verify-before-parse + replay window).
+   *  The card route reads only `allowlist`. NOTE: absence is a 503, but both A2A
+   *  routes ALSO 404 whenever
    *  `AGENT_A2A_ENABLED` is off regardless of this field (fail-safe: the expose
    *  surface reveals nothing until an operator enables it). */
   a2a?: A2aServerDeps;

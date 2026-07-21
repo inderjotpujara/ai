@@ -78,6 +78,14 @@ function harness() {
   const runsRoot = tmpRoot;
   const deps: A2aServerDeps = {
     allowlist: fakeAllowlist({ ask: { kind: JobKind.Chat, ref: 'file_qa' } }),
+    // These tests call the stream handler directly (past the route gate); a stub
+    // enrollment satisfies the required field without being consulted.
+    enrollment: {
+      issue: () => ({ id: '', token: '' }),
+      verify: () => false,
+      revoke: () => {},
+      list: () => [],
+    },
     jobStore: js.store,
     runsRoot,
     taskIndex: createTaskIndex(),

@@ -102,6 +102,14 @@ function harness(table?: Record<string, ResolvedTarget>) {
     allowlist: fakeAllowlist(
       table ?? { ask: { kind: JobKind.Chat, ref: 'file_qa' } },
     ),
+    // Dispatch-level tests bypass the route's Bearer gate; a stub enrollment
+    // satisfies the required A2aServerDeps field without being consulted here.
+    enrollment: {
+      issue: () => ({ id: '', token: '' }),
+      verify: () => false,
+      revoke: () => {},
+      list: () => [],
+    },
     jobStore: js.store,
     runsRoot: mkdtempSync(join(tmpdir(), 'a2a-srv-')),
     taskIndex: createTaskIndex(),

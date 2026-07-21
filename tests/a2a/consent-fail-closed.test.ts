@@ -121,6 +121,14 @@ function harness(): { deps: A2aServerDeps; seed: (rec: JobRecord) => void } {
   const store = { getJob: (id: string) => jobs.get(id) } as unknown as JobStore;
   const deps: A2aServerDeps = {
     allowlist: fakeAllowlist(),
+    // Dispatch-level test; the route Bearer gate is out of scope, so a stub
+    // enrollment satisfies the required field without being consulted.
+    enrollment: {
+      issue: () => ({ id: '', token: '' }),
+      verify: () => false,
+      revoke: () => {},
+      list: () => [],
+    },
     jobStore: store,
     runsRoot: mkdtempSync(join(tmpdir(), 'a2a-consent-')),
     taskIndex: createTaskIndex(),
