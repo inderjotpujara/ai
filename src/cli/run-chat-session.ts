@@ -1,3 +1,4 @@
+import type { ToolSet } from 'ai';
 import { createSuperAgent } from '../../agents/super.ts';
 import { StatusEventType } from '../contracts/index.ts';
 import type { StreamSink } from '../core/agent.ts';
@@ -40,6 +41,18 @@ export type ChatSessionDeps = {
    *  only; the server (`src/server/chat/run-turn.ts`, T30) wires it for both
    *  read (here) and write (`handleChat`'s `rememberOnce` auto-ingest). */
   memoryStore?: MemoryStore;
+  /** Slice 31, Task 29b: pre-built `delegate_to_<name>` tools for mounted A2A
+   *  remote peers, produced by `liveRemoteDelegateTools` (`src/a2a/mount.ts`,
+   *  flag-gated). When present + non-empty, each is merged into the orchestrator
+   *  as a peer of the local specialists so a remote configured via the
+   *  Federation console / `agent a2a remotes add` is a callable delegate target
+   *  in this live turn. Absent/empty ⇒ zero behavior change (no remote wired,
+   *  no perf/latency hit — remotes are never contacted at session-build time,
+   *  only when the orchestrator actually invokes the delegate tool). */
+  remoteTools?: ToolSet;
+  /** Sink for the local-wins name-collision warning (a remote sharing a local
+   *  specialist's name). Defaults to `console.warn` inside the orchestrator. */
+  onRemoteWarn?: (msg: string) => void;
 };
 
 export type ChatSessionInput = {
@@ -107,6 +120,8 @@ export async function runChatSession(
     deps.ledger,
     deps.mediaStore,
     events,
+    deps.remoteTools,
+    deps.onRemoteWarn,
   );
   const result = await runChatImpl({
     orchestrator,

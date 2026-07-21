@@ -35,7 +35,8 @@ import {
   TaskStateWire,
 } from '../contracts/index.ts';
 import { wrapToolsWithBreaker } from '../mcp/client.ts';
-import type { createA2aClient, RemoteAgent } from './client.ts';
+import { createA2aClient, type RemoteAgent } from './client.ts';
+import { createRemoteStore, type RemoteStore } from './remotes.ts';
 
 type A2aClient = ReturnType<typeof createA2aClient>;
 
@@ -283,4 +284,38 @@ export function mountRemotes(
     }
   }
   return merged;
+}
+
+/**
+ * Build the `delegate_to_<name>` ToolSet for EVERY currently-configured remote
+ * — the one seam a LIVE chat/crew/workflow turn calls to surface remotes as
+ * orchestrator delegates (Slice 31, Task 29b). Gating + freshness invariants:
+ *  - **Flag-gated.** `AGENT_A2A_ENABLED !== true` ⇒ `{}` immediately (a single
+ *    memoized config read, no store I/O) so a turn with A2A off is byte-for-byte
+ *    unchanged.
+ *  - **No remotes ⇒ `{}`.** An empty store adds no tools and no latency.
+ *  - **NO network at build.** `mountRemotes` only constructs tools; a peer is
+ *    contacted solely when the orchestrator later invokes the delegate
+ *    (`delegateAndPoll`) — reused as-is, never re-implemented, so the Task-21
+ *    failure-returns-not-throws + per-remote breaker + single-`agent.delegation`-
+ *    span properties carry over unchanged.
+ *  - **Fresh per call.** The store is read anew each turn, so a remote added via
+ *    the Federation console / `agent a2a remotes add` between turns is picked up
+ *    without a restart (the console persists atomically; this re-reads the file).
+ *
+ * `remotes`/`client` are injectable for tests and for a caller that already
+ * holds the shared expose-side instances; both default to freshly-constructed
+ * ones bound to the standard config paths.
+ */
+export function liveRemoteDelegateTools(opts?: {
+  remotes?: RemoteStore;
+  client?: A2aClient;
+  warn?: (msg: string) => void;
+  deps?: MountDeps;
+}): ToolSet {
+  if (loadConfig().values.AGENT_A2A_ENABLED !== true) return {};
+  const list = (opts?.remotes ?? createRemoteStore({})).list();
+  if (list.length === 0) return {};
+  const client = opts?.client ?? createA2aClient();
+  return mountRemotes(list, client, opts?.warn, opts?.deps);
 }
