@@ -157,11 +157,11 @@ export type IssuedTokenWire = z.infer<typeof IssuedTokenSchema>;
  *  lint-clean). Wire↔engine (`JobKindWire`↔`JobKind`) are value-identical
  *  string enums (`tests/contracts/job-kind-parity.test.ts`). */
 export const A2aSkillEntryWireSchema = z.object({
-  skillId: z.string(),
-  name: z.string(),
-  description: z.string(),
+  skillId: z.string().max(128),
+  name: z.string().max(200),
+  description: z.string().max(2000),
   kind: z.enum(JobKindWire),
-  ref: z.string(),
+  ref: z.string().max(128),
 });
 export type A2aSkillEntryWire = z.infer<typeof A2aSkillEntryWireSchema>;
 
@@ -180,7 +180,7 @@ export type A2aConfigResponse = z.infer<typeof A2aConfigResponseSchema>;
  *  `ref` is re-validated against the in-process registries (§7.4
  *  least-privilege) before it is persisted; an unknown ref → 400. */
 export const A2aSkillsPutRequestSchema = z.object({
-  skills: z.array(A2aSkillEntryWireSchema),
+  skills: z.array(A2aSkillEntryWireSchema).max(100),
 });
 export type A2aSkillsPutRequest = z.infer<typeof A2aSkillsPutRequestSchema>;
 

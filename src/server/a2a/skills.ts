@@ -87,6 +87,15 @@ export async function handleA2aSkillsPut(
     );
   }
 
+  // Replace semantics (§7.4 least-privilege — enables un-exposing a skill via
+  // the console): after the all-refs-valid check above, retract any currently
+  // exposed skill absent from the desired set, THEN upsert the desired entries.
+  // The 400-on-any-bad-ref gate runs first, so a rejected request removes
+  // nothing (all-or-nothing preserved — no silent over-exposure either way).
+  const desiredIds = new Set(entries.map((e) => e.skillId));
+  for (const existing of deps.allowlist.list())
+    if (!desiredIds.has(existing.skillId))
+      deps.allowlist.remove(existing.skillId);
   for (const entry of entries) deps.allowlist.put(entry);
 
   // Return the updated config so the caller re-renders without a follow-up GET.

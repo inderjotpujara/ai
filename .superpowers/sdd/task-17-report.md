@@ -1,44 +1,91 @@
-# Task 17 report — `POST /api/devices` pair (§7.1 security crux) [FABLE ADVERSARIAL-VERIFY]
+# Task 17 report — A2A config/skills/token console API (behind requireTrustedLocal)
 
-**Status:** COMPLETE. Commit `e42badc` — `feat(devices): POST /api/devices pair (server-minted id, token once) (Slice 25b Incr 3, §7.1)`.
+**Slice 31 (A2A interop), Increment 5. Branch `slice-31-a2a-multimachine`. Commit `0c69a98`.**
 
-## Files changed
-- **Create** `src/server/devices/pair.ts` — `handleDevicePair(req, deps, guard)`.
-- **Modify** `src/server/app.ts` — import + `POST /api/devices` route (below the GET, method-discriminated, deps built via `need()`).
-- **Test** `tests/server/devices/pair.test.ts` — 7 tests (the 4 brief cases + 3 extra §7.1 hardening cases).
+(Note: this file previously held a Slice-25b Task 17 report — same filename, different slice; overwritten for the current Slice-31 Task 17.)
 
-## TDD RED → GREEN
-- RED: wrote `pair.test.ts` first; run failed with `Cannot find module .../pair.ts`.
-- GREEN: implemented `pair.ts` + wired the route → 7 pass / 19 expect().
-- Gate: `bun run typecheck` clean; `bun run lint:file` clean (after biome import-sort/format autofix on the test file); `bun test tests/server/` = **354 pass / 0 fail**.
+## Implemented
 
-## The four §7.1 invariants — how enforced + the test that proves each
+The browser-facing (server-side) config surface the Federation tab (Increment 7) will call — four
+routes, all trusted-local, distinct from the A2A-Bearer protocol route `POST /api/a2a`:
 
-### 1. IDOR — server mints deviceId, body id ignored
-**Enforced:** `const deviceId = randomUUID()` is the ONLY source of the id. The body is parsed with `DevicePairRequestSchema.parse(...)` whose schema is `{ label }` ONLY (zod `.parse`, not passthrough) — a `deviceId` field in the JSON is stripped at parse and can never reach the mint/append. The minted UUID is what threads into `mintSessionToken`, `registry.append`, the span, and the response.
-**Proven by:** `IDOR: a client-supplied deviceId in the body is IGNORED` — POST `{ label:'x', deviceId:'local' }` → `body.deviceId !== 'local'` AND matches `/^[0-9a-f-]{36}$/` AND the registry's only row is the minted id (the injected `'local'` is nowhere). (minted-not-body)
+- `GET /api/a2a/config` — metadata-only view: `{ enabled, skills[], cardPreview, tokens[] }`. Never a raw token.
+- `PUT /api/a2a/skills` — set the exposed-skill allowlist; unknown ref → 400.
+- `POST /api/a2a/token` — mint an A2A Bearer; raw token returned EXACTLY ONCE (201).
+- `DELETE /api/a2a/token/:id` — revoke (idempotent 200).
 
-### 2. Trusted-local gate — 403 + NO side effect on failure
-**Enforced:** `requireTrustedLocal(req, guard, deps.policy)` runs FIRST, before `req.json()` is read or anything is minted/appended. It requires `principal === 'local'` AND `isLoopbackHost` AND `originAllowed`; any miss → 403 and early return. Because it precedes all mutation, a rejected caller leaves zero side effect.
-**Proven by:** two tests — `a non-local principal is 403 ... with NO side effect` (remoteGuard `principal:()=>'uuid-remote'` → 403, `registry.list()` empty) and `a non-loopback / tunnel Host is 403 even for a local principal, NO side effect` (Host `box.ts.net` + localGuard → 403, registry empty). Both cover the "gate on session-guard alone" and "loopback-not-tunnel" failure modes. (403 + no-side-effect)
+### Files changed (6, +539)
+- **`src/contracts/a2a.ts`** — landed the deferred `JobKindWire` import (first live wire-layer consumer, keeps Task 1 lint-clean) via new DTOs: `IssuedTokenSchema`, `A2aSkillEntryWireSchema` (`kind: z.enum(JobKindWire)`), `A2aConfigResponseSchema`, `A2aSkillsPutRequestSchema`, `A2aTokenIssueRequestSchema`, `A2aTokenIssueResponseSchema`.
+- **`src/server/a2a/config.ts`** (new) — `handleA2aConfig(deps)` + shared `buildA2aConfig` + `toWireSkill` (engine `SkillEntry`→wire, `as unknown as JobKindWire` per `enqueue.ts` precedent). `enabled` from `loadConfig().values.AGENT_A2A_ENABLED === true`; `tokens` from `enrollment.list()` (metadata only).
+- **`src/server/a2a/skills.ts`** (new) — `handleA2aSkillsPut(req, deps, guard)`: trusted-local FIRST; parse; validate ALL refs via shared `refExistsFor` up front (all-or-nothing, no partial write) → 400 on unknown ref; then `allowlist.put` each; returns updated config.
+- **`src/server/a2a/token.ts`** (new) — `handleA2aTokenIssue(req, deps, guard)` (201, token once) + `handleA2aTokenRevoke(id, req, deps, guard)` (200, idempotent). Both trusted-local FIRST.
+- **`src/server/app.ts`** — routed all four (action `/token` before `:id`); GET config gated with `requireTrustedLocal` at the route (its handler takes no req/guard); mutating handlers gate internally (the `handleDeviceRevoke` precedent). Unwired `deps.a2a` degrades to 503 via `need`.
+- **`tests/server/a2a-token-api.test.ts`** (new) — handler-level harness mirroring `devices/revoke.test.ts`.
 
-### 3. Token once, never persisted / re-listed
-**Enforced:** `registry.append({ deviceId, label, createdAt, exp })` — the token is NOT a field (and `device-registry.append` additionally runtime-field-strips to exactly those four). The token appears only in the `DevicePairResponse` body. The span (`recordDevicePair`) carries principal+deviceId, never the token.
-**Proven by:** the mint test asserts `JSON.stringify(listed)` does NOT contain the token and the registry row list equals `[deviceId]`; plus a dedicated `the minted token NEVER appears in a subsequent GET /api/devices` test that pairs then calls `handleDeviceList` and asserts the serialized list body does not contain the token. The mint test also confirms the token actually authenticates: `sessionTokens.verifySessionToken(token)?.deviceId === deviceId`. (token-once)
+### Deviation from brief
+The brief's Produces block wrote `handleA2aTokenRevoke(id, deps, guard)`, which cannot run `requireTrustedLocal(req, ...)` without a `req`. Implemented as `handleA2aTokenRevoke(id, req, deps, guard)` — matching the working `handleDeviceRevoke(id, req, deps, guard)` precedent. No functional impact.
 
-### 4. pairingUrl fragment, not query
-**Enforced:** `pairingUrl = ${publicBaseUrl}/#token=${token}` — token after `#`.
-**Proven by:** `pairingUrl carries the token in the # fragment, NOT the query string` — parses the URL and asserts `url.search === ''`, `url.searchParams.has('token') === false`, and `url.hash === '#token=' + token`. (fragment-not-query)
+### Design choice
+PUT skills pre-validates every entry's ref with `refExistsFor` (the exact least-privilege check `allowlist.put` runs internally) BEFORE writing any entry, so a single unknown ref rejects the whole request (400) with the persisted allowlist untouched — avoids a partial write that a naive "put-in-a-loop, catch throw" would leave. Full-array replace-semantics were NOT implemented (no diff/remove) — brief specifies "put per entry"; upsert-by-skillId only.
 
-## App-layer gates (inherited, not re-tested in this unit file)
-- **401-unauth:** the shared `!guard.verify(req)` check in `serve()` gates every `/api` route (POST /api/devices included) before dispatch — no route-local code needed.
-- **503-unwired:** the route builds its deps with `need(deps.deviceRegistry/sessionTokens/publicBaseUrl/bindInfo, ...)`, which throws `DepUnavailableError` → the existing handler maps to 503. So until T20 wires these, POST /api/devices degrades to a clean 503. Both are generic app-level behaviors already covered by the app test suite (354 pass).
+## TDD
 
-## Notes / decisions
-- Response status is **202** (per brief/contract), body validated through `DevicePairResponseSchema.parse` before send.
-- `bad body → 400` via try/catch around `parse` (covers empty `label`, non-JSON, missing field).
-- `DevicePairDeps.bindInfo` is `{ sessionTtlMs }`; the app passes the full `ServerDeps.bindInfo` (structurally assignable). `ttlMs = bindInfo.sessionTtlMs` drives both the token exp and the registry `exp = createdAt + ttlMs`.
-- Only my three files were `git add`-ed. No `git add -A`.
+### RED
+`bun run test:file -- "tests/server/a2a-token-api.test.ts"`
+→ `error: Cannot find module '../../src/server/a2a/config.ts'` — 0 pass, 1 fail (handlers absent).
+
+### GREEN
+After implementing handlers + DTOs + routes:
+```
+bun run test:file -- "tests/server/a2a-token-api.test.ts"
+ 5 pass  0 fail  21 expect() calls
+```
+Tests: (1) issue from non-loopback principal → 403, `enrollment.list()` unchanged (no token minted); (2) issue returns raw token once (201) + config `tokens[]` entry has `{id,label}` but no `token` prop and the raw secret appears nowhere in serialized config; (3) PUT unknown ref → 400, allowlist unchanged; (4) PUT from remote → 403, nothing persisted; (5) DELETE remote → 403 (id still present) then local → 200 (id gone).
+
+### Gate (all green)
+- `bun run typecheck` — clean.
+- `bun run lint:file -- <6 files>` — Checked 6 files, no errors (fixed import-collapse + import-sort + line-wrap during the run).
+- `bun run docs:check` — living docs present + linked; every src subsystem documented (`src/server/a2a` already documented; new files under existing subsystem).
+- Regression: full a2a suite (auth, rpc-route, card-route, stream-route, token-api, contracts) — `30 pass, 0 fail`.
+
+## Self-review — SECURITY lens
+- **Trusted-local FIRST + zero-side-effect-on-reject in ALL mutating handlers.** `handleA2aTokenIssue`, `handleA2aTokenRevoke`, `handleA2aSkillsPut` each call `requireTrustedLocal(req, guard, deps.policy)` as the first statement, before parsing the body or touching any store. Tests assert the reject path mints/removes/persists nothing (`enrollment.list()` / `allowlist.list()` unchanged on 403). GET config is also gated (at the route, since its handler is req/guard-free).
+- **Token returned exactly once, never in the config DTO.** `A2aTokenIssueResponseSchema` (`{id,token}`) is the only place `token` leaves; `enrollment.issue` returns it once and persists only `{id,label,createdAt,hash}`. `handleA2aConfig` sources tokens from `enrollment.list()` (metadata only) and `A2aConfigResponseSchema` has no `token` field. Test asserts the raw secret string is absent from the entire serialized config.
+- **Unknown ref → 400 reusing the allowlist validation.** PUT reuses `refExistsFor` — the exact function `allowlist.put` calls internally — so there is no second, drift-prone validation path, and no "run anything" exposure can be persisted.
+- **`:id` is opaque.** Revoke id flows only to `enrollment.revoke` (an array filter) — never the filesystem; a traversal-shaped id affects only its own (nonexistent) row (idempotent 200), same property as `handleDeviceRevoke`.
 
 ## Concerns
-None blocking. One observation for the Fable reviewer: the registry `exp` is computed as `createdAt + ttlMs`, matching the token payload's own `Date.now()+ttlMs` closely but not identically (two `Date.now()` reads, sub-ms apart) — cosmetic, both are the device's session lifetime; no security impact. `recordDevicePair` hardcodes `'local'` as the principal, which is correct here since `requireTrustedLocal` has already proven `principal === 'local'` before we reach it.
+- None blocking. Minor: PUT is upsert-only (no removal of skills absent from the payload) per the brief; if the Federation tab expects true PUT-replace semantics, a follow-up would need to diff+remove. Flagging for Increment 7 wiring.
+
+---
+
+## Fix wave (§7.4 replace-semantics)
+
+Two fixes applied on `slice-31-a2a-multimachine` (over commit `0c69a98`), closing the "PUT is upsert-only" concern flagged above.
+
+### Fix 1 (Important) — `PUT /api/a2a/skills` REPLACES, not upserts
+`handleA2aSkillsPut` (`src/server/a2a/skills.ts`) previously only `put` each payload entry, so a skill omitted from the desired set stayed exposed — an operator could not retract an exposure via the console (§7.4 silent over-exposure). Now, AFTER the all-refs-valid gate (unchanged), it computes the desired id set, `allowlist.remove(...)`s any currently-exposed skill absent from it, then upserts the desired entries. Ordering preserves the properties: trusted-local gate FIRST → schema parse → all-or-nothing ref validation (400 before any mutation) → remove-then-put → return updated config. A rejected request (bad ref / bad schema / non-loopback) removes nothing.
+
+### Fix 2 (Minor) — bound the skills payload
+`src/contracts/a2a.ts`: `A2aSkillsPutRequestSchema.skills` now `.max(100)`; `A2aSkillEntryWireSchema` fields bounded — `skillId`/`ref` `.max(128)`, `name` `.max(200)`, `description` `.max(2000)`. Cheap defense-in-depth; an over-cap PUT → schema reject → 400. Isomorphic contract stays valid (existing parses unaffected).
+
+### RED → GREEN evidence
+New tests added to `tests/server/a2a-token-api.test.ts`:
+- REPLACE: seed A(`file_qa`)+B(`web_fetch`), PUT only A → 200, `allowlist.list()` and `GET /api/a2a/config` show ONLY A (B un-exposed).
+- all-or-nothing: seed A+B, PUT [A, bad-ref C] → 400 and A+B intact (nothing removed).
+- bound: PUT 101-entry array → 400, nothing persisted.
+
+RED (before impl): `bun test tests/server/a2a-token-api.test.ts` → **6 pass / 2 fail** — REPLACE test saw `["B","A"]` (B not retracted); bound test got 200 instead of 400. (The all-or-nothing test already passed, since a bad ref rejects before any write.)
+
+GREEN (after impl):
+```
+$ bun test tests/server/a2a-token-api.test.ts
+ 8 pass
+ 0 fail
+ 29 expect() calls
+```
+
+All 6 pre-existing Task-17 tests stay green. All-or-nothing property preserved (validate-all-refs-first → 400 before any remove/put).
+
+### Gate
+`bun run typecheck` clean · `bun run lint:file -- src/server/a2a/skills.ts src/contracts/a2a.ts tests/server/a2a-token-api.test.ts` clean · `bun run docs:check` clean.
