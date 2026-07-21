@@ -7,7 +7,10 @@ import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
 import { handleAgentCard } from './a2a/card.ts';
+import { handleA2aConfig } from './a2a/config.ts';
 import { handleA2aRpc } from './a2a/rpc.ts';
+import { handleA2aSkillsPut } from './a2a/skills.ts';
+import { handleA2aTokenIssue, handleA2aTokenRevoke } from './a2a/token.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
 import {
@@ -65,6 +68,7 @@ import {
   createTokenGuard,
   type SessionGuard,
 } from './security/token.ts';
+import { requireTrustedLocal } from './security/trusted-local.ts';
 import { handleSessionDelete } from './sessions/delete.ts';
 import { handleSessionDetail } from './sessions/detail.ts';
 import { handleSessionExport } from './sessions/export.ts';
@@ -544,6 +548,70 @@ async function handleApi(
               bindInfo: need(deps.bindInfo, 'bindInfo'),
               policy: deps.policy,
             },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // --- A2A config console (Slice 31 Task 17) -----------------------
+        // The DEVICE-session-guarded, trusted-local config surface the
+        // Federation tab reads/writes — DISTINCT from the A2A-Bearer protocol
+        // route `POST /api/a2a` above. All four are trusted-local; the mutating
+        // handlers gate internally (the `handleDeviceRevoke` precedent), while
+        // the GET view (whose handler takes no req/guard) is gated here. An
+        // unwired `deps.a2a` degrades to 503 via `need` (the outer catch maps
+        // `DepUnavailableError`). Action (`/token`) precedes the `:id` detail.
+        if (req.method === 'GET' && url.pathname === '/api/a2a/config') {
+          const forbidden = requireTrustedLocal(req, guard, deps.policy);
+          if (forbidden) {
+            rec.status(forbidden.status);
+            return forbidden;
+          }
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleA2aConfig({
+            allowlist: a2a.allowlist,
+            enrollment: a2a.enrollment,
+            publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'PUT' && url.pathname === '/api/a2a/skills') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleA2aSkillsPut(
+            req,
+            {
+              allowlist: a2a.allowlist,
+              enrollment: a2a.enrollment,
+              publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/a2a/token') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleA2aTokenIssue(
+            req,
+            { enrollment: a2a.enrollment, policy: deps.policy },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action-before-:id: this bare-:id DELETE follows the fixed `/token`
+        // POST above so `POST /api/a2a/token` is never captured as a revoke id.
+        const a2aTokenRevoke = url.pathname.match(
+          /^\/api\/a2a\/token\/([^/]+)$/,
+        );
+        if (req.method === 'DELETE' && a2aTokenRevoke?.[1]) {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleA2aTokenRevoke(
+            a2aTokenRevoke[1],
+            req,
+            { enrollment: a2a.enrollment, policy: deps.policy },
             guard,
           );
           rec.status(res.status);
