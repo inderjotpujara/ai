@@ -204,3 +204,77 @@ test('invoke surfaces a JSON-RPC error as a thrown error', async () => {
     client.invoke(remote, A2aMethod.MessageSend, { message }),
   ).rejects.toThrow();
 });
+
+// --- §7.3 outbound-fetch DoS hardening (timeout + response-size cap) ---
+
+test('discover rejects a hung peer within the fetch timeout (§7.3 DoS)', async () => {
+  // A malicious peer that holds the socket open forever must not stall us: the
+  // wall-clock timeout aborts + rejects even though the stub never resolves.
+  const fetchImpl = (() =>
+    new Promise<Response>(() => {})) as unknown as typeof fetch;
+  const client = createA2aClient({ fetchImpl, timeoutMs: 20 });
+  const start = Date.now();
+  const res = await client.discover(CARD_URL);
+  expect(res.ok).toBe(false);
+  expect(Date.now() - start).toBeLessThan(2000); // did not hang
+});
+
+test('invoke rejects a hung peer within the fetch timeout (§7.3 DoS)', async () => {
+  const fetchImpl = (() =>
+    new Promise<Response>(() => {})) as unknown as typeof fetch;
+  const client = createA2aClient({ fetchImpl, timeoutMs: 20 });
+  const remote: RemoteAgent = {
+    name: 'peer',
+    baseUrl: BASE_URL,
+    cardUrl: CARD_URL,
+    token: 'secret-bearer',
+    pinnedCardHash: 'x',
+  };
+  const message = {
+    role: 'user' as const,
+    parts: [{ kind: 'text' as const, text: 'hi' }],
+    messageId: 'm1',
+  };
+  const start = Date.now();
+  await expect(
+    client.invoke(remote, A2aMethod.MessageSend, { message }),
+  ).rejects.toThrow();
+  expect(Date.now() - start).toBeLessThan(2000); // did not hang
+});
+
+test('discover rejects an over-cap card by declared Content-Length (never buffered whole)', async () => {
+  // The (small, valid) card body exceeds a deliberately tiny injected cap; the
+  // declared Content-Length lets us reject it before reading a single byte.
+  const card = validCard();
+  const { fetchImpl } = stubFetch(() => jsonResponse(card));
+  const client = createA2aClient({ fetchImpl, maxCardBytes: 10 });
+  const res = await client.discover(CARD_URL);
+  expect(res.ok).toBe(false);
+  if (!res.ok) expect(res.reason).toContain('exceeds');
+});
+
+test('discover rejects an over-cap body with a lying/absent Content-Length (streamed byte-count guard)', async () => {
+  // A hostile peer streams an UNBOUNDED body with NO Content-Length header —
+  // only the running byte count can stop it. The stream never ends on its own,
+  // so if the guard buffered the whole body this test would hang forever.
+  let pushed = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pushed += 1;
+      controller.enqueue(new Uint8Array(64)); // 64 bytes/pull, forever
+    },
+  });
+  const fetchImpl = (() =>
+    Promise.resolve(
+      new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )) as unknown as typeof fetch;
+  const client = createA2aClient({ fetchImpl, maxCardBytes: 256 });
+  const res = await client.discover(CARD_URL);
+  expect(res.ok).toBe(false);
+  if (!res.ok) expect(res.reason).toContain('exceeds');
+  // Proof we aborted mid-stream rather than buffering an unbounded body.
+  expect(pushed).toBeLessThan(100);
+});

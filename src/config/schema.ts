@@ -647,6 +647,18 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: '~/.config/ai/a2a-remotes.json',
     doc: 'consume remote-agent store; the leading `~` is expanded at the read site (`a2a/remotes.ts`), 0700 dir / 0600 file.',
   },
+  {
+    env: 'AGENT_A2A_FETCH_TIMEOUT_MS',
+    kind: 'number',
+    def: 15_000,
+    doc: '§7.3 malicious-peer DoS guard: wall-clock timeout (ms) applied to EVERY outbound remote fetch — discover/verifyPin/invoke — so a hostile peer that hangs the socket can never stall the local process (`a2a/client.ts`). Mirrors the Slice-21 reliability wall-clock posture on this outbound path.',
+  },
+  {
+    env: 'AGENT_A2A_MAX_CARD_BYTES',
+    kind: 'number',
+    def: 262_144,
+    doc: '§7.3 malicious-peer DoS guard: hard byte cap on any remote response body (agent card or invoke result). A body exceeding it — by declared Content-Length OR by streamed byte count for a lying/absent header — is rejected before it can be buffered whole, preventing a memory-exhaustion DoS (`a2a/client.ts`). Default 262144 = 256 KiB (a card is small).',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in

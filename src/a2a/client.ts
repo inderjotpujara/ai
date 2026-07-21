@@ -20,6 +20,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { loadConfig } from '../config/schema.ts';
 import {
   type A2aAgentCard,
   A2aMethod,
@@ -29,6 +30,11 @@ import {
 import { noRedirectFetch } from '../mcp/http-redirect.ts';
 import { hashCard } from './canonical.ts';
 import { recordA2aClientDiscover, recordA2aClientInvoke } from './spans.ts';
+
+/** Thrown when a remote response body exceeds `AGENT_A2A_MAX_CARD_BYTES` —
+ *  distinct so `discover`/`verifyPin` can surface a precise reason while any
+ *  other read failure collapses to a generic "not valid JSON". */
+class ResponseTooLargeError extends Error {}
 
 /** A discovered + pinned remote peer. `token` is its A2A Bearer (secret;
  *  sent only to `baseUrl`); `pinnedCardHash` is the hash that must still match
@@ -59,9 +65,16 @@ function peerHost(url: string): string {
 /**
  * Build the consume-side client. `fetchImpl` is injectable for tests; it is
  * always funnelled through `noRedirectFetch`, so the SSRF guard holds
- * regardless of the impl passed.
+ * regardless of the impl passed. `timeoutMs` / `maxCardBytes` override the
+ * `AGENT_A2A_FETCH_TIMEOUT_MS` / `AGENT_A2A_MAX_CARD_BYTES` config knobs
+ * (env-fallback only — never hardcoded at a call site) so the §7.3 DoS guards
+ * are testable without touching the process env.
  */
-export function createA2aClient(deps?: { fetchImpl?: typeof fetch }): {
+export function createA2aClient(deps?: {
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  maxCardBytes?: number;
+}): {
   discover(cardUrl: string): Promise<DiscoverResult>;
   verifyPin(
     remote: RemoteAgent,
@@ -73,6 +86,89 @@ export function createA2aClient(deps?: { fetchImpl?: typeof fetch }): {
   ): Promise<unknown>;
 } {
   const fetchImpl = deps?.fetchImpl ?? fetch;
+  const cfg = loadConfig().values;
+  const timeoutMs = deps?.timeoutMs ?? Number(cfg.AGENT_A2A_FETCH_TIMEOUT_MS);
+  const maxCardBytes =
+    deps?.maxCardBytes ?? Number(cfg.AGENT_A2A_MAX_CARD_BYTES);
+
+  /**
+   * SSRF-guarded fetch with a §7.3 wall-clock timeout. On timeout it aborts the
+   * underlying request AND rejects the returned promise itself — so a hostile
+   * peer that hangs the socket cannot stall us even if `fetchImpl` ignores the
+   * abort signal (the injected test stub does). `noRedirectFetch` still forces
+   * `redirect:'error'`, so the SSRF guard is unaffected.
+   */
+  function timedFetch(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    return new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`a2a fetch timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      noRedirectFetch(
+        url,
+        { ...init, signal: controller.signal },
+        fetchImpl,
+      ).then(
+        (res) => {
+          clearTimeout(timer);
+          resolve(res);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  /**
+   * Read a response body under a hard byte cap, then JSON-parse it. The cap is
+   * enforced TWICE (§7.3 memory-exhaustion defense): first by the declared
+   * `Content-Length` (fast reject, no bytes read), then by a running count of
+   * bytes actually streamed — so a lying or absent `Content-Length` can never
+   * slip an unbounded body past the guard; we abort the stream the moment the
+   * count crosses the cap instead of buffering it whole.
+   */
+  async function readCappedJson(res: Response): Promise<unknown> {
+    const declared = res.headers.get('content-length');
+    if (declared !== null) {
+      const n = Number(declared);
+      if (Number.isFinite(n) && n > maxCardBytes) {
+        throw new ResponseTooLargeError(
+          `response body exceeds cap of ${maxCardBytes} bytes (content-length ${declared})`,
+        );
+      }
+    }
+    const body = res.body;
+    if (body === null) throw new Error('response body is empty');
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value === undefined) continue;
+        total += value.byteLength;
+        if (total > maxCardBytes) {
+          throw new ResponseTooLargeError(
+            `response body exceeds cap of ${maxCardBytes} bytes (streamed)`,
+          );
+        }
+        chunks.push(value);
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return JSON.parse(new TextDecoder().decode(merged));
+  }
 
   /** GET + parse + validate a card from `cardUrl`, never following a redirect.
    *  Returns the validated card or a failure reason. */
@@ -82,18 +178,26 @@ export function createA2aClient(deps?: { fetchImpl?: typeof fetch }): {
     let res: Response;
     try {
       // redirect:'error' — a redirecting card host is an SSRF risk; reject it.
-      res = await noRedirectFetch(cardUrl, { redirect: 'error' }, fetchImpl);
+      // timedFetch adds the §7.3 wall-clock timeout so a hung peer can't stall.
+      res = await timedFetch(cardUrl, { redirect: 'error' });
     } catch {
-      // A redirect (or transport failure) — never followed.
-      return { ok: false, reason: 'card fetch failed (redirect or transport)' };
+      // A redirect, timeout, or transport failure — never followed / never hangs.
+      return {
+        ok: false,
+        reason: 'card fetch failed (redirect, timeout, or transport)',
+      };
     }
     if (res.status !== 200) {
       return { ok: false, reason: `card fetch status ${res.status}` };
     }
     let raw: unknown;
     try {
-      raw = await res.json();
-    } catch {
+      // §7.3 size-capped read — an over-cap card body is rejected, never OOM.
+      raw = await readCappedJson(res);
+    } catch (err) {
+      if (err instanceof ResponseTooLargeError) {
+        return { ok: false, reason: err.message };
+      }
       return { ok: false, reason: 'card body is not valid JSON' };
     }
     // Explicit protocol-version gate (also enforced by the schema literal) so
@@ -177,25 +281,23 @@ export function createA2aClient(deps?: { fetchImpl?: typeof fetch }): {
     });
     // The Bearer is sent ONLY to remote.baseUrl. Freshness headers satisfy the
     // peer's replay guard (Task 16 — x-a2a-timestamp / x-a2a-nonce).
-    const res = await noRedirectFetch(
-      remote.baseUrl,
-      {
-        method: 'POST',
-        redirect: 'error',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${remote.token}`,
-          'x-a2a-timestamp': String(Date.now()),
-          'x-a2a-nonce': randomUUID(),
-        },
-        body,
+    const res = await timedFetch(remote.baseUrl, {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${remote.token}`,
+        'x-a2a-timestamp': String(Date.now()),
+        'x-a2a-nonce': randomUUID(),
       },
-      fetchImpl,
-    );
+      body,
+    });
     if (res.status !== 200) {
       throw new Error(`a2a invoke failed: HTTP ${res.status}`);
     }
-    const envelope = (await res.json()) as {
+    // §7.3 size-capped read — an over-cap result body throws (caught by caller),
+    // never buffered whole.
+    const envelope = (await readCappedJson(res)) as {
       result?: unknown;
       error?: { code: number; message: string };
     };
