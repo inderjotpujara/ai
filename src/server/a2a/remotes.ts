@@ -18,7 +18,11 @@
  * caller of it can accidentally leak the remote's Bearer onto the wire.
  */
 
-import type { createA2aClient, RemoteAgent } from '../../a2a/client.ts';
+import {
+  cardUrlHostMismatch,
+  type createA2aClient,
+  type RemoteAgent,
+} from '../../a2a/client.ts';
 import type { RemoteStore } from '../../a2a/remotes.ts';
 import {
   A2aRemoteAddRequestSchema,
@@ -90,11 +94,21 @@ export async function handleRemoteAdd(
     return json({ error: `discover failed: ${discovered.reason}` }, 400);
   }
 
+  // §7.3 SSRF (capstone B4): the card's advertised `url` (where delegations
+  // POST) is remote-controlled — reject it unless it stays on the SAME host the
+  // operator vouched for by pasting `cardUrl`, so a hostile peer cannot redirect
+  // every delegation at an internal address. Nothing is persisted on mismatch.
+  const mismatch = cardUrlHostMismatch(body.cardUrl, discovered.card.url);
+  if (mismatch !== undefined) {
+    return json({ error: `discover failed: ${mismatch}` }, 400);
+  }
+
   const remote: RemoteAgent = {
     name: body.name,
     // The card's own `url` is the remote's JSON-RPC endpoint (the same field
     // `buildAgentCard` sets for OUR card) — trust the just-verified card, not
-    // the caller-supplied cardUrl, for where invocations are sent.
+    // the caller-supplied cardUrl, for where invocations are sent (now
+    // host-pinned to the operator's cardUrl above).
     baseUrl: discovered.card.url,
     cardUrl: body.cardUrl,
     token: body.token,

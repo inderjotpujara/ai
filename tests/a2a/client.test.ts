@@ -1,6 +1,10 @@
 import { expect, test } from 'bun:test';
 import { hashCard } from '../../src/a2a/canonical.ts';
-import { createA2aClient, type RemoteAgent } from '../../src/a2a/client.ts';
+import {
+  cardUrlHostMismatch,
+  createA2aClient,
+  type RemoteAgent,
+} from '../../src/a2a/client.ts';
 import { type A2aAgentCard, A2aMethod } from '../../src/contracts/index.ts';
 
 const CARD_URL = 'https://peer.ts.net/.well-known/agent-card.json';
@@ -277,4 +281,32 @@ test('discover rejects an over-cap body with a lying/absent Content-Length (stre
   if (!res.ok) expect(res.reason).toContain('exceeds');
   // Proof we aborted mid-stream rather than buffering an unbounded body.
   expect(pushed).toBeLessThan(100);
+});
+
+test('cardUrlHostMismatch flags a peer-controlled invoke endpoint off the operator host (§7.3 SSRF, capstone B4)', () => {
+  // Same host (path/scheme differ) → allowed.
+  expect(
+    cardUrlHostMismatch(
+      'https://peer.ts.net/.well-known/agent-card.json',
+      'https://peer.ts.net/api/a2a',
+    ),
+  ).toBeUndefined();
+  // Different host (link-local metadata service) → rejected with a reason.
+  expect(
+    cardUrlHostMismatch(
+      'https://peer.ts.net/card.json',
+      'http://169.254.169.254/latest/meta-data',
+    ),
+  ).toContain('169.254.169.254');
+  // A port change on the same hostname is also a mismatch (host = host:port).
+  expect(
+    cardUrlHostMismatch(
+      'https://peer.ts.net/card.json',
+      'https://peer.ts.net:9999/api',
+    ),
+  ).toBeDefined();
+  // Unparseable advertised url → rejected, never throws.
+  expect(
+    cardUrlHostMismatch('https://peer.ts.net/card.json', 'not a url'),
+  ).toBeDefined();
 });

@@ -244,6 +244,32 @@ test('POST /api/a2a/remotes rejects when discover fails — nothing persisted', 
   expect(c.remotes.list()).toEqual([]);
 });
 
+test('POST /api/a2a/remotes rejects a card whose advertised url host differs from the pasted cardUrl host (§7.3 SSRF, capstone B4) — 400, nothing persisted', async () => {
+  // A hostile peer's card advertises an INTERNAL invoke endpoint (link-local
+  // metadata service) even though it was discovered from the operator's host.
+  const c = ctx((cardUrl) => ({
+    ok: true,
+    card: validCard('http://169.254.169.254/latest/meta-data'),
+    pinnedCardHash: `hash-of-${cardUrl}`,
+  }));
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'peer',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(400);
+  const body = (await res.json()) as { error: string };
+  expect(body.error).toContain('169.254.169.254');
+  // discover ran (the mismatch is caught AFTER discovery), but the hostile
+  // endpoint was never persisted.
+  expect(c.discoverCalls).toEqual(['https://peer.ts.net/card.json']);
+  expect(c.remotes.list()).toEqual([]);
+});
+
 test('POST /api/a2a/remotes/test dry-runs discover/validate/pin WITHOUT persisting', async () => {
   const c = ctx();
   const res = await handleRemoteTest(

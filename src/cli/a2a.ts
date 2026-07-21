@@ -31,7 +31,7 @@ import type { SkillEntry } from '../a2a/allowlist.ts';
 import { createA2aAllowlist } from '../a2a/allowlist.ts';
 import { buildAgentCard } from '../a2a/card.ts';
 import type { RemoteAgent } from '../a2a/client.ts';
-import { createA2aClient } from '../a2a/client.ts';
+import { cardUrlHostMismatch, createA2aClient } from '../a2a/client.ts';
 import type { IssuedToken } from '../a2a/enroll.ts';
 import { createA2aEnrollment } from '../a2a/enroll.ts';
 import { delegateAndPoll } from '../a2a/mount.ts';
@@ -288,6 +288,13 @@ function buildRealA2aDeps(): A2aCliDeps {
         const discovered = await client.discover(cardUrl);
         if (!discovered.ok) {
           throw new Error(`discover failed: ${discovered.reason}`);
+        }
+        // §7.3 SSRF (capstone B4): the advertised `card.url` (delegation
+        // endpoint) is peer-controlled — reject it unless it stays on the SAME
+        // host the operator pasted as `cardUrl`. Same guard as `handleRemoteAdd`.
+        const mismatch = cardUrlHostMismatch(cardUrl, discovered.card.url);
+        if (mismatch !== undefined) {
+          throw new Error(`discover failed: ${mismatch}`);
         }
         const remote: RemoteAgent = {
           // No separate `--name` arg on this thin CLI: the discovered card's

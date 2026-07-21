@@ -51,6 +51,42 @@ export type DiscoverResult =
   | { ok: true; card: A2aAgentCard; pinnedCardHash: string }
   | { ok: false; reason: string };
 
+/**
+ * §7.3 SSRF guard on the persisted invoke endpoint (capstone B4). A discovered
+ * card advertises its own `url` (where every future delegation POSTs), but that
+ * body is REMOTE-CONTROLLED — a hostile peer could point it at
+ * `http://169.254.169.254/…` or another internal service and the daemon would
+ * dutifully POST there on each delegation. The only host the operator vouched
+ * for is the one in the `cardUrl` they pasted, so the advertised `url` MUST stay
+ * on that same host:port. Returns a human-readable reason on mismatch (surfaced
+ * to the operator as the add-remote failure), else `undefined`. `URL.host`
+ * carries host:port, so a port change is also caught.
+ */
+export function cardUrlHostMismatch(
+  operatorCardUrl: string,
+  advertisedUrl: string,
+): string | undefined {
+  let expected: URL;
+  let actual: URL;
+  try {
+    expected = new URL(operatorCardUrl);
+  } catch {
+    return 'operator cardUrl is not a valid URL';
+  }
+  try {
+    actual = new URL(advertisedUrl);
+  } catch {
+    return 'card.url is not a valid URL';
+  }
+  if (actual.host !== expected.host) {
+    return (
+      `card.url host "${actual.host}" does not match the operator-vouched ` +
+      `cardUrl host "${expected.host}" (SSRF guard, §7.3)`
+    );
+  }
+  return undefined;
+}
+
 /** Best-effort host extraction for telemetry — HOST only, never the full URL
  *  (Task 2 privacy contract). Falls back to a fixed sentinel for an unparseable
  *  URL so a span attribute is always a bare host. */
