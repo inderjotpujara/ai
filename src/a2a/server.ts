@@ -41,6 +41,7 @@ import type { A2aAllowlist, ResolvedTarget } from './allowlist.ts';
 import { withA2aServerTaskSpan } from './spans.ts';
 import type { createTaskIndex } from './task-index.ts';
 import {
+  consentDeclinedToTaskError,
   jobStatusToTaskState,
   orchestratorResultToArtifact,
 } from './task-map.ts';
@@ -269,10 +270,28 @@ export function handleTasksGet(
     const state = jobStatusToTaskState(job.status);
     rec.taskState(state);
     rec.outcome('ok');
+    // Fail-closed consent (Task 13, §7.1): a job that settled `Failed` because
+    // dispatch declined a mid-run consent gate surfaces the typed
+    // `consent-unavailable` error on its (terminal `failed`) status message —
+    // never an `input-required`, never a hang. Any other job's status stays
+    // `{ state }`. `consent.state` is exactly `state` here (both `failed`), so
+    // this only ATTACHES the error, never contradicts the base projection.
+    const consent = consentDeclinedToTaskError(job);
+    const status =
+      consent === undefined
+        ? { state }
+        : {
+            state: consent.state,
+            message: {
+              role: 'agent',
+              messageId: `${taskId}-error`,
+              parts: [{ kind: 'data', data: { error: consent.error } }],
+            },
+          };
     const task: A2aTask = TaskSchema.parse({
       id: taskId,
       contextId: deps.taskIndex.contextFor(taskId),
-      status: { state },
+      status,
       artifacts: projectArtifacts(job, taskId),
       history: [],
       kind: 'task',

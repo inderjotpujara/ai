@@ -21,9 +21,27 @@
  * premature-terminal shape the Slice-24 run-stream fix guards against.
  */
 
-import { type SpanDTO, SpanStatus, TaskStateWire } from '../contracts/index.ts';
+import {
+  type JsonRpcError,
+  type SpanDTO,
+  SpanStatus,
+  TaskStateWire,
+} from '../contracts/index.ts';
 
 export type A2aStreamCtx = { taskId: string; contextId: string };
+
+/** Build the A2A `TaskStatus.message` that carries a typed failure error (e.g.
+ *  the fail-closed `consent-unavailable`, Task 13) as an inert `data` part — the
+ *  A2A pattern for failure detail on a terminal status, never an artifact and
+ *  never spliced in as instructions. `MessageSchema`-shaped (`role`/`parts`/
+ *  `messageId`) so a client parses it as a normal agent message. */
+function a2aErrorMessage(ctx: A2aStreamCtx, error: JsonRpcError): unknown {
+  return {
+    role: 'agent',
+    messageId: `${ctx.taskId}-error`,
+    parts: [{ kind: 'data', data: { error } }],
+  };
+}
 
 /**
  * Top-level run roots whose END is the run's OWN terminal signal for an
@@ -62,19 +80,26 @@ export function a2aSseFrame(payload: unknown, id?: string): string {
   return `id: ${id.replace(CONTROL_CHARS, '')}\n${data}`;
 }
 
-/** A `TaskStatusUpdateEvent` SSE frame. */
+/** A `TaskStatusUpdateEvent` SSE frame. When `error` is present (a fail-closed
+ *  terminal failure, e.g. `consent-unavailable`), it rides the status `message`
+ *  as an inert data part — otherwise the status is just `{ state }`. */
 export function a2aStatusFrame(
   ctx: A2aStreamCtx,
   state: TaskStateWire,
   final: boolean,
   id?: string,
+  error?: JsonRpcError,
 ): string {
+  const status =
+    error === undefined
+      ? { state }
+      : { state, message: a2aErrorMessage(ctx, error) };
   return a2aSseFrame(
     {
       taskId: ctx.taskId,
       contextId: ctx.contextId,
       kind: 'status-update',
-      status: { state },
+      status,
       final,
     },
     id,
@@ -107,6 +132,9 @@ export function a2aArtifactFrame(
  *
  * - A terminal run root → `completed` (ok) / `failed` (error) status-update,
  *   `final: true`, keyed by `spanId` (the terminal frame — never undefined).
+ *   `terminalError` (a fail-closed typed error, e.g. `consent-unavailable`,
+ *   Task 13) rides the `failed` frame's status message when the backing job
+ *   declined a mid-run consent gate; it is ignored on a `completed` frame.
  * - A delegation span → a progress `artifact-update` with a `data` part (the
  *   sub-agent step), keyed by `spanId`.
  * - Anything else → `undefined` (no A2A meaning; skipped).
@@ -114,13 +142,18 @@ export function a2aArtifactFrame(
 export function frameRunSpanAsA2a(
   span: SpanDTO,
   ctx: A2aStreamCtx,
+  terminalError?: JsonRpcError,
 ): string | undefined {
   if (isA2aTerminalRoot(span.name)) {
-    const state =
-      span.status === SpanStatus.Error
-        ? TaskStateWire.Failed
-        : TaskStateWire.Completed;
-    return a2aStatusFrame(ctx, state, true, span.spanId);
+    const isError = span.status === SpanStatus.Error;
+    const state = isError ? TaskStateWire.Failed : TaskStateWire.Completed;
+    return a2aStatusFrame(
+      ctx,
+      state,
+      true,
+      span.spanId,
+      isError ? terminalError : undefined,
+    );
   }
   if (span.delegation) {
     return a2aArtifactFrame(

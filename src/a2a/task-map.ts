@@ -145,3 +145,66 @@ export function consentUnavailableError(): TaskError {
     message: 'consent-unavailable',
   };
 }
+
+/**
+ * Canonical marker a declined mid-run consent gate would leave on a job's
+ * terminal `error`.
+ *
+ * ⚑ HONESTY — this marker is FORWARD-LOOKING, not currently emitted. No dispatch
+ * path today lands a consent-tagged `Failed` job on an A2A-reachable kind
+ * (Chat/Crew/Workflow): MCP-mount consent fail-closes by SKIPPING the server
+ * (`mcp/consent.ts` — a warning + `false`, never a job failure), and the
+ * builder's consent returns a `declined` RESULT (Build is not A2A-reachable).
+ * So a declined-consent A2A job is not, today, distinguishable from any other
+ * `Failed` job. `consentDeclinedToTaskError` matches THIS token so the scoped
+ * future durable queue-consent capability (see Task 13 §2 non-goals) has one
+ * canonical string to stamp — and until then the detector is dormant. The
+ * load-bearing §7.1 guarantee (no hang, terminal `failed`) does NOT depend on
+ * it: `jobStatusToTaskState` already maps EVERY `Failed` job → terminal
+ * `failed`. This typed error is a refinement of that terminal state, never the
+ * guarantee itself.
+ */
+export const CONSENT_DECLINED_MARKER = 'consent-declined';
+
+/**
+ * The structural subset of a `JobRecord` this fail-closed detector reads — its
+ * terminal `status` and failure `error` string. Kept structural (not the full
+ * `JobRecord`) so the mapper stays pure and I/O-free.
+ */
+export type ConsentJobView = {
+  status: JobStatus;
+  error?: string | undefined;
+};
+
+/** True when a job's terminal `error` is a declined-consent marker (best-effort
+ *  substring match — see `CONSENT_DECLINED_MARKER`'s honesty note). */
+function isConsentDeclineError(error: string | undefined): boolean {
+  if (error === undefined) return false;
+  const e = error.toLowerCase();
+  return (
+    e.includes(CONSENT_DECLINED_MARKER) || e.includes('consent-unavailable')
+  );
+}
+
+/**
+ * Fail-closed mid-run consent → typed `failed` (Task 13, §7.1). If a job settled
+ * `Failed` because a mid-run consent gate was declined (its terminal `error`
+ * carries the consent-declined marker), project it to the A2A `failed` state +
+ * the typed `consent-unavailable` error. Any other job — including a plain
+ * `Failed` with an unrelated error — returns `undefined` (it keeps its existing
+ * error / plain `failed`).
+ *
+ * Totality: only a `Failed` job with the marker yields a projection; every other
+ * `JobStatus` returns `undefined`. The `Failed → failed` state it emits is
+ * exactly Task 8's `jobStatusToTaskState(Failed)`, so this can NEVER contradict
+ * the base projection — it only ATTACHES the typed error. A remote task hitting
+ * a consent gate therefore reaches a TERMINAL `failed` deterministically, never
+ * an `input-required`, never a hang.
+ */
+export function consentDeclinedToTaskError(
+  job: ConsentJobView,
+): { state: TaskStateWire.Failed; error: TaskError } | undefined {
+  if (job.status !== JobStatus.Failed) return undefined;
+  if (!isConsentDeclineError(job.error)) return undefined;
+  return { state: TaskStateWire.Failed, error: consentUnavailableError() };
+}

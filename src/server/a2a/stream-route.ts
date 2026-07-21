@@ -37,7 +37,10 @@ import {
   frameRunSpanAsA2a,
   isA2aTerminalRoot,
 } from '../../a2a/stream.ts';
-import { orchestratorResultToArtifact } from '../../a2a/task-map.ts';
+import {
+  consentDeclinedToTaskError,
+  orchestratorResultToArtifact,
+} from '../../a2a/task-map.ts';
 import {
   A2aMethod,
   JsonRpcResponseSchema,
@@ -144,7 +147,15 @@ function reframedBody(
     controller: ReadableStreamDefaultController<Uint8Array>,
     span: SpanDTO,
   ): void {
-    const framed = frameRunSpanAsA2a(span, ctx);
+    // Fail-closed consent (Task 13, §7.1): if the backing job settled `Failed`
+    // because dispatch declined a mid-run consent gate, the terminal `failed`
+    // frame carries the typed `consent-unavailable` error (ignored on a
+    // non-error root). The no-hang guarantee itself is the run-stream's terminal
+    // root arriving as `failed` — this only refines that frame's detail.
+    const terminalError = consentDeclinedToTaskError(
+      deps.jobStore.getJob(ctx.taskId) ?? { status: JobStatus.Queued },
+    )?.error;
+    const framed = frameRunSpanAsA2a(span, ctx, terminalError);
     if (framed === undefined) return;
     if (isA2aTerminalRoot(span.name)) {
       // Buffer (don't emit) — flushed at EOF. Keep only the latest terminal.
