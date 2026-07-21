@@ -24,6 +24,15 @@ const cronInput = (name: string) => ({
   enabled: true,
 });
 
+const webhookInput = (name: string) => ({
+  name,
+  type: TriggerType.Webhook,
+  origin: TriggerOrigin.Console,
+  target: { kind: JobKind.Chat, payload: { task: 'x' } },
+  config: { hmac: false },
+  enabled: true,
+});
+
 test('GET /api/triggers lists projected DTOs without secretRef', async () => {
   const d = deps();
   d.triggers.store.create(cronInput('nightly'), { tokenHash: 'hash-1' });
@@ -52,6 +61,50 @@ test('GET /api/triggers/:id → 404 for an unknown id', () => {
   const d = deps();
   const res = handleTriggerDetail('trig-nope', d as never);
   expect(res.status).toBe(404);
+});
+
+test('GET /api/triggers and /api/triggers/:id populate webhookUrl (token-free) for a webhook trigger', async () => {
+  const d = deps();
+  const base = 'http://127.0.0.1:4130';
+  const t = d.triggers.store.create(webhookInput('inbound'), {
+    tokenHash: 'a-persisted-hash-never-the-raw-token',
+  });
+
+  const listRes = handleTriggerList({ ...d, publicBaseUrl: base } as never);
+  expect(listRes.status).toBe(200);
+  const listBody = (await listRes.json()) as {
+    items: { id: string; webhookUrl?: string }[];
+  };
+  const listed = listBody.items.find((i) => i.id === t.id);
+  expect(listed?.webhookUrl).toBe(`${base}/hooks`);
+  // Base URL only — no per-trigger path token appended (the token is shown
+  // exactly once, at create).
+  expect(listed?.webhookUrl?.split('/hooks')[1]).toBe('');
+
+  const detailRes = handleTriggerDetail(t.id, {
+    ...d,
+    publicBaseUrl: base,
+  } as never);
+  expect(detailRes.status).toBe(200);
+  const detailBody = (await detailRes.json()) as { webhookUrl?: string };
+  expect(detailBody.webhookUrl).toBe(`${base}/hooks`);
+});
+
+test('GET /api/triggers and /api/triggers/:id leave webhookUrl undefined without a publicBaseUrl', async () => {
+  const d = deps();
+  const t = d.triggers.store.create(webhookInput('inbound-2'), {
+    tokenHash: 'another-persisted-hash',
+  });
+
+  const listRes = handleTriggerList(d as never);
+  const listBody = (await listRes.json()) as {
+    items: { id: string; webhookUrl?: string }[];
+  };
+  expect(listBody.items.find((i) => i.id === t.id)?.webhookUrl).toBeUndefined();
+
+  const detailRes = handleTriggerDetail(t.id, d as never);
+  const detailBody = (await detailRes.json()) as { webhookUrl?: string };
+  expect(detailBody.webhookUrl).toBeUndefined();
 });
 
 test('GET /api/triggers/:id/firings paginates newest-first', async () => {

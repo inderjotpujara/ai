@@ -102,6 +102,13 @@ const cronBody = (name: string) => ({
   config: { schedule: '*/5 * * * *' },
 });
 
+const webhookBody = (name: string) => ({
+  name,
+  type: 'webhook',
+  target: { kind: 'chat', payload: { task: 'x' } },
+  config: { hmac: false },
+});
+
 async function createConsoleTrigger(
   fetch: (r: Request) => Promise<Response>,
   name: string,
@@ -140,6 +147,33 @@ test('GET /api/triggers/:id returns the detail DTO for a known id', async () => 
   const body = (await res.json()) as { id: string; type: string };
   expect(body.id).toBe(id);
   expect(body.type).toBe('cron');
+});
+
+test("GET /api/triggers and /api/triggers/:id populate a webhook trigger's webhookUrl (token-free)", async () => {
+  const fetch = buildFetch(makeDeps());
+  const createRes = await fetch(
+    req('POST', '/api/triggers', webhookBody('inbound')),
+  );
+  expect(createRes.status).toBe(201);
+  const created = (await createRes.json()) as {
+    trigger: { id: string };
+    webhookToken: string;
+  };
+
+  const listRes = await fetch(req('GET', '/api/triggers'));
+  const listBody = (await listRes.json()) as {
+    items: { id: string; webhookUrl?: string }[];
+  };
+  const listed = listBody.items.find((i) => i.id === created.trigger.id);
+  expect(listed?.webhookUrl).toBe(`${BASE}/hooks`);
+  expect(listed?.webhookUrl).not.toContain(created.webhookToken);
+
+  const detailRes = await fetch(
+    req('GET', `/api/triggers/${created.trigger.id}`),
+  );
+  const detailBody = (await detailRes.json()) as { webhookUrl?: string };
+  expect(detailBody.webhookUrl).toBe(`${BASE}/hooks`);
+  expect(detailBody.webhookUrl).not.toContain(created.webhookToken);
 });
 
 test('PATCH /api/triggers/:id routes to the patch handler', async () => {

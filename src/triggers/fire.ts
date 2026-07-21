@@ -163,7 +163,7 @@ export function createFireTrigger(deps: {
       deps.triggerStore.update(t.id, { lastFiredAt: now });
       // Create the run dir AFTER the yield-free enqueue span so an immediate
       // /api/runs/:id/stream never 404s once fireTrigger returns (mirrors
-      // handleJobEnqueue). dispatch's markDaemonOrigin re-creates it
+      // handleJobEnqueue). dispatch's markJobOrigin re-creates it
       // idempotently at execution time. This is the sole `await`, deliberately
       // outside the critical span (F2).
       await createRun(deps.runsRoot, runId);

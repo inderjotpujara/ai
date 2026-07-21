@@ -524,6 +524,9 @@ async function handleApi(
         if (req.method === 'GET' && url.pathname === '/api/triggers') {
           const res = handleTriggerList({
             triggers: need(deps.triggers, 'triggers'),
+            // Threads webhookUrl into a webhook trigger's DTO (Slice 25
+            // LOW-2 follow-up), same as create/patch below.
+            publicBaseUrl: deps.publicBaseUrl,
           });
           rec.status(res.status);
           return res;
@@ -581,6 +584,9 @@ async function handleApi(
         if (req.method === 'GET' && triggerDetail?.[1]) {
           const res = handleTriggerDetail(triggerDetail[1], {
             triggers: need(deps.triggers, 'triggers'),
+            // Threads webhookUrl into a webhook trigger's DTO (Slice 25
+            // LOW-2 follow-up), same as create/patch below.
+            publicBaseUrl: deps.publicBaseUrl,
           });
           rec.status(res.status);
           return res;
