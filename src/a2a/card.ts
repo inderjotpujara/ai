@@ -13,10 +13,10 @@
  * leave this module undetected.
  */
 
-import { createHash } from 'node:crypto';
 import pkg from '../../package.json' with { type: 'json' };
 import { type A2aAgentCard, AgentCardSchema } from '../contracts/index.ts';
 import type { A2aAllowlist } from './allowlist.ts';
+import { hashCard } from './canonical.ts';
 
 /** Card `description` is fixed — it describes the orchestrator, not any one
  *  skill, so it is not a per-call override. */
@@ -50,28 +50,11 @@ export function buildAgentCard(deps: {
   });
 }
 
-/**
- * Deterministic key-sorted serialization so the hash is insensitive to
- * property insertion order. Task 20 extracts this as the shared
- * `canonicalizeCard`/`hashCard` in `src/a2a/canonical.ts` (also used by the
- * consume-side pinning check) — `cardEtag` re-points to it there.
- */
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value !== null && typeof value === 'object') {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      sorted[key] = canonicalize((value as Record<string, unknown>)[key]);
-    }
-    return sorted;
-  }
-  return value;
-}
-
 /** `sha256` of the card's canonical (key-sorted) JSON — a stable ETag for the
- *  `GET /.well-known/agent-card.json` route (Task 6). */
+ *  `GET /.well-known/agent-card.json` route (Task 6). Re-points to the shared
+ *  `hashCard` (Task 20, `src/a2a/canonical.ts`), the same canonicalization the
+ *  consume-side pin uses, so the expose ETag and the consume pin can never
+ *  diverge. */
 export function cardEtag(card: A2aAgentCard): string {
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalize(card)))
-    .digest('hex');
+  return hashCard(card);
 }
