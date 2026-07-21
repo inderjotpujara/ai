@@ -1564,3 +1564,20 @@ Base `5cac606` · branch `slice-25b-ops-console` · spec+diagram `cd25cb9` · pl
   - [ ] T35 §10 LIVE-VERIFY (USER-GATED: real daemon `bun run daemon start-foreground` loopback + real Ollama + native /chrome; 5 steps — cron fire→origin=schedule · webhook curl good/bad-HMAC/replay · file-drop→{{file.path}} · 2-step chain+depth-cap · restart-1-catch-up). Run final `bun run check` scope-excluding .live (both builders-turn + verification.live + discover.live flakes documented).
   - [ ] T37 LAND: merge --no-ff→main + push (4 docs + ledger same-push = slice-landing gate ok) → 🔔 NOTIFY USER. **USER push yes/no confirm required per git gate.**
 
+---
+
+# SLICE 31 — Multi-Machine + A2A Interop (web-focused)
+
+**Base:** main `a378b1c` · **Branch:** `slice-31-a2a-multimachine` · **Spec:** `docs/superpowers/specs/2026-07-21-slice-31-a2a-multimachine-design.md` (D1–D7 + §1.1 use-cases + §7 hard parts + §10 two-box live-verify) · **Diagram:** `docs/diagrams/slice-31-a2a-multimachine/a2a-interop.{excalidraw,png}` · **Plan:** `docs/superpowers/plans/2026-07-21-slice-31-a2a-multimachine.md` (32 tasks / 8 increments).
+
+**Brainstorm→plan record:** 3 explorers mapped the substrate (server-side strong: `POST /api/jobs`→202, SSE run-stream+replay, HMAC session tokens, MCP mount pattern; client-side ALL missing; pairing loopback-only = enrollment gap). A2A v1.0 web-validated (LF Apr 2026, JSON-RPC/HTTP+SSE, agent-card at `/.well-known/agent-card.json`; `@a2a-js/sdk` npm 0.3.x/v1.0-beta → hand-roll subset). **4 locked user decisions:** unify-on-A2A · both expose+consume · hand-roll v1.0 subset · real two-box Tailscale live-verify. **+ web-focused** (Ops-console Federation tab primary). Opus spec-draft → user spec-review+use-cases approved (proceed BOTH directions) → Opus plan-draft (31 tasks) → **Opus plan-audit = COMMIT-AFTER-FIXES** (caught C1: §7.1 consent round-trip had no substrate — queued jobs run consent fail-closed; B1: nothing constructs/injects `deps.a2a` at boot → 503s the whole surface). **Fixes applied (Opus):** C1 → **honest fail-closed** (user-chose) — mid-run consent → typed `failed` (`consent-unavailable`), matching existing queued-job posture; full promptId ConfirmPort round-trip documented as scoped future queue-consent slice (spec §2 non-goals). B1 → new **Task 18** wires `deps.a2a` in `startWebServer`/`daemon/core.ts` mirroring triggers injection. M1 → Task 1 unused-import fixed. Spec reconciled (no lingering input-required-round-trip/consent-variant claims). **32 tasks / 8 increments; §7 adversarial-verify tasks = 4, 8, 9, 13, 15, 16, 20; Fable capstone = T31.**
+
+**Increments (TRUST THE PLAN task list; resume at first task not [x]):** 1 Contracts+telemetry (T1-3) · 2 EXPOSE card+allowlist (T4-7) · 3 EXPOSE JSON-RPC server+task-map (T8-11) · 4 EXPOSE streaming+fail-closed-consent (T12-14) · 5 Auth/enrollment+boot-wiring (T15-19) · 6 CONSUME client+mount+remotes (T20-23) · 7 Federation tab+CLI (T24-28) · 8 docs+Artifact+live-verify+capstone+land (T29-32).
+
+**Model tiering:** Sonnet floor (contracts/routes/web/docs/CLI); Opus (task-map/server/enroll/client/boot-wiring + shared-seam reviews); Opus/ultracode adversarial-verify §7.1-7.4; **Fable whole-branch capstone (T31)**. Per-task loop = task-brief→implementer→review-package→task-reviewer→fix→ledger. Increment-boundary `bun run check`; final gate scope-excludes known `.live` flakes (builders-turn + verification.live + discover.live).
+
+**⚠️ T30 live-verify is a REAL TWO-BOX Tailscale gate — second Mac `100.121.49.105` normally POWERED OFF → MUST notify user to power it on BEFORE T30** ([[reference-second-mac-config-sync]]).
+
+**⏸ PAUSED (user 2026-07-21) after plan finalize — will resume.** Plan committed + ledger seeded; NO implementation started. **▶ RESUME: start subagent-driven SDD at Task 1** (Increment 1, Contracts).
+  - [ ] Increments 1–8 / Tasks 1–32 — not started (resume at T1).
+
