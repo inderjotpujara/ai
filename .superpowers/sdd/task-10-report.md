@@ -258,3 +258,116 @@ Files: `src/server/daemon/redact.ts`, `src/server/daemon/logs.ts`,
 `tests/server/daemon/redact.test.ts`, `tests/server/daemon/logs.test.ts`
 (only these four `git add`-ed; unrelated pre-existing working-tree
 modifications left untouched).
+
+---
+
+# Task 10 report — scheduler.ts + next-run.ts (Slice 25 Triggers, §7.2, HARD)
+
+## Status: DONE — gate green, commit landed.
+
+## Commit
+- `e243303` — feat(triggers): poll-tick scheduler + Croner next-run + fire-once misfire
+
+## Files
+- Created `src/triggers/next-run.ts` — `validateCron(schedule, tz?)` (construction-only pattern check) + `computeNextRun(t, after)` (Croner `new Cron(pattern,{timezone}).nextRun(after)?.getTime() ?? null`, whole expression wrapped in try/catch → null on ANY throw).
+- Created `src/triggers/scheduler.ts` — `createScheduler(deps)` → `{ start, stop, tick, reconcile }`. Injectable `now`/`setInterval`/`clearInterval` seams; `createLogger('triggers.scheduler')` for structured logs.
+- Created `tests/triggers/next-run.test.ts` (6 tests), `tests/triggers/scheduler.test.ts` (9 tests).
+- `bun add croner` → croner@10.0.1 (first consumer); package.json + bun.lock staged.
+
+## Test summary
+- 14 focused tests pass (30 assertions); full `tests/triggers/` suite 51 pass / 0 fail.
+
+## Contracts honored
+- **I1**: `computeNextRun` never throws — malformed pattern (throws at construction) AND bad IANA zone (throws at `.nextRun()`, verified against croner@10.0.1) both caught → null. `reconcile()` disables (never throws on) a row whose compute is null; the "daemon boot survives a bad repo cron" test asserts `enabled === false` after reconcile with no throw.
+- **T7 liveness**: `tick()` wraps `claimDueCron` in try/catch — a throw (incl. SQLITE_BUSY) is logged+counted (`tickErrors`) and the loop keeps ticking; interval stays armed. Test: a store whose `claimDueCron` throws once → first tick no-throw/no-fire, next tick fires normally.
+- **Misfire = at-most-once fire-once-on-boot**: reconcile leaves a past `next_run_at` in place (default catchUp) so the FIRST tick claims it exactly once, then `claimDueCron` advances to the next future occurrence — never one-per-missed-interval. `catchUp:false` advances straight to the future with no boot fire. Full matrix tested (fresh/past+catchUp/past+catchUp:false/future). No "exactly once" wording used anywhere (crash-between-claim-and-enqueue documented as the at-most-once gap).
+- Fire is fire-and-forget: `void deps.fire(t,{reason:'cron'}).catch(...)` — logs+counts (`fireErrors`), never an unhandledRejection.
+- `start()` runs `reconcile()` BEFORE arming the interval (verified: fake setInterval, callback not auto-invoked, reconcile-then-tick ordering asserted).
+- Croner is library-only (compute next occurrence); no Croner-managed timers.
+
+## Concerns
+- None blocking. `AGENT_TRIGGERS_POLL_MS` (schema default 1000) is the intended `pollMs` source but is wired by the daemon caller (Increment 3 / daemon integration), not this task — scheduler takes `pollMs` as an injected number per the brief signature.
+- `tickErrors`/`fireErrors` counters are internal (logged only) — the brief's return signature is `{start,stop,tick,reconcile}` with no metrics accessor, so I kept them as closure state rather than widening the public type.
+
+---
+
+## Fix pass — Task 10 dual-review findings (2026-07-20)
+
+Five verified findings from Task 10's dual review on `scheduler.ts`/
+`scheduler.test.ts`, all fixed in one commit.
+
+### Fix 1 — `start()` idempotency (timer leak, empirically confirmed)
+Added a guard: `if (interval !== undefined) return;` at the top of `start()`.
+A double-`start()` previously called `set(() => tick(), pollMs)` a second
+time without clearing the first handle — leaking the first timer (it kept
+firing, uncleared and unreachable) while running two live loops. Now a
+repeat `start()` is a no-op.
+
+Test added: `'start() is idempotent — a double-start arms only ONE interval'`
+— calls `start()` three times against a fake `setInterval`/`clearInterval`
+that count invocations; asserts exactly one timer was ever armed
+(`armed === 1`, `intervalCbs.length === 1`), then `stop()` clears it once
+(`cleared === 1`).
+
+### Fix 2 — `reconcile()` liveness guard (asymmetric with tick's T7 contract)
+`tick()` already had a T7 liveness contract: a throw from `claimDueCron`
+is logged+counted and swallowed so the interval stays armed. `reconcile()`
+had no equivalent — a throw from a single row's `store.update` (e.g.
+`SQLITE_IOERR` on one bad row) would abort the whole boot-reconciliation
+loop, leaving every trigger AFTER the throwing row unseeded/uncaught-up.
+Wrapped the per-trigger body of the loop in try/catch: on a throw, log +
+increment a new `reconcileErrors` counter (same pattern as `tickErrors`/
+`fireErrors`) + `continue` to the next trigger. The outer `triggerStore.list()`
+call itself is deliberately left UNGUARDED — a dead DB should still fail
+boot fast, not silently reconcile zero triggers.
+
+Tests added:
+- `'reconcile per-row liveness guard — one throwing row does not abort seeding the rest'`
+  — 3 fresh triggers, a wrapped store whose `update` throws only for the 2nd
+  trigger's id; asserts the 1st and 3rd still get seeded (`nextRunAt` set),
+  the 2nd (which always throws) is left unseeded, and `reconcile()` itself
+  never throws.
+- `'reconcile does not guard the initial store.list() call — a dead DB still fails boot fast'`
+  — a wrapped store whose `list()` throws; asserts `reconcile()` propagates
+  that throw (confirms the boundary of the guard is exactly where the
+  finding specified, not wider).
+
+### Fix 3 — wording nit (scheduler.ts:17)
+"claims it exactly once" → "claims it a single time" — the file's own
+header comment (lines 20–21) explicitly forbids describing the misfire
+guarantee as "exactly once" (crash-between-claim-and-enqueue can drop the
+catch-up; the real guarantee is at-most-once). Line 17 violated its own
+constraint; reworded to sidestep the banned phrase while keeping the same
+meaning. Confirmed via `grep -n "exactly once" src/triggers/scheduler.ts`
+now returns no hits.
+
+### Fix 4 — dropped filler test + unused import
+Removed `'the outcome enum is available for reason mapping sanity'` (a
+tautological assertion, `TriggerOutcome.Fired === 'fired'`, that exercised
+no scheduler behavior) and the now-unused `TriggerOutcome` import from
+`tests/triggers/scheduler.test.ts`.
+
+### Fix 5 — double-`stop()` idempotency test
+`stop()` already guarded (`if (interval !== undefined)`), so behavior was
+already correct — this closes the test gap. Added
+`'stop() is idempotent — double-stop does not throw and clears the interval once'`:
+calls `stop()` twice in a row, asserts no throw and that the fake
+`clearInterval` was invoked exactly once (the second `stop()` is a true
+no-op, not a second clear call).
+
+### Gate results
+- `bun run typecheck` — clean (0 errors).
+- `bun run lint:file -- src/triggers/scheduler.ts tests/triggers/scheduler.test.ts`
+  — `Checked 2 files. No fixes applied.`
+- `bun run test:file -- tests/triggers/` — **54 pass, 0 fail, 228 expect() calls**
+  across 8 files (up from 51 pass pre-fix; net +3 tests after dropping 1
+  filler and adding 4 — `start()` idempotency, `stop()` idempotency,
+  reconcile per-row guard, reconcile list()-not-guarded).
+
+### Commit
+`cec8918` — `fix(triggers): scheduler start idempotency + reconcile per-row liveness guard + nits`
+
+Files: `src/triggers/scheduler.ts`, `tests/triggers/scheduler.test.ts`
+(only these two `git add`-ed; unrelated pre-existing working-tree
+modifications under `.remember/*` and `.superpowers/sdd/*.md` left
+untouched).

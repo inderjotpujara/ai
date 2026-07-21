@@ -79,3 +79,43 @@ Result: 8/8 tests pass (up from 7) — new test included, no regressions.
 **Gate:** `bun run typecheck` clean; `bun run lint:file -- src/server/security/device-registry.ts tests/server/security/device-registry.test.ts` clean (biome, no fixes needed); `bun test tests/server/` → 330 pass / 0 fail across 71 files.
 
 **Commit:** `67fc6ec` — `fix(security): runtime field-strip so device registry can never persist a token (Slice 25b T13 review)`. Only the two files above were staged.
+
+---
+
+# Task 13 Report (Slice 25 — Scheduled + Triggered Agents) — `chain.ts` job-completion observer + pool onSettled seam (HARD §7.3)
+
+## Status: DONE
+
+Commit `2d6e358` — `feat(triggers): job-chain observer + pool onSettled seam (terminal-only)`.
+
+## What shipped
+- **`src/queue/pool.ts`** — added the `onSettled?: (job, status: Done|Failed) => void` seam to `createWorkerPool` opts + a private `safeSettled(job, status)` wrapper.
+  - Success path: `safeSettled(job, Done)` is called **inside the existing try, immediately after `markDone` succeeds** (I5). A throwing `markDone` falls to the catch WITHOUT firing — no phantom chain off an uncommitted completion.
+  - Fail path: `else if (after?.status === Failed) safeSettled(after, Failed)` after the existing retry re-read, inside the try. A retry re-queue (Queued) never reaches it; `markCanceled`/`markInterrupted` never call it. Terminal-only.
+  - `safeSettled` wraps `opts.onSettled?.(...)` in try/catch so a throwing observer can never wedge `runOne`/the claim loop.
+- **`src/triggers/chain.ts`** (new) — `createChainObserver({ triggerStore, fire, maxChainDepth })` → `{ handleJobSettled(job, status) }`. Iterates `triggerStore.list()`, skips non-enabled / non-`JobChain` (explicit `trigger.type === TriggerType.JobChain` branch — T1 non-discriminated-union carry), matches `(config as JobChainConfig)`: `onStatus === status` AND (`!onKind || onKind === job.kind`) AND (`!onName || onName === payloadName(job.payload)`). On a match: `fire(trigger, { reason: 'chain', chainDepth: (job.chainDepth ?? 0) + 1, vars: { 'chain.jobId': job.id, 'chain.runId': job.runId ?? '' } })`.
+
+## F1 trust-boundary carry (critical) — honored
+Fired depth derives ONLY from the finished job's PERSISTED `chainDepth` (`(job.chainDepth ?? 0) + 1`) — never any external input. The observer always increments + delegates; the cap is enforced downstream in `fire.ts` (verified: `fire.ts` treats `depth > maxChainDepth()` and non-integer/negative as cap-exceeded → Failed, no enqueue). `maxChainDepth` is kept in the observer deps for interface parity (per the brief signature) but is intentionally NOT consulted for capping — documented inline.
+
+## onName field resolution
+`onName` matches the finished job's `payload.name`. Confirmed via `src/server/jobs/dispatch.ts` (`CrewJobPayloadSchema`/`WorkflowJobPayloadSchema` = `{ name, input, ... }`) and `src/server/crews/run.ts` / `workflows/run.ts` (`payload: { name, input }`). `payloadName()` safely reads a string `name` off an object payload; chat/pull/build payloads have no `name`, so an `onName` filter never matches them.
+
+## Robustness
+`fire()` is fire-and-forget from the synchronous `handleJobSettled` seam; its returned promise gets a `.catch(() => {})` so a chain-fire rejection never surfaces as an unhandledRejection (the pool's `safeSettled` guards synchronous throws, not promise rejections).
+
+## Tests — TDD RED → GREEN
+- `tests/queue/pool-onsettled.test.ts` (5): onSettled(Done) fires once; onSettled(Failed) fires on terminal non-retryable failure; NOT called on retry re-queue; NOT called when `markDone` throws (no phantom + runOne does not reject); a throwing observer never wedges the claim loop (2nd job still reaches Done, no unhandledRejection).
+- `tests/triggers/chain.test.ts` (6): matching completion fires with depth+1 + correct reason/vars; depth threading passes `max+1` (cap enforced downstream); onStatus mismatch → no fire; onKind narrows; onName match/mismatch; disabled trigger skipped.
+- Result: **11/11 pass**. Broader regression: `bun test ./tests/queue/ ./tests/triggers/` → **141 pass / 0 fail** (logged SQLITE errors are other tests' intentional fault-injection).
+
+## Gate
+- `bun run typecheck` clean.
+- `bun run lint:file -- src/queue/pool.ts src/triggers/chain.ts tests/triggers/chain.test.ts tests/queue/pool-onsettled.test.ts` clean (biome, after auto-format).
+- `bun run test -- -t "onSettled"` → 5 pass / 0 fail.
+- pre-commit `docs:check` passed on commit.
+
+## Concerns
+- **Wiring not in scope:** this task only adds the seam + observer. Nothing yet calls `createWorkerPool({ onSettled })` with `createChainObserver(...).handleJobSettled` — that wiring (daemon composition) is a downstream task. Flagging so the slice's integration/live-verify step connects them.
+- **`maxChainDepth` unused in the observer body** by design (cap lives in fire.ts). Kept per the mandated brief signature; an adversarial reviewer may question it — rationale documented inline in `chain.ts`.
+- `triggerStore.list()` returns ALL triggers and the observer filters in-memory (no `listByType`). Fine at current scale; a `WHERE type='jobchain' AND enabled` query would be the optimization if trigger counts grow.
