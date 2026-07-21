@@ -52,7 +52,9 @@ const runDetailRoute = createRoute({
  *  param — deep-linkable and ⌘K-targetable, same pattern as
  *  `runDetailRoute`'s `graphKind`/`graphId`. Invalid/missing values fall
  *  back to `'overview'`. */
-export type OpsSearch = { tab?: 'overview' | 'jobs' | 'triggers' | 'devices' };
+export type OpsSearch = {
+  tab?: 'overview' | 'jobs' | 'triggers' | 'devices' | 'federation';
+};
 
 const opsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -62,7 +64,8 @@ const opsRoute = createRoute({
     tab:
       search.tab === 'jobs' ||
       search.tab === 'triggers' ||
-      search.tab === 'devices'
+      search.tab === 'devices' ||
+      search.tab === 'federation'
         ? search.tab
         : 'overview',
   }),
