@@ -1,3 +1,4 @@
+import type { A2aAllowlist } from '../a2a/allowlist.ts';
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import type { WorkerPool } from '../queue/pool.ts';
@@ -5,6 +6,7 @@ import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
+import { handleAgentCard } from './a2a/card.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
 import {
@@ -196,6 +198,15 @@ export type ServerDeps = {
    *  otherwise undefined, and no scheduler/watcher handle is opened). Optional:
    *  the trigger routes degrade to 503 (via `need()`) when unset. */
   triggers?: TriggersEngine;
+  /** A2A EXPOSE-surface deps (Slice 31, Increment 2+). Present only when the
+   *  daemon/server wires the expose side; the public discovery route and the
+   *  `/api/a2a` JSON-RPC endpoint degrade to 503 (via the branch's own guard)
+   *  when unset. Grown in later increments (enrollment/token registry) — kept
+   *  to just the skill allowlist here. NOTE: absence is a 503, but the card
+   *  route ALSO 404s whenever `AGENT_A2A_ENABLED` is off regardless of this
+   *  field (fail-safe: discovery reveals nothing until an operator enables the
+   *  surface). */
+  a2a?: { allowlist: A2aAllowlist };
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
@@ -275,6 +286,32 @@ export function buildFetch(
           secretStore: deps.triggers.secretStore,
           fire: deps.triggers.fire,
           runLimiter: deps.runLimiter,
+        });
+      }
+
+      // A2A public discovery (Slice 31 §Increment 2). The ONE unauthenticated
+      // READ on the expose surface — a remote orchestrator fetches it with NO
+      // Bearer to learn our advertised skills before enrolling. Placed here for
+      // the SAME reason as the /hooks branch: AFTER the Host/Origin perimeter
+      // (still enforced above) but BEFORE the /api session guard, so it never
+      // requires our browser bearer yet is still fronted by DNS-rebinding/CSRF
+      // defense. Only GET matches; any other method falls through to
+      // serveStatic (a .json path → plain 404), so nothing else is exposed
+      // here. Fail-safe layering: `handleAgentCard` 404s whenever
+      // AGENT_A2A_ENABLED is off (discovery reveals nothing until an operator
+      // enables the surface), and an unwired `deps.a2a` degrades to 503 (the
+      // same need()-shaped degrade as the /api routes) rather than the outer
+      // catch's opaque 500.
+      if (
+        req.method === 'GET' &&
+        url.pathname === '/.well-known/agent-card.json'
+      ) {
+        if (!deps.a2a) {
+          return json({ error: new DepUnavailableError('a2a').message }, 503);
+        }
+        return handleAgentCard(req, {
+          allowlist: deps.a2a.allowlist,
+          publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
         });
       }
 
