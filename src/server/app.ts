@@ -1,4 +1,4 @@
-import type { A2aAllowlist } from '../a2a/allowlist.ts';
+import type { A2aServerDeps } from '../a2a/server.ts';
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import type { WorkerPool } from '../queue/pool.ts';
@@ -7,6 +7,7 @@ import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
 import { handleAgentCard } from './a2a/card.ts';
+import { handleA2aRpc } from './a2a/rpc.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
 import {
@@ -201,12 +202,14 @@ export type ServerDeps = {
   /** A2A EXPOSE-surface deps (Slice 31, Increment 2+). Present only when the
    *  daemon/server wires the expose side; the public discovery route and the
    *  `/api/a2a` JSON-RPC endpoint degrade to 503 (via the branch's own guard)
-   *  when unset. Grown in later increments (enrollment/token registry) — kept
-   *  to just the skill allowlist here. NOTE: absence is a 503, but the card
-   *  route ALSO 404s whenever `AGENT_A2A_ENABLED` is off regardless of this
-   *  field (fail-safe: discovery reveals nothing until an operator enables the
-   *  surface). */
-  a2a?: { allowlist: A2aAllowlist };
+   *  when unset. Grown in Increment 3 (Task 10) from just `{ allowlist }` to the
+   *  full `A2aServerDeps` (allowlist + jobStore + runsRoot + taskIndex, plus the
+   *  optional running-job `pool` the route wires in Task 12) so the JSON-RPC
+   *  handler can enqueue/resolve/project tasks. The card route reads only
+   *  `allowlist`. NOTE: absence is a 503, but both A2A routes ALSO 404 whenever
+   *  `AGENT_A2A_ENABLED` is off regardless of this field (fail-safe: the expose
+   *  surface reveals nothing until an operator enables it). */
+  a2a?: A2aServerDeps;
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
@@ -325,7 +328,17 @@ export function buildFetch(
         // stays header-bearer-only. The exception is scoped to the beacon.
         const isBeacon =
           req.method === 'POST' && url.pathname === '/api/telemetry';
-        if (!isBeacon && !guard.verify(req)) {
+        // POST /api/a2a is the A2A JSON-RPC endpoint. It is let past THIS
+        // (browser DEVICE session) guard for the SAME structural reason as the
+        // beacon — but authenticates with a DIFFERENT credential: the A2A
+        // Bearer, verified inside `handleA2aRpc` against a SEPARATE token store
+        // (D5 two-stores split, added in Task 16). A device session token is
+        // NEVER accepted here — the route does not touch the device path at
+        // all. The Host/Origin perimeter above STILL fronts it, and the handler
+        // 404s while `AGENT_A2A_ENABLED` is off, so nothing is reachable until
+        // an operator enables the expose surface.
+        const isA2aRpc = req.method === 'POST' && url.pathname === '/api/a2a';
+        if (!isBeacon && !isA2aRpc && !guard.verify(req)) {
           return json({ error: 'unauthorized' }, 401);
         }
         return await handleApi(req, url, deps, guard);
@@ -377,6 +390,15 @@ async function handleApi(
         }
         if (req.method === 'POST' && url.pathname === '/api/telemetry') {
           const res = await handleTelemetry(req, guard);
+          rec.status(res.status);
+          return res;
+        }
+        // A2A JSON-RPC. Reached PAST the device session guard (see the
+        // guard-exception in buildFetch) but still behind the Host/Origin
+        // perimeter; `handleA2aRpc` owns the enable-gate (404 when
+        // AGENT_A2A_ENABLED is off) and, from Task 16, the A2A-Bearer check.
+        if (req.method === 'POST' && url.pathname === '/api/a2a') {
+          const res = await handleA2aRpc(req, need(deps.a2a, 'a2a'));
           rec.status(res.status);
           return res;
         }

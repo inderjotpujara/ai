@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createA2aAllowlist } from '../../src/a2a/allowlist.ts';
+import { createTaskIndex } from '../../src/a2a/task-index.ts';
 import type { MemoryStore } from '../../src/memory/store.ts';
 import type { JobStore } from '../../src/queue/store.ts';
 import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
@@ -64,8 +65,18 @@ const baseDeps = {
   publicBaseUrl: 'http://agent.local',
 } satisfies Omit<ServerDeps, 'a2a'>;
 
-// Wired-a2a server (the real route under test).
-const deps: ServerDeps = { ...baseDeps, a2a: { allowlist } };
+// Wired-a2a server (the real route under test). The card route reads only
+// `allowlist`; the grown A2aServerDeps (jobStore/runsRoot/taskIndex, Task 10)
+// is filled from baseDeps so the shape typechecks.
+const deps: ServerDeps = {
+  ...baseDeps,
+  a2a: {
+    allowlist,
+    jobStore: baseDeps.jobStore,
+    runsRoot,
+    taskIndex: createTaskIndex(),
+  },
+};
 // A server WITHOUT the a2a dep — proves the fail-safe 503 degrade.
 const depsNoA2a: ServerDeps = { ...baseDeps, policy: policyNoA2a };
 

@@ -1,0 +1,203 @@
+import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { A2aAllowlist, ResolvedTarget } from '../../src/a2a/allowlist.ts';
+import { createTaskIndex } from '../../src/a2a/task-index.ts';
+import type { MemoryStore } from '../../src/memory/store.ts';
+import type { JobStore } from '../../src/queue/store.ts';
+import {
+  type JobInput,
+  JobKind,
+  JobPriority,
+  type JobRecord,
+  JobStatus,
+} from '../../src/queue/types.ts';
+import { buildFetch, type ServerDeps } from '../../src/server/app.ts';
+import type { RunBuilderTurn } from '../../src/server/builders/build.ts';
+import type { RunChatTurn } from '../../src/server/chat/run-turn.ts';
+import { createConsentRegistry } from '../../src/server/consent/registry.ts';
+import type { RunCrewTurn } from '../../src/server/crews/run.ts';
+import { createMcpMountStatus } from '../../src/server/mcp/mount-status.ts';
+import type { RunWorkflowTurn } from '../../src/server/workflows/run.ts';
+import type { SessionStore } from '../../src/session/store.ts';
+import { makeFakePool } from './_fake-pool.ts';
+
+const A2A_PATH = '/api/a2a';
+const policy = { port: 0, allowedOrigins: [] as string[] };
+
+// --- minimal in-memory a2a-server fakes (mirror tests/a2a/server.test.ts) ----
+
+function fakeAllowlist(table: Record<string, ResolvedTarget>): A2aAllowlist {
+  return {
+    list: () => [],
+    put: () => {},
+    remove: () => {},
+    resolve: (skillId: string) => table[skillId],
+  };
+}
+
+function fakeJobStore(): JobStore {
+  const jobs = new Map<string, JobRecord>();
+  let seq = 0;
+  const store = {
+    enqueue(input: JobInput): JobRecord {
+      const id = `job-${++seq}`;
+      const rec: JobRecord = {
+        id,
+        kind: input.kind,
+        payload: input.payload,
+        priority: JobPriority.Normal,
+        status: JobStatus.Queued,
+        attempts: 0,
+        maxAttempts: 1,
+        createdAt: 0,
+        updatedAt: 0,
+        startedAt: undefined,
+        finishedAt: undefined,
+        availableAt: 0,
+        runId: input.runId,
+        result: undefined,
+        error: undefined,
+        retriedFrom: null,
+        origin: input.origin,
+        chainDepth: 0,
+      };
+      jobs.set(id, rec);
+      return rec;
+    },
+    getJob: (id: string) => jobs.get(id),
+    markCanceled: () => {},
+  };
+  return store as unknown as JobStore;
+}
+
+const uploadsDir = mkdtempSync(join(tmpdir(), 'a2a-rpc-uploads-'));
+const runsRoot = mkdtempSync(join(tmpdir(), 'a2a-rpc-runs-'));
+const mcpConfigPath = join(
+  mkdtempSync(join(tmpdir(), 'a2a-rpc-mcp-')),
+  'm.json',
+);
+writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
+
+const unusedThrow = (label: string) => async (): Promise<never> => {
+  throw new Error(`${label} should not be invoked by these tests`);
+};
+
+const a2aDeps = {
+  allowlist: fakeAllowlist({ ask: { kind: JobKind.Chat, ref: 'file_qa' } }),
+  jobStore: fakeJobStore(),
+  runsRoot,
+  taskIndex: createTaskIndex(),
+};
+
+const deps: ServerDeps = {
+  token: 'a'.repeat(64),
+  policy,
+  recordIo: false,
+  indexHtml: '<!doctype html><title>t</title>',
+  runChatTurn: unusedThrow('runChatTurn') as unknown as RunChatTurn,
+  consent: createConsentRegistry(),
+  uploadsDir,
+  runsRoot,
+  runCrewTurn: unusedThrow('runCrewTurn') as unknown as RunCrewTurn,
+  runWorkflowTurn: unusedThrow('runWorkflowTurn') as unknown as RunWorkflowTurn,
+  runBuilderTurn: unusedThrow('runBuilderTurn') as unknown as RunBuilderTurn,
+  runModelPull: async () => {},
+  freeDiskBytes: async () => Number.MAX_SAFE_INTEGER,
+  mcpConfigPath,
+  mcpMountStatus: createMcpMountStatus(),
+  mountOne: unusedThrow('mountOne') as unknown as ServerDeps['mountOne'],
+  memoryStore: {} as unknown as MemoryStore,
+  sessionStore: { close: () => {} } as unknown as SessionStore,
+  jobStore: a2aDeps.jobStore,
+  pool: makeFakePool(),
+  publicBaseUrl: 'http://agent.local',
+  a2a: a2aDeps,
+};
+
+let server: ReturnType<typeof Bun.serve>;
+let base: string;
+
+beforeAll(() => {
+  server = Bun.serve({ port: 0, fetch: buildFetch(deps), idleTimeout: 0 });
+  if (server.port === undefined) throw new Error('server did not bind a port');
+  policy.port = server.port;
+  base = `http://localhost:${server.port}`;
+});
+afterAll(() => {
+  server.stop(true);
+});
+afterEach(() => {
+  delete process.env.AGENT_A2A_ENABLED;
+});
+
+const rpc = (method: string, params?: unknown): string =>
+  JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
+
+test('POST /api/a2a is reachable WITHOUT a device session token (owns its own auth)', async () => {
+  process.env.AGENT_A2A_ENABLED = '1';
+  // No Authorization header on purpose: the route is let past the DEVICE
+  // session guard (D5 two-stores split). An invalid envelope must therefore
+  // reach the handler and come back as a JSON-RPC error (HTTP 200), NEVER a
+  // 401-from-the-session-guard.
+  const res = await fetch(`${base}${A2A_PATH}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ not: 'a valid json-rpc envelope' }),
+  });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as {
+    jsonrpc: string;
+    error?: { code: number };
+  };
+  expect(res.status).not.toBe(401);
+  expect(body.jsonrpc).toBe('2.0');
+  expect(body.error?.code).toBe(-32600); // invalid request, from the handler
+});
+
+test('POST /api/a2a message/send returns a JSON-RPC response with a submitted task', async () => {
+  process.env.AGENT_A2A_ENABLED = '1';
+  const res = await fetch(`${base}${A2A_PATH}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: rpc('message/send', {
+      message: {
+        role: 'user',
+        parts: [{ kind: 'text', text: 'summarize this' }],
+        messageId: 'm1',
+      },
+      metadata: { skillId: 'ask' },
+    }),
+  });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as {
+    jsonrpc: string;
+    id: number;
+    result?: { status?: { state?: string }; kind?: string };
+    error?: unknown;
+  };
+  expect(body.jsonrpc).toBe('2.0');
+  expect(body.id).toBe(1); // same id echoed back
+  expect(body.error).toBeUndefined();
+  expect(body.result?.kind).toBe('task');
+  expect(body.result?.status?.state).toBe('submitted');
+});
+
+test('POST /api/a2a 404s when AGENT_A2A_ENABLED is off (fail-safe)', async () => {
+  delete process.env.AGENT_A2A_ENABLED; // default-off
+  const res = await fetch(`${base}${A2A_PATH}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: rpc('message/send', {
+      message: {
+        role: 'user',
+        parts: [{ kind: 'text', text: 'hi' }],
+        messageId: 'm2',
+      },
+      metadata: { skillId: 'ask' },
+    }),
+  });
+  expect(res.status).toBe(404);
+  await res.text();
+});
