@@ -134,8 +134,13 @@ function completedText(task: A2aTask): string {
  * Every throw is intentional: the outer wrapper converts it to `{ error }`, so
  * the tool NEVER throws — matching the `asDelegateTool` contract — while a
  * persistently-dead/slow peer still trips its per-remote circuit.
+ *
+ * Exported (not just used internally by `remoteAsToolSet`) so `agent a2a call`
+ * (`src/cli/a2a.ts`, Task 27) can drive the SAME send→poll loop the mounted
+ * orchestrator tool uses, instead of re-implementing it — here it is left to
+ * throw (the CLI's own dispatch converts the throw to a printed error).
  */
-async function delegateAndPoll(
+export async function delegateAndPoll(
   remote: RemoteAgent,
   client: A2aClient,
   task: string,

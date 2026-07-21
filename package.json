@@ -35,6 +35,7 @@
     "start": "bun run src/cli/start.ts",
     "daemon": "bun run src/cli/daemon.ts",
     "triggers": "bun run src/cli/triggers.ts",
+    "a2a": "bun run src/cli/a2a.ts",
     "status": "bun run src/cli/status.ts",
     "usage": "bun run src/cli/usage.ts"
   },
