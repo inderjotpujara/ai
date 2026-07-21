@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import {
   type A2aArtifact,
   ArtifactSchema,
+  type JsonRpcError,
   TaskStateWire,
 } from '../contracts/index.ts';
 import type { OrchestratorResult } from '../core/orchestrator.ts';
@@ -33,52 +34,82 @@ export const RESOURCE_ERROR_CODE = -32002;
 /** The typed error a fail-closed mid-run consent gate lands on (Task 13). */
 export const CONSENT_UNAVAILABLE_ERROR_CODE = -32003;
 
-type TaskError = { code: number; message: string; data?: unknown };
+/**
+ * The local typed-error shape is the wire contract itself (`JsonRpcError`) so a
+ * schema change can't drift a hand-rolled duplicate: `{ code, message, data? }`.
+ */
+type TaskError = JsonRpcError;
 
 /**
  * Terminal result → wire task state: `answer` completes; a `gap` or `resource`
- * failure is `Failed` (never `Completed`).
+ * failure is `Failed` (never `Completed`). The `never` tail makes an added
+ * `OrchestratorResult` variant fail `tsc` until it is mapped here.
  */
 export function orchestratorResultToTaskState(
   r: OrchestratorResult,
 ): TaskStateWire {
-  if (r.kind === 'answer') return TaskStateWire.Completed;
-  return TaskStateWire.Failed;
+  switch (r.kind) {
+    case 'answer':
+      return TaskStateWire.Completed;
+    case 'gap':
+    case 'resource':
+      return TaskStateWire.Failed;
+    default: {
+      const _exhaustive: never = r;
+      return _exhaustive;
+    }
+  }
 }
 
 /**
  * `answer` → one text-part artifact carrying `r.text`; `gap` / `resource` →
  * `undefined` (their detail rides the JSON-RPC error / task-status message).
+ * The `never` tail makes an added variant fail `tsc` until it is mapped here.
  */
 export function orchestratorResultToArtifact(
   r: OrchestratorResult,
 ): A2aArtifact | undefined {
-  if (r.kind !== 'answer') return undefined;
-  return ArtifactSchema.parse({
-    artifactId: randomUUID(),
-    parts: [{ kind: 'text', text: r.text }],
-  });
+  switch (r.kind) {
+    case 'answer':
+      return ArtifactSchema.parse({
+        artifactId: randomUUID(),
+        parts: [{ kind: 'text', text: r.text }],
+      });
+    case 'gap':
+    case 'resource':
+      return undefined;
+    default: {
+      const _exhaustive: never = r;
+      return _exhaustive;
+    }
+  }
 }
 
 /**
  * The typed JSON-RPC error for a failure result, or `undefined` for `answer`.
  * `gap` carries the missing capability as inert `data`; `resource` carries its
- * message verbatim (never as an instruction).
+ * message verbatim (never as an instruction). The `never` tail makes an added
+ * variant fail `tsc` until it is mapped here (no Failed-with-no-error desync).
  */
 export function resultToTaskError(
   r: OrchestratorResult,
 ): TaskError | undefined {
-  if (r.kind === 'gap') {
-    return {
-      code: MISSING_CAPABILITY_ERROR_CODE,
-      message: 'missing-capability',
-      data: { missingCapability: r.missingCapability },
-    };
+  switch (r.kind) {
+    case 'answer':
+      return undefined;
+    case 'gap':
+      return {
+        code: MISSING_CAPABILITY_ERROR_CODE,
+        message: 'missing-capability',
+        data: { missingCapability: r.missingCapability },
+      };
+    case 'resource':
+      return { code: RESOURCE_ERROR_CODE, message: r.message };
+    default: {
+      const _exhaustive: never = r;
+      return _exhaustive;
+    }
   }
-  if (r.kind === 'resource') {
-    return { code: RESOURCE_ERROR_CODE, message: r.message };
-  }
-  return undefined;
 }
 
 /**

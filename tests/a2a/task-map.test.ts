@@ -92,6 +92,22 @@ test('every JobStatus member maps (no completed hole for terminal-failure)', () 
     TaskStateWire.Completed,
   );
 });
+test('a Failed projection always carries a defined typed error (gap + resource)', () => {
+  // Compile-time totality (the `never` tail) can't be exercised at runtime;
+  // this asserts its observable intent: every non-answer result that maps to
+  // Failed also yields a defined JsonRpcError — no Failed-with-no-error desync.
+  const failures = [
+    { kind: 'gap', missingCapability: 'ocr', message: 'no ocr' },
+    { kind: 'resource', message: 'oom' },
+  ] as const;
+  for (const r of failures) {
+    expect(orchestratorResultToTaskState(r)).toBe(TaskStateWire.Failed);
+    const err = resultToTaskError(r);
+    expect(err).toBeDefined();
+    expect(typeof err?.code).toBe('number');
+    expect(typeof err?.message).toBe('string');
+  }
+});
 test('consentUnavailableError is the typed fail-closed error', () => {
   expect(CONSENT_UNAVAILABLE_ERROR_CODE).toBe(-32003);
   const err = consentUnavailableError();
