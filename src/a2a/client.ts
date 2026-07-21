@@ -280,14 +280,18 @@ export function createA2aClient(deps?: {
       params,
     });
     // The Bearer is sent ONLY to remote.baseUrl. Freshness headers satisfy the
-    // peer's replay guard (Task 16 — x-a2a-timestamp / x-a2a-nonce).
+    // peer's replay guard (Task 16 — x-a2a-timestamp / x-a2a-nonce). The
+    // timestamp is in SECONDS: the server (`server/a2a/rpc.ts`) does
+    // `Number(tsHeader) * 1000` to convert it to ms before the ±window check, so
+    // a milliseconds value here would land ~forever-in-the-future and 409 EVERY
+    // authenticated invoke (capstone B1). Emit `Date.now()/1000` to match.
     const res = await timedFetch(remote.baseUrl, {
       method: 'POST',
       redirect: 'error',
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${remote.token}`,
-        'x-a2a-timestamp': String(Date.now()),
+        'x-a2a-timestamp': String(Math.floor(Date.now() / 1000)),
         'x-a2a-nonce': randomUUID(),
       },
       body,
