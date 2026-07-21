@@ -32,6 +32,18 @@ import { loadConfig } from '../config/schema.ts';
 import { expandHome } from '../triggers/confine.ts';
 import type { RemoteAgent } from './client.ts';
 
+/**
+ * The remote-name charset — IDENTICAL to `A2aRemoteAddRequestSchema.name`
+ * (`src/contracts/a2a.ts`). Enforced HERE, at the single persistence choke
+ * point, because `name` becomes a LIVE `delegate_to_<name>` AI-SDK tool key AND
+ * a line in `buildRoutingPrompt`'s catalog (Task 29b): a space/special char is
+ * an invalid provider tool name (turn breakage) and a newline injects a
+ * routing-prompt line. The HTTP schema guards the `/api/a2a/remotes` body, but
+ * the CLI (`cli/a2a.ts`) derives `name` from the PEER-CONTROLLED `card.name` and
+ * never touched that schema — so a hostile card name reached the live tool key
+ * unchecked (capstone B6). Guarding `add` closes it for every caller. */
+export const REMOTE_NAME_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
+
 export type RemoteStore = {
   list(): RemoteAgent[];
   get(name: string): RemoteAgent | undefined;
@@ -76,6 +88,17 @@ export function createRemoteStore(config: { path?: string }): RemoteStore {
       return remotes.find((r) => r.name === name);
     },
     add(r: RemoteAgent): void {
+      // §7.3 name-charset guard at the SINGLE choke point (capstone B6): reject
+      // a non-conforming name before it is persisted / mounted as a live
+      // `delegate_to_<name>` tool key + routing-prompt line. The CLI derives the
+      // name from the peer-controlled `card.name`, which bypasses the HTTP
+      // schema's identical guard — so enforce it here for every caller.
+      if (!REMOTE_NAME_REGEX.test(r.name)) {
+        throw new Error(
+          `invalid remote name ${JSON.stringify(r.name)}: must match ` +
+            `${REMOTE_NAME_REGEX.source} (letters, digits, '_' or '-', 1–64 chars)`,
+        );
+      }
       // Field-strip to exactly the five persisted fields (defense-in-depth):
       // the type forbids extras at compile time only — an `as any`/spread
       // caller could otherwise smuggle a stray property onto disk.

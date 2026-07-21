@@ -85,3 +85,18 @@ test('an absent store file is a legitimate empty list, not an error', () => {
   const store = tempStore();
   expect(store.list()).toEqual([]);
 });
+
+test('add rejects a peer-controlled name with a space/newline (§7.3, capstone B6)', () => {
+  const store = tempStore();
+  expect(() => store.add(remote({ name: 'evil peer' }))).toThrow(
+    /invalid remote name/,
+  );
+  expect(() => store.add(remote({ name: 'line\ninject' }))).toThrow(
+    /invalid remote name/,
+  );
+  // A hostile name never reached disk — the store stays empty.
+  expect(store.list()).toEqual([]);
+  // A conforming name still persists.
+  store.add(remote({ name: 'good_peer-1' }));
+  expect(store.list().map((r) => r.name)).toEqual(['good_peer-1']);
+});
