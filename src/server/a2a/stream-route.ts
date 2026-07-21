@@ -40,6 +40,7 @@ import {
 import { orchestratorResultToArtifact } from '../../a2a/task-map.ts';
 import {
   A2aMethod,
+  JsonRpcResponseSchema,
   type SpanDTO,
   SpanDtoSchema,
   TaskStateWire,
@@ -54,10 +55,18 @@ const SSE_HEADERS = {
 };
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 
-/** A non-SSE JSON error (a resolve-then-reject rejection or an unresolvable
- *  resubscribe) — a stream never opens, so there is nothing to frame. */
-function jsonError(code: number, message: string): Response {
-  return new Response(JSON.stringify({ error: { code, message } }), {
+/** A JSON-RPC id per the spec: a string, a number, or null (echoed verbatim so a
+ *  batching client can correlate the reply). */
+type JsonRpcId = string | number | null;
+
+/** A non-SSE pre-stream rejection (a resolve-then-reject rejection or an
+ *  unresolvable resubscribe) — no stream opens, so there is nothing to frame.
+ *  Returned as a proper JSON-RPC 2.0 envelope (`{jsonrpc,id,error}`) echoing the
+ *  request `id`, matching the non-streaming `rpc.ts` path — not a bare
+ *  `{error}`. Rides HTTP 200 (the error lives in the body, not the transport). */
+function jsonRpcError(id: JsonRpcId, code: number, message: string): Response {
+  const envelope = { jsonrpc: '2.0', id, error: { code, message } };
+  return new Response(JSON.stringify(JsonRpcResponseSchema.parse(envelope)), {
     status: 200,
     headers: JSON_HEADERS,
   });
@@ -119,6 +128,18 @@ function reframedBody(
     controller.enqueue(encoder.encode(frame));
   }
 
+  // Buffer for the terminal root's frames (answer artifact + the final:true
+  // completed/failed status-update). It is NOT emitted inline: the run DTO is
+  // depth-first, so the run root sorts BEFORE its children within a single poll
+  // — emitting `completed(final:true)` there would put it ahead of a same-poll
+  // child's progress artifact, and a spec-conformant client closes on
+  // `final:true` and loses the trailing frame (or re-replays the root on
+  // reconnect → duplicate terminal). We hold it and flush ONLY once the
+  // upstream reader reaches EOF (all same-poll children already emitted), so
+  // `final:true` is genuinely the last frame. The answer artifact stays
+  // immediately before `completed` (both buffered back-to-back) and is id-less.
+  const terminal: string[] = [];
+
   function reframe(
     controller: ReadableStreamDefaultController<Uint8Array>,
     span: SpanDTO,
@@ -126,15 +147,16 @@ function reframedBody(
     const framed = frameRunSpanAsA2a(span, ctx);
     if (framed === undefined) return;
     if (isA2aTerminalRoot(span.name)) {
-      // A2A order: the answer artifact precedes the terminal completed. It is
-      // id-less so it never becomes the resume cursor (see module header).
+      // Buffer (don't emit) — flushed at EOF. Keep only the latest terminal.
+      terminal.length = 0;
       const artifact = answerArtifact(deps, ctx.taskId);
       if (artifact !== undefined) {
-        emit(
-          controller,
+        terminal.push(
           a2aArtifactFrame(ctx, artifact, { append: false, lastChunk: true }),
         );
       }
+      terminal.push(framed);
+      return;
     }
     emit(controller, framed);
   }
@@ -181,6 +203,10 @@ function reframedBody(
             sep = buf.indexOf('\n\n');
           }
         }
+        // Upstream EOF: every same-poll child/progress artifact has now been
+        // emitted, so flush the buffered terminal frame(s) LAST — `final:true`
+        // is genuinely the final frame on the wire.
+        for (const f of terminal) emit(controller, f);
       } catch {
         // Degrade to a clean close — never crash the reader (mirrors the
         // run-stream engine's own read-error posture).
@@ -204,24 +230,26 @@ function reframedBody(
 /**
  * Handle a streaming A2A method (`message/stream` / `tasks/resubscribe`),
  * returning a `text/event-stream` Response. On a resolve-then-reject rejection
- * or an unresolvable task, returns a non-SSE JSON error instead (no stream to
- * frame). The caller (`rpc.ts`) routes here AFTER the enable-gate.
+ * or an unresolvable task, returns a non-SSE JSON-RPC error envelope instead
+ * (no stream to frame) echoing the request `id`. The caller (`rpc.ts`) routes
+ * here AFTER the enable-gate and passes the envelope's `id`.
  */
 export async function handleA2aStream(
   params: unknown,
   method: A2aMethod,
   req: Request,
   deps: A2aServerDeps,
+  id: JsonRpcId = null,
 ): Promise<Response> {
   if (method === A2aMethod.MessageStream) {
     // Reuse the non-streaming send: §7.4 resolve-then-reject + §7.2 fence +
     // enqueue. A rejection (unlisted skill) never opens a stream.
     const res = await handleMessageSend(params, deps);
-    if (!res.ok) return jsonError(res.error.code, res.error.message);
+    if (!res.ok) return jsonRpcError(id, res.error.code, res.error.message);
     const task = res.result as { id: string; contextId: string };
     const job = deps.jobStore.getJob(task.id);
     if (job?.runId === undefined) {
-      return jsonError(-32603, 'run not available for streaming');
+      return jsonRpcError(id, -32603, 'run not available for streaming');
     }
     const ctx: A2aStreamCtx = { taskId: task.id, contextId: task.contextId };
     return new Response(reframedBody(job.runId, ctx, deps, undefined, true), {
@@ -233,10 +261,14 @@ export async function handleA2aStream(
   // HTTP Last-Event-ID (EventSource's reconnect cursor). No synthetic opening
   // frames — this is a reconnect, not a fresh subscription.
   const taskId = asObject(params).id;
-  if (typeof taskId !== 'string') return jsonError(-32602, 'invalid params');
+  if (typeof taskId !== 'string') {
+    return jsonRpcError(id, -32602, 'invalid params');
+  }
   const jobId = deps.taskIndex.jobIdForTask(taskId);
   const job = jobId === undefined ? undefined : deps.jobStore.getJob(jobId);
-  if (job?.runId === undefined) return jsonError(-32001, 'task not found');
+  if (job?.runId === undefined) {
+    return jsonRpcError(id, -32001, 'task not found');
+  }
   const ctx: A2aStreamCtx = {
     taskId,
     contextId: deps.taskIndex.contextFor(taskId),

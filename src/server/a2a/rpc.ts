@@ -125,6 +125,7 @@ export async function handleA2aRpc(
       envelope.data.method,
       req,
       deps,
+      envelope.data.id,
     );
   }
 

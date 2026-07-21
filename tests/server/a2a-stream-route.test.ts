@@ -311,3 +311,82 @@ test('tasks/resubscribe replays only frames NEWER than Last-Event-ID (cursor chi
     ),
   ).toBe(false);
 });
+
+test('same-poll (message/stream fast path): child progress precedes final:true, and final:true is the LAST frame', async () => {
+  const { deps, js } = harness();
+  const res = await handleA2aStream(
+    { message: msg('go'), metadata: { skillId: 'ask' } },
+    A2aMethod.MessageStream,
+    streamReq(),
+    deps,
+  );
+  const job = [...js.jobs.values()][0];
+  if (!job?.runId) throw new Error('expected an enqueued job with a runId');
+  // The run completes BEFORE the first poll: root + child land in ONE snapshot
+  // (written in a single file write, so a poll sees both together). The run
+  // root sorts FIRST in the depth-first DTO, so a naive framer would emit its
+  // completed(final:true) BEFORE the child's progress artifact.
+  job.status = JobStatus.Done;
+  job.result = { kind: 'answer', text: 'fast answer' };
+  await writeSpans(job.runId, [childSpan, rootSpan]);
+
+  const frames = await collect(res);
+  const childIdx = frames.findIndex((f) => f.id === 'd1'); // child progress
+  const finalIdx = frames.findIndex((f) => f.data.final === true);
+  expect(childIdx).toBeGreaterThanOrEqual(0);
+  expect(finalIdx).toBeGreaterThanOrEqual(0);
+  // the child progress artifact is emitted BEFORE the terminal completed frame
+  expect(childIdx).toBeLessThan(finalIdx);
+  // final:true is genuinely the LAST frame in the stream
+  expect(finalIdx).toBe(frames.length - 1);
+  // exactly one terminal frame (never dropped, never duplicated)
+  expect(frames.filter((f) => f.data.final === true)).toHaveLength(1);
+});
+
+test('resubscribe on a Done run (whole snapshot in ONE poll): final:true is the LAST frame', async () => {
+  const { deps, js } = harness();
+  const runId = 'run-resub-order';
+  js.jobs.set('job-ro', {
+    ...baseRecord('job-ro'),
+    status: JobStatus.Done,
+    runId,
+    result: { kind: 'answer', text: 'ro answer' },
+  });
+  deps.taskIndex.bind('job-ro', 'job-ro', 'ctx-ro');
+  // Root written first (also sorts first in the DTO); child ends earlier. No
+  // Last-Event-ID → the full snapshot replays in a single poll, so root and
+  // child are re-framed within the same poll.
+  await writeSpans(runId, [rootSpan, childSpan]);
+
+  const res = await handleA2aStream(
+    { id: 'job-ro' },
+    A2aMethod.TasksResubscribe,
+    streamReq(),
+    deps,
+  );
+  const frames = await collect(res);
+  const childIdx = frames.findIndex((f) => f.id === 'd1');
+  const finalIdx = frames.findIndex((f) => f.data.final === true);
+  expect(childIdx).toBeGreaterThanOrEqual(0);
+  expect(childIdx).toBeLessThan(finalIdx);
+  expect(finalIdx).toBe(frames.length - 1); // final:true genuinely last
+});
+
+test('a streaming reject returns a JSON-RPC error envelope (jsonrpc/id/error)', async () => {
+  const { deps, js } = harness();
+  const res = await handleA2aStream(
+    { message: msg('hi'), metadata: { skillId: 'ghost' } },
+    A2aMethod.MessageStream,
+    streamReq(),
+    deps,
+    'req-77', // the JSON-RPC id to echo
+  );
+  expect(res.headers.get('content-type')).not.toContain('text/event-stream');
+  expect(js.jobs.size).toBe(0);
+  const body = (await res.json()) as Record<string, unknown>;
+  expect(body).toMatchObject({
+    jsonrpc: '2.0',
+    id: 'req-77',
+    error: { code: expect.any(Number), message: expect.any(String) },
+  });
+});
