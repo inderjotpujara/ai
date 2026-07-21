@@ -38,7 +38,9 @@ import { newRunId } from '../run/run-id.ts';
 import { createRun } from '../run/run-store.ts';
 import { delimitUntrusted } from '../server/chat/task.ts';
 import type { A2aAllowlist, ResolvedTarget } from './allowlist.ts';
+import type { createA2aClient } from './client.ts';
 import type { A2aEnrollment } from './enroll.ts';
+import type { RemoteStore } from './remotes.ts';
 import { withA2aServerTaskSpan } from './spans.ts';
 import type { createTaskIndex } from './task-index.ts';
 import {
@@ -79,6 +81,14 @@ export type A2aServerDeps = {
    *  tests, or a queued/terminal job) the store is marked directly. Additive,
    *  optional — the route (Task 12) wires the real pool. */
   pool?: { cancel(id: string): boolean };
+  /** CONSUME-side deps (Task 20/22) — the remote-agent store + discover/pin/
+   *  invoke client the `/api/a2a/remotes*` routes need. Optional so the
+   *  pre-Increment-6 EXPOSE-only test fixtures that build `A2aServerDeps`
+   *  literals for the RPC/stream/card routes (which never touch the CONSUME
+   *  side) need not set them; `buildA2aServerDeps` (`server/a2a/wire.ts`)
+   *  always constructs both. */
+  remotes?: RemoteStore;
+  client?: ReturnType<typeof createA2aClient>;
 };
 
 export type A2aRpcResult =

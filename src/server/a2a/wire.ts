@@ -14,13 +14,17 @@
  * report unavailable — the expose surface advertises nothing until an operator
  * turns it on (the fail-safe default).
  *
- * Increment 6 (Task 20/22) extends this with the CONSUME side (`remotes` +
- * `client`); those factories do not exist yet, so this Increment-5 constructor
- * builds only the EXPOSE-complete fields.
+ * Increment 6 (Task 20/22) extends this with the CONSUME side: `remotes`
+ * (`a2a/remotes.ts`, the discovered/pinned remote-agent store) and `client`
+ * (`a2a/client.ts`, the discover/verifyPin/invoke port). Both are now
+ * constructed unconditionally alongside the EXPOSE-side fields, so
+ * `deps.a2a.remotes`/`deps.a2a.client` are live whenever `deps.a2a` is.
  */
 
 import { createA2aAllowlist } from '../../a2a/allowlist.ts';
+import { createA2aClient } from '../../a2a/client.ts';
 import { createA2aEnrollment } from '../../a2a/enroll.ts';
+import { createRemoteStore } from '../../a2a/remotes.ts';
 import type { A2aServerDeps } from '../../a2a/server.ts';
 import { createTaskIndex } from '../../a2a/task-index.ts';
 import type { loadConfig } from '../../config/schema.ts';
@@ -46,6 +50,10 @@ export function buildA2aServerDeps(
     jobStore: ctx.jobStore,
     runsRoot: ctx.runsRoot,
     taskIndex: createTaskIndex(),
-    // Task 20/22 (Increment 6): add remotes + client (CONSUME side).
+    // CONSUME side (Task 20/22): the remote store's own path knob
+    // (`AGENT_A2A_REMOTES_PATH`) is separate from the expose-side skills
+    // path — the two surfaces never share a file.
+    remotes: createRemoteStore({ path: String(cfg.AGENT_A2A_REMOTES_PATH) }),
+    client: createA2aClient(),
   };
 }

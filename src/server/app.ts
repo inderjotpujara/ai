@@ -8,9 +8,16 @@ import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
 import { handleAgentCard } from './a2a/card.ts';
 import { handleA2aConfig } from './a2a/config.ts';
+import {
+  handleRemoteAdd,
+  handleRemoteDelete,
+  handleRemoteList,
+} from './a2a/remotes.ts';
+import { handleRemoteTest } from './a2a/remotes-test.ts';
 import { handleA2aRpc } from './a2a/rpc.ts';
 import { handleA2aSkillsPut } from './a2a/skills.ts';
 import { handleA2aTokenIssue, handleA2aTokenRevoke } from './a2a/token.ts';
+
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
 import {
@@ -618,6 +625,73 @@ async function handleApi(
             a2aTokenRevoke[1],
             req,
             { enrollment: a2a.enrollment, policy: deps.policy },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // --- A2A remotes (CONSUME side, Slice 31 Task 22) -------------------
+        // The Federation console's remote-agent CRUD — which remote peers
+        // THIS node delegates to, distinct from the expose-side token/skills
+        // routes above. All four gate `requireTrustedLocal` INTERNALLY (the
+        // `handleA2aTokenIssue`/`handleA2aTokenRevoke` precedent), so this
+        // block just narrows the optional CONSUME deps via `need` (a missing
+        // `deps.a2a`/`.remotes`/`.client` degrades to 503, never a throw). The
+        // `/test` dry-run action is matched before the bare-`:name` DELETE
+        // detail below, mirroring the `/token` vs `/token/:id` ordering.
+        if (req.method === 'GET' && url.pathname === '/api/a2a/remotes') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleRemoteList(
+            req,
+            {
+              remotes: need(a2a.remotes, 'a2a.remotes'),
+              client: need(a2a.client, 'a2a.client'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/a2a/remotes/test') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleRemoteTest(
+            req,
+            { client: need(a2a.client, 'a2a.client'), policy: deps.policy },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/a2a/remotes') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleRemoteAdd(
+            req,
+            {
+              remotes: need(a2a.remotes, 'a2a.remotes'),
+              client: need(a2a.client, 'a2a.client'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action-before-:id: this bare-:name DELETE follows the `/test`
+        // action above so `POST /api/a2a/remotes/test` is never captured here.
+        const a2aRemoteDelete = url.pathname.match(
+          /^\/api\/a2a\/remotes\/([^/]+)$/,
+        );
+        if (req.method === 'DELETE' && a2aRemoteDelete?.[1]) {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleRemoteDelete(
+            a2aRemoteDelete[1],
+            req,
+            {
+              remotes: need(a2a.remotes, 'a2a.remotes'),
+              client: need(a2a.client, 'a2a.client'),
+              policy: deps.policy,
+            },
             guard,
           );
           rec.status(res.status);

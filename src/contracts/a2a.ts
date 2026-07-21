@@ -196,3 +196,56 @@ export const A2aTokenIssueResponseSchema = z.object({
   token: z.string(),
 });
 export type A2aTokenIssueResponse = z.infer<typeof A2aTokenIssueResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// A2A remote store DTOs (Slice 31 Task 22) — the CONSUME-side counterpart to
+// the config console above: which remote peers THIS node delegates to, added
+// via `POST /api/a2a/remotes` (discover-then-pin) and listed via
+// `GET /api/a2a/remotes`. Distinct credential domain from the expose-side
+// tokens: a remote's `token` is ITS Bearer, sent outbound to `baseUrl`, and —
+// like the expose-side secret — is NEVER round-tripped onto the wire once
+// stored (`a2a/remotes.ts`).
+// ---------------------------------------------------------------------------
+
+/** Wire DTO for one discovered+pinned remote. OMITS `token` — the remote's
+ *  Bearer lives only in the server-side store (`a2a/remotes.ts`) and must
+ *  never reach a client, span, or log. */
+export const A2aRemoteDtoSchema = z.object({
+  name: z.string(),
+  baseUrl: z.string(),
+  cardUrl: z.string(),
+  pinnedCardHash: z.string(),
+});
+export type A2aRemoteDto = z.infer<typeof A2aRemoteDtoSchema>;
+
+/** `GET /api/a2a/remotes` response. */
+export const A2aRemoteListResponseSchema = z.object({
+  remotes: z.array(A2aRemoteDtoSchema),
+});
+export type A2aRemoteListResponse = z.infer<typeof A2aRemoteListResponseSchema>;
+
+/** `POST /api/a2a/remotes` body — add a remote. The server discovers +
+ *  pins `cardUrl` BEFORE persisting (a failed discover is a 400, nothing
+ *  stored); `token` is the remote's Bearer, stored but never echoed back. */
+export const A2aRemoteAddRequestSchema = z.object({
+  name: z.string().min(1).max(200),
+  cardUrl: z.string().min(1).max(2048),
+  token: z.string().min(1),
+});
+export type A2aRemoteAddRequest = z.infer<typeof A2aRemoteAddRequestSchema>;
+
+/** `POST /api/a2a/remotes/test` body — dry-run discover/validate/pin of a
+ *  card URL; nothing is persisted regardless of outcome. */
+export const A2aRemoteTestRequestSchema = z.object({
+  cardUrl: z.string().min(1).max(2048),
+});
+export type A2aRemoteTestRequest = z.infer<typeof A2aRemoteTestRequestSchema>;
+
+/** `POST /api/a2a/remotes/test` response — the discovered card + the hash
+ *  that WOULD be pinned were this an Add. The store is untouched by this
+ *  route (`server/a2a/remotes-test.ts`). */
+export const A2aRemoteTestResponseSchema = z.object({
+  card: AgentCardSchema,
+  pinnedCardHash: z.string(),
+});
+export type A2aRemoteTestResponse = z.infer<typeof A2aRemoteTestResponseSchema>;

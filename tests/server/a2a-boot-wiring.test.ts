@@ -86,7 +86,7 @@ test('AGENT_A2A_ENABLED off → deps.a2a undefined and the card route reports un
   }
 });
 
-test('buildA2aServerDeps yields the EXPOSE-complete shape (allowlist+enrollment+jobStore+runsRoot+taskIndex); remotes/client deferred to T20/T22', () => {
+test('buildA2aServerDeps yields the full EXPOSE+CONSUME shape (allowlist+enrollment+jobStore+runsRoot+taskIndex+remotes+client)', () => {
   const skillsPath = join(
     mkdtempSync(join(tmpdir(), 'a2a-boot-wire-')),
     'a2a-skills.json',
@@ -111,9 +111,10 @@ test('buildA2aServerDeps yields the EXPOSE-complete shape (allowlist+enrollment+
     expect(deps.jobStore).toBe(jobStore);
     expect(deps.runsRoot).toBe('runs');
     expect(deps.taskIndex).toBeDefined();
-    // Increment 6 (Task 20/22, CONSUME side) grows these — absent here.
-    expect('remotes' in deps).toBe(false);
-    expect('client' in deps).toBe(false);
+    // Increment 6 (Task 20/22, CONSUME side) — now constructed alongside the
+    // EXPOSE-side fields, not deferred.
+    expect(deps.remotes).toBeDefined();
+    expect(deps.client).toBeDefined();
   } finally {
     jobStore.close();
   }
