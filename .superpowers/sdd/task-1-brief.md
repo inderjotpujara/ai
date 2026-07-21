@@ -1,126 +1,70 @@
-## Task 1: `JobDto.availableAt` + `JobDto.retriedFrom` + `retried_from` column + store lineage plumbing
+### Task 1: Engine trigger types + enums
 
 **Files:**
-- Modify: `src/contracts/dto.ts` (add two fields to `JobDtoSchema`)
-- Modify: `src/queue/migrations.ts` (append an `'add-retried-from'` migration)
-- Modify: `src/queue/types.ts` (`JobRecord.retriedFrom`, `JobInput.retriedFrom`)
-- Modify: `src/queue/store.ts` (`JobRowRaw.retried_from`, `toJobRecord`, `enqueue` INSERT)
-- Test: `tests/queue/migrations.test.ts` (extend), `tests/queue/store-lineage.test.ts` (new), `tests/contracts/job-dto.test.ts` (extend or new)
+- Create: `src/triggers/types.ts`
+- Test: `tests/triggers/types.test.ts`
 
 **Interfaces:**
-- Consumes: `JobDtoSchema` (`src/contracts/dto.ts:131`), `JOB_MIGRATIONS` (`src/queue/migrations.ts`), `JobRecord`/`JobInput` (`src/queue/types.ts`), `createJobStore` (`src/queue/store.ts:112`).
-- Produces: `JobDtoSchema` with `availableAt: z.number()` + `retriedFrom: z.string().nullable()` (Shared contracts); `JobRecord.retriedFrom: string | null`; `JobInput.retriedFrom?: string`; `JobStore.enqueue` persists `retried_from`. `toJobDto` (`src/server/jobs/map.ts`) is an unchanged passthrough `JobDtoSchema.parse(record)` — it works once `JobRecord` carries `availableAt` (already there) + `retriedFrom`.
+- Consumes: `JobKind`, `JobStatus` from `src/queue/types.ts`; `RunOrigin` from `src/contracts/enums.ts`.
+- Produces:
+  - `enum TriggerType { Cron='cron', Webhook='webhook', File='file', JobChain='jobchain' }`
+  - `enum TriggerOrigin { Repo='repo', Console='console' }`
+  - `enum TriggerOutcome { Fired='fired', SkippedOverlap='skipped-overlap', Failed='failed' }`
+  - `enum FileEventKind { Add='add', Change='change' }`
+  - `type CronConfig = { schedule: string; timezone?: string; catchUp?: boolean; allowOverlap?: boolean }`
+  - `type WebhookConfig = { hmac?: boolean }`
+  - `type FileConfig = { path: string; events?: FileEventKind[] }`
+  - `type JobChainConfig = { onKind?: JobKind; onName?: string; onStatus: JobStatus }`
+  - `type TriggerConfig = CronConfig | WebhookConfig | FileConfig | JobChainConfig`
+  - `type TriggerTarget = { kind: JobKind; payload: unknown }`
+  - `type Trigger = { id: string; name: string; type: TriggerType; enabled: boolean; target: TriggerTarget; config: TriggerConfig; origin: TriggerOrigin; nextRunAt?: number; lastFiredAt?: number; secretRef?: string; createdAt: number; updatedAt: number }`
+  - `type TriggerFiring = { id: string; triggerId: string; firedAt: number; jobId?: string; runId?: string; outcome: TriggerOutcome }`
+  - `type TriggerInput = { name: string; type: TriggerType; enabled?: boolean; target: TriggerTarget; config: TriggerConfig; origin: TriggerOrigin; secretRef?: string; nextRunAt?: number }`
 
-- [ ] **Step 1: Write the failing store test** — `tests/queue/store-lineage.test.ts`:
-```typescript
-import { test, expect } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createJobStore } from '../../src/queue/store.ts';
-import { JobKind } from '../../src/queue/types.ts';
+- [ ] **Step 1: Write the failing test** — assert the enum string values are exactly the spec's wire strings (so a later rename breaks loudly).
 
-function tempStore() {
-  return createJobStore({ path: mkdtempSync(join(tmpdir(), 'jobs-')) }, {});
-}
+```ts
+import { expect, test } from 'bun:test';
+import { TriggerOrigin, TriggerOutcome, TriggerType } from '../../src/triggers/types.ts';
 
-test('a fresh job has retriedFrom null', () => {
-  const store = tempStore();
-  const job = store.enqueue({ kind: JobKind.Crew, payload: { input: 'go' } });
-  expect(job.retriedFrom).toBeNull();
-  expect(store.getJob(job.id)?.retriedFrom).toBeNull();
-  store.close();
+test('TriggerType holds the four source wire values', () => {
+  expect(Object.values(TriggerType).sort()).toEqual(
+    ['cron', 'file', 'jobchain', 'webhook'],
+  );
 });
-
-test('enqueue stamps retriedFrom when supplied (lineage)', () => {
-  const store = tempStore();
-  const original = store.enqueue({ kind: JobKind.Crew, payload: 1 });
-  const retry = store.enqueue({
-    kind: JobKind.Crew,
-    payload: 1,
-    retriedFrom: original.id,
-  });
-  expect(retry.retriedFrom).toBe(original.id);
-  expect(store.getJob(retry.id)?.retriedFrom).toBe(original.id);
-  store.close();
+test('TriggerOrigin + TriggerOutcome wire values', () => {
+  expect(Object.values(TriggerOrigin).sort()).toEqual(['console', 'repo']);
+  expect(Object.values(TriggerOutcome).sort()).toEqual(
+    ['failed', 'fired', 'skipped-overlap'],
+  );
 });
 ```
 
-- [ ] **Step 2: Run — verify it fails** — `bun test tests/queue/store-lineage.test.ts` → FAIL (`retriedFrom` is `undefined`, not `null`, and `JobInput` has no `retriedFrom`).
+- [ ] **Step 2: Run test to verify it fails** — `bun run test -- -t "TriggerType holds"` → FAIL (module not found).
+- [ ] **Step 3: Write minimal implementation** — create `src/triggers/types.ts` with the enums and `type`s from the Produces block above. `import { type JobKind, type JobStatus } from '../queue/types.ts'` and `import type { RunOrigin } from '../contracts/enums.ts'` (RunOrigin is only re-referenced in later modules; import lazily where used — types.ts itself needs only JobKind/JobStatus).
+- [ ] **Step 4: Run test to verify it passes** — `bun run test -- -t "TriggerType holds"` → PASS.
+- [ ] **Step 5: Land the `src/triggers/` docs stub in THIS commit (unblocks `docs:check`).** Creating the first `src/triggers/` file makes `scripts/docs-check.ts` fail on the pre-commit hook (it hard-fails on any undocumented top-level `src/<subsystem>`, and `.githooks/pre-commit` has no bypass). Insert a minimal stub section into `docs/architecture.md` — placed near the Queue/Daemon subsystem sections — so the `arch.includes('src/triggers')` substring check passes from this first commit. 2–4 sentences, marked as expanded later:
 
-- [ ] **Step 3: Implement the migration** — append to `JOB_MIGRATIONS` in `src/queue/migrations.ts` (AFTER the existing `'init-jobs'` entry, so `user_version` advances to 2):
-```typescript
-  {
-    name: 'add-retried-from',
-    up: (db: Database) => {
-      // §11 lineage: a retried job records the id of the job it re-runs, so the
-      // Jobs drawer can show "retry of job X" and back-link. Nullable — original
-      // (non-retry) jobs have no lineage.
-      db.run(`ALTER TABLE jobs ADD COLUMN retried_from TEXT`);
-    },
-  },
+```markdown
+### `src/triggers/` — trigger engine (Slice 25, stub)
+
+A durable poll-tick trigger engine that lives in the daemon: four sources —
+cron, webhook, file-watch, and job-chain — converge on `fire.ts`, which
+enqueues a target `JobKind`+payload via `JobStore.enqueue` (threading `origin`
+provenance) and writes a `trigger_firings` audit row. Triggers are authored
+from repo TS defs (`triggers/index.ts`, `origin=repo`) and console/API CRUD
+(`origin=console`), persisted in `jobs.db`.
+
+> Stub — expanded into the full subsystem writeup (module map, data-flow
+> edges, `/hooks/:token` route class) in this slice's docs task (Task 34).
 ```
 
-- [ ] **Step 4: Implement the type + store changes.**
-  - `src/queue/types.ts`: add `retriedFrom: string | null;` to `JobRecord` (after `error`), and `retriedFrom?: string;` to `JobInput` (after `runId`).
-  - `src/queue/store.ts`: add `retried_from: string | null;` to `JobRowRaw`; in `toJobRecord` add `retriedFrom: r.retried_from,` (SQLite yields `string | null` directly — no `?? undefined` since the DTO field is `nullable`, not optional); change the `enqueue` INSERT to include the column:
-```typescript
-    db.run(
-      `INSERT OR IGNORE INTO jobs
-       (id, kind, payload, priority, status, attempts, max_attempts,
-        created_at, updated_at, started_at, finished_at, available_at,
-        run_id, result, error, retried_from)
-       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?)`,
-      [
-        id,
-        input.kind,
-        JSON.stringify(input.payload),
-        priority,
-        max,
-        at,
-        at,
-        availableAt,
-        runId,
-        input.retriedFrom ?? null,
-      ],
-    );
-```
+- [ ] **Step 6: Gate + commit** — `bun run typecheck && bun run lint:file -- src/triggers/types.ts tests/triggers/types.test.ts && bun run docs:check` (docs-check now PASSES because the stub documents `src/triggers/`).
 
-- [ ] **Step 5: Extend the migration test** — in `tests/queue/migrations.test.ts`, update the `init-jobs` column assertion's expected version to `2` and add `'retried_from'` to the expected `cols` array (last element); add:
-```typescript
-test('add-retried-from advances user_version to 2', () => {
-  const db = new Database(':memory:');
-  expect(migrate(db, JOB_MIGRATIONS)).toBe(2);
-});
-```
-
-- [ ] **Step 6: Extend the contract** — in `src/contracts/dto.ts`, add to `JobDtoSchema` (after `error`):
-```typescript
-  availableAt: z.number(),
-  retriedFrom: z.string().nullable(),
-```
-Add a round-trip assertion in `tests/contracts/job-dto.test.ts` (create if absent):
-```typescript
-import { test, expect } from 'bun:test';
-import { JobDtoSchema } from '../../src/contracts/dto.ts';
-
-test('JobDtoSchema round-trips availableAt + nullable retriedFrom', () => {
-  const dto = {
-    id: 'job-1', kind: 'crew', payload: { input: 'x' }, priority: 'normal',
-    status: 'queued', attempts: 0, maxAttempts: 3, createdAt: 1, updatedAt: 1,
-    availableAt: 0, retriedFrom: null,
-  };
-  expect(JobDtoSchema.parse(dto).retriedFrom).toBeNull();
-  expect(JobDtoSchema.parse({ ...dto, retriedFrom: 'job-0' }).retriedFrom).toBe('job-0');
-});
-```
-
-- [ ] **Step 7: Run — verify green** — `bun test tests/queue/store-lineage.test.ts tests/queue/migrations.test.ts tests/contracts/job-dto.test.ts` → PASS.
-
-- [ ] **Step 8: Gate + commit**
 ```bash
-bun run typecheck && bun run lint:file -- src/contracts/dto.ts src/queue/migrations.ts src/queue/types.ts src/queue/store.ts tests/queue/store-lineage.test.ts tests/queue/migrations.test.ts tests/contracts/job-dto.test.ts
-git add src/contracts/dto.ts src/queue/migrations.ts src/queue/types.ts src/queue/store.ts tests/queue/
-git commit -m "feat(queue): JobDto availableAt + retriedFrom lineage column (Slice 25b Incr 1)"
+git add src/triggers/types.ts tests/triggers/types.test.ts docs/architecture.md
+git commit -m "feat(triggers): engine trigger types + enums (+ src/triggers docs stub)"
 ```
+
+*Model: Sonnet (mechanical type definition + a one-paragraph docs stub).*
 

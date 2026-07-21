@@ -86,3 +86,105 @@ The route consumes `deps.rootTokens` and `deps.sessionTokens` as-is; correctness
 - **Minor / test hygiene:** the dead control block in `tests/server/security/rotate.test.ts` (created `d`/`bad`, asserted nothing) now asserts the valid rotate is 200 and its body carries only `token` with no echo of `d.rootSecret`.
 
 **Gates:** `bun run typecheck` clean · `bun run lint:file` (3 files) clean · `bun test tests/server/security/root-token.test.ts tests/server/security/rotate.test.ts` → 14 pass / 0 fail · `bun test tests/server/` → 373 pass / 0 fail (session-token/rotate/pair/revoke all green).
+
+
+---
+
+# Task 19 report — Slice 25 (Scheduled + Triggered Agents): `POST /hooks/:token` webhook receiver (HARD §7.1)
+
+**Status:** COMPLETE. **Commit:** `3f7e58e`.
+
+## What was built
+- `src/triggers/webhook-verify.ts` (pure, unit-testable):
+  - `hashToken(token)` = `createHash('sha256').update(token).digest('hex')`.
+  - `constantTimeEqualHex(a,b)` — double length-guard (string, then decoded
+    bytes — `Buffer.from(hex)` drops invalid/odd nibbles) before
+    `timingSafeEqual` (which throws on length mismatch).
+  - `verifyHmac(...)` — replay window checked FIRST (unix SECONDS per M4;
+    `Number(...)`, non-finite/absent/wrong-unit-ms → 409), THEN constant-time
+    HMAC-SHA256 compare over `${timestampHeader}.${rawBody}` (Stripe-verbatim,
+    raw body bytes; bad sig / missing sig header → 401).
+- `src/server/hooks/webhook.ts` — `handleWebhook(token, req, deps)` inside
+  `withServerRequestSpan({ route:'/hooks/:token' })`. Order: token→sha256 lookup
+  via `getByTokenHash` (miss/non-webhook/disabled → 404, uniform shape) → body
+  cap (Content-Length pre-check vs `AGENT_WEB_MAX_BODY_BYTES`, injectable
+  `maxBodyBytes` for tests → 413) → read raw body ONCE → HMAC when
+  `cfg.hmac` (secretStore.get(); missing secret → 500 fail-closed; 401/409 per
+  verifyHmac) → run-dir limiter (429) → `fire(trigger,{reason:'webhook',
+  vars:{'webhook.body':rawBody}})` fire-and-forget → 202 {jobId,runId} (or
+  202 {skipped:outcome} on overlap/cap skip). Raw token/secret never
+  logged/spanned/returned.
+- `src/server/app.ts` — `/hooks/:token` POST branch placed AFTER
+  `new URL()`/`enforcePerimeter` but BEFORE the `/api` session-guard block
+  (outside bearer guard, inside Host/Origin perimeter). Absent `deps.triggers`
+  → explicit 503 (DepUnavailableError message shape), not the outer-catch 500.
+  Only POST matches; other methods fall through to serveStatic (exposes nothing
+  new). Wired store/secretStore/fire from `deps.triggers`, runLimiter from
+  `deps.runLimiter` (shared process limiter).
+
+## Tests (TDD)
+`tests/triggers/webhook-verify.test.ts` + `tests/server/hooks-webhook.test.ts`:
+**20 pass / 0 fail (46 assertions).** Covers: good HMAC→202+fire; bad HMAC→401
+no-fire; stale/absent/garbage/millisecond-unit timestamp→409; replay-before-sig
+ordering; unknown/disabled/non-webhook token→404 no-fire; hmac-off→202 on token
+alone; missing secret→500; over-cap Content-Length→413 before buffering;
+rate-limit→429; overlap-skip→202; token/secret-never-in-response assertions.
+Regression: app.test.ts + principal.test.ts (22 pass).
+
+Gate: `bun run typecheck` clean; `bun run lint:file` on all 5 files clean;
+focused tests green. Staged only the 5 touched files.
+
+## Concerns / notes
+- Handler adds a Content-Length pre-check (mirroring /api/telemetry) as
+  defense-in-depth so 413 is unit-testable; Bun.serve `maxRequestBodySize`
+  remains the runtime backstop. It rejects only when CL is present and > cap
+  (chunked/absent-CL bodies still rely on the Bun.serve backstop) — deliberate,
+  to avoid breaking chunked senders.
+- GET `/hooks/:token` (extensionless) falls through to serveStatic's SPA
+  fallback (returns index HTML 200), same as any extensionless path — no
+  webhook function is exposed; only POST fires. Acceptable / pre-existing.
+- The route branch bypasses `handleApi`'s span/telemetry wrapper by design (it
+  runs its own `withServerRequestSpan` inside `handleWebhook`). Docs
+  (architecture.md/README/ROADMAP/ledger) are the slice-landing gate's job, not
+  this per-task commit.
+
+## Fix pass
+
+Task 19's dual review (spec-review + §7.1 adversarial, both SOUND/Approved —
+no security break) found one LOW code fix + two security-posture doc notes.
+All three applied in one commit.
+
+- **FIX 1 (LOW code — status oracle).** `src/server/app.ts`'s route branch
+  called `handleWebhook(decodeURIComponent(hookMatch[1]), …)` directly.
+  `decodeURIComponent('%zz')` throws a `URIError`, which escaped to the outer
+  try/catch → an opaque 500 — a minor 500-vs-404 status oracle breaking the
+  "any invalid token → uniform 404" contract. Fixed by wrapping the decode in
+  its own try/catch: a decode failure now returns the SAME 404 shape
+  (`{ error: 'not found' }`) as an unknown/disabled-trigger miss, BEFORE any
+  store lookup. Valid tokens still decode+hash identically (unchanged path).
+  **Test added:** `tests/server/app.test.ts` — `POST /hooks/%zz` → 404 with
+  body `{ error: 'not found' }`, using a dedicated fixture server whose
+  triggerStore/secretStore/fire stubs all throw if invoked (proves the decode
+  failure short-circuits before any lookup).
+- **FIX 2 (doc — in-window replay, no code change).** `src/triggers/webhook-verify.ts`
+  — added a comment at the replay-window check in `verifyHmac` stating
+  in-window HMAC replay is intentionally NOT deduped (no nonce/delivery-id
+  store); the ±windowMs window bounds exposure, it doesn't eliminate it. This
+  mirrors GitHub/Stripe (both push idempotency to the consumer) and is
+  accepted for a local single-owner daemon; tightening would need an LRU of
+  seen signatures — deferred as out-of-scope for this task.
+- **FIX 3 (doc — empty-secret contract, no code change).** `src/triggers/webhook-verify.ts`
+  — added a one-line contract comment on `verifyHmac`'s doc block: the caller
+  MUST pass a non-empty secret (an empty HMAC key is attacker-computable);
+  `verifyHmac` does not itself validate that, relying on two upstream guards
+  (the handler's `if (!secret)` → 500, and the secret store's `load()`
+  dropping empty/whitespace secrets at rest).
+
+No nonce dedup added, rate limiter not reordered, HMAC/replay behavior
+unchanged — matches the fix brief exactly.
+
+**Gate:** `bun run typecheck` clean; `bun run lint:file` on the 4 touched
+files clean; `bun run test:file -- tests/server/app.test.ts
+tests/server/hooks-webhook.test.ts` → 32 pass / 0 fail (88 assertions);
+broader regression `tests/server` + `tests/triggers` → 515 pass / 0 fail.
+Commit `fix(triggers): webhook malformed-token 404 (was 500) + replay/empty-secret contract notes`.

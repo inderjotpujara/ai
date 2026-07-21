@@ -136,3 +136,96 @@ both `use-job-actions.test.tsx` and an integration assertion in
    unrelated earlier slice's Task 30 (daemon/queue telemetry spans) — a task
    numbering collision across slices, not something this task introduced.
    Overwritten with the correct content above.
+
+---
+
+# Task 30 report — Firings drawer + toggle/fire wiring (Slice 25, LAST console task)
+
+Slice 25 (Scheduled + Triggered Agents web console). Branch
+`slice-25-triggers`. Commit `cbd9012`
+`feat(web): firing-history drawer + enable/disable toggle + manual fire`.
+
+(Note: the section above this separator is a DIFFERENT slice's Task 30 —
+Slice 25b's job cancel/resume/retry actions. That numbering collision is
+pre-existing and not introduced by this task; this section is appended,
+per the report contract, rather than overwriting it.)
+
+## What shipped
+
+### `web/src/features/ops/trigger-firings-drawer.tsx` (new)
+`TriggerFiringsDrawer({ triggerId, triggerName, onClose })` — mirrors the
+`JobDetailDrawer` shell (fixed right-hand `<aside>`, `data-testid`
+`ops-trigger-firings-drawer`, a Close button) but lists
+`useTriggerFirings(triggerId)`'s keyset page of firing records instead of a
+single job's fields:
+- Each row (`data-testid=ops-firing-${firing.id}`) shows `firedAt`
+  (`toLocaleString()`) and `outcome` (`fired`/`skipped-overlap`/`failed`,
+  raw `TriggerOutcomeWire` value).
+- A `runId`, when present, renders a `Link` (`@tanstack/react-router`) to
+  `/runs/$runId` — the `JobDetailDrawer`'s `runId`-deep-link precedent,
+  byte-for-byte (`to="/runs/$runId"` + `params={{ runId }}`). Per
+  `TriggerFiringDtoSchema`'s contract, `jobId`/`runId` are absent for a
+  `skipped-overlap`/pre-enqueue-`failed` outcome — the link only renders
+  when `runId` exists; a `jobId`-without-`runId` case (shouldn't currently
+  occur but defensively handled) falls back to plain `job {jobId}` text.
+- Keyset paging via `useTriggerFirings`'s `goNext`/`goFirst`
+  (`ops-firings-next`/`ops-firings-first` buttons) — the `JobsTab`
+  First/Next idiom, `Next` only rendered when `page.nextCursor` exists.
+- The header renders `triggerName` (falls back to the raw `triggerId` if
+  the trigger isn't in the currently-loaded list — e.g. right after a fire
+  from a row not on the current page) via PLAIN React interpolation only —
+  never `dangerouslySetInnerHTML` — matching the `triggers-tab.tsx`
+  XSS-safe-name precedent; covered by a dedicated malicious-name test.
+
+### `web/src/features/ops/triggers-tab.tsx` (modified)
+- Added `openTriggerId` state; each `<tr>` now has
+  `onClick={() => setOpenTriggerId(trigger.id)}` (plus `cursor-pointer`
+  styling) — the row-click-opens-drawer wiring Task 28 deliberately left
+  unwired.
+- **Action-button click must not also open the drawer**: the toggle/fire/
+  delete buttons sit inside the now-clickable row, so each one's `onClick`
+  calls `e.stopPropagation()` before its mutation — otherwise a bubbled
+  click would also fire the row handler and pop the drawer open underneath
+  the button press.
+- **Fire opens the drawer on the fired trigger**: replaced the bare
+  `fire(trigger.id)` call with a local `fireAndOpen(id)` that awaits
+  `fire(id)` then calls `setOpenTriggerId(id)`, so the operator lands
+  directly on the drawer showing the new firing once the mutation settles
+  (the brief's "fire calls fire then shows the drawer" requirement).
+- `openTrigger` is looked up from the live `triggers` array by
+  `openTriggerId` to supply `triggerName`; the drawer itself tolerates an
+  `undefined` name.
+
+## Web gate — all green
+- `bun run typecheck` — clean.
+- `bun run test` (full web suite) — **419 passed / 82 files**, including
+  the new `trigger-firings-drawer.test.tsx` (7 tests: row-click opens
+  drawer, firings render with outcome + working `/runs/:id` deep-link
+  (and the no-link case for a `skipped-overlap` firing with no
+  `jobId`/`runId`), keyset page-through via `goNext`/`goFirst`, toggle
+  calls `setEnabled` + does NOT open the drawer, fire calls `fire` then
+  DOES open the drawer, delete does not open the drawer, close, and the
+  malicious-trigger-name XSS-safe-render test).
+- `bun run lint:file` on all 3 changed/new files — clean (fixed one
+  unused-test-parameter and one formatter nit before commit).
+- Pre-commit `docs:check` passed on `git commit` — no `src/**`/
+  `docs/architecture.md` gate applies (web-only change, no new
+  `src/<subsystem>`); the pre-push slice-landing gate applies at
+  slice closeout, not per-task.
+
+## Concerns / follow-ups
+1. `triggerName` is resolved client-side from the currently-loaded
+   `triggers` array by id. If a trigger is deleted (or not yet loaded)
+   between the row click / fire and the drawer render, the header falls
+   back to the raw `triggerId` rather than erroring — a deliberate,
+   documented degrade, not a bug.
+2. The drawer's "First page" button is always rendered (not gated behind
+   a `hasPaged`-style flag the way `JobsTab` gates its own First-page
+   button) — calling `goFirst()` when already on the first page is a
+   no-op (`useTriggerFirings` just resets `cursors` to `[]`, already
+   empty), so this is harmless but slightly less strict than the
+   `JobsTab` precedent. Not covered by an explicit test either way; flagged
+   for a reviewer who wants byte-for-byte First-page-button parity with
+   `JobsTab`.
+3. This is the LAST console task for Slice 25 per the task brief — no
+   further Slice-25 web console tasks remain after this one.

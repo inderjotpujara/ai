@@ -82,3 +82,76 @@ Updated the test that previously PINNED the self-lockout behavior (`tests/server
 - `bun test tests/server/` sanity → 363 pass / 0 fail, 923 expect() across 77 files.
 
 **Files:** `src/server/devices/revoke.ts`, `tests/server/devices/revoke.test.ts`.
+
+---
+---
+
+# Task 18 Report — Webhook secret store `~/.agent/trigger-secrets.json` (Slice 25 Triggers, §7.1)
+
+> Note: content ABOVE this separator is a stale Slice 25b Task-18 report (device revocation) left in this path. The report below is the CURRENT Slice 25 (Scheduled + Triggered Agents) Task 18.
+
+## Status: COMPLETE — committed `70841a6` (branch `slice-25-triggers`)
+
+## What shipped
+Replaced the fail-closed Task 16 stub `src/triggers/secret-store.ts` (which returned `resolve()→undefined`) with the real per-trigger HMAC secret store persisting to `~/.agent/trigger-secrets.json`. Mirrors `src/server/security/device-registry.ts` byte-for-byte: `~/.agent` dir `0o700`, file `0o600`, atomic temp-write + `rename`, fail-closed load (ENOENT→`{}`; present-but-corrupt/non-object→THROW).
+
+### Interface alignment (the context the brief could not know)
+The brief's Produces block declared a NEW `export type TriggerSecretStore` in secret-store.ts, but the note directed keeping `src/triggers/engine.ts` as the single source of truth and NOT forking. The engine's type was Task 16's `{ resolve }` seam; nothing in production calls `.resolve()` yet (Task 19 will call `get()`). So I **aligned the interface in engine.ts in place** (the engine comment explicitly invited "Task 18 aligns/extends this interface") from `{ resolve }` → `{ mint; get; remove }`, and secret-store.ts **imports** it (no fork). Updated the one consumer stub in `tests/triggers/engine.test.ts` accordingly.
+
+Final interface (engine.ts, verbatim from brief):
+```ts
+export type TriggerSecretStore = {
+  mint(): { secretRef: string; hmacSecret: string };
+  get(secretRef: string): string | undefined;
+  remove(secretRef: string): void;
+};
+```
+Plus `export function defaultTriggerSecretsPath(): string` and `createTriggerSecretStore(config: { path?: string }): TriggerSecretStore` in secret-store.ts.
+
+## §7.1 security proof
+- Secrets minted SERVER-SIDE only: `randomBytes(32).toString('hex')` (secret), `randomBytes(9).toString('hex')` (ref). Never client-supplied.
+- `mint()` persists + returns `{ secretRef, hmacSecret }` ONCE (create-response once-only display); thereafter the file is the ONLY at-rest location.
+- `get()` returns the raw secret (for Task 19 HMAC verify) or `undefined`. Constant-time compare deliberately left to Task 19.
+- `remove()` drops on trigger delete (no-op if absent → no needless write).
+- Store object exposes ONLY `mint`/`get`/`remove` — no `toJSON`/enumerable secret field; `JSON.stringify(store) === '{}'` (test-pinned) so a logger/DTO/span serializer cannot pick the secret up. Raw secret never logged / in a DTO / a span attribute.
+
+## Files
+- **Modify** `src/triggers/secret-store.ts` — real store (was the stub).
+- **Modify** `src/triggers/engine.ts` — aligned `TriggerSecretStore` type (single source of truth) + updated doc comment.
+- **Create** `tests/triggers/secret-store.test.ts` — 9 tests.
+- **Modify** `tests/triggers/engine.test.ts` — updated the injected `secretStore` stub to the new shape.
+
+## TDD RED → GREEN
+- RED: wrote secret-store.test.ts first → `store.mint is not a function` (0 pass / 9 fail) against the old `{ resolve }` stub.
+- GREEN: after impl → 9/9 pass.
+
+## Gate (run inline)
+- `bun run typecheck` → clean (`tsc --noEmit`, no output).
+- `bun run lint:file -- src/triggers/secret-store.ts src/triggers/engine.ts tests/triggers/secret-store.test.ts tests/triggers/engine.test.ts` → "Checked 4 files. No fixes applied."
+- `bun test tests/triggers/secret-store.test.ts` → **9 pass / 0 fail, 18 expect()**.
+- `bun test tests/triggers/` (regression, interface change) → **102 pass / 0 fail, 329 expect()** across 14 files.
+- pre-commit `docs:check` → passed on commit.
+
+## Test coverage
+mint→persist→get round-trip (incl. across a fresh store over the same file); ref/secret hex-format + per-call distinctness; `get` undefined for unknown ref; `remove` drops + persists + absent-ref no-op; file is `0o600`; corrupt-JSON throws; non-object (array) throws; file holds exactly `{ref: secret}`; store has no serialization surface.
+
+## Concerns
+1. **Interface change is cross-task**: engine.ts's `TriggerSecretStore` went `resolve`→`mint/get/remove`. Safe now (no production caller of `.resolve()`), but **Task 19 must consume `get()`** (not `resolve()`) for HMAC verification — that is the intended seam.
+2. Docs (architecture.md / README / ROADMAP / ledger) are the slice-landing controller's job, not this per-task commit; not touched here.
+
+## Fix pass
+
+**§7.1 adversarial-verifier finding closed** — commit `da8bfd8` (branch `slice-25-triggers`, on top of `70841a6`).
+
+**Fail-OPEN divergence:** `load()`'s value filter was `if (typeof secret === 'string') out[ref] = secret;` — a tampered/corrupt secrets file containing `{"ref":""}` or `{"ref":"   "}` survived the filter, and `get("ref")` would hand back an empty/whitespace HMAC key: an empty-key HMAC signature is computable by anyone, the exact forgeable-signature vector `src/server/security/root-token.ts` (the precedent this file mirrors) already defends against via its `readNonEmpty` idiom (`t.trim().length > 0 ? t : null`).
+
+**Fix:** tightened the `load()` filter to `if (typeof secret === 'string' && secret.trim().length > 0) out[ref] = secret;`, mirroring root-token.ts's `readNonEmpty`. Empty/whitespace-only values are now dropped at load — never surfacing as a stored secret — so `get()` can never return one. Also updated the `load()` doc comment to name the empty/whitespace case and the root-token.ts parallel. `mint()` is unaffected (already only ever emits 64-hex secrets, so no valid path changes).
+
+**Test added:** `an empty or whitespace-only secret value is dropped at load, not served as a key (§7.1 fail-closed)` — writes `{"ref":""}` and (separately) `{"ref":"   "}` directly to the secrets file, then asserts `get('ref')` is `undefined` in each case.
+
+**Gate:**
+- `bun run typecheck` → clean.
+- `bun run lint:file -- src/triggers/secret-store.ts tests/triggers/secret-store.test.ts` → "Checked 2 files. No fixes applied."
+- `bun run test:file -- tests/triggers/secret-store.test.ts` → **10 pass / 0 fail, 20 expect()** (was 9/9; +1 new test).
+
+Staged only the two files (`src/triggers/secret-store.ts`, `tests/triggers/secret-store.test.ts`); pre-commit `docs:check` passed.

@@ -32,12 +32,37 @@ export function createWorkerPool(opts: {
   concurrency: number;
   dispatch: (kind: JobKind) => JobExecutor;
   pollMs?: number;
+  /**
+   * §7.3 chain seam. Invoked AFTER a job reaches a TERMINAL transition only
+   * (Done, or Failed with no retry left) — NEVER on a retry re-queue, cancel,
+   * or interrupt. The call is wrapped (see `safeSettled`) so a throwing observer
+   * can never break `runOne` or the claim loop. The job-chain observer
+   * (`src/triggers/chain.ts`) plugs in here.
+   */
+  onSettled?: (
+    job: JobRecord,
+    status: JobStatus.Done | JobStatus.Failed,
+  ) => void;
 }): WorkerPool {
   const pollMs = opts.pollMs ?? 250;
   const controllers = new Map<string, AbortController>();
   const inFlight = new Set<Promise<void>>();
   let running = false;
   let loops: Promise<void>[] = [];
+
+  // A settle observer must never wedge the claim loop: log-and-swallow anything
+  // it throws (there is no logger wired at this layer; the daemon supplies a
+  // wrapping onSettled if it wants failures recorded).
+  function safeSettled(
+    job: JobRecord,
+    status: JobStatus.Done | JobStatus.Failed,
+  ): void {
+    try {
+      opts.onSettled?.(job, status);
+    } catch {
+      /* observer error is not the pool's failure — degrade, never crash */
+    }
+  }
 
   async function runOne(job: JobRecord): Promise<void> {
     const controller = new AbortController();
@@ -55,11 +80,17 @@ export function createWorkerPool(opts: {
       if (controller.signal.aborted) return;
       try {
         opts.store.markDone(job.id, result);
+        // I5: chain-observe ONLY a completion that actually committed. This sits
+        // INSIDE the try, immediately after markDone — a throwing markDone falls
+        // to the catch below WITHOUT calling safeSettled, so no chained job is
+        // fired off a completion that never committed (no phantom chain).
+        safeSettled(job, JobStatus.Done);
       } catch {
         // Persistence failure (SQLITE_BUSY/FULL, DB closed mid-shutdown): swallow
         // rather than let it propagate out of runOne and kill the claim loop. The
         // row is left Running and will be reconciled to Interrupted later by
-        // reconcileOrphans / stop()'s sweep. Degrade, never crash.
+        // reconcileOrphans / stop()'s sweep. Degrade, never crash. onSettled NOT
+        // called.
       }
     } catch (err) {
       if (controller.signal.aborted) return; // cancel path owns the transition
@@ -75,6 +106,11 @@ export function createWorkerPool(opts: {
         // Re-read so job.attempt reflects the attempt that just failed.
         const after = opts.store.getJob(job.id);
         if (after?.status === JobStatus.Queued) recordJobRetry(after);
+        // Terminal failure (retries exhausted / non-retryable): chain-observe it.
+        // A re-queue (Queued above) is NOT terminal, so it never reaches here.
+        // Inside the try so a throwing markFailed/getJob skips it too.
+        else if (after?.status === JobStatus.Failed)
+          safeSettled(after, JobStatus.Failed);
       } catch {
         // Same as markDone above: a terminal-write failure must NOT escape
         // runOne. Left Running → reconciled to Interrupted later.

@@ -5,6 +5,7 @@ import { getWorkflow } from '../../workflows/index.ts';
 import { loadConfig } from '../config/schema.ts';
 import { RuntimeKind } from '../core/types.ts';
 import { defaultPidPath } from '../daemon/pid.ts';
+import { createLogger } from '../log/logger.ts';
 import { defaultConfigPath } from '../mcp/config.ts';
 import { makeEmbedder, probeEmbedder } from '../memory/embed.ts';
 import { makeCrossEncoderReranker } from '../memory/reranker.ts';
@@ -17,6 +18,11 @@ import { createJobStore, type JobStore } from '../queue/store.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { createSessionStore } from '../session/store.ts';
+import {
+  createTriggersEngine,
+  type TriggersEngine,
+} from '../triggers/engine.ts';
+import { createTriggerSecretStore } from '../triggers/secret-store.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createDurableConsentRegistry } from './consent/durable-registry.ts';
@@ -44,6 +50,8 @@ import {
   defaultRevocationPath,
   type SessionTokenStore,
 } from './security/session-token.ts';
+
+const log = createLogger('server.main');
 
 // The built web/ SPA (`cd web && bun run build`) lands at web/dist/, two
 // directories up from this file (src/server/ -> src/ -> repo root).
@@ -214,6 +222,16 @@ export type StartOptions = {
    *  of the same default rather than a shared import, since `cli/daemon.ts`'s
    *  version isn't exported; both derive from `defaultPidPath()`). */
   daemonLogDir?: string;
+  /** Injected triggers engine owned by the caller (the daemon, Task 16). When
+   *  present, `startWebServer` wires it onto `ServerDeps.triggers` for the
+   *  /api/triggers* routes but does NOT start/stop it — the daemon constructed
+   *  it, wired the pool's `onSettled` to it, and owns its lifecycle (start after
+   *  pool+server, stop first). Absent = standalone: `startWebServer`
+   *  auto-constructs its OWN engine ONLY when `AGENT_TRIGGERS_ENABLED` is truthy
+   *  (I3), wiring `onSettled`, starting it after the pool, and tearing it down
+   *  FIRST on shutdown. With the flag off (the default) NO engine is built — no
+   *  scheduler interval, no chokidar watcher, no open handle. */
+  triggers?: TriggersEngine;
 };
 
 /** Boot the local web BFF. Returns the server handle for tests/shutdown. */
@@ -223,6 +241,12 @@ export function startWebServer(opts: StartOptions = {}): {
   port: number;
   jobStore: JobStore;
   pool: WorkerPool;
+  /** The triggers engine wired into this server, if any (injected by the daemon,
+   *  or standalone-constructed when `AGENT_TRIGGERS_ENABLED` is on; undefined
+   *  with the flag off — the I3 invariant, so a plain boot spins no scheduler/
+   *  watcher). In standalone mode the caller may `await triggers.stop()` to tear
+   *  it down; in injected mode the daemon owns its lifecycle. */
+  triggers?: TriggersEngine;
 } {
   const cfg = loadConfig().values;
   const port = opts.port ?? (cfg.AGENT_WEB_PORT as number);
@@ -397,6 +421,11 @@ export function startWebServer(opts: StartOptions = {}): {
     injected?.jobStore ??
     createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
   let pool: WorkerPool;
+  // Triggers engine (Task 16). Injected mode: the daemon owns it (start/stop +
+  // onSettled wiring), we only surface it on ServerDeps. Standalone: we own it
+  // — but construct ONLY when the caller injected none AND the flag is on (I3),
+  // else it stays undefined and NO scheduler/watcher handle is opened.
+  let triggers: TriggersEngine | undefined = opts.triggers;
   // Worker-pool concurrency surfaced on the Overview queue card (T8's
   // /api/queue/stats) and the daemon status card. In standalone mode we own
   // the pool and thread the exact value it was built with; in injected
@@ -421,14 +450,49 @@ export function startWebServer(opts: StartOptions = {}): {
       runsRoot,
     });
     queueConcurrency = computeConcurrency();
+    // I3: standalone auto-constructs its OWN engine ONLY when none was injected
+    // AND `AGENT_TRIGGERS_ENABLED` is truthy. Built BEFORE the pool so its
+    // `handleJobSettled` can be wired as the pool's `onSettled` (chain triggers
+    // fire on a terminal settle). The daemon path never reaches here.
+    if (triggers === undefined && (cfg.AGENT_TRIGGERS_ENABLED as boolean)) {
+      triggers = createTriggersEngine({
+        jobStore,
+        runsRoot,
+        triggersDbPath: String(cfg.AGENT_QUEUE_PATH),
+        secretStore: createTriggerSecretStore({}),
+      });
+    }
     pool = createWorkerPool({
       store: jobStore,
       concurrency: queueConcurrency,
       dispatch,
       pollMs: cfg.AGENT_QUEUE_POLL_MS as number,
+      onSettled: triggers?.handleJobSettled,
     });
     pool.start();
+    // Producer LAST: start the engine only after the pool is claiming (it
+    // enqueues, never executes). Only a standalone-CONSTRUCTED engine is ours to
+    // start — an injected `opts.triggers` is caller-owned (its `start()` was, or
+    // will be, called by that caller), so guard on the standalone construction.
+    if (triggers !== undefined && opts.triggers === undefined) {
+      triggers.start();
+    }
     onShutdown(async () => {
+      // Stop producing FIRST (D2), before draining the pool — so no scheduler/
+      // watcher/chain fire enqueues onto an already-draining pool. Only the
+      // engine we constructed is torn down here; an injected one is caller-owned.
+      // A throwing engine.stop() (e.g. a rejecting chokidar/sqlite close) must
+      // NOT skip the drain below — degrade (log + swallow) and always proceed,
+      // mirroring the T13 chain.ts norm.
+      if (opts.triggers === undefined) {
+        try {
+          await triggers?.stop();
+        } catch (err) {
+          log.error('triggers.stop failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       await pool.stop();
       jobStore.close();
     });
@@ -486,6 +550,9 @@ export function startWebServer(opts: StartOptions = {}): {
     deviceRegistry,
     rootTokens: rootStore,
     publicBaseUrl,
+    // Triggers routes (Increment 5) resolve this; undefined in standalone mode
+    // with the flag off, so those routes degrade to 503 via need() (I3).
+    triggers,
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB
@@ -514,7 +581,7 @@ export function startWebServer(opts: StartOptions = {}): {
   }
   policy.port = boundPort; // reconcile when port === 0 (ephemeral)
   bindInfo.port = boundPort; // same reconcile for the daemon-status DTO
-  return { server, token, port: boundPort, jobStore, pool };
+  return { server, token, port: boundPort, jobStore, pool, triggers };
 }
 
 if (import.meta.main) {

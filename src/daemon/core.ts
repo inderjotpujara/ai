@@ -25,13 +25,17 @@
  * is safe. `status()` reports liveness straight from the pid file.
  */
 
+import { createLogger } from '../log/logger.ts';
 import { installSignalHandlers, onShutdown } from '../process/lifecycle.ts';
 import type { WorkerPool } from '../queue/pool.ts';
 import type { JobStore } from '../queue/store.ts';
 import type { JobRecord } from '../queue/types.ts';
 import type { startWebServer as StartWebServer } from '../server/main.ts';
+import type { TriggersEngine } from '../triggers/engine.ts';
 import { clearPid, defaultPidPath, readLivePid, writePid } from './pid.ts';
 import { recordDaemonStart, recordDaemonStop } from './spans.ts';
+
+const log = createLogger('daemon.core');
 
 export type Daemon = {
   install(): void;
@@ -62,6 +66,15 @@ export type CreateDaemonOptions = {
    *  real process SIGINT/SIGTERM handlers. Defaults to the process-wide
    *  `installSignalHandlers`. */
   installSignals?: () => void;
+  /** The triggers engine (Slice 25, Task 16), constructed + owned by the daemon
+   *  (`buildRealDaemon`) alongside the pool. The daemon lifecycle-binds it: it is
+   *  started AFTER the pool + server are up (step 5b — it is a PRODUCER, so it
+   *  must never enqueue before the consumer is ready) and stopped FIRST in
+   *  `stop()` (before the pool drains — stop producing before draining
+   *  consumers, per D2). Forwarded through to the injected `startWebServer` so
+   *  the /api/triggers* routes (Increment 5) resolve the SAME engine instance.
+   *  Absent (Increments 4-5 unit tests) = no triggers wired. */
+  triggers?: TriggersEngine;
   /** Reconcile predicate for durable-orphan requeue (Increment 6, Task 41):
    *  a Running orphan matching this predicate (crew/workflow) is re-queued at
    *  boot so the pool re-claims and resumes it from its checkpoint, instead of
@@ -81,6 +94,18 @@ export function createDaemon(opts: CreateDaemonOptions): Daemon {
   async function stop(): Promise<void> {
     if (!started) return; // idempotent: nothing to drain
     started = false;
+    // Stop the PRODUCER first (D2): halt the scheduler/watcher/chain so no new
+    // job is enqueued while the pool drains. Must precede pool.stop() — stop
+    // producing before draining consumers. A throwing engine.stop() (e.g. a
+    // rejecting chokidar/sqlite close) must NOT skip the drain below — degrade
+    // (log + swallow) and always proceed, mirroring the T13 chain.ts norm.
+    try {
+      await opts.triggers?.stop();
+    } catch (err) {
+      log.error('triggers.stop failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     // Drain: stop claiming, await in-flight, interrupt stragglers (bounded by
     // drainTimeoutMs when set, else the pool's unbounded graceful drain).
     await opts.pool.stop(opts.drainTimeoutMs);
@@ -121,9 +146,19 @@ export function createDaemon(opts: CreateDaemonOptions): Daemon {
           pool: opts.pool,
           concurrency: opts.concurrency,
         },
+        // Forward the daemon-owned engine so the injected server surfaces it on
+        // ServerDeps.triggers (the /api/triggers* routes resolve THIS instance);
+        // startWebServer does NOT start/stop an injected engine — the daemon does
+        // (step 5b below + stop-first above).
+        triggers: opts.triggers,
       });
       server = handle.server;
       started = true;
+      // 5b. Start the PRODUCER LAST — AFTER the pool is claiming and the server
+      //     is up (D2). The engine only ENQUEUES (via the scheduler/watcher/chain
+      //     fire), never executes, so a fire the instant it starts lands on an
+      //     already-running consumer.
+      opts.triggers?.start();
       // 6. SIGTERM/SIGINT → graceful drain via stop().
       onShutdown(() => stop());
       installSignals();

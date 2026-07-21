@@ -43,7 +43,12 @@ function json(body: unknown, status: number): Response {
  * a FRESH job with the SAME `kind`+`payload`, a fresh runId + pre-created run
  * dir (so an immediate `/api/runs/:runId/stream` never 404s, mirroring the
  * enqueue path), stamping `retriedFrom: <originalId>` (the T1 lineage column)
- * so the Jobs drawer can back-link the retry to its origin. Session-guarded like
+ * so the Jobs drawer can back-link the retry to its origin. It ALSO carries the
+ * original job's `origin` + `chainDepth` forward (Slice 25 I6): without this a
+ * retried webhook/schedule-origin job would silently re-attribute to daemon
+ * (dropping off the `?origin=` facet) and a chained job would reset to
+ * `chainDepth 0` (evading the A→B→A cycle cap on its next hop — the retry is
+ * itself a hop that must survive per the T9 F1 finding). Session-guarded like
  * the other job mutations (cancel) — NOT trusted-local.
  */
 export async function handleJobRetry(
@@ -61,6 +66,8 @@ export async function handleJobRetry(
     kind: job.kind,
     payload: job.payload,
     retriedFrom: job.id,
+    origin: job.origin, // I6: preserve provenance across a retry (stays on the ?origin= facet)
+    chainDepth: job.chainDepth, // I6: keep the chain-depth cap honest across the retry hop
     runId,
   });
   recordJobRetry(retry);

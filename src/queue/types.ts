@@ -1,3 +1,5 @@
+import type { RunOrigin } from '../contracts/enums.ts';
+
 export enum JobStatus {
   Queued = 'queued',
   Running = 'running',
@@ -45,6 +47,8 @@ export type JobRecord = {
   result: unknown; // terminal success payload (JSON), undefined until Done
   error: string | undefined; // terminal failure title, undefined unless Failed
   retriedFrom: string | null; // id of the job this one re-runs, null for an original (non-retry) job
+  origin: RunOrigin | undefined; // Slice 25: how this job was triggered (schedule/webhook/api/…); undefined for pre-Slice-25 rows and directly-enqueued jobs
+  chainDepth: number; // Slice 25 §7.3 A→B→A cycle guard: hop count incremented per chained fire, capped by fire.ts; 0 for a non-chained job
 };
 
 export type JobInput = {
@@ -55,6 +59,8 @@ export type JobInput = {
   availableAt?: number; // epoch-ms floor; defaults to 0 (immediately claimable). A caller may schedule a delayed job; retry backoff sets it forward internally.
   runId?: string; // caller may pre-mint (newRunId()); store mints if absent
   retriedFrom?: string; // set when this enqueue is a retry of an earlier job (lineage)
+  origin?: RunOrigin; // Slice 25: how this job was triggered (schedule/webhook/api/…); omitted for directly-enqueued jobs
+  chainDepth?: number; // Slice 25 §7.3 cycle-guard hop count; defaults to 0
 };
 
 /** Reserved second constructor arg — parity seam mirroring `SessionStoreDeps`

@@ -193,3 +193,84 @@ finals land; (iii) back-to-back separate gestures stay isolated;
 
 ## Commit
 `5e44f88` — `fix(voice): correlate §7.1 progressive-decode guards per-SEGMENT, not per-segmenter`
+
+---
+
+# Task 12 — watcher.ts + confine.ts — file triggers (HARD §7.4)
+
+**Status:** COMPLETE. Commit `dd76d8c`.
+**Branch:** slice-25-triggers.
+**Dep added:** chokidar@4.0.3 (`bun add chokidar@4`).
+
+## What shipped
+
+### `src/triggers/confine.ts`
+- `WatchPathError extends Error` — carries the offending `candidate`.
+- `expandHome(p)` — `p.replace(/^~(?=$|\/)/, homedir())`. THE single `~`-resolution site (I4). Bare `~` and `~/…` expand; `~user`, mid-string `~`, and any non-`~` string pass through untouched. A literal `~` can never reach `realpathSync`.
+- `confineWatchPath(candidate, baseDir)` — mirrors `confineToDir` in `src/server/security/media-path.ts`. `realpathSync(resolve(baseDir))` (throws `WatchPathError` on a missing root rather than raw ENOENT); candidate is `realpathSync`'d when it exists (defeats symlink escape), else `resolve`'d (chokidar may watch a not-yet-created path; `resolve` still collapses `..`). Rejects the filesystem root (`real === parse(real).root`) AND anything not equal to / under `realRoot` (prefix check with trailing `sep`). Callers pass an already-`expandHome`d baseDir. Watching the root dir itself is allowed.
+
+### `src/triggers/watcher.ts`
+- `createFileWatcher({ triggerStore, fire, watchRoot, watch? })` → `{ start(): void; stop(): Promise<void> }`.
+- `start()`: idempotent (double-start guarded). FIRST `expandHome(watchRoot)`, then `mkdirSync(root, { recursive: true, mode: 0o700 })` (I4 — create the confinement root private before confining anything). Then iterates `triggerStore.list()`, skips non-enabled / non-`File`, and for each: re-confines `(config as FileConfig).path` under `root` (defence in depth, §7.4 — create-time also confines), then `chokidar.watch(confined, { awaitWriteFinish: { stabilityThreshold: 400, pollInterval: 100 }, ignoreInitial: true, depth: 0 })`. Subscribes the configured events (default `[FileEventKind.Add]`); on each, fires `deps.fire(t, { reason: 'file', vars: { 'file.path': matchedPath } })` fire-and-forget with a logging `.catch`. A `'error'` listener logs watcher-level errors. A path that fails confinement is skipped with a `log.warn` — never crashes `start()`.
+- `stop()`: `await Promise.all(...close())` on all watchers, clears the map, resets `started`.
+- chokidar sits behind the injectable `watch?: typeof chokidar.watch` seam; the returned handle is narrowed to a local `WatcherHandle` (`on`/`close`) via `as unknown as` to avoid coupling to chokidar's generic EventEmitter typings (13 existing `as unknown as` precedents in src/).
+
+## Tests (20 pass, 33 expect calls, ~730ms)
+- **confine.test.ts (12):** rejects `/`; rejects outside root; accepts file under root; accepts the root dir itself; accepts not-yet-existing path (resolve fallback); rejects `..` traversal; **rejects a symlink under the root escaping to an outside dir** (§7.4 symlink probe); rejects when base dir missing; `expandHome` default `~/.agent/inbox`, bare `~`, absolute passthrough, and non-leading-`~` passthrough (`~user/x`, `/a/~/b`).
+- **watcher.test.ts (8):** add event → fire with `{reason:'file', vars:{'file.path':…}}`; awaitWriteFinish+ignoreInitial+depth:0 options passed; configured events list honoured (change-only ignores add); skips disabled + non-file triggers; skips unconfinable path without crashing + still watches the confinable one; start() idempotent; stop() closes every watcher; creates a missing watch root 0700 on start; **one REAL-chokidar smoke test** — a file created in the watched dir fires with its absolute path end-to-end (production 400ms threshold, ~1s, stop() in finally so no leaked handle).
+
+## Gate
+`bun run typecheck` clean · `bun run lint:file` on all 4 files clean · focused tests green.
+
+## Adversarial-review notes / concerns
+- Symlink escape, `..` traversal, and BOTH create-time (API, later task) + watch-time confinement are covered. Watch-time re-confinement is exercised (the `/etc/passwd` skip test).
+- **Confinement of a not-yet-existing candidate** uses plain `resolve` (no realpath) — safe because a non-existent leaf cannot be a symlink; `resolve` still collapses `..`. A symlink at an EXISTING parent segment is caught because we `realpathSync` whenever the full path exists. Edge: a path whose parent is a symlink-to-outside but whose leaf does not yet exist would `resolve` (not realpath) — chokidar itself would follow the link at event time, but the leaf can't exist without its parent existing, at which point realpath applies. Judged acceptable; flagging for the reviewer.
+- The `matchedPath` passed to `fire` is chokidar's emitted path (absolute, from the confined absolute watch target). Not re-confined per event — the watch target was already confined and `depth:0` prevents descent.
+- Two `w.on(...)` calls could see chokidar emit before `start()` returns only in real usage; harmless (fire is idempotent w.r.t. overlap in fire.ts).
+
+## Fix pass
+
+Post-landing security fix (branch `slice-25-triggers`, base HEAD dd76d8c). Two reviewers
+(spec + adversarial §7.4) independently confirmed a **HIGH path-confinement ESCAPE** —
+exactly the edge the original report's adversarial note flagged as "judged acceptable":
+a candidate whose ANCESTOR is a symlink-to-outside but whose leaf does not yet exist. The
+old catch branch did a plain `resolve(realRoot, candidate)` on a non-existent leaf, which
+collapses `..` but does NOT resolve a symlinked ancestor — so `<root>/link-out/drop.csv`
+(link-out → /outside, drop.csv absent) kept the in-root prefix and wrongly passed the
+prefix check. This is the common file-trigger case (watch a drop path before the file lands).
+Reproduced end-to-end with real chokidar. All four findings applied:
+
+- **FIX 1 (HIGH — confine.ts).** In the non-existent-leaf catch branch, walk up to the
+  nearest EXISTING ancestor, `realpathSync` THAT (resolving any symlinked ancestor), then
+  re-append the non-existent tail via `join` before the existing `sep`-prefixed prefix
+  check + `real !== realRoot` guard (both kept unchanged). Imported `basename`, `dirname`,
+  `join`. Verified: the escape test FAILS against the old code (accepted) and PASSES after
+  (rejected) — `git stash` A/B confirmed.
+- **FIX 2 (belt-and-braces — watcher.ts).** `followSymlinks: false` added to the
+  `chokidar.watch` opts so an in-root symlink can't extend the watch outward at event time
+  (also shrinks the Scenario-2 TOCTOU window).
+- **FIX 3 (MEDIUM — watcher.ts).** `mkdirSync(mode)` does not chmod an existing dir, so a
+  pre-existing 0755 inbox stayed group/world-accessible silently. After ensuring the root,
+  `statSync` it; if `(mode & 0o077) !== 0`, `log.warn` naming the path + octal perms.
+  Warn-only — we do NOT auto-chmod a dir we didn't create.
+- **FIX 4 (MEDIUM — watcher.ts).** `mkdirSync` wrapped in try/catch: on failure `log.warn`
+  ("watch root unavailable — file triggers disabled this start") and return cleanly (no
+  throw from `start()`). The `started` flag is now set true only AFTER the mkdir succeeds,
+  so a failed start does NOT latch and a later `start()` retries. A `log?: Logger` dep was
+  added (defaults to the module logger) so tests can capture warnings deterministically.
+
+**Tests added (all fail against pre-fix code, pass after):**
+- confine: symlinked-ancestor + absent-leaf REJECTED (the escape); an absent leaf under a
+  REAL (non-symlink) in-root subdir still ACCEPTED. Existing-file cases unchanged.
+- watcher (real chokidar, temp dir, cleanup): a file created at the OUTSIDE symlink target
+  does NOT fire (no fired path is under the outside dir — chokidar treats the in-root
+  symlink node as a plain, non-followed entry); `followSymlinks:false` also asserted in the
+  opts test.
+- watcher: pre-existing 0755 root → warn emitted (captured via injected logger), path +
+  `755` in fields, dir left un-chmod'd. Un-mkdir-able root (a FILE as the parent) → `start()`
+  does not throw, no watches armed, `started` stays false → a second `start()` re-attempts
+  (a second "unavailable" warning, proving no latch).
+
+**Gate:** `bun run typecheck` clean · `bun run lint:file -- src/triggers/confine.ts
+src/triggers/watcher.ts tests/triggers/` clean · `bun run test:file -- tests/triggers/`
+= 79 pass / 0 fail.

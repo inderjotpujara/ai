@@ -16,6 +16,9 @@ import {
   RuntimeKind,
   SpanStatus,
   StepKind,
+  TriggerOriginWire,
+  TriggerOutcomeWire,
+  TriggerTypeWire,
   VerifiedLevel,
 } from './enums.ts';
 
@@ -147,6 +150,46 @@ export const JobDtoSchema = z.object({
   retriedFrom: z.string().nullable(),
 });
 export type JobDTO = z.infer<typeof JobDtoSchema>;
+
+/** One trigger's durable record on the wire — projects `TriggerRecord`
+ *  (`src/triggers/types.ts`) with the wire enums. `target` addresses the job
+ *  the trigger fires (`kind`+opaque `payload`, mirroring `JobDtoSchema`'s
+ *  payload idiom); `config` is per-`type` opaque JSON (`CronConfigSchema`/
+ *  `WebhookConfigSchema`/`FileConfigSchema`/`JobChainConfigSchema` in
+ *  `requests.ts` describe its shape per `type`, validated by the create/patch
+ *  handler, not this DTO). `webhookUrl` is the trigger's PUBLIC fire endpoint
+ *  (safe to re-list) — deliberately distinct from the raw path token, which
+ *  is NEVER included here (SECURITY: the token is transmitted exactly once,
+ *  in `TriggerCreateResponseSchema`, the `DevicePairResponseSchema`
+ *  precedent — this DTO carries no token/secret field at all). Slice 25. */
+export const TriggerDtoSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.enum(TriggerTypeWire),
+  enabled: z.boolean(),
+  target: z.object({ kind: z.enum(JobKindWire), payload: z.unknown() }),
+  config: z.unknown(),
+  origin: z.enum(TriggerOriginWire),
+  nextRunAt: z.number().optional(),
+  lastFiredAt: z.number().optional(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  webhookUrl: z.string().optional(),
+});
+export type TriggerDTO = z.infer<typeof TriggerDtoSchema>;
+
+/** One firing-history row on the wire — projects `TriggerFiringRecord`
+ *  (`src/triggers/types.ts`). `jobId`/`runId` are absent for a
+ *  `skipped-overlap`/`failed`-before-enqueue outcome. Slice 25. */
+export const TriggerFiringDtoSchema = z.object({
+  id: z.string(),
+  triggerId: z.string(),
+  firedAt: z.number(),
+  jobId: z.string().optional(),
+  runId: z.string().optional(),
+  outcome: z.enum(TriggerOutcomeWire),
+});
+export type TriggerFiringDTO = z.infer<typeof TriggerFiringDtoSchema>;
 
 export const ChatMessageDtoSchema = z.object({
   id: z.string(),

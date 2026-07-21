@@ -1,51 +1,59 @@
-## Task 3: Daemon status/bind + queue stats DTOs
+### Task 3: Trigger DTOs + request/response schemas
 
 **Files:**
-- Modify: `src/contracts/dto.ts` (`DaemonBindDtoSchema`, `DaemonStatusDtoSchema`, `QueueStatsDtoSchema`)
-- Test: `tests/contracts/daemon-queue-dto.test.ts` (new)
+- Modify: `src/contracts/dto.ts` (append after `JobDtoSchema`), `src/contracts/requests.ts` (append at end)
+- Test: `tests/contracts/trigger-dto.test.ts`
 
 **Interfaces:**
-- Consumes: `JobStatusWire` (`src/contracts/enums.ts:221`).
-- Produces: `DaemonBindDtoSchema`, `DaemonStatusDtoSchema`, `QueueStatsDtoSchema` (+ their `z.infer` type exports) EXACTLY as in Shared contracts.
+- Consumes: `TriggerTypeWire`, `TriggerOriginWire`, `TriggerOutcomeWire`, `JobKindWire`, `JobStatusWire` from `./enums.ts`; `JobLaunchResponseSchema` reused for fire responses (`{ jobId, runId }`).
+- Produces (dto.ts):
+  - `TriggerDtoSchema` / `TriggerDTO`: `{ id, name, type: z.enum(TriggerTypeWire), enabled: z.boolean(), target: z.object({ kind: z.enum(JobKindWire), payload: z.unknown() }), config: z.unknown(), origin: z.enum(TriggerOriginWire), nextRunAt: z.number().optional(), lastFiredAt: z.number().optional(), createdAt: z.number(), updatedAt: z.number(), webhookUrl: z.string().optional() }` — **NEVER** a token/secret field.
+  - `TriggerFiringDtoSchema` / `TriggerFiringDTO`: `{ id, triggerId, firedAt: z.number(), jobId: z.string().optional(), runId: z.string().optional(), outcome: z.enum(TriggerOutcomeWire) }`.
+- Produces (requests.ts):
+  - Per-type config schemas: `CronConfigSchema` (`{ schedule: z.string().min(1).max(200), timezone: z.string().max(64).optional(), catchUp: z.boolean().optional(), allowOverlap: z.boolean().optional() }`), `WebhookConfigSchema` (`{ hmac: z.boolean().optional() }`), `FileConfigSchema` (`{ path: z.string().min(1).max(4096), events: z.array(z.enum(['add','change'])).optional() }`), `JobChainConfigSchema` (`{ onKind: z.enum(JobKindWire).optional(), onName: z.string().max(200).optional(), onStatus: z.enum(['done','failed']) }`).
+  - `TriggerCreateRequestSchema` / `TriggerCreateRequest`: `{ name: z.string().min(1).max(120), type: z.enum(TriggerTypeWire), target: z.object({ kind: z.enum(JobKindWire), payload: z.unknown() }), config: z.unknown(), enabled: z.boolean().optional() }` (config validated per-type in the handler, Task 23).
+  - `TriggerPatchRequestSchema` / `TriggerPatchRequest`: `{ enabled: z.boolean().optional(), target: z.object({ kind: z.enum(JobKindWire), payload: z.unknown() }).optional(), config: z.unknown().optional() }`.
+  - `TriggerCreateResponseSchema` / `TriggerCreateResponse`: `{ trigger: TriggerDtoSchema, webhookToken: z.string().optional(), webhookUrl: z.string().optional() }` — the raw path token is transmitted EXACTLY ONCE here (the `DevicePairResponseSchema` precedent).
+  - `TriggerListResponseSchema` / `TriggerListResponse`: `{ items: z.array(TriggerDtoSchema) }` (plain array — small set, no cursor, the `CrewListResponseSchema` idiom).
+  - `TriggerFiringListQuerySchema` / `TriggerFiringListQuery`: `{ cursor: z.string().optional(), limit: z.coerce.number().int().positive().max(200).default(25) }`.
+  - `TriggerFiringListResponseSchema` / `TriggerFiringListResponse`: `{ items: z.array(TriggerFiringDtoSchema), nextCursor: z.string().optional(), total: z.number() }` (keyset — `JobListResponseSchema` shape).
 
-- [ ] **Step 1: Write the failing test** — `tests/contracts/daemon-queue-dto.test.ts`:
-```typescript
-import { test, expect } from 'bun:test';
+- [ ] **Step 1: Write the failing test** — round-trip a `TriggerDtoSchema` value and reject a bad `outcome`:
+
+```ts
+import { expect, test } from 'bun:test';
 import {
-  DaemonStatusDtoSchema,
-  QueueStatsDtoSchema,
+  TriggerDtoSchema,
+  TriggerFiringDtoSchema,
 } from '../../src/contracts/dto.ts';
 
-test('DaemonStatusDto round-trips with bind + optional uptime', () => {
-  const dto = DaemonStatusDtoSchema.parse({
-    running: true, pid: 42, startedAt: 1000, uptimeMs: 500,
-    bind: { bind: '127.0.0.1', allowedHosts: [], port: 4130, sessionTtlMs: 1 },
-  });
-  expect(dto.bind.port).toBe(4130);
-  expect(DaemonStatusDtoSchema.parse({
-    running: false, bind: { bind: '127.0.0.1', allowedHosts: [], port: 4130, sessionTtlMs: 1 },
-  }).pid).toBeUndefined();
+test('TriggerDtoSchema round-trips a cron trigger', () => {
+  const dto = {
+    id: 't-1', name: 'nightly', type: 'cron', enabled: true,
+    target: { kind: 'workflow', payload: { input: 'x' } },
+    config: { schedule: '0 3 * * *' }, origin: 'console',
+    nextRunAt: 1, createdAt: 1, updatedAt: 1,
+  };
+  expect(TriggerDtoSchema.parse(dto)).toMatchObject({ id: 't-1', type: 'cron' });
 });
-
-test('QueueStatsDto keeps activeCount distinct from counts.running', () => {
-  const dto = QueueStatsDtoSchema.parse({
-    counts: { running: 2 }, total: 2, activeCount: 1, concurrency: 4,
-  });
-  expect(dto.activeCount).toBe(1);
-  expect(dto.counts.running).toBe(2);
+test('TriggerFiringDtoSchema rejects an unknown outcome', () => {
+  expect(() =>
+    TriggerFiringDtoSchema.parse({
+      id: 'f1', triggerId: 't-1', firedAt: 1, outcome: 'exploded',
+    }),
+  ).toThrow();
 });
 ```
 
-- [ ] **Step 2: Run — verify it fails** — `bun test tests/contracts/daemon-queue-dto.test.ts` → FAIL.
+- [ ] **Step 2: Run test to verify it fails** — `bun run test -- -t "TriggerDtoSchema round-trips"` → FAIL.
+- [ ] **Step 3: Write minimal implementation** — add the schemas from the Produces block to `dto.ts` and `requests.ts`. Import the new wire enums; reuse `JobLaunchResponseSchema` where the plan later needs a `{ jobId, runId }` fire response (no new schema for that).
+- [ ] **Step 4: Run test to verify it passes** → PASS.
+- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/contracts/dto.ts src/contracts/requests.ts tests/contracts/trigger-dto.test.ts`.
 
-- [ ] **Step 3: Implement** — add the three schemas to `src/contracts/dto.ts` (verbatim from Shared contracts). Add `JobStatusWire` to the enums import if not present (it already is, line 9).
-
-- [ ] **Step 4: Run — verify green** → PASS.
-
-- [ ] **Step 5: Gate + commit**
 ```bash
-bun run typecheck && bun run lint:file -- src/contracts/dto.ts tests/contracts/daemon-queue-dto.test.ts
-git add src/contracts/dto.ts tests/contracts/daemon-queue-dto.test.ts
-git commit -m "feat(contracts): DaemonStatus/DaemonBind/QueueStats DTOs (Slice 25b Incr 1)"
+git add src/contracts/dto.ts src/contracts/requests.ts tests/contracts/trigger-dto.test.ts
+git commit -m "feat(contracts): trigger DTOs + request/response schemas"
 ```
+
+*Model: Sonnet.*
 

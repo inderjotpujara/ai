@@ -34,6 +34,7 @@
     "config": "bun run src/cli/config.ts",
     "start": "bun run src/cli/start.ts",
     "daemon": "bun run src/cli/daemon.ts",
+    "triggers": "bun run src/cli/triggers.ts",
     "status": "bun run src/cli/status.ts",
     "usage": "bun run src/cli/usage.ts"
   },
@@ -54,6 +55,8 @@
     "@opentelemetry/sdk-trace-base": "^2.8.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "ai": "^7.0.31",
+    "chokidar": "4",
+    "croner": "^10.0.1",
     "ollama-ai-provider-v2": "^4.0.1",
     "sherpa-onnx-node": "1.13.4",
     "zod": "^4.4.3"

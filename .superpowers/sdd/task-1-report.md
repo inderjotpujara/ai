@@ -1,87 +1,104 @@
-# Task 1 Report: JobDto.availableAt + retriedFrom lineage
+# Task 1 report — Engine trigger types + enums (Slice 25)
 
-(Note: this file previously held a report for an unrelated Slice 24 Increment 1
-task that reused the same filename. It has been overwritten with the Slice 25b
+(Note: this file previously held a report for an unrelated Slice 25b
+Increment-1 task that reused this filename. Overwritten with the Slice 25
 Task 1 report below.)
 
 ## Status: DONE
 
-## What was implemented
-Per `.superpowers/sdd/task-1-brief.md`, verbatim except for two mechanical
-ambiguity resolutions noted below.
+## Commit
+- `3eea5c3` — `feat(triggers): engine trigger types + enums (+ src/triggers docs stub)`
 
-1. **`src/queue/migrations.ts`** — appended `'add-retried-from'` migration
-   (`ALTER TABLE jobs ADD COLUMN retried_from TEXT`), advancing `user_version`
-   to 2.
-2. **`src/queue/types.ts`** — added `retriedFrom: string | null` to
-   `JobRecord` (after `error`) and `retriedFrom?: string` to `JobInput`
-   (after `runId`).
-3. **`src/queue/store.ts`** — added `retried_from: string | null` to
-   `JobRowRaw`; `toJobRecord` now sets `retriedFrom: r.retried_from` (no
-   `?? undefined` — the DTO field is nullable, not optional); `enqueue`'s
-   INSERT now includes `retried_from`, bound from `input.retriedFrom ?? null`.
-4. **`src/contracts/dto.ts`** — `JobDtoSchema` gained `availableAt: z.number()`
-   and `retriedFrom: z.string().nullable()` (after `error`). `toJobDto`
-   (`src/server/jobs/map.ts`) is an unchanged passthrough, as the brief said.
+## What was done
 
-## TDD evidence
-- **RED**: wrote `tests/queue/store-lineage.test.ts` verbatim from the brief,
-  ran `bun test tests/queue/store-lineage.test.ts` before any impl change →
-  2 failures (`retriedFrom` was `undefined`, not `null`/the retried job's id).
-- **GREEN**: after Steps 3–6, `bun test tests/queue/store-lineage.test.ts
-  tests/queue/migrations.test.ts tests/contracts/job-dto.test.ts` → 11 pass,
-  0 fail.
+Followed TDD exactly per `.superpowers/sdd/task-1-brief.md`'s steps:
 
-## Two ambiguities resolved (not blocking, both mechanical)
+1. **Wrote the failing test** — `tests/triggers/types.test.ts`, asserting the
+   exact wire-string values of `TriggerType`, `TriggerOrigin`, and
+   `TriggerOutcome`.
+2. **Confirmed it fails** — `bun run test -- -t "TriggerType holds"` →
+   `error: Cannot find module '../../src/triggers/types.ts'` (1 fail, 1 error).
+3. **Implemented `src/triggers/types.ts`** — exactly the Produces block from
+   the brief:
+   - `enum TriggerType { Cron='cron', Webhook='webhook', File='file', JobChain='jobchain' }`
+   - `enum TriggerOrigin { Repo='repo', Console='console' }`
+   - `enum TriggerOutcome { Fired='fired', SkippedOverlap='skipped-overlap', Failed='failed' }`
+   - `enum FileEventKind { Add='add', Change='change' }`
+   - `CronConfig`, `WebhookConfig`, `FileConfig`, `JobChainConfig`,
+     `TriggerConfig` (union), `TriggerTarget`, `Trigger`, `TriggerFiring`,
+     `TriggerInput`
+   - Imports `type { JobKind, JobStatus }` from `../queue/types.ts` only — no
+     `RunOrigin` import, since nothing in this file's Produces block actually
+     references it (per the brief's "RunOrigin is only re-referenced in later
+     modules; import lazily where used" note).
+4. **Confirmed it passes** — `bun run test -- -t "TriggerType holds"` → 1
+   pass, 0 fail.
+5. **Landed the `docs/architecture.md` stub** — inserted the brief's verbatim
+   stub section (`### \`src/triggers/\` — trigger engine (Slice 25, stub)`)
+   at the end of §24, right after §24.8's config-knobs table and before the
+   `---` separator + the "Jobs & Triggers Ops Console (web UI — Slice 25b)"
+   section — i.e. directly adjacent to the Queue (§24.1)/Daemon (§24.3)
+   subsystem narrative, as instructed.
+6. **Gate + commit**:
+   - `bun run typecheck` → clean (after the test-file cast noted below).
+   - `bun run lint:file -- src/triggers/types.ts tests/triggers/types.test.ts`
+     → clean (biome auto-fixed formatting/multi-line array wrapping on both
+     files; re-ran lint after and it was clean).
+   - `bun run docs:check` → `✔ docs-check: living docs present + linked;
+     every src subsystem documented.`
+   - Focused test: `bun run test:file -- "tests/triggers/types.test.ts"` → 2
+     pass, 0 fail, 3 expect() calls.
+   - Committed exactly the three intended files:
+     `src/triggers/types.ts`, `tests/triggers/types.test.ts`,
+     `docs/architecture.md`.
 
-1. **`tests/contracts/job-dto.test.ts` already existed** (the brief said
-   "create if absent," but it was present with an existing `'JobDtoSchema
-   round-trips a full record'` test). That test's fixture object omitted
-   `availableAt`/`retriedFrom`, which would now fail to parse since both are
-   required (non-optional) fields on `JobDtoSchema`. Fixed by adding
-   `availableAt: 0, retriedFrom: null` to that existing fixture (same spirit
-   as the brief's own Step 5, which updates the pre-existing migrations-test
-   column-list assertion) — then appended the brief's new round-trip test
-   below it, unmodified.
-2. **`bun run typecheck` caught two more `JobRecord` literal fixtures** the
-   brief's file list didn't mention: `tests/daemon/spans.test.ts`'s `job()`
-   helper and `tests/server/jobs/dispatch.test.ts`'s `fakeJob()`, both
-   constructing a full `JobRecord` object without the now-required
-   `retriedFrom` field. Added `retriedFrom: null` to each (mechanical fixture
-   update, no behavior change) — required for `bun run typecheck` to pass per
-   the gate.
+## Deviation from the brief's literal test snippet (and why)
 
-Both are additive, non-controversial completions of the same seam-threading
-task (a required field was added to a type; every literal of that type needed
-updating) — not scope or design decisions, so I did not stop for
-NEEDS_CONTEXT.
+The brief's Step-1 test snippet does `Object.values(TriggerType).sort()`
+without a cast. Under this repo's `tsc --noEmit` (part of the mandatory
+per-task gate — `bun test` alone doesn't type-check), TS enum member values
+don't structurally widen to `string[]` for `.toEqual([...])` against
+string-literal arrays, so that snippet fails typecheck even though it passes
+at runtime. The sibling file `tests/queue/types.test.ts` establishes the
+repo's existing convention for exactly this situation: cast to `as string[]`
+before `.sort()`/`.toEqual()`. I applied the same cast to all three
+assertions so the test both passes at runtime and type-checks cleanly — same
+coverage the brief specified, just typed to match repo convention. Biome then
+reflowed the multi-value `.toEqual([...])` arrays onto multiple lines
+(auto-fix), reflected in the committed file.
 
-## Files changed
-- `src/contracts/dto.ts`
-- `src/queue/migrations.ts`
-- `src/queue/types.ts`
-- `src/queue/store.ts`
-- `tests/queue/store-lineage.test.ts` (new)
-- `tests/queue/migrations.test.ts`
-- `tests/contracts/job-dto.test.ts`
-- `tests/daemon/spans.test.ts` (fixture fix only)
-- `tests/server/jobs/dispatch.test.ts` (fixture fix only)
+## Test output (focused)
 
-## Gate results
-- `bun run typecheck` → clean.
-- `bun run lint:file -- <9 files above>` → clean (after `biome check --write`
-  auto-fixed two formatting nits — an import-sort and a long-line wrap — in
-  the two new/extended test files; no logic changes).
-- `bun test tests/queue tests/contracts tests/daemon/spans.test.ts
-  tests/server/jobs` → 200 pass, 0 fail, 381 expect() calls. Full contract
-  parity suite (`tests/contracts/*`) and full queue suite (`tests/queue/*`)
-  both green.
+```
+$ bun test --path-ignore-patterns 'web/**' --path-ignore-patterns 'spikes/**' tests/triggers/types.test.ts
+bun test v1.3.11 (af24e281)
+
+ 2 pass
+ 0 fail
+ 3 expect() calls
+Ran 2 tests across 1 file. [12.00ms]
+```
+
+## Self-review
+
+- Enum wire values, type shapes, and field names match the brief's Produces
+  block verbatim (checked field-by-field).
+- `JobKind`/`JobStatus` imported as `type`-only from `../queue/types.ts`,
+  mirroring `src/queue/types.ts`'s own style (string enums, `type` over
+  `interface`, small file, no stray runtime imports).
+- `RunOrigin` (`src/contracts/enums.ts`) is listed as "consumed" in the brief
+  but has no corresponding field in this file's Produces block (`origin` on
+  `Trigger`/`TriggerInput` is `TriggerOrigin`, this module's own enum, not
+  `RunOrigin`). Left unimported here per the brief's explicit lazy-import
+  instruction — flagging it so a later task's reviewer isn't surprised that
+  the "Consumes" line's `RunOrigin` has no import in this particular file.
+- Docs stub placed adjacent to the Queue/Daemon narrative sections as
+  directed, not merely appended at file end — keeps the doc readable in
+  section order pending the full Task-34 expansion.
+- Ran a full `bun run test` in the background as an extra sanity check beyond
+  the brief's required gate; did not block the commit on it since it isn't
+  part of the specified per-task gate and this project's convention (per
+  project memory) is focused-test-inline, full-suite-between-tasks.
 
 ## Concerns
-None outstanding. The two fixture fixes are pure mechanical completions of
-the required-field threading; no design ambiguity remains for later tasks
-consuming `JobRecord.retriedFrom` / `JobDTO.retriedFrom`.
-
-## Commit
-`676fbdb` — `feat(queue): JobDto availableAt + retriedFrom lineage column (Slice 25b Incr 1)`
-(9 files changed, 81 insertions(+), 4 deletions(-))
+None outstanding.

@@ -224,3 +224,162 @@ to `0` — only the defined-but-negative case is clamped.
 bind object, the span, and everything else in the handler are unchanged.
 
 **Commit:** `fix(server): clamp daemon uptimeMs ≥0 for clock-skew safety (Slice 25b T9 review)`
+
+---
+---
+
+# Slice 25 — Task 9: fire.ts convergence point + substitute.ts
+
+**Status:** COMPLETE. Commit `20796c4`.
+
+## What was built
+- `src/triggers/substitute.ts` — `substituteTemplate(payload, vars)`: deep recursive
+  walk over any JSON-shaped payload; replaces `{{key}}` (regex
+  `/\{\{\s*([\w.]+)\s*\}\}/g`) in every STRING leaf with `vars[key]` when present,
+  leaving unknown keys literal. Arrays/objects recursed; non-string leaves
+  (number/boolean/null) pass through untouched. Structurally fresh output (no
+  mutation). PLAIN string interpolation only — NO `eval`/`Function`/template engine
+  (§7.3). Verified by grep: the only `eval`/`Function` tokens in the two src files
+  are inside doc comments, never executable.
+- `src/triggers/fire.ts` — `createFireTrigger(deps)` returning `FireTrigger`.
+  Implemented the brief body verbatim inside `withTriggerFireSpan`:
+  1. **Chain-depth cap** (`ctx.chainDepth ?? 0`) checked FIRST against
+     `deps.maxChainDepth()` — over-cap records a `Failed` firing + span outcome and
+     returns `{fired:false}` with NO enqueue. Enforced at this single convergence
+     point so no `reason` can bypass it (depth==cap still fires; depth>cap fails).
+  2. **Overlap protection** — `allowOverlap` = `bypassOverlap===true` OR
+     (`type===Cron` && `(config as CronConfig).allowOverlap===true`). Branch is on
+     `trigger.type` explicitly (T1 non-discriminated union — never structural
+     narrowing). When not allowed, joins `latestFiring→jobId→getJob`; if prev job is
+     Queued|Running, records `SkippedOverlap` firing + `recordTriggerSkip` span, no
+     enqueue.
+  3. **Fire path** — pre-mints `newRunId()` + `createRun(runsRoot,runId)` (so an
+     immediate stream never 404s), `jobStore.enqueue` with
+     `origin=ORIGIN_FOR[reason]`, `chainDepth=depth`, substituted payload; then
+     `recordFiring(Fired)` and `update(t.id,{lastFiredAt:now})`.
+  - `ORIGIN_FOR`: cron→Schedule, webhook→Webhook, file/chain/manual→Api (spec D3).
+  - **M5** honored: `lastFiredAt` written ONLY on the Fired path, never skip/fail.
+  - **M7** accepted-gap NOTE comment kept verbatim (firing row + enqueue span two
+    bun:sqlite connections; audit-only orphan risk documented, not fixed).
+
+Kept `FireReason` as the brief's string-literal union (not an enum) because the brief
+specifies it exactly and callers pass string literals (`reason: 'cron'`); Biome does
+not flag it.
+
+## Tests (TDD — written first, verified failing, then green)
+- `tests/triggers/substitute.test.ts` (5): nested-string-only substitution; unknown
+  placeholder left literal; array elements + non-string leaves untouched; multiple
+  placeholders + inner whitespace; code-shaped key stays literal (proves non-eval).
+- `tests/triggers/fire.test.ts` (8, real TriggerStore+JobStore on a shared temp
+  jobs.db): cron→Schedule + Fired firing + payload substituted + run dir created +
+  lastFiredAt bumped; overlap skip on in-flight prev (audit firing still written);
+  allowOverlap config lets concurrent through; terminal prev does not block;
+  chain-depth cap → Failed + no enqueue + audit firing; at-cap boundary still
+  enqueues with its chainDepth + origin=Api; bypassOverlap manual fire ignores
+  in-flight; webhook→Webhook.
+
+## Gate
+- `bun run typecheck` — clean (fixed a `noUncheckedIndexedAccess` narrowing in
+  substitute's replacer by binding `vars[key]` to a const before the undefined check).
+- `bun run lint:file` on all four files — clean.
+- `bun run test:file -- tests/triggers/` — 32 pass / 0 fail (13 new + existing
+  store/spans/migrations/types).
+- pre-commit docs-check passed (src/triggers already a documented subsystem).
+
+## Concerns
+- None blocking. M7 orphan-audit gap is the one accepted limitation (documented in
+  code per brief). Downstream tasks (scheduler/watcher/webhook/chain) must pass
+  `chainDepth = finishedJob.chainDepth + 1` on chain hops for the cap to bite.
+
+## Fix pass
+
+Post-spec-review defect pass: two reviewers found four real defects (verified,
+implemented as specified — not re-litigated). All four fixed in one commit.
+
+### FIX 1 (Important) — overlap masked by skip rows
+- **Where:** `src/triggers/store.ts` (new `latestFiredFiring`), `src/triggers/fire.ts` (overlap check).
+- **What:** `latestFiring` returns the most-recent firing regardless of outcome;
+  a skip/fail row has jobId=null, so on the NEXT tick the guard saw a jobId-less
+  row and fell through → concurrent enqueue on the 3rd tick. Added
+  `latestFiredFiring(triggerId)` (`WHERE job_id IS NOT NULL`, mirroring
+  latestFiring's shape) and switched the overlap check to use it.
+- **Test:** `overlap guard: a skip row does not mask the still-in-flight fired job
+  (3-fire regression)` — every-tick cron, job A claimed→Running; fire1 Fired,
+  fire2 SkippedOverlap, fire3 must ALSO be SkippedOverlap (would breach pre-fix).
+
+### FIX 2 (F2) — overlap TOCTOU
+- **Where:** `src/triggers/fire.ts`.
+- **What:** `await createRun` sat between the sync overlap check and the sync
+  enqueue, so two concurrent fires both passed the check during each other's
+  await. Reordered so check→enqueue→recordFiring→update is one yield-free sync
+  block (bun:sqlite is sync); `await createRun(runId)` now runs AFTER the block
+  (run dir still exists before fireTrigger returns; markJobOrigin's create is
+  idempotent).
+- **Test:** `two concurrent fires on a non-allowOverlap trigger yield exactly one
+  Fired + one SkippedOverlap` (Promise.all; deterministic under the reorder; also
+  asserts exactly one job enqueued).
+
+### FIX 3 (N1) — prototype-chain template lookup
+- **Where:** `src/triggers/substitute.ts` (`substituteString`).
+- **What:** `vars[key]` walked the prototype chain, so `{{toString}}` /
+  `{{constructor}}` interpolated function sources instead of staying literal.
+  Guarded with `Object.hasOwn(vars, key)` (unknown → placeholder left literal).
+- **Test:** extended the unknown-placeholder test — `{{toString}}`,
+  `{{constructor}}`, `{{__proto__}}` all stay literal.
+
+### FIX 4 (N2) — chainDepth clamp
+- **Where:** `src/triggers/fire.ts` (depth guard + `ctx.chainDepth` doc comment).
+- **What:** `depth > maxChainDepth()` let NaN/negative through (NaN self-
+  perpetuates through +1 hops → unbounded chains). Now a supplied
+  `ctx.chainDepth` that is not a non-negative integer is treated as cap-exceeded
+  (same Failed outcome — plan-mandated, unchanged — no enqueue). Added the
+  trust-boundary doc comment on `ctx.chainDepth` (callers MUST derive from the
+  source job's persisted chainDepth +1 per hop; caller-side enforcement = T13/T24).
+- **Test:** `chainDepth clamp: NaN is rejected as cap-exceeded` and `... a negative
+  depth is rejected as cap-exceeded` — both assert Failed + no enqueue.
+
+### Gate
+- `bun run typecheck` — clean.
+- `bun run lint:file -- src/triggers/fire.ts src/triggers/store.ts src/triggers/substitute.ts tests/triggers/` — clean (9 files, no fixes).
+- `bun run test:file -- tests/triggers/` — **36 pass / 0 fail** (109 expect calls; +4 new regression tests over the prior 32).
+- M7 NOTE untouched; over-cap outcome value (Failed) unchanged, per brief.
+
+## Fix pass 2
+
+Re-review found a pre-existing latent ordering bug in `src/triggers/store.ts`: firing
+ids are `newId('f', now, rand)` (random suffix per ms), but `latestFiring` /
+`latestFiredFiring` / `listFirings` ordered by `fired_at DESC, id ASC`. Two firings in
+the same millisecond sorted in random id order, so "latest" occasionally returned the
+OLDER row — the `overlap skip when the previous job is still running` test failed ~25%
+of runs when the Fired and SkippedOverlap firings shared a millisecond.
+
+### Root cause fix — monotonic rowid tiebreak
+- `latestFiring` + `latestFiredFiring`: `ORDER BY fired_at DESC, rowid DESC` (newest
+  insertion wins ties).
+- `listFirings` keyset reworked from (fired_at, id / `id ASC`) to (fired_at, rowid):
+  `SELECT rowid, *`, cursor now encodes `fired_at:rowid`, WHERE clause
+  `fired_at < ? OR (fired_at = ? AND rowid < ?)`, `ORDER BY fired_at DESC, rowid DESC`
+  — strictly monotonic, no gaps/overlaps under ties. Cursor stays opaque (same
+  base64url encode/decode helpers); `TriggerFiring` DTO does NOT gain a rowid field
+  (rowid is internal to the cursor only).
+
+### Comment nits
+- NIT 1: fire.ts run-dir comment `markJobOrigin` → `markDaemonOrigin` (real fn in
+  `src/server/jobs/dispatch.ts`).
+- NIT 2: extended the M7 NOTE — after the F2 reorder, if `createRun` throws post-enqueue
+  the job is durably enqueued + Fired recorded but fire() throws; same audit-gap family
+  as M7, accepted.
+
+### Tests
+- Existing keyset page-2 test still passes.
+- ADDED `same-millisecond firings resolve deterministically by insertion order (rowid
+  tiebreak)`: records 5 firings with an identical `fired_at`, asserts latestFiring /
+  latestFiredFiring return the LAST-inserted row and that size-2 keyset pagination over
+  the tied rows is stable + complete (newest-insertion→oldest, no gap/overlap) — wrapped
+  in a 20-iteration loop to prove determinism.
+
+### Gate
+- `bun run typecheck` — clean.
+- `bun run lint:file -- src/triggers/store.ts src/triggers/fire.ts tests/triggers/store.test.ts tests/triggers/fire.test.ts` — clean (no fixes).
+- `bun run test:file -- tests/triggers/` — **37 pass / 0 fail** (189 expect calls; +1 new determinism test).
+- Previously-flaky loop: `for i in {1..20}; do bun test tests/triggers/fire.test.ts -t "overlap skip"; done` → **PASSED 20/20**.

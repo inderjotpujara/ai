@@ -6,6 +6,8 @@ import {
   ModelInventoryDtoSchema,
   RunListItemDtoSchema,
   SessionListItemDtoSchema,
+  TriggerDtoSchema,
+  TriggerFiringDtoSchema,
   WorkflowListItemDtoSchema,
 } from './dto.ts';
 import {
@@ -18,6 +20,7 @@ import {
   RunKind,
   RunOrigin,
   RuntimeKind,
+  TriggerTypeWire,
 } from './enums.ts';
 
 /**
@@ -371,3 +374,99 @@ export const DaemonLogsResponseSchema = z.object({
   lines: z.array(z.string()),
 });
 export type DaemonLogsResponse = z.infer<typeof DaemonLogsResponseSchema>;
+
+/**
+ * Per-`type` trigger config bodies (Slice 25). `TriggerDtoSchema.config` /
+ * `TriggerCreateRequestSchema.config` stay `z.unknown()` on the wire (the
+ * shape depends on the sibling `type` field); the create/patch handler
+ * (Task 23) validates the posted `config` against the schema matching
+ * `type` from this set.
+ */
+export const CronConfigSchema = z.object({
+  schedule: z.string().min(1).max(200),
+  timezone: z.string().max(64).optional(),
+  catchUp: z.boolean().optional(),
+  allowOverlap: z.boolean().optional(),
+});
+export type CronConfig = z.infer<typeof CronConfigSchema>;
+
+export const WebhookConfigSchema = z.object({
+  hmac: z.boolean().optional(),
+});
+export type WebhookConfig = z.infer<typeof WebhookConfigSchema>;
+
+export const FileConfigSchema = z.object({
+  path: z.string().min(1).max(4096),
+  events: z.array(z.enum(['add', 'change'])).optional(),
+});
+export type FileConfig = z.infer<typeof FileConfigSchema>;
+
+export const JobChainConfigSchema = z.object({
+  onKind: z.enum(JobKindWire).optional(),
+  onName: z.string().max(200).optional(),
+  onStatus: z.enum(['done', 'failed']),
+});
+export type JobChainConfig = z.infer<typeof JobChainConfigSchema>;
+
+/** `POST /api/triggers` body (Slice 25). `config` is validated per-`type`
+ *  in the handler (Task 23) against one of the schemas above — kept
+ *  `z.unknown()` here since the shape depends on the sibling `type` field. */
+export const TriggerCreateRequestSchema = z.object({
+  name: z.string().min(1).max(120),
+  type: z.enum(TriggerTypeWire),
+  target: z.object({ kind: z.enum(JobKindWire), payload: z.unknown() }),
+  config: z.unknown(),
+  enabled: z.boolean().optional(),
+});
+export type TriggerCreateRequest = z.infer<typeof TriggerCreateRequestSchema>;
+
+/** `PATCH /api/triggers/:id` body (Slice 25) — every field optional
+ *  (partial update); `config`, like the create request, is re-validated
+ *  per-`type` by the handler, not this schema. */
+export const TriggerPatchRequestSchema = z.object({
+  enabled: z.boolean().optional(),
+  target: z
+    .object({ kind: z.enum(JobKindWire), payload: z.unknown() })
+    .optional(),
+  config: z.unknown().optional(),
+});
+export type TriggerPatchRequest = z.infer<typeof TriggerPatchRequestSchema>;
+
+/** `POST /api/triggers` response — the raw webhook path token is
+ *  transmitted EXACTLY ONCE here (present only when `type` is `webhook`),
+ *  mirroring `DevicePairResponseSchema`'s precedent (Slice 25b Incr 1, T4);
+ *  `TriggerDtoSchema` itself never carries it. */
+export const TriggerCreateResponseSchema = z.object({
+  trigger: TriggerDtoSchema,
+  webhookToken: z.string().optional(),
+  webhookUrl: z.string().optional(),
+});
+export type TriggerCreateResponse = z.infer<typeof TriggerCreateResponseSchema>;
+
+/** `GET /api/triggers` response — plain array (small in-memory/on-disk set,
+ *  no cursor), mirroring `CrewListResponseSchema`'s idiom. */
+export const TriggerListResponseSchema = z.object({
+  items: z.array(TriggerDtoSchema),
+});
+export type TriggerListResponse = z.infer<typeof TriggerListResponseSchema>;
+
+/** `GET /api/triggers/:id/firings?cursor=&limit=` query — mirrors
+ *  `JobListQuerySchema`'s keyset-page shape. */
+export const TriggerFiringListQuerySchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().positive().max(200).default(25),
+});
+export type TriggerFiringListQuery = z.infer<
+  typeof TriggerFiringListQuerySchema
+>;
+
+/** `GET /api/triggers/:id/firings` response — a page of firing records +
+ *  cursor when more remain, byte-for-byte `JobListResponseSchema`'s shape. */
+export const TriggerFiringListResponseSchema = z.object({
+  items: z.array(TriggerFiringDtoSchema),
+  nextCursor: z.string().optional(),
+  total: z.number(),
+});
+export type TriggerFiringListResponse = z.infer<
+  typeof TriggerFiringListResponseSchema
+>;

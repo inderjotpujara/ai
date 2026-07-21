@@ -39,7 +39,7 @@ export function recordDaemonStop(info: { pid: number }): void {
 
 /** Every queue job dispatched through the daemon's worker pool carries
  *  `RunOrigin.Daemon` provenance — the SAME value `dispatch.ts`'s
- *  `markDaemonOrigin` writes to `runs/<runId>/origin` — so a job's spans
+ *  `markJobOrigin` writes to `runs/<runId>/origin` — so a job's spans
  *  agree with its run's `readRunOrigin()` projection. */
 function setJobAttrs(span: Span, job: JobRecord): void {
   span.setAttribute(ATTR.JOB_ID, job.id);

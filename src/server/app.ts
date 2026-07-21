@@ -4,6 +4,7 @@ import type { WorkerPool } from '../queue/pool.ts';
 import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
+import type { TriggersEngine } from '../triggers/engine.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
 import {
@@ -24,6 +25,7 @@ import { handleDeviceList } from './devices/list.ts';
 import { handleDevicePair } from './devices/pair.ts';
 import { handleDeviceRevoke } from './devices/revoke.ts';
 import { handleFeedback } from './feedback.ts';
+import { handleWebhook } from './hooks/webhook.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
 import { handleJobCancel } from './jobs/cancel.ts';
 import { handleJobDetail } from './jobs/detail.ts';
@@ -66,6 +68,13 @@ import { handleSessionExport } from './sessions/export.ts';
 import { handleSessionList } from './sessions/list.ts';
 import { handleSessionRename } from './sessions/rename.ts';
 import { handleTelemetry } from './telemetry/handler.ts';
+import { handleTriggerCreate } from './triggers/create.ts';
+import { handleTriggerDelete } from './triggers/delete.ts';
+import { handleTriggerDetail } from './triggers/detail.ts';
+import { handleTriggerFire } from './triggers/fire.ts';
+import { handleTriggerFirings } from './triggers/firings.ts';
+import { handleTriggerList } from './triggers/list.ts';
+import { handleTriggerPatch } from './triggers/patch.ts';
 import { handleUpload } from './upload.ts';
 import { handleWorkflowDetail } from './workflows/detail.ts';
 import { handleWorkflowList } from './workflows/list.ts';
@@ -180,6 +189,13 @@ export type ServerDeps = {
   /** Public base URL the pairing URL/QR (POST /api/devices) is built from —
    *  `AGENT_WEB_PUBLIC_URL` or derived from the request origin. Optional. */
   publicBaseUrl?: string;
+  /** The triggers engine (Slice 25, Task 16). In injected (daemon) mode the
+   *  daemon constructs+owns it and passes it through so the /api/triggers* routes
+   *  (Increment 5) can resolve the store/fire/secretStore. In standalone mode it
+   *  is present ONLY when `AGENT_TRIGGERS_ENABLED` is truthy (I3 invariant —
+   *  otherwise undefined, and no scheduler/watcher handle is opened). Optional:
+   *  the trigger routes degrade to 503 (via `need()`) when unset. */
+  triggers?: TriggersEngine;
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
@@ -225,6 +241,43 @@ export function buildFetch(
       if (blocked) return blocked;
 
       const url = new URL(req.url);
+
+      // §7.1 inbound webhook receiver — the ONLY unauthenticated route class.
+      // Placed AFTER the Host/Origin perimeter (still enforced above) but
+      // BEFORE the /api session-guard block: a third-party sender reaches it
+      // without our bearer token, yet cannot touch any /api route. Its own
+      // token/HMAC/replay/cap/rate-limit checks (handleWebhook) ARE the whole
+      // security boundary. Only POST matches; any other method/verb falls
+      // through to serveStatic (so /hooks exposes nothing else). Absent
+      // triggers engine → 503 (matches the /api need() degrade shape) rather
+      // than the outer catch's opaque 500.
+      const hookMatch = url.pathname.match(/^\/hooks\/([^/]+)$/);
+      if (req.method === 'POST' && hookMatch?.[1]) {
+        if (!deps.triggers) {
+          return json(
+            { error: new DepUnavailableError('triggers').message },
+            503,
+          );
+        }
+        let token: string;
+        try {
+          token = decodeURIComponent(hookMatch[1]);
+        } catch {
+          // Malformed percent-encoding (`%zz`) is just another shape of "not
+          // a real token" — same 404 body/status as an unknown/disabled
+          // trigger (handleWebhook's own miss path), so a decode failure
+          // never surfaces as an opaque 500 that would break the uniform
+          // "any invalid token → 404" contract (a status oracle).
+          return json({ error: 'not found' }, 404);
+        }
+        return await handleWebhook(token, req, {
+          triggerStore: deps.triggers.store,
+          secretStore: deps.triggers.secretStore,
+          fire: deps.triggers.fire,
+          runLimiter: deps.runLimiter,
+        });
+      }
+
       if (url.pathname.startsWith('/api')) {
         // `navigator.sendBeacon` can't set an Authorization header, so the
         // beacon carries its token in the request BODY (not the URL — a query
@@ -465,6 +518,105 @@ async function handleApi(
         const jobDetail = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
         if (req.method === 'GET' && jobDetail?.[1]) {
           const res = handleJobDetail(jobDetail[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/triggers') {
+          const res = handleTriggerList({
+            triggers: need(deps.triggers, 'triggers'),
+            // Threads webhookUrl into a webhook trigger's DTO (Slice 25
+            // LOW-2 follow-up), same as create/patch below.
+            publicBaseUrl: deps.publicBaseUrl,
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/triggers') {
+          // Behind the /api session guard AND (inside the handler)
+          // requireTrustedLocal. publicBaseUrl threads the webhookUrl into the
+          // created DTO (T23 carry) — same AGENT_WEB_PUBLIC_URL source as the
+          // device-pairing route.
+          const res = await handleTriggerCreate(
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+              publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action sub-path matches (`/firings`, `/fire`) MUST precede the bare
+        // `:id` detail/patch/delete match below — same action-before-detail
+        // discipline as `/api/jobs/:id/cancel` and `/api/devices/:id/revoke`.
+        const triggerFirings = url.pathname.match(
+          /^\/api\/triggers\/([^/]+)\/firings$/,
+        );
+        if (req.method === 'GET' && triggerFirings?.[1]) {
+          const res = handleTriggerFirings(
+            triggerFirings[1],
+            new URLSearchParams(url.search),
+            { triggers: need(deps.triggers, 'triggers') },
+          );
+          rec.status(res.status);
+          return res;
+        }
+        const triggerFire = url.pathname.match(
+          /^\/api\/triggers\/([^/]+)\/fire$/,
+        );
+        if (req.method === 'POST' && triggerFire?.[1]) {
+          const res = await handleTriggerFire(
+            triggerFire[1],
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Bare `:id` match shared by GET (detail) / PATCH / DELETE.
+        const triggerDetail = url.pathname.match(/^\/api\/triggers\/([^/]+)$/);
+        if (req.method === 'GET' && triggerDetail?.[1]) {
+          const res = handleTriggerDetail(triggerDetail[1], {
+            triggers: need(deps.triggers, 'triggers'),
+            // Threads webhookUrl into a webhook trigger's DTO (Slice 25
+            // LOW-2 follow-up), same as create/patch below.
+            publicBaseUrl: deps.publicBaseUrl,
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'PATCH' && triggerDetail?.[1]) {
+          const res = await handleTriggerPatch(
+            triggerDetail[1],
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+              // Optional here (matches TriggerPatchDeps) — threads the
+              // webhookUrl back into a patched webhook trigger's DTO (T23 carry).
+              publicBaseUrl: deps.publicBaseUrl,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'DELETE' && triggerDetail?.[1]) {
+          const res = handleTriggerDelete(
+            triggerDetail[1],
+            req,
+            {
+              triggers: need(deps.triggers, 'triggers'),
+              policy: deps.policy,
+            },
+            guard,
+          );
           rec.status(res.status);
           return res;
         }

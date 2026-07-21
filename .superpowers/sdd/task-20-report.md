@@ -110,3 +110,47 @@ Fails if the session store captured the root as a string or used a different roo
   Task 20 scope — not implemented here.
 - Docs surfaces (architecture.md/README/ROADMAP/ledger/Artifact) are the slice-landing gate's
   concern at increment close — not touched per-task.
+
+
+---
+
+# Task 20 Report — Generalize markDaemonOrigin + retry provenance carry (Slice 25 Triggers)
+
+**Status:** DONE. Commit `5eba90d` on `slice-25-triggers`.
+
+## What shipped
+1. **Provenance generalization** (`src/server/jobs/dispatch.ts`): renamed
+   `markDaemonOrigin(runsRoot, runId)` → `markJobOrigin(runsRoot, runId, origin)`.
+   The `createJobDispatch` wrapper now passes `job.origin ?? RunOrigin.Daemon`, so a
+   cron-fired run stamps `runs/<id>/origin=schedule`, webhook→`webhook`,
+   file/chain→`api` (whatever `fire.ts` set), and a directly-enqueued job still
+   defaults to `daemon` (unchanged). The runs `?origin=` facet (Slice 25b) then
+   filters trigger-fired runs for free. `RunOrigin` already had Schedule/Webhook/Api
+   — no enum change. `markDaemonOrigin` had no external callers (only comments in
+   fire.ts:166 / daemon/spans.ts:42), so it was renamed cleanly, no alias needed.
+
+2. **I6 carry** (`src/server/jobs/retry.ts`): the `handleJobRetry` re-enqueue now
+   carries `origin: job.origin` and `chainDepth: job.chainDepth` forward. Previously
+   a retried webhook/schedule job silently reset to daemon (dropped off the facet)
+   and a chained job reset to chainDepth 0 (evading the A→B→A cap on its next hop —
+   the T9 F1 finding: chainDepth must survive every hop incl. manual retry).
+
+3. **app.ts `/hooks/:token` route:** NOT modified — already wired by a prior task
+   (buildFetch lines 247-272, inside the perimeter, outside the /api session guard,
+   with malformed-token→404 handling). Added `tests/server/app-hooks-route.test.ts`
+   to lock the boundary the brief specified: forbidden Origin→403 (perimeter),
+   loopback POST no-bearer unknown token→404 not 401 (outside session guard), GET
+   falls through (POST-only).
+
+## Tests
+`bun test` (dispatch-origin + retry-origin + app-hooks-route + pre-existing
+dispatch/retry/app/hooks-webhook): 54 pass, 0 fail. Broader sweep
+`tests/server/jobs tests/triggers`: 149 pass, 0 fail. typecheck clean; lint clean.
+
+New test files: `tests/server/dispatch-origin.test.ts` (Schedule/Webhook stamp +
+Daemon default), `tests/server/jobs/retry-origin.test.ts` (webhook+chainDepth=2,
+schedule+chainDepth=3, plain job stays undefined/0), `tests/server/app-hooks-route.test.ts`.
+
+## Concerns
+None. The app.ts deliverable in the brief was already complete from an earlier task;
+the added route test closes the coverage gap the brief called for.

@@ -81,3 +81,60 @@ real values. No `main.ts` construction change (that is T20's job).
 - The rotate-root span deliberately carries no `deviceId`; a future per-session
   invalidated-count would be an added attribute on the same span, not a schema
   change.
+
+---
+
+# Task 15 — engine.ts (triggers subsystem composition root)
+
+**Status:** COMPLETE. Commit `c874008` on branch `slice-25-triggers`.
+
+## What shipped
+- `src/triggers/engine.ts` — `createTriggersEngine(deps)` returning a
+  `TriggersEngine { store, secretStore, fire, handleJobSettled, start(), stop() }`.
+  Wires the single `createFireTrigger` into scheduler + watcher + chain observer
+  (shared convergence), resolves `pollMs`/`watchRoot`/`maxChainDepth` from
+  `loadConfig()` with the injected `config.*` override winning, and threads
+  `now`/`setInterval`/`clearInterval`/`watch` seams into the sub-components.
+- `start()` order: `syncRepoTriggers(store, repoDefs)` → `scheduler.start()`
+  (its own reconcile runs first) → `watcher.start()`.
+- `stop()` reverse teardown: `scheduler.stop()` → `await watcher.stop()` →
+  `store.close()`.
+- `handleJobSettled` = `chain.handleJobSettled` (observer is NOT started; it is
+  the callback Task 16 passes to `createWorkerPool({ onSettled })`).
+- Exported a minimal `TriggerSecretStore` type (`resolve(secretRef)`); engine
+  only holds+exposes it, so this task does not depend on Task 18 landing.
+
+## Deviations / decisions
+- Added `now`/`setInterval`/`clearInterval`/`watch` seams to the deps beyond the
+  brief's literal Produces block — required by the brief's Step-1 test (fake
+  timers + fake chokidar) and the launching agent's "injectable seams thread
+  through" note. Daemon passes none → real implementations.
+- `maxChainDepth` reads a config loaded ONCE at construction (single `loadConfig`
+  call) rather than re-calling `loadConfig()` per invocation as the brief's
+  sample literally wrote — same live-config semantics, kept as a `() => number`
+  getter for the fire.ts/chain seam.
+
+## Tests (tests/triggers/engine.test.ts, 3 tests)
+1. start/stop lifecycle runs clean + syncs repo defs (order proof: a repo cron's
+   `nextRunAt` is seeded only because sync ran before scheduler.reconcile).
+2. `handleJobSettled` forwards to the chain observer — a matched jobchain trigger
+   records a firing through the engine's own store/fire.
+3. `stop()` clears the exact interval id `start()` armed, closes every watcher,
+   and closes the DB (post-stop `store.get()` throws).
+
+Gate: `bun run typecheck` clean; `bun run lint:file` clean (exit 0, 0 warnings);
+focused suite 3/3 pass; full `tests/triggers/` 93/93 pass.
+
+## Concerns / carries
+- **T13 N-carry (logger for chain observer's swallowed fire rejection) NOT
+  applied here — defer to Task 16.** `createChainObserver` (chain.ts) does not
+  accept a logger param; its `fire().catch(() => {})` still swallows silently.
+  Adding a logger would require modifying chain.ts + its tests (out of scope for
+  this integration task). T16 should either add a `log?` seam to
+  `createChainObserver` or have the engine wrap `handleJobSettled` with logging.
+- `TriggerSecretStore` is a minimal placeholder type. Task 18's real
+  `createTriggerSecretStore` must align to / re-export this shape (or the engine
+  import updates) when it lands.
+- Engine opens a SECOND bun:sqlite connection onto the same jobs.db as the
+  injected jobStore — this is the pre-existing M7 dual-connection design already
+  documented in fire.ts (audit-only gap), not new.

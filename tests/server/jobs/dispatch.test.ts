@@ -24,6 +24,8 @@ const fakeJob = (kind: JobKind, payload: unknown): JobRecord => ({
   result: undefined,
   error: undefined,
   retriedFrom: null,
+  origin: undefined,
+  chainDepth: 0,
 });
 
 const baseDeps = () => ({

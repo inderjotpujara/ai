@@ -54,4 +54,16 @@ export const JOB_MIGRATIONS: Migration[] = [
       db.run(`ALTER TABLE jobs ADD COLUMN retried_from TEXT`);
     },
   },
+  {
+    name: 'add-origin-and-chain-depth',
+    up: (db: Database) => {
+      // Slice 25: trigger-fired jobs carry provenance (RunOrigin.Schedule/
+      // Webhook/Api) so the runs `?origin=` facet lights up; chain_depth is the
+      // §7.3 A→B→A cycle guard — every hop increments it, fire.ts caps it.
+      db.run(`ALTER TABLE jobs ADD COLUMN origin TEXT`);
+      db.run(
+        `ALTER TABLE jobs ADD COLUMN chain_depth INTEGER NOT NULL DEFAULT 0`,
+      );
+    },
+  },
 ];

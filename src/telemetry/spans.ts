@@ -195,6 +195,12 @@ export const ATTR = {
    *  daemon/queue-dispatched job's spans are distinguishable from a directly
    *  launched run's, independent of `readRunOrigin`'s file-based marker. */
   JOB_ORIGIN: 'job.origin',
+  // Triggers (Slice 25): scheduled/webhook/file/job-chain trigger telemetry.
+  // NEVER put the webhook token or secretRef value in a span attribute.
+  TRIGGER_ID: 'trigger.id',
+  TRIGGER_TYPE: 'trigger.type',
+  TRIGGER_ORIGIN: 'trigger.origin',
+  TRIGGER_OUTCOME: 'trigger.outcome',
 } as const;
 
 export type ModelSelectInfo = {

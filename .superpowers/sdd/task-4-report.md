@@ -1,94 +1,87 @@
-# Task 4 Report — Device DTOs + pairing requests + rotate-root request (Slice 25b Incr 1)
+# Task 4 Report — Queue provenance + chain-depth columns (Slice 25 Task 4)
 
 ## Status: DONE
 
-Note: this report file previously held a stale Phase-8 Task 4 report
-(`useReducedMotion` hook, unrelated slice/phase). That content was already
-committed under its own SHA in that phase and is unaffected by this overwrite.
+Note: this report file previously held a stale Task 4 report from
+Slice 25b Increment 1 (Device DTOs + pairing requests). That content was
+already committed under its own SHA (`c8caf6a`, branch `slice-25b-ops-console`)
+and is unaffected by this overwrite.
 
 ## Summary
-Added the device-management + security request/response DTOs for the Devices &
-Access tab, per the brief and the "Shared contracts" snippet in
-`docs/superpowers/plans/2026-07-19-slice-25b-ops-console.md:77-104`. Pure
-schema declarations + inferred types + round-trip tests only — no endpoint
-wiring (that's future Task 13/14/T21 work per the plan).
+Threaded trigger provenance through the job queue per the brief:
 
-## Implementation
-- **`src/contracts/dto.ts`** — appended after `QueueStatsDtoSchema` (Task 3's
-  addition, 2e1daee):
-  - `DeviceDtoSchema { deviceId: string, label: string, createdAt: number, exp: number }`
-    + `DeviceDTO` inferred type. `exp` is the device's session-token expiry
-    (epoch-ms) — the registry never stores the token itself.
-  - `DeviceListResponseSchema { items: DeviceDtoSchema[] }` + `DeviceListResponse`.
-- **`src/contracts/requests.ts`** — appended after `JobListResponseSchema`
-  (Task 3's addition):
-  - `DevicePairRequestSchema { label: z.string().min(1).max(120) }` +
-    `DevicePairRequest`.
-  - `DevicePairResponseSchema { deviceId: string, token: string, pairingUrl: string }`
-    + `DevicePairResponse`.
-  - `RotateRootRequestSchema { rootSecret: z.string() }` + `RotateRootRequest`.
-- No change needed to `src/contracts/index.ts` — it re-exports via
-  `export * from './dto.ts'` / `'./requests.ts'`, so the new schemas are
-  already reachable from `@contracts`.
-- Doc comments added above each schema explaining the wire contract (token
-  transmitted exactly once, `exp` vs token, root-secret re-confirm) matching
-  the file's existing comment density/style (e.g. `DaemonBindDtoSchema`,
-  `JobEnqueueRequestSchema`).
+- `src/queue/migrations.ts` — appended `add-origin-and-chain-depth` as the
+  **third** entry in `JOB_MIGRATIONS` (strict append, never inserted mid-list —
+  preserves the positional `PRAGMA user_version` prefix invariant a later task
+  relies on to concatenate trigger-table migrations after it). Adds
+  `origin TEXT` (nullable) and `chain_depth INTEGER NOT NULL DEFAULT 0` via
+  `ALTER TABLE`.
+- `src/queue/types.ts` — imports `RunOrigin` from `../contracts/enums.ts`
+  (one-directional: contracts imports nothing from queue). `JobInput` gains
+  `origin?: RunOrigin` and `chainDepth?: number`; `JobRecord` gains
+  `origin: RunOrigin | undefined` and `chainDepth: number`.
+- `src/queue/store.ts` — `JobRowRaw` gains `origin: string | null` and
+  `chain_depth: number`; `toJobRecord` sets `origin: (r.origin ?? undefined) as
+  RunOrigin | undefined, chainDepth: r.chain_depth`; `enqueue`'s INSERT column
+  list and value array both extended in lockstep with `origin` (`input.origin
+  ?? null`) and `chain_depth` (`input.chainDepth ?? 0`) — double-checked the
+  column/value lists stay positionally aligned.
+- `tests/queue/store-origin.test.ts` (new) — the brief's exact TDD test:
+  a job enqueued with `origin`/`chainDepth` reads them back; a default job
+  reads `origin: undefined, chainDepth: 0`. Confirmed RED first (`origin`
+  expected `"schedule"`, received `undefined`), then GREEN after the fix.
 
-## TDD
-- **RED**: wrote `tests/contracts/device-dto.test.ts` verbatim from the brief
-  first; ran `bun test tests/contracts/device-dto.test.ts` → failed with
-  `SyntaxError: Export named 'DeviceListResponseSchema' not found in module
-  '.../src/contracts/dto.ts'` (confirms missing export, not a typo/import path
-  bug).
-- **GREEN**: added the schemas; re-ran → `2 pass, 0 fail, 4 expect() calls`.
-- One deviation from the brief's literal test text: the line
-  `expect(() => DevicePairRequestSchema.parse({ label: 'x'.repeat(121) })).toThrow();`
-  exceeds Biome's line-length wrap rule under `lint:file`. Reformatted to
-  Biome's required multi-line form (identical assertion/behavior) — required
-  to pass the gate; no other deviation.
+### Incidental fixes required for the gate to pass (outside the brief's file list)
+Adding two new *required* fields to `JobRecord` broke hand-built object-literal
+fixtures elsewhere:
+- `tests/daemon/spans.test.ts` — `job()` fixture now sets `origin: undefined,
+  chainDepth: 0`.
+- `tests/server/jobs/dispatch.test.ts` — `fakeJob()` fixture now sets the same.
+- `tests/queue/migrations.test.ts` — asserted `user_version === 2` and an
+  exact `PRAGMA table_info(jobs)` column list; updated to `3` and appended
+  `origin`, `chain_depth` to the expected column list (both the migration
+  count and the column shape necessarily shift when a migration is appended).
+
+Confirmed `JobDtoSchema` (`src/contracts/dto.ts`) and its mapper `toJobDto`
+(`src/server/jobs/map.ts`) are unaffected: the mapper builds the DTO with an
+explicit field list, so it naturally omits `origin`/`chainDepth` with no code
+change needed — matches the reviewer note (`chainDepth` unread there;
+`availableAt`/`retriedFrom` unaffected).
 
 ## Files changed
-- `src/contracts/dto.ts` (modified)
-- `src/contracts/requests.ts` (modified)
-- `tests/contracts/device-dto.test.ts` (new)
+- `src/queue/migrations.ts`
+- `src/queue/types.ts`
+- `src/queue/store.ts`
+- `tests/queue/store-origin.test.ts` (new)
+- `tests/queue/migrations.test.ts`
+- `tests/daemon/spans.test.ts`
+- `tests/server/jobs/dispatch.test.ts`
 
-## Gate results (all inline, all green)
-- `bun run typecheck` → clean (`tsc --noEmit`, no errors).
-- `bun run lint:file -- src/contracts/dto.ts src/contracts/requests.ts tests/contracts/device-dto.test.ts`
-  → clean after the formatting fix above (`Checked 3 files in 6ms. No fixes applied.`).
-- `bun test tests/contracts/device-dto.test.ts` → `2 pass, 0 fail`.
-- `bun test tests/contracts/` (full contract-parity suite, all 32 files) →
-  `123 pass, 0 fail, 192 expect() calls` — no regressions from Tasks 1-3's
-  additions (job/run/daemon/queue contracts).
+## Gate results (all green)
+- `bun run typecheck` → clean, no errors.
+- `bun run lint:file -- src/queue/types.ts src/queue/migrations.ts src/queue/store.ts tests/queue/store-origin.test.ts tests/daemon/spans.test.ts tests/server/jobs/dispatch.test.ts tests/queue/migrations.test.ts` → clean after `biome check --write` applied import-order/formatting fixes (no logic changes; verified diff was formatting-only).
+- `bun run test:file -- tests/queue/` → 51 pass, 0 fail (1520 expect() calls, 13 files).
+- `bun run test -- -t "claimNext"` (brief's regression check) → 5 pass, 0 fail.
 
 ## Commit
-`c8caf6a` — `feat(contracts): Device DTOs + pair/rotate-root requests (Slice 25b Incr 1)`
-on branch `slice-25b-ops-console` (3 files changed, 57 insertions). Only the
-three intended files were staged (`git add` by explicit path, not `-A`); other
-working-tree modifications present at commit time (`.remember/`,
-`.superpowers/sdd/task-{1,2,3}-*`, plan doc) belong to sibling tasks/history
-and were deliberately left untouched/unstaged. Pre-commit `docs-check` hook
-passed automatically (`✔ docs-check: living docs present + linked; every src
-subsystem documented.`) — no `docs/architecture.md` edit was needed since
-`src/contracts/` was already a documented subsystem before this task.
-
-## Self-review
-- Schema field names/types match the plan's "Shared contracts" snippet
-  (`docs/superpowers/plans/2026-07-19-slice-25b-ops-console.md:80-103`) and
-  the design spec
-  (`docs/superpowers/specs/2026-07-19-slice-25b-ops-console-design.md:44`)
-  verbatim — no deviation, no judgment calls needed on shape.
-- `enum` over unions / `type` over `interface` — n/a here (no new enums or
-  object-shape types beyond the inferred DTO types, consistent with every
-  sibling schema in the file).
-- No `z.record` over an enum used in this task (the Task-3
-  `z.partialRecord`-vs-exhaustive-`z.record` pitfall doesn't apply — no
-  enum-keyed record was needed for device/security DTOs).
-- No `console.log`, no `any`, no deviation from repo code style.
+`cca3380` — "feat(queue): job origin + chain_depth columns" on branch
+`slice-25-triggers` (7 files changed, 61 insertions, 6 deletions). Only the
+task-4 files were staged by explicit path (not `-A`); other working-tree
+modifications present at commit time (`.remember/`, `.superpowers/sdd/task-{1,2,3}-*`,
+`.superpowers/sdd/progress.md`) belong to sibling tasks and were deliberately
+left untouched/unstaged. Pre-commit `docs-check` hook passed automatically
+(no `docs/architecture.md` edit needed — `src/queue/` was already documented).
 
 ## Concerns
-None. Endpoint wiring (`POST /api/devices`, `/api/devices/:id/revoke`,
-`POST /api/security/rotate-root`, `requireTrustedLocal`, `DeviceRegistry`) is
-explicitly out of scope per the brief and belongs to later tasks (T13/T14/T21
-per the plan) that will consume these schemas.
+- INSERT column list and value array in `enqueue` were extended in parallel
+  (`origin`, `chain_depth` appended at the same position in both lists) —
+  worth a second look given positional bind params silently corrupt every
+  row on a mis-order.
+- Migration is a pure additive `ALTER TABLE ... ADD COLUMN`; no backfill
+  needed since `origin` is nullable and `chain_depth` has `DEFAULT 0`, so
+  pre-migration rows read back as `undefined`/`0` exactly per spec.
+- Did not wait for a full `bun run test` run to finish (kicked off in the
+  background for extra confidence but still executing at task close); the
+  task's own specified gate — focused `tests/queue/` (51 tests) plus the
+  `-t "claimNext"` regression check — is green. Recommend the slice
+  controller run the full suite (`bun run check`) before landing.
