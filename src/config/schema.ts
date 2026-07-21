@@ -615,6 +615,38 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: false,
     doc: 'Governs ONLY whether a standalone startWebServer (no injected daemon queue) auto-constructs and starts its own triggers engine. Defaults OFF so an existing/ad-hoc startWebServer() (as every current server test calls it) never spins a scheduler, watches files, or leaves an open handle — the I3 invariant. The daemon always constructs+injects its engine explicitly (via opts.triggers, ignoring this flag), so the real deployment runs triggers unconditionally; the flag is the standalone-server opt-in (AGENT_TRIGGERS_ENABLED=1). (No AGENT_TRIGGERS_PATH knob — the repo registry is the compile-time triggers/index.ts import, so a path override would have no consumer.)',
   },
+
+  // --- A2A interop (Slice 31) ---
+  {
+    env: 'AGENT_A2A_ENABLED',
+    kind: 'boolean',
+    def: false,
+    doc: 'Governs whether the EXPOSE surface is live: the card route (`server/a2a/card.ts`) 404s and `POST /api/a2a` (`server/a2a/rpc.ts`) rejects when off. Default OFF so the daemon exposes nothing until an operator authors an allowlist + issues a token from the Federation tab.',
+  },
+  {
+    env: 'AGENT_A2A_CARD_TTL',
+    kind: 'number',
+    def: 300,
+    doc: 'card `Cache-Control: max-age` seconds (`a2a/card.ts`).',
+  },
+  {
+    env: 'AGENT_A2A_REPLAY_WINDOW_MS',
+    kind: 'number',
+    def: 300_000,
+    doc: 'inbound request replay window; a request whose timestamp is outside ±window is rejected (`a2a/enroll.ts` / `server/a2a/rpc.ts`, §7.2).',
+  },
+  {
+    env: 'AGENT_A2A_SKILLS_PATH',
+    kind: 'string',
+    def: 'a2a-skills.json',
+    doc: 'expose allowlist + issued-token-registry store path, mirroring `AGENT_QUEUE_PATH` (`a2a/allowlist.ts` / `a2a/enroll.ts`).',
+  },
+  {
+    env: 'AGENT_A2A_REMOTES_PATH',
+    kind: 'string',
+    def: '~/.config/ai/a2a-remotes.json',
+    doc: 'consume remote-agent store; the leading `~` is expanded at the read site (`a2a/remotes.ts`), 0700 dir / 0600 file.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in

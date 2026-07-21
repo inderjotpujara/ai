@@ -3680,6 +3680,20 @@ path.
 
 ---
 
+### `src/a2a/` — A2A interop (Slice 31, stub)
+
+One A2A v1.0 layer over the Slice-24 daemon + queue. EXPOSE: an Agent Card
+(`GET /.well-known/agent-card.json`) + JSON-RPC (`POST /api/a2a`) map an inbound
+task onto `JobStore.enqueue` (`origin=Remote`) behind a least-privilege skill
+allowlist and a separate A2A Bearer. CONSUME: remote A2A agents are discovered,
+validated, hash-pinned, and mounted as `delegate_to_<name>` specialists through
+the existing MCP mount path.
+
+> Stub — expanded into the full subsystem writeup (module map, data-flow edges,
+> the `POST /api/a2a` route class) in this slice's docs task (Task 29).
+
+---
+
 ## 24. Always-on daemon + task queue + resumable jobs + secure remote access (Slice 24, Phase E; Slice 25b added the Ops-console HTTP surfaces below — the web UI itself is its own section immediately after this one)
 
 Through Slice 23 the BFF was a **foreground** `Bun.serve` whose runs were
