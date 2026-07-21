@@ -30,7 +30,12 @@ import {
   dispatchA2aRpc,
 } from '../../a2a/server.ts';
 import { loadConfig } from '../../config/schema.ts';
-import { JsonRpcResponseSchema } from '../../contracts/index.ts';
+import {
+  A2aMethod,
+  JsonRpcRequestSchema,
+  JsonRpcResponseSchema,
+} from '../../contracts/index.ts';
+import { handleA2aStream } from './stream-route.ts';
 
 /** JSON-RPC 2.0 Parse Error — the body was not valid JSON at all (distinct from
  *  `-32600` invalid-request, which `dispatchA2aRpc` returns for a well-formed
@@ -104,6 +109,23 @@ export async function handleA2aRpc(
       ok: false,
       error: { code: PARSE_ERROR, message: 'parse error' },
     });
+  }
+
+  // Streaming methods return an SSE Response (not a JSON-RPC body), so they are
+  // routed to the stream route BEFORE the JSON-RPC dispatcher — which only
+  // knows the three non-streaming methods and would otherwise -32601 them.
+  const envelope = JsonRpcRequestSchema.safeParse(body);
+  if (
+    envelope.success &&
+    (envelope.data.method === A2aMethod.MessageStream ||
+      envelope.data.method === A2aMethod.TasksResubscribe)
+  ) {
+    return handleA2aStream(
+      envelope.data.params,
+      envelope.data.method,
+      req,
+      deps,
+    );
   }
 
   const id = extractId(body);
