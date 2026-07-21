@@ -23,6 +23,7 @@ import {
   type TriggersEngine,
 } from '../triggers/engine.ts';
 import { createTriggerSecretStore } from '../triggers/secret-store.ts';
+import { buildA2aServerDeps } from './a2a/wire.ts';
 import { buildFetch, type ServerDeps } from './app.ts';
 import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createDurableConsentRegistry } from './consent/durable-registry.ts';
@@ -232,6 +233,14 @@ export type StartOptions = {
    *  FIRST on shutdown. With the flag off (the default) NO engine is built — no
    *  scheduler interval, no chokidar watcher, no open handle. */
   triggers?: TriggersEngine;
+  /** Injected A2A EXPOSE-surface deps (Slice 31, Task 18). Caller-supplied wins
+   *  (tests / the CLI, Task 27); absent = `startWebServer` self-constructs from
+   *  cfg ONLY when `AGENT_A2A_ENABLED` is on, else leaves `deps.a2a` undefined
+   *  (the expose surface stays dark — card route + `POST /api/a2a` report
+   *  unavailable). Unlike the pool/triggers, the A2A stores have NO start/stop
+   *  lifecycle, so this is a pure deps handoff — no drain, no
+   *  double-instantiation hazard, nothing to tear down on shutdown. */
+  a2a?: ServerDeps['a2a'];
 };
 
 /** Boot the local web BFF. Returns the server handle for tests/shutdown. */
@@ -553,6 +562,23 @@ export function startWebServer(opts: StartOptions = {}): {
     // Triggers routes (Increment 5) resolve this; undefined in standalone mode
     // with the flag off, so those routes degrade to 503 via need() (I3).
     triggers,
+    // A2A EXPOSE surface (Slice 31, Task 18): caller-injected wins, else
+    // self-construct from cfg ONLY when AGENT_A2A_ENABLED is on. Off ⇒ undefined
+    // ⇒ the card route + POST /api/a2a report unavailable (advertise NOTHING
+    // until an operator enables it). `rootStore` is the SAME hoisted instance
+    // the session guard verifies against, so a rotate-root invalidates issued
+    // A2A Bearers too. A2A has no start/stop lifecycle — a pure deps handoff.
+    // Task 20/22 (Increment 6): buildA2aServerDeps grows remotes + client
+    // (CONSUME side); this EXPOSE-side boot wiring is unchanged by that.
+    a2a:
+      opts.a2a ??
+      ((cfg.AGENT_A2A_ENABLED as boolean)
+        ? buildA2aServerDeps(cfg, {
+            jobStore,
+            runsRoot,
+            rootTokens: rootStore,
+          })
+        : undefined),
   };
   // idleTimeout: 0 is required so future SSE streams are not idle-closed.
   // maxRequestBodySize (Slice 24 Incr 5, item 3): Bun's own default is 128MB

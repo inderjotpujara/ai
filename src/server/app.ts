@@ -215,7 +215,13 @@ export type ServerDeps = {
    *  The card route reads only `allowlist`. NOTE: absence is a 503, but both A2A
    *  routes ALSO 404 whenever
    *  `AGENT_A2A_ENABLED` is off regardless of this field (fail-safe: the expose
-   *  surface reveals nothing until an operator enables it). */
+   *  surface reveals nothing until an operator enables it). CONSTRUCTED at boot
+   *  by `buildA2aServerDeps` (Slice 31, Task 18) — `server/a2a/wire.ts` —
+   *  ONLY when `AGENT_A2A_ENABLED` is on, so with the flag off this stays
+   *  undefined and the whole expose surface is dark. Increment 6 (Task 20/22)
+   *  grows `A2aServerDeps` with the CONSUME side (`remotes` + `client`); those
+   *  factories don't exist yet, so today's boot wiring builds only the
+   *  EXPOSE-complete fields. */
   a2a?: A2aServerDeps;
 };
 
