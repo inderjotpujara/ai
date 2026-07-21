@@ -50,6 +50,10 @@ function fakeChokidar() {
       },
       close: async (): Promise<void> => {
         closed.push(path);
+        // Match real chokidar: a closed watcher delivers no further events —
+        // otherwise a stale listener from a re-attached (moved) path could
+        // still fire on a synthetic emit() targeting the old path.
+        byPath.delete(path);
       },
     };
     return emitter;
@@ -521,6 +525,97 @@ test('reconcile does not double-attach an already-watched trigger', () => {
   w.reconcile();
   expect(chok.calls).toHaveLength(1);
   expect(chok.closed).toHaveLength(0);
+});
+
+test('reconcile re-attaches when config.path is edited at runtime (drift)', () => {
+  const root = realRoot();
+  const store = newStore();
+  const t = store.create({
+    name: 'moves',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(root, 'a.csv') },
+  });
+  const chok = fakeChokidar();
+  const { fire, calls } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  w.start();
+  expect(chok.calls).toHaveLength(1);
+  expect(chok.calls[0]?.path).toBe(join(root, 'a.csv'));
+
+  // A runtime `PATCH /api/triggers/:id` edits config.path — same id, still
+  // enabled — while it stays a FILE trigger.
+  store.update(t.id, { config: { path: join(root, 'b.csv') } });
+  w.reconcile();
+
+  // Old watch closed exactly once, a fresh watch armed on the new path — only
+  // one chokidar instance is live (old closed, not both).
+  expect(chok.closed).toEqual([join(root, 'a.csv')]);
+  expect(chok.calls).toHaveLength(2);
+  expect(chok.calls[1]?.path).toBe(join(root, 'b.csv'));
+
+  // An event on the OLD path does not fire (nothing is listening there
+  // anymore); an event on the NEW path fires.
+  const oldPath = join(root, 'a.csv');
+  chok.emit(oldPath, 'add', oldPath);
+  expect(calls).toHaveLength(0);
+
+  const newPath = join(root, 'b.csv');
+  chok.emit(newPath, 'add', newPath);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.[0].id).toBe(t.id);
+  expect(calls[0]?.[1].vars?.['file.path']).toBe(newPath);
+
+  // A further reconcile with the path unchanged is a strict no-op — no extra
+  // watch() or close() calls.
+  w.reconcile();
+  expect(chok.calls).toHaveLength(2);
+  expect(chok.closed).toHaveLength(1);
+});
+
+test('an unconfinable enabled trigger warns ONCE across multiple reconciles', () => {
+  const root = realRoot();
+  const store = newStore();
+  store.create({
+    name: 'escapes-always',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: '/etc/passwd' }, // repo-defined path that bypassed the API gate
+  });
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const cap = captureLogger();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+    log: cap.log,
+  });
+  w.start();
+
+  const warnsAfterStart = cap.lines.filter(
+    (l) => l.level === 'warn' && l.msg.includes('unconfinable path'),
+  );
+  expect(warnsAfterStart).toHaveLength(1);
+
+  // Multiple subsequent poll ticks must NOT re-log the warning.
+  w.reconcile();
+  w.reconcile();
+  w.reconcile();
+
+  const warnsAfterTicks = cap.lines.filter(
+    (l) => l.level === 'warn' && l.msg.includes('unconfinable path'),
+  );
+  expect(warnsAfterTicks).toHaveLength(1);
+  expect(chok.calls).toHaveLength(0); // never attached
 });
 
 test('reconcile before start() is a no-op (no root yet)', () => {

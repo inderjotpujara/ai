@@ -51,10 +51,16 @@ export type FileWatcher = {
    * Diff the store's currently-enabled file triggers against the set of
    * currently-attached watches (keyed by trigger id) and converge: ATTACH a
    * watch for any enabled file trigger not yet watched, DETACH (close + remove)
-   * any attached watch whose trigger is no longer enabled or present. Idempotent
-   * and synchronous per call; drives runtime pickup of console/CLI-created file
-   * triggers the same way the scheduler polls the store for runtime crons. A
-   * no-op until `start()` has created the watch root.
+   * any attached watch whose trigger is no longer enabled or present, and
+   * RE-ATTACH (detach old + attach new) an already-watched trigger whose
+   * `config.path` was edited at runtime (e.g. `PATCH /api/triggers/:id`) — an
+   * unchanged path is a strict no-op. Idempotent and synchronous per call;
+   * drives runtime pickup of console/CLI-created file triggers the same way
+   * the scheduler polls the store for runtime crons. A no-op until `start()`
+   * has created the watch root. A persistently-unconfinable enabled trigger is
+   * warned about only once (negative-cached per id+path) rather than on every
+   * poll tick, re-warning only if its path changes or it leaves and re-enters
+   * the enabled set.
    */
   reconcile(): void;
   stop(): Promise<void>;
@@ -69,12 +75,35 @@ export function createFileWatcher(deps: {
 }): FileWatcher {
   const watchFn = deps.watch ?? chokidar.watch;
   const log = deps.log ?? defaultLog;
-  // One watcher per trigger id (so reconcile/stop can close them all).
-  const watchers = new Map<string, WatcherHandle>();
+  // One watcher per trigger id (so reconcile/stop can close them all). Stores
+  // the CONFINED path alongside the handle so reconcile can detect a runtime
+  // `config.path` edit (same trigger id, new path) and re-attach on the new
+  // path instead of silently watching the stale one forever.
+  const watchers = new Map<
+    string,
+    { handle: WatcherHandle; confinedPath: string }
+  >();
+  // Negative cache: trigger ids already warned-as-unconfinable, keyed to the
+  // raw (un-confined) `config.path` that failed — so a persistently-escaping
+  // enabled trigger warns ONCE per poll-tick loop instead of on every tick.
+  // Cleared when the path changes (re-warn) or the trigger leaves the enabled
+  // set (disabled/deleted) so a later re-entry warns again too.
+  const unconfinableWarned = new Map<string, string>();
   // The expanded, confirmed-present watch root — set once `start()` succeeds.
   // `undefined` means "not started yet", so `reconcile()` is a safe no-op until
   // the root exists (confineWatchPath needs `realpathSync(root)` to succeed).
   let rootPath: string | undefined;
+
+  /** `confineWatchPath`, swallowing the throw into `undefined` — used by
+   *  reconcile to detect a config.path drift without duplicating the warning
+   *  logic (that lives in `watchTrigger`, which re-confines and warns itself). */
+  function tryConfine(path: string, root: string): string | undefined {
+    try {
+      return confineWatchPath(path, root);
+    } catch {
+      return undefined;
+    }
+  }
 
   function watchTrigger(t: Trigger, root: string): void {
     const cfg = t.config as FileConfig;
@@ -84,13 +113,23 @@ export function createFileWatcher(deps: {
       // (defence in depth, §7.4). Runs at EVERY attach — boot and runtime.
       confined = confineWatchPath(cfg.path, root);
     } catch (err) {
-      log.warn('skipping file trigger with an unconfinable path', {
-        triggerId: t.id,
-        path: cfg.path,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      // Negative-cache: only warn when this id hasn't already been warned for
+      // this EXACT path — otherwise a persistently-unconfinable enabled trigger
+      // re-logs the same warning on every reconcile poll tick forever.
+      if (unconfinableWarned.get(t.id) !== cfg.path) {
+        log.warn('skipping file trigger with an unconfinable path', {
+          triggerId: t.id,
+          path: cfg.path,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        unconfinableWarned.set(t.id, cfg.path);
+      }
       return;
     }
+    // Confinement succeeded — this id is no longer unconfinable (e.g. the
+    // path was just edited to something valid); clear any stale warn-cache
+    // entry so a future regression to the SAME escaping path warns again.
+    unconfinableWarned.delete(t.id);
     try {
       const events = cfg.events ?? [FileEventKind.Add];
       const w = watchFn(confined, {
@@ -125,7 +164,7 @@ export function createFileWatcher(deps: {
           error: err instanceof Error ? err.message : String(err),
         });
       });
-      watchers.set(t.id, w);
+      watchers.set(t.id, { handle: w, confinedPath: confined });
     } catch (err) {
       // A per-trigger attach failure logs-and-skips — it must never throw out
       // of reconcile (which runs on every poll tick) and wedge the loop.
@@ -137,13 +176,13 @@ export function createFileWatcher(deps: {
   }
 
   function detach(id: string): void {
-    const w = watchers.get(id);
-    if (!w) return;
+    const entry = watchers.get(id);
+    if (!entry) return;
     watchers.delete(id);
     // Actually close the chokidar instance so the fs handle is released (no
     // leak). Fire-and-forget with a logging .catch — a rejected close must not
     // surface as an unhandledRejection nor throw out of reconcile.
-    void w.close().catch((err: unknown) => {
+    void entry.handle.close().catch((err: unknown) => {
       log.error('error closing detached file watcher', {
         triggerId: id,
         error: err instanceof Error ? err.message : String(err),
@@ -171,15 +210,39 @@ export function createFileWatcher(deps: {
       });
       return;
     }
-    // DETACH watches whose trigger is no longer enabled/present (disabled /
-    // deleted / repo-pruned).
-    for (const id of [...watchers.keys()]) {
-      if (!enabled.has(id)) detach(id);
+    // DETACH watches (and unconfinable-warn cache entries) whose trigger is no
+    // longer enabled/present (disabled / deleted / repo-pruned). Clearing the
+    // warn cache too means a later re-enable of the SAME still-unconfinable
+    // path warns again (leave/re-enter re-warns, per the negative-cache spec).
+    for (const id of new Set([
+      ...watchers.keys(),
+      ...unconfinableWarned.keys(),
+    ])) {
+      if (enabled.has(id)) continue;
+      detach(id);
+      unconfinableWarned.delete(id);
     }
     // ATTACH any enabled file trigger not yet watched (no double-watch: an id
-    // already in `watchers` is skipped).
+    // already in `watchers` is skipped) — OR re-attach one whose stored
+    // `config.path` has drifted since it was attached (a runtime
+    // `PATCH /api/triggers/:id` edit on a still-enabled trigger). An unchanged
+    // path is a strict no-op — do NOT detach/re-attach it (that would
+    // reintroduce watch churn/leak risk).
     for (const [id, t] of enabled) {
-      if (!watchers.has(id)) watchTrigger(t, root);
+      const existing = watchers.get(id);
+      if (!existing) {
+        watchTrigger(t, root);
+        continue;
+      }
+      const cfg = t.config as FileConfig;
+      const nowConfined = tryConfine(cfg.path, root);
+      if (nowConfined === existing.confinedPath) continue; // unchanged — no-op
+      // Path drifted (to a new valid path, or to one that now escapes
+      // confinement). Detach the stale watch first, then let `watchTrigger`
+      // re-confine + attach — or, if it now escapes, warn-and-skip without
+      // re-attaching (§7.4 defence in depth still runs on every attach).
+      detach(id);
+      watchTrigger(t, root);
     }
   }
 
@@ -228,8 +291,11 @@ export function createFileWatcher(deps: {
     },
     reconcile,
     async stop(): Promise<void> {
-      await Promise.all([...watchers.values()].map((w) => w.close()));
+      await Promise.all(
+        [...watchers.values()].map((entry) => entry.handle.close()),
+      );
       watchers.clear();
+      unconfinableWarned.clear();
       rootPath = undefined;
     },
   };
