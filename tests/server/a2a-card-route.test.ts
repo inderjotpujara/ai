@@ -159,9 +159,23 @@ test('If-None-Match matching the ETag returns 304', async () => {
   await second.text();
 });
 
-test('card route 503s when the a2a dep is not wired (degrade, not 500)', async () => {
+test('card route 404s (not 503) when the a2a dep is not wired — same featureless body as flag-off (capstone B7b)', async () => {
   process.env.AGENT_A2A_ENABLED = '1';
   const res = await fetch(`${baseNoA2a}${CARD_PATH}`);
-  expect(res.status).toBe(503);
-  await res.text();
+  expect(res.status).toBe(404);
+  const body = (await res.json()) as { error: string };
+  // Featureless: the body must not leak that this is an A2A-specific gap
+  // (e.g. a `DepUnavailableError`-shaped "server dependency not configured:
+  // a2a" message) — it has to read exactly like an unknown route.
+  expect(body.error).toBe('not found');
+  expect(body.error.toLowerCase()).not.toContain('a2a');
+});
+
+test('card route 404 body is byte-identical whether A2A is disabled by flag or by missing dep', async () => {
+  delete process.env.AGENT_A2A_ENABLED; // disabled-by-flag, deps.a2a IS wired
+  const flagOff = await fetch(`${base}${CARD_PATH}`);
+  process.env.AGENT_A2A_ENABLED = '1'; // enabled, but deps.a2a is absent
+  const depMissing = await fetch(`${baseNoA2a}${CARD_PATH}`);
+  expect(flagOff.status).toBe(depMissing.status);
+  expect(await flagOff.text()).toBe(await depMissing.text());
 });

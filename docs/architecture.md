@@ -3895,9 +3895,16 @@ target is privileged config, same class as device pairing/rotate-root).
 `server/main.ts` and `src/daemon/core.ts` both accept an optional injected
 `a2a` dep; when absent, `server/main.ts` self-constructs `deps.a2a` via
 `buildA2aServerDeps` ONLY when `AGENT_A2A_ENABLED` is on, else leaves it
-`undefined` — every A2A route then degrades to a uniform `503` via the same
-`need()` helper the triggers/queue routes use, rather than the outer
-catch's opaque `500`.
+`undefined`. **Capstone B7b:** the two PUBLIC/bearer routes — the card route
+and `POST /api/a2a` — degrade to the SAME featureless `404` (`card.ts`'s
+`notFound()`, reused by `app.ts`) they already return when the flag is off,
+so an unconfigured surface is never distinguishable from a disabled one via
+a status-code fingerprint. The four trusted-local admin routes
+(`{config,skills,token,remotes}`) are unaffected and still degrade to a
+uniform `503` via the same `need()` helper the triggers/queue routes use,
+rather than the outer catch's opaque `500` — that shape is appropriate there
+because those routes already sit behind `requireTrustedLocal` (no discovery
+value in hiding "not configured" from an authenticated local operator).
 
 #### Data flow
 

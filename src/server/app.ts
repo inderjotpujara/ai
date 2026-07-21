@@ -6,7 +6,7 @@ import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
-import { handleAgentCard } from './a2a/card.ts';
+import { notFound as a2aNotFound, handleAgentCard } from './a2a/card.ts';
 import { handleA2aConfig } from './a2a/config.ts';
 import {
   handleRemoteAdd,
@@ -210,25 +210,27 @@ export type ServerDeps = {
    *  otherwise undefined, and no scheduler/watcher handle is opened). Optional:
    *  the trigger routes degrade to 503 (via `need()`) when unset. */
   triggers?: TriggersEngine;
-  /** A2A EXPOSE-surface deps (Slice 31, Increment 2+). Present only when the
-   *  daemon/server wires the expose side; the public discovery route and the
-   *  `/api/a2a` JSON-RPC endpoint degrade to 503 (via the branch's own guard)
-   *  when unset. Grown in Increment 3 (Task 10) from just `{ allowlist }` to the
-   *  full `A2aServerDeps` (allowlist + jobStore + runsRoot + taskIndex, plus the
-   *  optional running-job `pool` the route wires in Task 12) so the JSON-RPC
-   *  handler can enqueue/resolve/project tasks — and in Increment 5 (Task 16)
-   *  with `enrollment`, the D5 A2A-Bearer store the `POST /api/a2a` gate
-   *  verifies inbound requests against (verify-before-parse + replay window).
-   *  The card route reads only `allowlist`. NOTE: absence is a 503, but both A2A
-   *  routes ALSO 404 whenever
-   *  `AGENT_A2A_ENABLED` is off regardless of this field (fail-safe: the expose
-   *  surface reveals nothing until an operator enables it). CONSTRUCTED at boot
-   *  by `buildA2aServerDeps` (Slice 31, Task 18) — `server/a2a/wire.ts` —
-   *  ONLY when `AGENT_A2A_ENABLED` is on, so with the flag off this stays
-   *  undefined and the whole expose surface is dark. Increment 6 (Task 20/22)
-   *  grows `A2aServerDeps` with the CONSUME side (`remotes` + `client`); those
-   *  factories don't exist yet, so today's boot wiring builds only the
-   *  EXPOSE-complete fields. */
+  /** A2A deps, BOTH directions (Slice 31). Present only when the daemon/server
+   *  wires A2A up. Grown in Increment 3 (Task 10) from just `{ allowlist }` to
+   *  the full `A2aServerDeps` (allowlist + jobStore + runsRoot + taskIndex, plus
+   *  the optional running-job `pool` the route wires in Task 12) so the
+   *  JSON-RPC handler can enqueue/resolve/project tasks; Increment 5 (Task 16)
+   *  added `enrollment`, the D5 A2A-Bearer store the `POST /api/a2a` gate
+   *  verifies inbound requests against (verify-before-parse + replay window);
+   *  Increment 6 (Task 20/22) grew it with the CONSUME side — `remotes`
+   *  (`RemoteStore`) and `client` (`A2aClient`) — both built and wired by the
+   *  Federation console routes below. The card route reads only `allowlist`.
+   *  **NOTE (capstone B7b): absence is now a featureless 404, NOT a 503, for
+   *  the two PUBLIC/bearer A2A routes** (the card route and `POST /api/a2a`) —
+   *  those return the SAME `notFound()` (`a2a/card.ts`) they already return
+   *  when `AGENT_A2A_ENABLED` is off, so "disabled" and "unconfigured" are one
+   *  uniform, fingerprint-free surface. Every OTHER `/api/a2a/*` admin route
+   *  (config/skills/token/remotes — all behind the browser device session
+   *  guard, never public) still degrades to 503 via `need()` when this is
+   *  unset; that shape is unchanged. CONSTRUCTED at boot by `buildA2aServerDeps`
+   *  (Slice 31, Task 18) — `server/a2a/wire.ts` — ONLY when `AGENT_A2A_ENABLED`
+   *  is on, so with the flag off this stays undefined and the whole surface is
+   *  dark. */
   a2a?: A2aServerDeps;
 };
 
@@ -322,15 +324,16 @@ export function buildFetch(
       // serveStatic (a .json path → plain 404), so nothing else is exposed
       // here. Fail-safe layering: `handleAgentCard` 404s whenever
       // AGENT_A2A_ENABLED is off (discovery reveals nothing until an operator
-      // enables the surface), and an unwired `deps.a2a` degrades to 503 (the
-      // same need()-shaped degrade as the /api routes) rather than the outer
-      // catch's opaque 500.
+      // enables the surface). An unwired `deps.a2a` (capstone B7b) returns the
+      // SAME featureless 404 — NOT the generic need()-shaped 503 — so a
+      // disabled-by-flag daemon and a disabled-by-missing-dep daemon are
+      // byte-identical to a caller; neither leaks that A2A exists here.
       if (
         req.method === 'GET' &&
         url.pathname === '/.well-known/agent-card.json'
       ) {
         if (!deps.a2a) {
-          return json({ error: new DepUnavailableError('a2a').message }, 503);
+          return a2aNotFound();
         }
         return handleAgentCard(req, {
           allowlist: deps.a2a.allowlist,
@@ -417,8 +420,17 @@ async function handleApi(
         // guard-exception in buildFetch) but still behind the Host/Origin
         // perimeter; `handleA2aRpc` owns the enable-gate (404 when
         // AGENT_A2A_ENABLED is off) and, from Task 16, the A2A-Bearer check.
+        // An unwired `deps.a2a` (capstone B7b) is handled HERE, deliberately
+        // bypassing the generic `need()` → `DepUnavailableError` → 503 path
+        // (below) that every other admin a2a/* route still uses: this is one
+        // of the two PUBLIC/bearer A2A routes, so absence returns the SAME
+        // featureless 404 the flag-off path returns, not a 503 fingerprint.
         if (req.method === 'POST' && url.pathname === '/api/a2a') {
-          const res = await handleA2aRpc(req, need(deps.a2a, 'a2a'));
+          if (!deps.a2a) {
+            rec.status(404);
+            return a2aNotFound();
+          }
+          const res = await handleA2aRpc(req, deps.a2a);
           rec.status(res.status);
           return res;
         }

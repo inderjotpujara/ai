@@ -28,6 +28,10 @@ import { makeFakePool } from './_fake-pool.ts';
 
 const A2A_PATH = '/api/a2a';
 const policy = { port: 0, allowedOrigins: [] as string[] };
+// The no-a2a server binds a DIFFERENT ephemeral port, so it needs its OWN
+// perimeter policy (the Host-header port check keys on policy.port) — mirrors
+// tests/server/a2a-card-route.test.ts's depsNoA2a pattern.
+const policyNoA2a = { port: 0, allowedOrigins: [] as string[] };
 
 // --- minimal in-memory a2a-server fakes (mirror tests/a2a/server.test.ts) ----
 
@@ -129,17 +133,35 @@ const deps: ServerDeps = {
   a2a: a2aDeps,
 };
 
+// A server WITHOUT the a2a dep (capstone B7b) — proves the disabled-by-
+// missing-dep path is the SAME featureless 404 as the disabled-by-flag path,
+// not the generic need()-shaped 503 other unwired deps degrade to.
+const depsNoA2a: ServerDeps = { ...deps, a2a: undefined, policy: policyNoA2a };
+
 let server: ReturnType<typeof Bun.serve>;
 let base: string;
+let serverNoA2a: ReturnType<typeof Bun.serve>;
+let baseNoA2a: string;
 
 beforeAll(() => {
   server = Bun.serve({ port: 0, fetch: buildFetch(deps), idleTimeout: 0 });
   if (server.port === undefined) throw new Error('server did not bind a port');
   policy.port = server.port;
   base = `http://localhost:${server.port}`;
+
+  serverNoA2a = Bun.serve({
+    port: 0,
+    fetch: buildFetch(depsNoA2a),
+    idleTimeout: 0,
+  });
+  if (serverNoA2a.port === undefined)
+    throw new Error('serverNoA2a did not bind a port');
+  policyNoA2a.port = serverNoA2a.port;
+  baseNoA2a = `http://localhost:${serverNoA2a.port}`;
 });
 afterAll(() => {
   server.stop(true);
+  serverNoA2a.stop(true);
 });
 afterEach(() => {
   delete process.env.AGENT_A2A_ENABLED;
@@ -224,4 +246,27 @@ test('POST /api/a2a 404s when AGENT_A2A_ENABLED is off (fail-safe)', async () =>
   });
   expect(res.status).toBe(404);
   await res.text();
+});
+
+test('POST /api/a2a 404s (not 503) when the a2a dep is not wired — same featureless body as flag-off (capstone B7b)', async () => {
+  process.env.AGENT_A2A_ENABLED = '1';
+  const res = await fetch(`${baseNoA2a}${A2A_PATH}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: rpc('message/send', {
+      message: {
+        role: 'user',
+        parts: [{ kind: 'text', text: 'hi' }],
+        messageId: 'm3',
+      },
+      metadata: { skillId: 'ask' },
+    }),
+  });
+  expect(res.status).toBe(404);
+  const body = (await res.json()) as { error: string };
+  // Featureless: no `DepUnavailableError`-shaped "server dependency not
+  // configured: a2a" leak — a caller cannot tell "unconfigured" apart from
+  // "disabled" or "no such route".
+  expect(body.error).toBe('not found');
+  expect(body.error.toLowerCase()).not.toContain('a2a');
 });

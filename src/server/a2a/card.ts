@@ -11,7 +11,10 @@
  *   disabled would advertise internal capability (skill ids/descriptions) to
  *   any caller past the perimeter. The 404 is indistinguishable from "no such
  *   route", so a disabled daemon leaks neither the card nor the fact that A2A
- *   exists here.
+ *   exists here. `app.ts` (capstone B7b) reuses this SAME `notFound()` when
+ *   `deps.a2a` is absent too (flag off ⇒ the dep is never constructed), so a
+ *   disabled-by-flag route and a disabled-by-missing-dep route are the same
+ *   uniform 404 — never the generic 503 dep-guard shape other routes use.
  * - **Cacheable, revalidatable.** A `200` carries a strong `ETag` (sha256 of
  *   the canonical card, from `cardEtag`) and `Cache-Control: public,
  *   max-age=<AGENT_A2A_CARD_TTL>`; a conditional `If-None-Match` that matches
@@ -27,8 +30,12 @@ import { loadConfig } from '../../config/schema.ts';
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 
 /** A disabled/unknown route: an intentionally featureless 404 so a caller
- *  cannot distinguish "A2A off" from "no such path" (no capability leak). */
-function notFound(): Response {
+ *  cannot distinguish "A2A off" from "no such path" (no capability leak).
+ *  Exported (capstone B7b) so `app.ts` returns this SAME shape — not a 503 —
+ *  when `deps.a2a` itself is absent (flag off ⇒ never constructed at boot):
+ *  an unconfigured A2A surface must look identical to a disabled one, never a
+ *  distinguishable "dependency not configured" fingerprint. */
+export function notFound(): Response {
   return new Response(JSON.stringify({ error: 'not found' }), {
     status: 404,
     headers: JSON_HEADERS,

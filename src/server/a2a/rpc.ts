@@ -11,7 +11,10 @@
  * - **404 when `AGENT_A2A_ENABLED` is off (fail-safe).** Identical to the card
  *   route: the whole expose surface is dark until an operator enables it, and a
  *   404 (not a 401/403) means a caller past the perimeter cannot distinguish
- *   "A2A off" from "no such route" — no capability leak.
+ *   "A2A off" from "no such route" — no capability leak. `app.ts` (capstone
+ *   B7b) returns this SAME featureless 404 when `deps.a2a` is absent too (flag
+ *   off ⇒ the dep is never constructed at boot), so an unconfigured route is
+ *   never distinguishable from a disabled one via a 503 dep-guard fingerprint.
  * - **A2A-Bearer verification (Task 16), at the top of the enabled handler,
  *   BEFORE the body is parsed.** It is a SEPARATE token store from the browser
  *   device session (D5 two-stores split): this route is intentionally routed
