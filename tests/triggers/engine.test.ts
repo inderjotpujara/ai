@@ -27,15 +27,21 @@ function fakeTimers() {
   let seq = 0;
   const armed: number[] = [];
   const cleared: number[] = [];
-  const setInterval = ((): number => {
+  const callbacks: Array<() => void> = [];
+  const setInterval = ((cb: () => void): number => {
     const id = ++seq;
     armed.push(id);
+    callbacks.push(cb);
     return id;
   }) as unknown as typeof globalThis.setInterval;
   const clearInterval = ((id: number): void => {
     cleared.push(id);
   }) as unknown as typeof globalThis.clearInterval;
-  return { setInterval, clearInterval, armed, cleared };
+  // Invoke every armed interval callback once — a synthetic poll tick.
+  const fireTick = (): void => {
+    for (const cb of callbacks) cb();
+  };
+  return { setInterval, clearInterval, armed, cleared, fireTick };
 }
 
 /** A fake `chokidar.watch` that records watched paths and `.close()` calls, so
@@ -166,6 +172,31 @@ test('handleJobSettled forwards to the chain observer (fires the chained target)
   // engine wired, recording a firing for the matched chain trigger.
   const firings = engine.store.listFirings(trigger.id, { limit: 10 });
   expect(firings.total).toBeGreaterThanOrEqual(1);
+
+  await engine.stop();
+});
+
+test('a file trigger created after start() is watched within one poll tick', async () => {
+  const { engine, watchRoot, timers, chokidar } = harness(() => ({}));
+
+  engine.start();
+  // No file triggers at boot → nothing watched yet.
+  expect(chokidar.watched.length).toBe(0);
+
+  // A console/CLI create at runtime (mirrors the live-verify path).
+  engine.store.create({
+    name: 'runtime-drop',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(watchRoot, 'runtime.csv') },
+  });
+  // Still unwatched until a tick runs (just like a runtime-created cron).
+  expect(chokidar.watched.length).toBe(0);
+
+  // One synthetic poll tick — the scheduler's tick drives watcher.reconcile.
+  timers.fireTick();
+  expect(chokidar.watched).toEqual([join(watchRoot, 'runtime.csv')]);
 
   await engine.stop();
 });

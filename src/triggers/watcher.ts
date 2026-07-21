@@ -47,6 +47,16 @@ type WatcherHandle = {
 
 export type FileWatcher = {
   start(): void;
+  /**
+   * Diff the store's currently-enabled file triggers against the set of
+   * currently-attached watches (keyed by trigger id) and converge: ATTACH a
+   * watch for any enabled file trigger not yet watched, DETACH (close + remove)
+   * any attached watch whose trigger is no longer enabled or present. Idempotent
+   * and synchronous per call; drives runtime pickup of console/CLI-created file
+   * triggers the same way the scheduler polls the store for runtime crons. A
+   * no-op until `start()` has created the watch root.
+   */
+  reconcile(): void;
   stop(): Promise<void>;
 };
 
@@ -59,16 +69,19 @@ export function createFileWatcher(deps: {
 }): FileWatcher {
   const watchFn = deps.watch ?? chokidar.watch;
   const log = deps.log ?? defaultLog;
-  // One watcher per trigger id (so stop() can close them all).
+  // One watcher per trigger id (so reconcile/stop can close them all).
   const watchers = new Map<string, WatcherHandle>();
-  let started = false;
+  // The expanded, confirmed-present watch root — set once `start()` succeeds.
+  // `undefined` means "not started yet", so `reconcile()` is a safe no-op until
+  // the root exists (confineWatchPath needs `realpathSync(root)` to succeed).
+  let rootPath: string | undefined;
 
   function watchTrigger(t: Trigger, root: string): void {
     const cfg = t.config as FileConfig;
     let confined: string;
     try {
       // Re-confine at watch time even though create-time also confined
-      // (defence in depth, §7.4).
+      // (defence in depth, §7.4). Runs at EVERY attach — boot and runtime.
       confined = confineWatchPath(cfg.path, root);
     } catch (err) {
       log.warn('skipping file trigger with an unconfinable path', {
@@ -78,47 +91,103 @@ export function createFileWatcher(deps: {
       });
       return;
     }
-    const events = cfg.events ?? [FileEventKind.Add];
-    const w = watchFn(confined, {
-      awaitWriteFinish: AWAIT_WRITE_FINISH,
-      ignoreInitial: true,
-      depth: 0,
-      // Belt-and-braces (§7.4): never follow an in-root symlink outward at
-      // event time — a symlink can't extend the watch past the confinement
-      // root, and it shrinks the create-vs-watch (TOCTOU) window.
-      followSymlinks: false,
-    }) as unknown as WatcherHandle;
-    for (const ev of events) {
-      w.on(ev, (matchedPath: string) => {
-        // Fire-and-forget: fire.ts owns overlap/cap/provenance/audit and its
-        // own errors, but a rejected promise here must never surface as an
-        // unhandledRejection — attach a logging .catch.
-        void deps
-          .fire(t, { reason: 'file', vars: { 'file.path': matchedPath } })
-          .catch((fireErr: unknown) => {
-            log.error('file trigger fire rejected', {
-              triggerId: t.id,
-              error:
-                fireErr instanceof Error ? fireErr.message : String(fireErr),
+    try {
+      const events = cfg.events ?? [FileEventKind.Add];
+      const w = watchFn(confined, {
+        awaitWriteFinish: AWAIT_WRITE_FINISH,
+        ignoreInitial: true,
+        depth: 0,
+        // Belt-and-braces (§7.4): never follow an in-root symlink outward at
+        // event time — a symlink can't extend the watch past the confinement
+        // root, and it shrinks the create-vs-watch (TOCTOU) window.
+        followSymlinks: false,
+      }) as unknown as WatcherHandle;
+      for (const ev of events) {
+        w.on(ev, (matchedPath: string) => {
+          // Fire-and-forget: fire.ts owns overlap/cap/provenance/audit and its
+          // own errors, but a rejected promise here must never surface as an
+          // unhandledRejection — attach a logging .catch.
+          void deps
+            .fire(t, { reason: 'file', vars: { 'file.path': matchedPath } })
+            .catch((fireErr: unknown) => {
+              log.error('file trigger fire rejected', {
+                triggerId: t.id,
+                error:
+                  fireErr instanceof Error ? fireErr.message : String(fireErr),
+              });
             });
-          });
+        });
+      }
+      w.on('error', (err: unknown) => {
+        // A watcher-level error (e.g. EMFILE) must be logged, not thrown.
+        log.error('file watcher error', {
+          triggerId: t.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }
-    w.on('error', (err: unknown) => {
-      // A watcher-level error (e.g. EMFILE) must be logged, not thrown.
-      log.error('file watcher error', {
+      watchers.set(t.id, w);
+    } catch (err) {
+      // A per-trigger attach failure logs-and-skips — it must never throw out
+      // of reconcile (which runs on every poll tick) and wedge the loop.
+      log.warn('failed to attach file watcher — skipping', {
         triggerId: t.id,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  function detach(id: string): void {
+    const w = watchers.get(id);
+    if (!w) return;
+    watchers.delete(id);
+    // Actually close the chokidar instance so the fs handle is released (no
+    // leak). Fire-and-forget with a logging .catch — a rejected close must not
+    // surface as an unhandledRejection nor throw out of reconcile.
+    void w.close().catch((err: unknown) => {
+      log.error('error closing detached file watcher', {
+        triggerId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
-    watchers.set(t.id, w);
+  }
+
+  function reconcile(): void {
+    // No-op until start() has created the watch root (confineWatchPath needs it).
+    if (rootPath === undefined) return;
+    const root = rootPath;
+    // Snapshot the store's currently-enabled file triggers, keyed by id.
+    let enabled: Map<string, Trigger>;
+    try {
+      enabled = new Map(
+        deps.triggerStore
+          .list()
+          .filter((t) => t.enabled && t.type === TriggerType.File)
+          .map((t) => [t.id, t]),
+      );
+    } catch (err) {
+      // A wedged store must not throw out of reconcile (it runs on every tick).
+      log.error('file watcher reconcile: store list failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    // DETACH watches whose trigger is no longer enabled/present (disabled /
+    // deleted / repo-pruned).
+    for (const id of [...watchers.keys()]) {
+      if (!enabled.has(id)) detach(id);
+    }
+    // ATTACH any enabled file trigger not yet watched (no double-watch: an id
+    // already in `watchers` is skipped).
+    for (const [id, t] of enabled) {
+      if (!watchers.has(id)) watchTrigger(t, root);
+    }
   }
 
   return {
     start(): void {
-      // Idempotency guard: a double-start must not arm a second set of
-      // watchers (which would double-fire every trigger).
-      if (started) return;
+      // Idempotency guard: a double-start must not re-run root setup + a second
+      // attach pass (reconcile below is itself idempotent, but skip the mkdir).
+      if (rootPath !== undefined) return;
       // I4: expand `~` FIRST, then ensure the confinement root exists private
       // (0700) BEFORE confining any trigger path under it — so the default
       // `~/.agent/inbox` exists and `realpathSync(root)` in confineWatchPath
@@ -128,7 +197,8 @@ export function createFileWatcher(deps: {
         mkdirSync(root, { recursive: true, mode: 0o700 });
       } catch (err) {
         // An unwritable/invalid parent must NOT crash start() (skip-with-warning
-        // robustness posture). `started` stays false so a later start() retries.
+        // robustness posture). `rootPath` stays undefined so a later start()
+        // retries (and reconcile stays a no-op until then).
         log.warn('watch root unavailable — file triggers disabled this start', {
           root,
           error: err instanceof Error ? err.message : String(err),
@@ -152,16 +222,15 @@ export function createFileWatcher(deps: {
       } catch {
         // A stat failure here is non-fatal; proceed to arm the watches.
       }
-      started = true;
-      for (const t of deps.triggerStore.list()) {
-        if (!t.enabled || t.type !== TriggerType.File) continue;
-        watchTrigger(t, root);
-      }
+      rootPath = root;
+      // Initial attach pass = a reconcile over an empty watcher set.
+      reconcile();
     },
+    reconcile,
     async stop(): Promise<void> {
       await Promise.all([...watchers.values()].map((w) => w.close()));
       watchers.clear();
-      started = false;
+      rootPath = undefined;
     },
   };
 }

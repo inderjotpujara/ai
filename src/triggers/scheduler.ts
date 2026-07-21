@@ -43,6 +43,13 @@ export function createScheduler(deps: {
   now?: () => number;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+  /**
+   * An optional hook run at the END of every tick (after the due crons are
+   * claimed + fired). The engine wires `watcher.reconcile` here so runtime-
+   * created FILE triggers are picked up on the same poll cadence as runtime
+   * crons — a single interval drives both, no second timer.
+   */
+  onTick?: () => void;
 }): Scheduler {
   const clock = deps.now ?? ((): number => Date.now());
   const set = deps.setInterval ?? setInterval;
@@ -89,6 +96,19 @@ export function createScheduler(deps: {
           error: err instanceof Error ? err.message : String(err),
         });
       });
+    }
+    // End-of-tick hook (e.g. the file watcher's reconcile). Guarded so a
+    // throwing hook can never tear down the interval callback (T7 liveness).
+    if (deps.onTick) {
+      try {
+        deps.onTick();
+      } catch (err) {
+        tickErrors += 1;
+        log.error('scheduler onTick hook failed — keeping the loop alive', {
+          tickErrors,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 

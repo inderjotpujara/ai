@@ -348,6 +348,203 @@ test('creates a missing watch root (default ~-style) private on start', () => {
   expect(chok.calls).toHaveLength(1);
 });
 
+// ---- reconcile (runtime attach/detach) ------------------------------------
+
+test('reconcile attaches a file trigger created AFTER start()', () => {
+  const root = realRoot();
+  const store = newStore();
+  const chok = fakeChokidar();
+  const { fire, calls } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  w.start();
+  expect(chok.calls).toHaveLength(0); // nothing to watch at boot
+
+  // A console/CLI create at runtime — not present when start() armed.
+  const t = store.create({
+    name: 'runtime-inbox',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(root, 'late.csv') },
+  });
+  w.reconcile();
+
+  expect(chok.calls).toHaveLength(1);
+  expect(chok.calls[0]?.path).toBe(join(root, 'late.csv'));
+  // ...and it actually fires.
+  const matched = join(root, 'late.csv');
+  chok.emit(matched, 'add', matched);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.[0].id).toBe(t.id);
+});
+
+test('reconcile detaches (closes) a watch when its trigger is disabled', () => {
+  const root = realRoot();
+  const store = newStore();
+  const t = store.create({
+    name: 'toggling',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(root, 'x.csv') },
+  });
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  w.start();
+  expect(chok.calls).toHaveLength(1);
+
+  store.update(t.id, { enabled: false });
+  w.reconcile();
+
+  // The chokidar instance was actually closed (no leak).
+  expect(chok.closed).toEqual([join(root, 'x.csv')]);
+});
+
+test('reconcile detaches a watch when its trigger is deleted', () => {
+  const root = realRoot();
+  const store = newStore();
+  const t = store.create({
+    name: 'ephemeral',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(root, 'x.csv') },
+  });
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  w.start();
+
+  store.remove(t.id);
+  w.reconcile();
+
+  expect(chok.closed).toEqual([join(root, 'x.csv')]);
+});
+
+test('reconcile re-attaches a trigger toggled disable→enable', () => {
+  const root = realRoot();
+  const store = newStore();
+  const t = store.create({
+    name: 'flip',
+    type: TriggerType.File,
+    enabled: false, // starts disabled → not watched at boot
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(root, 'x.csv') },
+  });
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  w.start();
+  expect(chok.calls).toHaveLength(0);
+
+  store.update(t.id, { enabled: true });
+  w.reconcile();
+  expect(chok.calls).toHaveLength(1);
+
+  store.update(t.id, { enabled: false });
+  w.reconcile();
+  expect(chok.closed).toEqual([join(root, 'x.csv')]);
+
+  store.update(t.id, { enabled: true });
+  w.reconcile();
+  // A fresh watch was armed after the re-enable (two watch() calls total).
+  expect(chok.calls).toHaveLength(2);
+});
+
+test('reconcile never attaches a path-escaping trigger (confinement, §7.4)', () => {
+  const root = realRoot();
+  const store = newStore();
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  w.start();
+
+  // Runtime create of an escaping path — confineWatchPath must reject it.
+  store.create({
+    name: 'escapes-late',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: '/etc/passwd' },
+  });
+  expect(() => w.reconcile()).not.toThrow();
+  expect(chok.calls).toHaveLength(0);
+});
+
+test('reconcile does not double-attach an already-watched trigger', () => {
+  const root = realRoot();
+  const store = newStore();
+  store.create({
+    name: 'stable',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(root, 'x.csv') },
+  });
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  w.start();
+  w.reconcile();
+  w.reconcile();
+  expect(chok.calls).toHaveLength(1);
+  expect(chok.closed).toHaveLength(0);
+});
+
+test('reconcile before start() is a no-op (no root yet)', () => {
+  const root = realRoot();
+  const store = newStore();
+  store.create({
+    name: 'pre-start',
+    type: TriggerType.File,
+    origin: TriggerOrigin.Console,
+    target: { kind: JobKind.Chat, payload: {} },
+    config: { path: join(root, 'x.csv') },
+  });
+  const chok = fakeChokidar();
+  const { fire } = recordingFire();
+  const w = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot: root,
+    watch: chok.watch,
+  });
+  expect(() => w.reconcile()).not.toThrow();
+  expect(chok.calls).toHaveLength(0);
+});
+
 // A single REAL-chokidar smoke test proves the wiring end-to-end (no seam): a
 // file created in the watched dir fires the trigger with its absolute path.
 // awaitWriteFinish is the production 400ms threshold — a single ~1s test.

@@ -102,8 +102,10 @@ export function createTriggersEngine(deps: {
 
   const repoDefs = deps.repoDefs ?? TRIGGERS;
 
-  // Construction (dependency order): store → fire → chain/scheduler/watcher.
-  // The SINGLE fire is injected into all three consumers (shared convergence).
+  // Construction (dependency order): store → fire → chain → watcher → scheduler
+  // (the scheduler's onTick hook references the watcher's reconcile, so the
+  // watcher is built first). The SINGLE fire is injected into all three
+  // consumers (shared convergence).
   const store = createTriggerStore({ path: deps.triggersDbPath });
   const fire = createFireTrigger({
     triggerStore: store,
@@ -116,6 +118,16 @@ export function createTriggersEngine(deps: {
     fire,
     maxChainDepth,
   });
+  // Watcher first — the scheduler's onTick hook reconciles it on every poll
+  // tick, so runtime-created FILE triggers are picked up on the SAME cadence as
+  // runtime crons (mirroring the scheduler's per-tick store poll), driven by
+  // the scheduler's single interval (no second timer).
+  const watcher = createFileWatcher({
+    triggerStore: store,
+    fire,
+    watchRoot,
+    watch: deps.watch,
+  });
   const scheduler = createScheduler({
     triggerStore: store,
     fire,
@@ -123,12 +135,7 @@ export function createTriggersEngine(deps: {
     now: deps.now,
     setInterval: deps.setInterval,
     clearInterval: deps.clearInterval,
-  });
-  const watcher = createFileWatcher({
-    triggerStore: store,
-    fire,
-    watchRoot,
-    watch: deps.watch,
+    onTick: () => watcher.reconcile(),
   });
 
   return {
