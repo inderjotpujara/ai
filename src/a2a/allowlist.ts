@@ -63,22 +63,41 @@ export class AllowlistError extends Error {
   }
 }
 
+/** Valid `JobKind` enum values, for validating hand-edited store entries. */
+const JOB_KINDS = new Set<string>(Object.values(JobKind));
+
+/** Is `kind` an actual `JobKind` member (not arbitrary string)? */
+function isJobKind(kind: unknown): kind is JobKind {
+  return typeof kind === 'string' && JOB_KINDS.has(kind);
+}
+
 /**
  * Does `ref` name a REGISTERED target for `kind`? This is the least-privilege
- * check: only names present in the in-process registries are exposable.
+ * check: ONLY the {Chat, Crew, Workflow} kinds are exposable as A2A skills, and
+ * only names present in the in-process registries are accepted (§7.4).
  * - `Workflow` → a registered workflow.
  * - `Crew`     → a registered crew.
  * - `Chat`     → a registered agent OR a registered crew (the launch surface
  *   lets a chat target either).
+ * - anything else (Pull/Build/…) → NOT exposable — closes the leak where a
+ *   non-chat job kind with a registered agent ref would slip through and expose
+ *   model-pull/builder jobs as A2A skills.
  * `AGENTS` is a bare `Record`, so `Object.hasOwn` (not `!!AGENTS[ref]`) is used
  * to avoid `constructor`/`__proto__`/`toString` resolving to inherited members
  * and slipping an unregistered ref past the guard; `getCrew`/`getWorkflow`
  * already apply the same `Object.hasOwn` discipline.
  */
 export function refExistsFor(kind: JobKind, ref: string): boolean {
-  if (kind === JobKind.Workflow) return getWorkflow(ref) !== undefined;
-  if (kind === JobKind.Crew) return getCrew(ref) !== undefined;
-  return Object.hasOwn(AGENTS, ref) || getCrew(ref) !== undefined;
+  switch (kind) {
+    case JobKind.Workflow:
+      return getWorkflow(ref) !== undefined;
+    case JobKind.Crew:
+      return getCrew(ref) !== undefined;
+    case JobKind.Chat:
+      return Object.hasOwn(AGENTS, ref) || getCrew(ref) !== undefined;
+    default:
+      return false;
+  }
 }
 
 export function createA2aAllowlist(config: { path?: string }): A2aAllowlist {
@@ -140,7 +159,13 @@ export function createA2aAllowlist(config: { path?: string }): A2aAllowlist {
       // default target (§7.4: the server resolves-then-rejects).
       const current = load(path);
       const hit = current.find((s) => s.skillId === skillId);
-      return hit ? { kind: hit.kind, ref: hit.ref } : undefined;
+      if (!hit) return undefined;
+      // Fail-safe re-validation: a hand-edited store may list a ref that is no
+      // longer registered, or a kind outside {Chat,Crew,Workflow}. Re-run the
+      // least-privilege check so the allowlist is authoritative on its own,
+      // without depending on a downstream consumer to reject a stale target.
+      if (!refExistsFor(hit.kind, hit.ref)) return undefined;
+      return { kind: hit.kind, ref: hit.ref };
     },
   };
 }
@@ -187,7 +212,10 @@ function load(path: string): SkillEntry[] {
         typeof (s as SkillEntry).skillId === 'string' &&
         typeof (s as SkillEntry).name === 'string' &&
         typeof (s as SkillEntry).description === 'string' &&
-        typeof (s as SkillEntry).kind === 'string' &&
+        // Drop entries whose kind is not a valid JobKind member (fail-safe,
+        // least-exposure — a garbage/unknown kind can never be exposed),
+        // consistent with the malformed-entry drop above.
+        isJobKind((s as SkillEntry).kind) &&
         typeof (s as SkillEntry).ref === 'string',
     )
     .map(
