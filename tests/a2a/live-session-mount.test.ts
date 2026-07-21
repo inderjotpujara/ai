@@ -67,7 +67,9 @@ function fakeClient(text: string): { client: A2aClient; sends: string[] } {
   const sends: string[] = [];
   const client = {
     discover: () => Promise.reject(new Error('unused')),
-    verifyPin: () => Promise.reject(new Error('unused')),
+    // The live delegate path re-verifies the pin before the first send
+    // (capstone B5) — default OK so this routing test exercises the send loop.
+    verifyPin: () => Promise.resolve({ ok: true as const }),
     invoke: (_r: RemoteAgent, m: A2aMethod, p: unknown) => {
       if (m === A2aMethod.MessageSend) {
         const params = p as { message: { parts: { text?: string }[] } };

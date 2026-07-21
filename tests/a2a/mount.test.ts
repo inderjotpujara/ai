@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { AGENTS } from '../../agents/index.ts';
 import type { createA2aClient, RemoteAgent } from '../../src/a2a/client.ts';
-import { mountRemotes, remoteAsToolSet } from '../../src/a2a/mount.ts';
+import {
+  mountRemotes,
+  remoteAsToolSet,
+  resetPinVerificationForTest,
+} from '../../src/a2a/mount.ts';
 import {
   A2aMethod,
   type A2aTask,
@@ -90,7 +94,10 @@ function fakeClient(
   const calls: { method: A2aMethod; params: unknown }[] = [];
   const client = {
     discover: () => Promise.reject(new Error('unused')),
-    verifyPin: () => Promise.reject(new Error('unused')),
+    // The live delegate path re-verifies the pin before the first send
+    // (capstone B5); default it to OK so these lifecycle tests exercise the
+    // send→poll loop. The dedicated B5 tests override it.
+    verifyPin: () => Promise.resolve({ ok: true as const }),
     invoke: (r: RemoteAgent, m: A2aMethod, p: unknown) => {
       calls.push({ method: m, params: p });
       return invoke(r, m, p);
@@ -117,6 +124,7 @@ function lifecycleClient(text: string, workingPolls = 1) {
 
 beforeEach(() => {
   resetBreakers();
+  resetPinVerificationForTest();
 });
 afterEach(() => {
   process.env.AGENT_BREAKER_THRESHOLD = undefined as unknown as string;
@@ -218,6 +226,66 @@ test('a failing remote returns a structured error (never throws) + trips the bre
   const third = (await t?.execute?.({ task: 'x' }, OPTS)) as { error?: string };
   expect(third.error).toContain('circuit open');
   expect(calls).toHaveLength(2); // invoke was NOT called again
+});
+
+test('B5: a rug-pulled remote (pin mismatch) returns a structured error and is NEVER invoked, no hang', async () => {
+  const invokeMethods: A2aMethod[] = [];
+  const client = {
+    discover: () => Promise.reject(new Error('unused')),
+    // The live re-verify finds the card changed since it was pinned.
+    verifyPin: () =>
+      Promise.resolve({
+        ok: false as const,
+        reason: 'card hash mismatch (pin verification failed)',
+      }),
+    invoke: (_r: RemoteAgent, m: A2aMethod) => {
+      invokeMethods.push(m);
+      return Promise.resolve(submittedTask());
+    },
+  } as unknown as A2aClient;
+
+  const set = remoteAsToolSet(remote('rugpull'), client, FAST);
+  const out = (await set.delegate_to_rugpull?.execute?.(
+    { task: 'x' },
+    OPTS,
+  )) as {
+    text?: string;
+    error?: string;
+  };
+
+  expect(out.text).toBeUndefined();
+  expect(out.error).toBeDefined();
+  expect(out.error).toContain('pin verification failed');
+  // The peer was NEVER contacted — no message/send, no tasks/get.
+  expect(invokeMethods).toEqual([]);
+});
+
+test('B5: the pin is re-verified ONCE per process then memoized (not re-fetched every turn)', async () => {
+  let verifyCalls = 0;
+  let gets = 0;
+  const client = {
+    discover: () => Promise.reject(new Error('unused')),
+    verifyPin: () => {
+      verifyCalls += 1;
+      return Promise.resolve({ ok: true as const });
+    },
+    invoke: (_r: RemoteAgent, m: A2aMethod) => {
+      if (m === A2aMethod.MessageSend) return Promise.resolve(submittedTask());
+      gets += 1;
+      return Promise.resolve(completedTask('ok'));
+    },
+  } as unknown as A2aClient;
+
+  const set = remoteAsToolSet(remote('steady'), client, FAST);
+  const t = set.delegate_to_steady;
+  const first = (await t?.execute?.({ task: 'a' }, OPTS)) as { text?: string };
+  const second = (await t?.execute?.({ task: 'b' }, OPTS)) as { text?: string };
+
+  expect(first.text).toBe('ok');
+  expect(second.text).toBe('ok');
+  expect(gets).toBeGreaterThanOrEqual(2); // both delegations ran the poll loop
+  // …but the card pin was fetched+verified exactly ONCE for the process.
+  expect(verifyCalls).toBe(1);
 });
 
 test('the mounted tool set feeds forAgent → toolsFor (delegate_to_<name> visible to the orchestrator)', () => {
