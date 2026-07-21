@@ -35,17 +35,21 @@ export function buildA2aServerDeps(
   cfg: ReturnType<typeof loadConfig>['values'],
   ctx: { jobStore: JobStore; runsRoot: string; rootTokens: RootTokenStore },
 ): A2aServerDeps {
-  // The allowlist and issued-token registry share ONE store path
-  // (`AGENT_A2A_SKILLS_PATH`, mirroring `AGENT_QUEUE_PATH`).
-  const skillsPath = String(cfg.AGENT_A2A_SKILLS_PATH);
+  // The allowlist and the issued-token registry are DISTINCT files with
+  // DISTINCT top-level JSON shapes: the allowlist persists `{skills:[...]}` (an
+  // object, `AGENT_A2A_SKILLS_PATH`) while the token registry persists `[...]`
+  // (an array, `AGENT_A2A_TOKENS_PATH`). Pointing both at ONE path
+  // fail-closed-crashes the daemon on boot — enroll.ts `load()` throws on a
+  // non-array the moment an operator authors an allowlist (caught by
+  // live-verify), so they MUST stay separate.
   return {
-    allowlist: createA2aAllowlist({ path: skillsPath }),
+    allowlist: createA2aAllowlist({ path: String(cfg.AGENT_A2A_SKILLS_PATH) }),
     // Enrollment resolves the root PER CALL through the SAME `rootStore` the
     // session guard verifies against (passed as `ctx.rootTokens`), so a
     // rotate-root invalidates every outstanding A2A Bearer at once.
     enrollment: createA2aEnrollment({
       rootTokens: ctx.rootTokens,
-      registryPath: skillsPath,
+      registryPath: String(cfg.AGENT_A2A_TOKENS_PATH),
     }),
     jobStore: ctx.jobStore,
     runsRoot: ctx.runsRoot,

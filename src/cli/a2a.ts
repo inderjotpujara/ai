@@ -247,9 +247,18 @@ export async function runA2aCli(
  */
 function buildRealA2aDeps(): A2aCliDeps {
   const cfg = loadConfig().values;
-  const allowlist = createA2aAllowlist({});
+  // Allowlist and token registry are DISTINCT files with DISTINCT JSON shapes
+  // ({skills:[...]} object vs [...] array) — the CLI reads the SAME two knobs
+  // the daemon wires (server/a2a/wire.ts) so a token issued here is found by
+  // the daemon; sharing one path fail-closed-crashes boot.
+  const allowlist = createA2aAllowlist({
+    path: String(cfg.AGENT_A2A_SKILLS_PATH),
+  });
   const rootTokens = createRootTokenStore({});
-  const enrollment = createA2aEnrollment({ rootTokens });
+  const enrollment = createA2aEnrollment({
+    rootTokens,
+    registryPath: String(cfg.AGENT_A2A_TOKENS_PATH),
+  });
   const remoteStore = createRemoteStore({});
   const client = createA2aClient();
   // Mirrors server/main.ts's / cli/triggers.ts's publicBaseUrl fallback:

@@ -639,7 +639,13 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     env: 'AGENT_A2A_SKILLS_PATH',
     kind: 'string',
     def: 'a2a-skills.json',
-    doc: 'expose allowlist + issued-token-registry store path, mirroring `AGENT_QUEUE_PATH` (`a2a/allowlist.ts` / `a2a/enroll.ts`).',
+    doc: 'expose allowlist store path, mirroring `AGENT_QUEUE_PATH` (`a2a/allowlist.ts`). The issued-token registry lives in a SEPARATE file — see `AGENT_A2A_TOKENS_PATH`.',
+  },
+  {
+    env: 'AGENT_A2A_TOKENS_PATH',
+    kind: 'string',
+    def: 'a2a-tokens.json',
+    doc: 'issued A2A Bearer token registry; SEPARATE file from the allowlist [AGENT_A2A_SKILLS_PATH] because the two use different top-level JSON shapes — the allowlist persists `{skills:[...]}` (an object) while the token registry persists `[...]` (an array), so sharing one path fail-closed-crashes the daemon on boot (enroll.ts `load()` throws on a non-array). Sibling of the allowlist by default. Read at `a2a/enroll.ts`.',
   },
   {
     env: 'AGENT_A2A_REMOTES_PATH',

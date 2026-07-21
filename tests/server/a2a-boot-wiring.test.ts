@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createA2aEnrollment } from '../../src/a2a/enroll.ts';
 import { loadConfig } from '../../src/config/schema.ts';
 import { createJobStore } from '../../src/queue/store.ts';
 import { buildA2aServerDeps } from '../../src/server/a2a/wire.ts';
@@ -16,6 +17,7 @@ const CARD_PATH = '/.well-known/agent-card.json';
 const ENV_KEYS = [
   'AGENT_A2A_ENABLED',
   'AGENT_A2A_SKILLS_PATH',
+  'AGENT_A2A_TOKENS_PATH',
   'AGENT_QUEUE_PATH',
   'AGENT_TRIGGERS_ENABLED',
 ] as const;
@@ -117,5 +119,100 @@ test('buildA2aServerDeps yields the full EXPOSE+CONSUME shape (allowlist+enrollm
     expect(deps.client).toBeDefined();
   } finally {
     jobStore.close();
+  }
+});
+
+// --- Regression: the shared-path daemon-boot crash (caught by live-verify) ---
+//
+// The allowlist persists `{skills:[...]}` (an OBJECT) and the token registry
+// persists `[...]` (an ARRAY). When BOTH stores pointed at
+// AGENT_A2A_SKILLS_PATH, the moment an operator authored an allowlist the
+// enrollment `load()` saw a non-array and threw fail-closed → the whole daemon
+// crashed on boot. Every unit test missed it because each store used its own
+// isolated temp path; only the real shared-path wiring triggered it. These
+// tests exercise the REAL coexistence scenario the fix restores.
+
+test('daemon boots with an AUTHORED allowlist ({skills:[...]}) AND an issued token ([...]) coexisting — separate paths, no fail-closed crash', async () => {
+  const skillsPath = join(
+    mkdtempSync(join(tmpdir(), 'a2a-coexist-skills-')),
+    'a2a-skills.json',
+  );
+  const tokensPath = join(
+    mkdtempSync(join(tmpdir(), 'a2a-coexist-tokens-')),
+    'a2a-tokens.json',
+  );
+  process.env.AGENT_A2A_ENABLED = '1';
+  process.env.AGENT_A2A_SKILLS_PATH = skillsPath;
+  process.env.AGENT_A2A_TOKENS_PATH = tokensPath;
+
+  // Authored allowlist on disk: the OBJECT shape (`{skills:[...]}`) that used
+  // to blow up enrollment's array-only `load()` when the paths were shared.
+  writeFileSync(
+    skillsPath,
+    JSON.stringify({
+      skills: [
+        {
+          skillId: 'fetch-a-url',
+          name: 'Fetch a URL',
+          description: 'expose the web_fetch agent as an A2A skill',
+          kind: 'chat',
+          ref: 'web_fetch',
+        },
+      ],
+    }),
+  );
+
+  // Shared daemon root so a token issued now verifies against the booted
+  // server's enrollment (both resolve the root from the SAME file).
+  const authDir = mkdtempSync(join(tmpdir(), 'a2a-coexist-auth-'));
+  const rootTokenPath = join(authDir, 'daemon-token');
+  const sessionRevocationPath = join(authDir, 'revoked-devices.json');
+  const rootTokens = createRootTokenStore({ path: rootTokenPath });
+
+  // Issue a token → writes the ARRAY-shaped registry at the SEPARATE tokens
+  // path, so both stores now exist with their incompatible shapes.
+  const issuer = createA2aEnrollment({ rootTokens, registryPath: tokensPath });
+  const { token } = issuer.issue('ci-peer');
+
+  // The pre-fix shared-path config would have thrown HERE (an object where an
+  // array is required); prove that directly so the regression can't silently
+  // return.
+  expect(() =>
+    createA2aEnrollment({ rootTokens, registryPath: skillsPath }),
+  ).toThrow(/not a JSON array/);
+
+  // The two knobs must resolve to DISTINCT files — the root cause was sharing.
+  const cfg = loadConfig().values;
+  expect(String(cfg.AGENT_A2A_SKILLS_PATH)).not.toBe(
+    String(cfg.AGENT_A2A_TOKENS_PATH),
+  );
+
+  // The real assertion: startWebServer / buildA2aServerDeps must NOT throw with
+  // both stores authored, and the card must serve the authored skill.
+  const handle = startWebServer({
+    port: 0,
+    rootTokenPath,
+    sessionRevocationPath,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${handle.port}${CARD_PATH}`);
+    expect(res.status).toBe(200);
+    const card = (await res.json()) as {
+      skills?: Array<{ id: string }>;
+    };
+    expect(card.skills?.some((s) => s.id === 'fetch-a-url')).toBe(true);
+
+    // And the coexisting issued token verifies against the booted daemon's
+    // enrollment (same root, separate registry) — end-to-end proof the two
+    // surfaces work side by side.
+    const verifier = createA2aEnrollment({
+      rootTokens,
+      registryPath: tokensPath,
+    });
+    expect(verifier.verify(token)).toBe(true);
+  } finally {
+    await handle.pool.stop();
+    handle.server.stop(true);
+    handle.jobStore.close();
   }
 });

@@ -47,7 +47,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
 import type { RootTokenStore } from '../server/security/root-token.ts';
 
@@ -80,11 +80,12 @@ type StoredToken = {
 /** The signed wire payload of an A2A Bearer. */
 type A2aPayload = { tokenId: string; kind: typeof A2A_KIND };
 
-/** Default registry location: sits BESIDE the allowlist store
- *  (`AGENT_A2A_SKILLS_PATH`), same dir/discipline (`a2a/allowlist.ts`). */
+/** Default registry location: the dedicated `AGENT_A2A_TOKENS_PATH` knob — a
+ *  SEPARATE file from the allowlist (`AGENT_A2A_SKILLS_PATH`) because the two
+ *  use different top-level JSON shapes (array vs `{skills}` object); sharing one
+ *  path fail-closed-crashes the daemon on boot. */
 export function defaultA2aRegistryPath(): string {
-  const skillsPath = String(loadConfig().values.AGENT_A2A_SKILLS_PATH);
-  return join(dirname(skillsPath), 'a2a-tokens.json');
+  return String(loadConfig().values.AGENT_A2A_TOKENS_PATH);
 }
 
 /** HMAC-SHA256 of `payload` keyed by the root token, hex-encoded — the SAME
