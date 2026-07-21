@@ -228,7 +228,13 @@ export type A2aRemoteListResponse = z.infer<typeof A2aRemoteListResponseSchema>;
  *  pins `cardUrl` BEFORE persisting (a failed discover is a 400, nothing
  *  stored); `token` is the remote's Bearer, stored but never echoed back. */
 export const A2aRemoteAddRequestSchema = z.object({
-  name: z.string().min(1).max(200),
+  // Constrained to the delegate-tool charset (the same pattern `delegateToolName`
+  // + the local `AGENT` keys assume): as of Task 29b this name becomes a LIVE
+  // `delegate_to_<name>` AI-SDK tool key handed to the router model AND a line in
+  // `buildRoutingPrompt`'s catalog. A space/special char would be an invalid
+  // provider tool name (turn breakage) and a newline would inject a routing-prompt
+  // line — so reject anything outside `[a-zA-Z0-9_-]{1,64}` at the schema edge.
+  name: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   cardUrl: z.string().min(1).max(2048),
   token: z.string().min(1),
 });

@@ -195,11 +195,15 @@ Mini.
 > discovers + hash-pins a remote card (SSRF-guarded, timeout+size-capped,
 > a hash mismatch is a hard reject, never a silent re-pin) and
 > `src/a2a/mount.ts` shapes a `delegate_to_<name>` `ToolSet` matching the
-> MCP mount's failure-returns-not-throws contract — **honestly not yet
-> spliced into a live chat/crew/workflow session's tool set** this slice;
-> today's shipped Consume surface is discover→pin→persist plus manual
-> invocation via `agent a2a call` or the Federation tab's recent-remote-
-> tasks history. A new Ops-console **Federation tab** (Expose + Consume
+> MCP mount's failure-returns-not-throws contract. A console/CLI-added
+> remote surfaces as a **live `delegate_to_<name>` in CHAT turns**
+> (`liveRemoteDelegateTools` → `createOrchestrator`, both web + CLI chat;
+> gated by `AGENT_A2A_ENABLED`, **local agent wins on a name collision**),
+> so the orchestrator can pick a remote peer mid-turn — no restart.
+> Crew/workflow consume-delegation is a documented **seam-ready follow-on**
+> (those build their toolset via a different seam and don't yet consume
+> `remoteTools`); `agent a2a call` and the Federation tab's remote-task
+> history remain for direct invocation. A new Ops-console **Federation tab** (Expose + Consume
 > panels) and `agent a2a skills|token|remotes|call|card` CLI. An
 > adversarial review caught + fixed three real defects (a non-exposable
 > `JobKind` could slip the allowlist; a terminal SSE frame could arrive

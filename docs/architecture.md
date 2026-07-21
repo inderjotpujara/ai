@@ -304,7 +304,7 @@ graph TD
         a2areplay["replay-guard.ts · createReplayGuard (nonce+timestamp bounded LRU)"]
         a2acanon["canonical.ts · hashCard (key-sorted sha256, ETag+pin share)"]
         a2aclient["client.ts · createA2aClient (discover/verifyPin/invoke, SSRF+timeout+size-cap)"]
-        a2amount["mount.ts · remoteAsToolSet/mountRemotes → delegate_to_&lt;name&gt; (forAgent-shaped, unwired into a live session)"]
+        a2amount["mount.ts · remoteAsToolSet/mountRemotes/liveRemoteDelegateTools → delegate_to_&lt;name&gt; (live in CHAT turns, T29b; crew/workflow follow-on)"]
         a2aremotes["remotes.ts · RemoteStore (pinned remotes, 0600, token stripped at DTO)"]
         a2aspans["spans.ts · a2a.server.*/a2a.client.* spans (ATTR/inSpan reuse)"]
     end
@@ -318,9 +318,9 @@ graph TD
     %% BEFORE the body is parsed) which resolves-then-rejects against the
     %% allowlist and enqueues onto the SAME Slice-24 JobStore as any other job
     %% API caller (origin=Remote); CONSUME — the Federation console discovers +
-    %% hash-pins a remote's card, persists it, and mount.ts SHAPES (but does not
-    %% yet splice into a live session's tool set) a delegate_to_<name> ToolSet
-    %% reusing the MCP mount failure-returns contract.
+    %% hash-pins a remote's card, persists it, and (T29b) liveRemoteDelegateTools
+    %% splices it as a live delegate_to_<name> into CHAT turns (gated by
+    %% AGENT_A2A_ENABLED, local-wins on name collision); crew/workflow = follow-on.
     a2ainbound -.-> sa2acard
     a2ainbound -.-> sa2arpc
     sa2acard --> a2acard
@@ -2141,7 +2141,7 @@ agent-builder suggests from (§18).
 - **`types.ts`** — `McpTransportKind` (`Stdio`/`Http`), `McpAuthKind` (`Static`/`OAuth`) + `httpAuthSchema` (Slice 18, the optional `auth: {kind: OAuth}` on an HTTP entry), the raw Zod schemas (`stdioEntrySchema`/`httpEntrySchema`), the validated `StdioServerEntry`/`HttpServerEntry` union (`McpServerEntry`, each carrying the as-written `raw` value alongside the env-expanded fields), `McpConfig` (`entries`/`dormant`/`warnings`), and `PackEntry`.
 - **`config.ts`** — `loadMcpConfig(path, env)`: reads `mcp.json` (default `./mcp.json`, override `AGENT_MCP_CONFIG`), expands `${VAR}`/`${VAR:-default}` (`expandVars`), and degrades per-entry rather than throwing — a malformed entry warns and is skipped, an entry with an unresolved required var goes to `dormant`, and a VS-Code-style `servers` root (instead of `mcpServers`) is tolerated with a warning.
 - **`consent.ts`** — `specHash` (identity hash over raw command/args/env-**key-names**, or url/header-**names** — never values, so secrets are never hashed or stored), `toolsHash` (fingerprints the live tool set: name+description+schema), `ensureConsent` (the gate itself), `pinTools`/`checkDrift` (the rug-pull check), `dangerFlags` (sudo / `rm -rf` / curl\|sh pattern warnings), and `readApprovals`/`writeApprovals` against `.mcp-approvals.json` (git-ignored, atomic temp+rename write).
-- **`mount.ts`** — `mountAll(config)`: for each entry, consent-gate → mount (stdio or HTTP) → hash + drift-check + pin → collect. Returns a `MountedRegistry` — `merged` (every tool, for workflow tool-steps), `forAgent(name)` (unscoped entries + entries naming that agent — the per-agent slice), `mounted`/`skipped` (for status/telemetry), `close()`. Also `warnUnknownAgents` — a typo guard for an `agents` entry naming an agent that doesn't exist (Slice 18 wires it into `chat.ts` too, matching `flow.ts`; `crew.ts` is deliberately excluded because crews use `reg.merged`, not `reg.forAgent`, so agent-scoping doesn't apply). **A2A consume-side reuse (Slice 31, `src/a2a/mount.ts`):** a discovered/pinned remote peer's `delegate_to_<name>` `ToolSet` (`remoteAsToolSet`/`mountRemotes`) is deliberately shaped to be a drop-in `MountedRegistry.forAgent` entry — same failure-returns-not-throws contract as a local specialist — but `mountAll`/`loadMcpConfig` do not themselves read the A2A remote store; no boot path splices a consumed remote into a live `chat`/`crew`/`workflow` session's tool set this slice (see the `src/a2a/` subsystem section's honest-gap note). **MCP OAuth (Slice 18 wiring, Slice 26 live):** `resolveAuthProvider(entry, authProviders, warn)` passes an injected `OAuthClientProvider` into the HTTP transport when an entry declares `auth.kind = OAuth` (`McpAuthKind`, `httpAuthSchema` in `types.ts`); the static-header path (github/brave/exa) is unchanged (no `auth` → no `authProvider`), and a declared-OAuth entry with no registered provider **warns and mounts without auth** (degrade, never crash). As of Slice 26 the provider actually supplied is the real, live `createOAuthProvider` (below) — see "Live OAuth" for the completed handshake.
+- **`mount.ts`** — `mountAll(config)`: for each entry, consent-gate → mount (stdio or HTTP) → hash + drift-check + pin → collect. Returns a `MountedRegistry` — `merged` (every tool, for workflow tool-steps), `forAgent(name)` (unscoped entries + entries naming that agent — the per-agent slice), `mounted`/`skipped` (for status/telemetry), `close()`. Also `warnUnknownAgents` — a typo guard for an `agents` entry naming an agent that doesn't exist (Slice 18 wires it into `chat.ts` too, matching `flow.ts`; `crew.ts` is deliberately excluded because crews use `reg.merged`, not `reg.forAgent`, so agent-scoping doesn't apply). **A2A consume-side reuse (Slice 31, `src/a2a/mount.ts`):** a discovered/pinned remote peer's `delegate_to_<name>` `ToolSet` (`remoteAsToolSet`/`mountRemotes`) is deliberately shaped to be a drop-in `MountedRegistry.forAgent` entry — same failure-returns-not-throws contract as a local specialist. `mountAll`/`loadMcpConfig` still do not themselves read the A2A remote store; instead the dedicated `liveRemoteDelegateTools` seam (`a2a/mount.ts`, Task 29b) reads it fresh each turn and both chat entrypoints (`server/chat/run-turn.ts`, `src/cli/chat.ts`) pass its output into `createOrchestrator` as `remoteTools` — so a consumed remote IS spliced into a live CHAT session (gated by `AGENT_A2A_ENABLED`, local-wins on name collision); crew/workflow consume-delegation remains a seam-ready follow-on (see the `src/a2a/` subsystem section's CONSUME note). **MCP OAuth (Slice 18 wiring, Slice 26 live):** `resolveAuthProvider(entry, authProviders, warn)` passes an injected `OAuthClientProvider` into the HTTP transport when an entry declares `auth.kind = OAuth` (`McpAuthKind`, `httpAuthSchema` in `types.ts`); the static-header path (github/brave/exa) is unchanged (no `auth` → no `authProvider`), and a declared-OAuth entry with no registered provider **warns and mounts without auth** (degrade, never crash). As of Slice 26 the provider actually supplied is the real, live `createOAuthProvider` (below) — see "Live OAuth" for the completed handshake.
 - **`oauth-provider.ts`** (Slice 26, NEW) — `createOAuthProvider(serverName, opts)` returns a `LiveOAuthClientProvider`: a real `@ai-sdk/mcp` `OAuthClientProvider` implementation backed by the Slice-26 token store. Implements the full optional surface the SDK's `authInternal` looks for, not just the required minimum: `tokens`/`saveTokens` (round-trip through `token-store.ts`), `codeVerifier`/`saveCodeVerifier` (PKCE), `state`/`saveState`/`storedState` (an in-memory per-flow CSRF nonce — implementing these makes the SDK mint and verify a real `state` param instead of skipping CSRF protection), `clientInformation`/`saveClientInformation` (absent → the SDK runs Dynamic Client Registration / CIMD, no preconfigured `client_id` required), and `authorizationServerInformation`/`saveAuthorizationServerInformation` (persists the discovered AS metadata so the **second**, code-exchange `auth()` call — on a possibly-fresh provider instance, e.g. after a process restart — doesn't throw "Stored OAuth authorization server metadata is required when exchanging an authorization code", the exact error the live Linear handshake hit before this was added). `redirectToAuthorization(url)` binds a one-shot loopback listener (`ensureServer`, built the same way as `loopback.ts`'s `awaitOAuthRedirect` but bound once per provider instance and reused for both the advertised `redirectUrl` and the actual callback, since DCR and the authorization URL must agree on the same port) and opens the browser; the non-contract `waitForRedirect()` method (not part of `OAuthClientProvider`) is what `client.ts` awaits after the SDK throws `UnauthorizedError`.
 - **`@ai-sdk/mcp` v2 note (Slice 23; revisited Slice 24 Incr 5, item 14).** Under `@ai-sdk/mcp@2`, the HTTP transport's `redirect` option defaults to `'error'` (an SSRF hardening — v1 followed 3xx). `client.ts`'s `buildHttpTransportConfig` now sets `redirect: 'error'` **explicitly** (rather than relying on the SDK's implicit default) and additionally wires a `fetch` option (`redirectSafeFetch`, backed by `http-redirect.ts`'s `noRedirectFetch`) that independently re-checks the response status and throws on any 3xx — a defense-in-depth second guard so the SSRF protection survives even if a future edit swapped in a custom `fetch` that ignored `redirect`. Locked by `tests/mcp/redirect-ssrf.test.ts` (`noRedirectFetch` unit tests) and the `buildHttpTransportConfig` suite in `tests/mcp/client.test.ts` (asserts `transport.redirect === 'error'` and that `transport.fetch` itself rejects a redirect) — a future edit that weakens either to `'follow'` fails these tests. The two built-in servers are stdio (unaffected); this only touches user-configured remote HTTP servers, now more relevant since Slice 24 opens remote (Tailscale-tunneled) access — deliberately not weakened to `'follow'`.
 - **`loopback.ts`** (Slice 26, NEW) — `loopbackRedirectUri(port)` (`http://127.0.0.1:<port>/callback`) and `awaitOAuthRedirect(buildAuthUrl, expectedState, deps?)`: binds an ephemeral localhost server, opens the authorization URL in the browser, resolves `{code, state}` on the first `/callback` hit (rejecting on a `state` mismatch or a missing `code`), and always stops the server on exit — a wall-clock timeout (default 180s) guards a no-show. `oauth-provider.ts` reuses `loopbackRedirectUri` but implements its own listener (a provider instance's redirect+callback must share one bound port across two separate SDK calls, which this standalone helper isn't shaped for).
@@ -3837,23 +3837,28 @@ never leaves this store raw — `server/a2a/remotes.ts`'s `toRemoteDto` is the
 ONE place a `RemoteAgent` is narrowed to its wire form, stripping `token`
 unconditionally.
 
-> **⚑ HONEST GAP — CONSUME reuse is shaped, not yet spliced into a live run.**
-> `remoteAsToolSet`/`mountRemotes` produce a `ToolSet` that is
-> **structurally** a drop-in for `MountedRegistry.forAgent` (same
-> failure-returns-not-throws contract, same tool-name convention as a local
-> specialist), and are unit-tested standalone (`tests/a2a/mount.test.ts`).
-> But as of this slice **no boot path actually merges a discovered remote's
-> tools into a live `chat`/`crew`/`workflow` session's own tool set** —
-> `mountAll`/`loadMcpConfig` never reads `RemoteStore`. The only real callers
-> of the underlying send→poll loop today are `agent a2a call` (`src/cli/a2a.ts`,
-> which calls `delegateAndPoll` directly — bypassing `remoteAsToolSet`
-> entirely) and the unit suite. Splicing consumed remotes into a live
-> orchestrator's tool set (the "chat to a remote peer through
-> `delegate_to_<name>` inside an ordinary run" use case) is scoped future
-> work, not a Slice-31 regression — the shipped CONSUME surface today is
-> "discover, pin, store, and manually invoke via the CLI or the Federation
-> tab's task history," not "an extra specialist the orchestrator can choose
-> mid-run."
+> **CONSUME live-mounting — the CHAT path is spliced (Task 29b); crew/workflow
+> is seam-ready follow-on.** `liveRemoteDelegateTools` (`a2a/mount.ts`) is the
+> one seam a live turn calls: gated by `AGENT_A2A_ENABLED` (off ⇒ `{}`, a turn
+> is byte-for-byte unchanged), it reads `RemoteStore` fresh each turn and returns
+> a `delegate_to_<name>` `ToolSet` for every configured remote. Both chat
+> entrypoints wire it in — `server/chat/run-turn.ts` (web) and `src/cli/chat.ts`
+> (CLI) pass its output as `deps.remoteTools`, and `createOrchestrator`
+> (`src/core/orchestrator.ts`) merges those tools alongside the local
+> specialists into the router's toolset + routing catalog. **Local wins on a
+> name collision** — a remote whose `delegate_to_<name>` matches a local
+> specialist is dropped with a warning, never silently shadowing the local
+> agent. So a remote added via the Federation console / `agent a2a remotes add`
+> becomes a live delegate the orchestrator can choose mid-CHAT-turn, no restart.
+> **Still a follow-on:** crew and workflow sessions do NOT yet consume
+> `remoteTools` (they build their toolset via `reg.merged`, a different seam);
+> splicing consumed remotes into those is scoped seam-ready future work, not a
+> regression. And note the observability gap (inherited from Task 21, now live):
+> a remote delegate executes as a plain tool call outside `runGuardedAgent`, so
+> **no `agent.delegation` span** fires for the remote hop (only the client's own
+> `a2a.client.invoke` span), and a remote failure / open circuit is NOT recorded
+> to the `DegradationLedger` nor emitted as a Degrade/Delegation status event —
+> the per-remote breaker still protects the run. Documented forward-item.
 
 #### Route layer (`src/server/a2a/`) + boot wiring
 

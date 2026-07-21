@@ -13,11 +13,16 @@
  *    remote task, or a tripped breaker (`CircuitOpenError`) all collapse to a
  *    structured `{ error }` result the orchestrator model handles like any
  *    specialist gap — never an unhandled throw that crashes the run.
- *  - **NO second delegation span here.** `withDelegationSpan` (→ `agent.delegation`)
- *    already fires when the orchestrator invokes this tool through
- *    `runGuardedAgent`; the A2A hop is the tool's `execute`, which nests under
- *    it. The client's own `a2a.client.invoke` span (Task 20) is the A2A-layer
- *    span — this module emits none.
+ *  - **NO `agent.delegation` span for the remote hop.** As of Task 29b the
+ *    live path (`liveRemoteDelegateTools`) inserts these tools DIRECTLY into
+ *    `createOrchestrator`'s toolset — they execute as a plain AI-SDK tool call,
+ *    NOT through `runGuardedAgent`, so `withDelegationSpan` never wraps a remote
+ *    delegate and NO `agent.delegation` span fires for it (unlike a local
+ *    specialist). This is intentional: the client's own `a2a.client.invoke`
+ *    span (Task 20) is the sole A2A-layer span for the hop, and this module
+ *    emits none of its own. (The earlier Task-21 header claimed the hop nests
+ *    under an orchestrator `agent.delegation` span; that was true only under the
+ *    since-superseded scoped-under-a-specialist design and is false now.)
  *
  * The breaker is keyed per-remote (`a2a:<name>`) so one dead peer fast-fails on
  * its own circuit without dragging down the others.

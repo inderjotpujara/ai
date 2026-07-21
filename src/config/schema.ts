@@ -621,7 +621,7 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     env: 'AGENT_A2A_ENABLED',
     kind: 'boolean',
     def: false,
-    doc: 'Governs whether the EXPOSE surface is live: the card route (`server/a2a/card.ts`) 404s and `POST /api/a2a` (`server/a2a/rpc.ts`) rejects when off. Default OFF so the daemon exposes nothing until an operator authors an allowlist + issues a token from the Federation tab.',
+    doc: 'Governs BOTH directions of A2A: (1) the EXPOSE surface — the card route (`server/a2a/card.ts`) 404s and `POST /api/a2a` (`server/a2a/rpc.ts`) rejects when off; and (2) as of Task 29b, CONSUME-side live-mounting — `liveRemoteDelegateTools` (`a2a/mount.ts`) returns `{}` when off, so a configured remote surfaces as a `delegate_to_<name>` orchestrator delegate only when this is on. Default OFF so the daemon neither exposes anything nor mounts any remote until an operator authors an allowlist + issues a token from the Federation tab; flipping it on lights up both directions at once.',
   },
   {
     env: 'AGENT_A2A_CARD_TTL',

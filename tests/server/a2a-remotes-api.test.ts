@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DiscoverResult } from '../../src/a2a/client.ts';
 import { createRemoteStore } from '../../src/a2a/remotes.ts';
+import { A2aRemoteAddRequestSchema } from '../../src/contracts/a2a.ts';
 import type { A2aAgentCard } from '../../src/contracts/index.ts';
 import {
   handleRemoteAdd,
@@ -174,6 +175,58 @@ test('POST /api/a2a/remotes (trusted-local) pins via discover BEFORE persisting'
   // The response DTO omits the token.
   const body = (await res.json()) as Record<string, unknown>;
   expect(body).not.toHaveProperty('token');
+});
+
+test('POST /api/a2a/remotes rejects a name with a space (invalid delegate-tool key) — 400, no discover, nothing persisted', async () => {
+  const c = ctx();
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'bad name',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(400);
+  // Rejected at the schema edge — no discover call, store untouched.
+  expect(c.discoverCalls).toEqual([]);
+  expect(c.remotes.list()).toEqual([]);
+});
+
+test('POST /api/a2a/remotes rejects a name with a newline (routing-prompt line injection) — 400, no discover, nothing persisted', async () => {
+  const c = ctx();
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'peer\ninjected: line',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(400);
+  expect(c.discoverCalls).toEqual([]);
+  expect(c.remotes.list()).toEqual([]);
+});
+
+test('A2aRemoteAddRequestSchema constrains name to the delegate-tool charset', () => {
+  expect(
+    A2aRemoteAddRequestSchema.safeParse({
+      name: 'ok-Peer_1',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+    }).success,
+  ).toBe(true);
+  for (const bad of ['has space', 'new\nline', 'dot.name', 'star*', '']) {
+    expect(
+      A2aRemoteAddRequestSchema.safeParse({
+        name: bad,
+        cardUrl: 'https://peer.ts.net/card.json',
+        token: 't',
+      }).success,
+    ).toBe(false);
+  }
 });
 
 test('POST /api/a2a/remotes rejects when discover fails — nothing persisted', async () => {
