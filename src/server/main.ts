@@ -29,6 +29,7 @@ import { createLazyEngine, createRealRunChatTurn } from './chat/run-turn.ts';
 import { createDurableConsentRegistry } from './consent/durable-registry.ts';
 import { createJobDispatch } from './jobs/dispatch.ts';
 import {
+  createRealRunAgentTurn,
   createRealRunBuilderTurn,
   createRealRunCrewTurn,
   createRealRunModelPull,
@@ -356,6 +357,8 @@ export function startWebServer(opts: StartOptions = {}): {
   const runLimiter = createProcessRunLimiter();
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
+  // Single-agent runner for A2A Chat skills bound to an agent ref (B3).
+  const runAgentTurn = createRealRunAgentTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
   const runModelPull = createRealRunModelPull(runsRoot);
   const mcpConfigPath = defaultConfigPath();
@@ -455,6 +458,7 @@ export function startWebServer(opts: StartOptions = {}): {
       getWorkflow,
       runModelPull,
       runChatTurn,
+      runAgentTurn,
       runBuilderTurn,
       runsRoot,
     });

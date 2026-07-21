@@ -156,3 +156,45 @@ test('chat dispatch threads the pool signal into runChatTurn', async () => {
   expect((calls[0] as { runId: string }).runId).toBe('run-xyz');
   expect(res).toEqual({ kind: 'answer', text: 'hi' });
 });
+
+test('B3: a chat job carrying a2aRef runs ONLY that agent via runAgentTurn (NOT the full orchestrator)', async () => {
+  const agentCalls: unknown[] = [];
+  const chatCalls: unknown[] = [];
+  const controller = new AbortController();
+  const dispatch = createJobDispatch({
+    ...baseDeps(),
+    runChatTurn: async (i) => {
+      chatCalls.push(i);
+      return { kind: 'answer', text: 'orchestrator' } as never;
+    },
+    runAgentTurn: async (i) => {
+      agentCalls.push(i);
+      return { kind: 'answer', text: 'single-agent answer' };
+    },
+  });
+  const res = await dispatch(JobKind.Chat)(
+    fakeJob(JobKind.Chat, { task: 'summarize', a2aRef: 'file_qa' }),
+    controller.signal,
+  );
+  // Routed to the single-agent runner with the resolved ref — never the full
+  // super-agent chat turn (which would expose every specialist + MCP + remotes).
+  expect(chatCalls).toHaveLength(0);
+  expect(agentCalls).toHaveLength(1);
+  expect((agentCalls[0] as { ref: string }).ref).toBe('file_qa');
+  expect((agentCalls[0] as { task: string }).task).toBe('summarize');
+  expect((agentCalls[0] as { signal: AbortSignal }).signal).toBe(
+    controller.signal,
+  );
+  expect((agentCalls[0] as { runId: string }).runId).toBe('run-xyz');
+  expect(res).toEqual({ kind: 'answer', text: 'single-agent answer' });
+});
+
+test('B3: a chat job with a2aRef but no runAgentTurn dep fails (never falls through to the orchestrator)', async () => {
+  const dispatch = createJobDispatch(baseDeps()); // no runAgentTurn wired
+  await expect(
+    dispatch(JobKind.Chat)(
+      fakeJob(JobKind.Chat, { task: 'x', a2aRef: 'file_qa' }),
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(/a2aRef/);
+});

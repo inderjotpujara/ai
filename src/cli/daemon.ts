@@ -42,6 +42,7 @@ import {
 } from '../server/chat/run-turn.ts';
 import { createJobDispatch } from '../server/jobs/dispatch.ts';
 import {
+  createRealRunAgentTurn,
   createRealRunBuilderTurn,
   createRealRunCrewTurn,
   createRealRunModelPull,
@@ -123,6 +124,8 @@ function buildRealDaemon() {
   const runsRoot = process.env.AGENT_RUNS_ROOT ?? 'runs';
   const runCrewTurn = createRealRunCrewTurn(runsRoot);
   const runWorkflowTurn = createRealRunWorkflowTurn(runsRoot);
+  // Single-agent runner for A2A Chat skills bound to an agent ref (B3).
+  const runAgentTurn = createRealRunAgentTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
   const runModelPull = createRealRunModelPull(runsRoot);
   const memoryEmbedModel =
@@ -169,6 +172,7 @@ function buildRealDaemon() {
     getWorkflow,
     runModelPull,
     runChatTurn,
+    runAgentTurn,
     runBuilderTurn,
     runsRoot,
   });

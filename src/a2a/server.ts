@@ -21,6 +21,8 @@
  * carried to the orchestrator as inert data, never spliced in as instructions.
  */
 
+import { AGENTS } from '../../agents/index.ts';
+import { getCrew } from '../../crews/index.ts';
 import type { A2aArtifact, A2aPart, A2aTask } from '../contracts/index.ts';
 import {
   A2aMethod,
@@ -143,20 +145,54 @@ function extractSkillId(
   return undefined;
 }
 
-/** Build the per-kind enqueue payload from the (already fenced) untrusted text.
- *  Only the three exposable kinds are reachable — the allowlist can only
- *  `resolve` a Chat/Crew/Workflow target — but we return undefined for anything
- *  else as defense-in-depth so a Pull/Build can never be enqueued via A2A. */
-function buildJobPayload(
+/** The queue kind + payload a resolved skill enqueues. */
+type EnqueuePlan = { kind: JobKind; payload: Record<string, unknown> };
+
+/**
+ * Map a resolved allowlist target to the EXACT queue enqueue (§7.4 / capstone
+ * B3). The allowlist can `resolve` only a Chat/Crew/Workflow target, and a
+ * `Chat` ref may be EITHER a registered crew OR a registered agent
+ * (`refExistsFor`). Honor the ref precisely rather than blindly enqueuing
+ * `kind=Chat`:
+ *  - `Workflow` → run THAT workflow;
+ *  - `Crew`     → run THAT crew;
+ *  - `Chat` + crew ref  → run THAT crew (never a generic chat that ignores it);
+ *  - `Chat` + agent ref → a Chat job carrying `a2aRef`, so dispatch runs ONLY
+ *    that agent, NOT the full super-agent orchestrator (exposing one Chat skill
+ *    must not expose the entire orchestrator — the "run-anything" D2 forbids).
+ * Returns undefined for anything else (defense-in-depth so a Pull/Build can
+ * never be enqueued via A2A, and so a hand-edited Chat ref that resolves to
+ * neither a crew nor an agent is rejected rather than silently run).
+ */
+function planEnqueue(
   target: ResolvedTarget,
   untrusted: string,
-): Record<string, unknown> | undefined {
+): EnqueuePlan | undefined {
   switch (target.kind) {
-    case JobKind.Chat:
-      return { task: untrusted };
-    case JobKind.Crew:
     case JobKind.Workflow:
-      return { name: target.ref, input: untrusted };
+      return {
+        kind: JobKind.Workflow,
+        payload: { name: target.ref, input: untrusted },
+      };
+    case JobKind.Crew:
+      return {
+        kind: JobKind.Crew,
+        payload: { name: target.ref, input: untrusted },
+      };
+    case JobKind.Chat:
+      if (getCrew(target.ref) !== undefined) {
+        return {
+          kind: JobKind.Crew,
+          payload: { name: target.ref, input: untrusted },
+        };
+      }
+      if (Object.hasOwn(AGENTS, target.ref)) {
+        return {
+          kind: JobKind.Chat,
+          payload: { task: untrusted, a2aRef: target.ref },
+        };
+      }
+      return undefined;
     default:
       return undefined;
   }
@@ -227,13 +263,10 @@ export function handleMessageSend(
       }
 
       // §7.2: the inbound parts are untrusted — fence their text.
-      const built = buildJobPayload(
-        target,
-        untrustedInboundText(message.parts),
-      );
-      if (built === undefined) {
-        // Unreachable via a valid allowlist (Chat/Crew/Workflow only); a
-        // defense-in-depth guard so a Pull/Build can never enqueue via A2A.
+      const plan = planEnqueue(target, untrustedInboundText(message.parts));
+      if (plan === undefined) {
+        // A Chat ref that maps to neither a registered crew nor agent (or a
+        // non-exposable kind) — reject rather than run something unintended.
         rec.outcome('rejected');
         return fail(SKILL_NOT_ALLOWED, 'skill not allowed');
       }
@@ -241,8 +274,8 @@ export function handleMessageSend(
       const runId = newRunId();
       await createRun(deps.runsRoot, runId);
       const job = deps.jobStore.enqueue({
-        kind: target.kind,
-        payload: { ...built, a2aRef: target.ref },
+        kind: plan.kind,
+        payload: plan.payload,
         origin: RunOrigin.Remote,
         runId,
       });

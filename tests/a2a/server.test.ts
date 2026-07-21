@@ -158,6 +158,41 @@ test('message/send to a listed skill enqueues origin=Remote and returns a submit
   expect(deps.taskIndex.jobIdForTask(task.id)).toBe(req(js.returned[0]).id);
 });
 
+test('B3: a Chat skill bound to an AGENT ref enqueues kind=Chat carrying a2aRef (dispatch runs only that agent)', async () => {
+  const { deps, js } = harness({
+    ask: { kind: JobKind.Chat, ref: 'file_qa' },
+  });
+  await handleMessageSend(
+    { message: msg('summarize this'), metadata: { skillId: 'ask' } },
+    deps,
+  );
+  const input = req(js.enqueueCalls[0]);
+  expect(input.kind).toBe(JobKind.Chat);
+  const payload = input.payload as { task?: string; a2aRef?: string };
+  // The ref is threaded as a2aRef so dispatch runs ONLY file_qa, not the full
+  // super-agent orchestrator (§7.4 — exposing one Chat skill ≠ the whole node).
+  expect(payload.a2aRef).toBe('file_qa');
+  expect(typeof payload.task).toBe('string');
+});
+
+test('B3: a Chat skill bound to a CREW ref enqueues kind=Crew (runs that crew, ref never ignored)', async () => {
+  const { deps, js } = harness({
+    research: { kind: JobKind.Chat, ref: 'research-crew' },
+  });
+  await handleMessageSend(
+    { message: msg('go research'), metadata: { skillId: 'research' } },
+    deps,
+  );
+  const input = req(js.enqueueCalls[0]);
+  // A Chat skill whose ref is a registered crew runs THAT crew — not a generic
+  // chat that would strip/ignore the ref (capstone B3).
+  expect(input.kind).toBe(JobKind.Crew);
+  const payload = input.payload as { name?: string; input?: string };
+  expect(payload.name).toBe('research-crew');
+  expect(typeof payload.input).toBe('string');
+  expect(payload).not.toHaveProperty('a2aRef');
+});
+
 test('message/send to an UNLISTED skill rejects pre-enqueue (§7.4, no job)', async () => {
   const { deps, js } = harness();
   const res = await handleMessageSend(
