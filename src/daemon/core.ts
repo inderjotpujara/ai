@@ -30,6 +30,7 @@ import { installSignalHandlers, onShutdown } from '../process/lifecycle.ts';
 import type { WorkerPool } from '../queue/pool.ts';
 import type { JobStore } from '../queue/store.ts';
 import type { JobRecord } from '../queue/types.ts';
+import type { ServerDeps } from '../server/app.ts';
 import type { startWebServer as StartWebServer } from '../server/main.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
 import { clearPid, defaultPidPath, readLivePid, writePid } from './pid.ts';
@@ -75,6 +76,13 @@ export type CreateDaemonOptions = {
    *  the /api/triggers* routes (Increment 5) resolve the SAME engine instance.
    *  Absent (Increments 4-5 unit tests) = no triggers wired. */
   triggers?: TriggersEngine;
+  /** Injected A2A EXPOSE-surface deps (Slice 31, Task 18), forwarded to the
+   *  injected `startWebServer`. Absent (the real daemon, `buildRealDaemon`) =
+   *  `startWebServer` self-constructs from cfg when `AGENT_A2A_ENABLED` is on,
+   *  reusing the daemon's own `jobStore`. Unlike `triggers`, A2A has NO
+   *  start/stop lifecycle, so the daemon does NOT lifecycle-bind it — this is a
+   *  pure passthrough for injection/testing parity. */
+  a2a?: ServerDeps['a2a'];
   /** Reconcile predicate for durable-orphan requeue (Increment 6, Task 41):
    *  a Running orphan matching this predicate (crew/workflow) is re-queued at
    *  boot so the pool re-claims and resumes it from its checkpoint, instead of
@@ -151,6 +159,11 @@ export function createDaemon(opts: CreateDaemonOptions): Daemon {
         // startWebServer does NOT start/stop an injected engine — the daemon does
         // (step 5b below + stop-first above).
         triggers: opts.triggers,
+        // A2A EXPOSE deps (Task 18): forwarded when injected; otherwise
+        // undefined and startWebServer self-constructs from cfg (AGENT_A2A_
+        // ENABLED-gated) over the daemon's injected jobStore. No lifecycle to
+        // own — A2A stores have no start/stop.
+        a2a: opts.a2a,
       });
       server = handle.server;
       started = true;

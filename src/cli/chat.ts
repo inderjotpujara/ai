@@ -1,6 +1,7 @@
 import { agentNames } from '../../agents/index.ts';
 import qwenRouter from '../../models/qwen-router.ts';
 import { BOOTSTRAP } from '../../models/registry.ts';
+import { liveRemoteDelegateTools } from '../a2a/mount.ts';
 import { buildAgent } from '../agent-builder/builder.ts';
 import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
 import { loadConfig } from '../config/schema.ts';
@@ -333,6 +334,14 @@ async function main(): Promise<void> {
               routerNumCtx,
               mediaStore: store,
               memoryStore,
+              // Slice 31 (Task 29b): mount every configured A2A remote as a
+              // `delegate_to_<name>` orchestrator delegate for this turn. Flag-
+              // gated + fresh-read inside the helper (off ⇒ `{}`, no change);
+              // peers are contacted only on actual delegate invocation.
+              remoteTools: liveRemoteDelegateTools({
+                warn: (m) => console.error(m),
+              }),
+              onRemoteWarn: (m) => console.error(m),
             },
           });
           for (const warning of warnings) console.error(`media: ${warning}`);

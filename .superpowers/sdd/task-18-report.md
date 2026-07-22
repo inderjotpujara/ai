@@ -155,3 +155,58 @@ mint→persist→get round-trip (incl. across a fresh store over the same file);
 - `bun run test:file -- tests/triggers/secret-store.test.ts` → **10 pass / 0 fail, 20 expect()** (was 9/9; +1 new test).
 
 Staged only the two files (`src/triggers/secret-store.ts`, `tests/triggers/secret-store.test.ts`); pre-commit `docs:check` passed.
+
+---
+---
+
+# Task 18 Report — Wire `deps.a2a` at daemon/server boot (Slice 31 A2A interop, Increment 5)
+
+> Note: content ABOVE this separator is stale prior-slice Task-18 reports (Slice 25b device revocation, Slice 25 webhook secret store) left in this shared path. The report below is the CURRENT Slice 31 (A2A interop) Task 18.
+
+## Status: COMPLETE — committed `881d006` (branch `slice-31-a2a-multimachine`)
+
+## What was implemented
+The A2A EXPOSE surface is now LIVE at boot. `deps.a2a` is constructed + injected exactly where the Slice-25 `triggers` engine is — a PURE deps handoff (A2A stores have NO start/stop lifecycle, so no drain / producer-ordering / double-instantiation hazard, unlike the pool/triggers).
+
+Files:
+- **Created `src/server/a2a/wire.ts`** — `buildA2aServerDeps(cfg, ctx)`: the single shared constructor (main.ts + CLI Task 27). Builds ONLY the EXPOSE-complete fields whose factories exist now: `{ allowlist: createA2aAllowlist({path}), enrollment: createA2aEnrollment({rootTokens, registryPath}), jobStore, runsRoot, taskIndex: createTaskIndex() }`. `allowlist` + `enrollment` share `AGENT_A2A_SKILLS_PATH`.
+- **`src/server/main.ts`** — imported `buildA2aServerDeps`; added optional `a2a?: ServerDeps['a2a']` to `StartOptions`; added the `a2a` field to `deps` beside `triggers`: `opts.a2a ?? ((cfg.AGENT_A2A_ENABLED as boolean) ? buildA2aServerDeps(cfg, { jobStore, runsRoot, rootTokens: rootStore }) : undefined)`. Caller-injected wins, else self-construct ONLY when the flag is on.
+- **`src/server/app.ts`** — updated the `ServerDeps.a2a` doc comment to record Task-18 boot construction (`wire.ts`, flag-gated) + the Increment-6 CONSUME-side growth. No structural type change — `A2aServerDeps` is already the EXPOSE-complete shape; remotes/client don't exist as types yet, so they were NOT added.
+- **`src/daemon/core.ts`** — imported `type { ServerDeps }`; added optional `a2a?: ServerDeps['a2a']` to `CreateDaemonOptions`; threaded `a2a: opts.a2a` into the injected `opts.startWebServer({...})` call beside `triggers`. The real daemon passes nothing → `startWebServer` self-constructs from cfg over the daemon's injected `jobStore`. No daemon-owned lifecycle.
+- **Created `tests/server/a2a-boot-wiring.test.ts`** — 3 tests.
+
+## Ordering adjudication honored
+Per the controller: `createRemoteStore` (Task 22) + `createA2aClient` (Task 20) are Increment 6 and DO NOT EXIST — NOT imported or called. `wire.ts` imports only `createA2aAllowlist`, `createA2aEnrollment`, `createTaskIndex`. Grep-verified: no EXPOSE consumer (card.ts/rpc.ts/config.ts/server.ts) references `deps.a2a.remotes`/`.client`. Marker `// Task 20/22 (Increment 6): add remotes + client (CONSUME side)` left at the wire.ts construction site (and in main.ts/app.ts comments).
+
+## TDD RED → GREEN
+RED (before `wire.ts` existed):
+```
+$ bun run test:file -- "tests/server/a2a-boot-wiring.test.ts"
+error: Cannot find module '../../src/server/a2a/wire.ts'
+ 0 pass  1 fail  1 error
+```
+GREEN (after implementation):
+```
+$ bun run test:file -- "tests/server/a2a-boot-wiring.test.ts"
+ 3 pass  0 fail  14 expect() calls
+```
+Tests: (1) `AGENT_A2A_ENABLED=1` + temp skills file → real `startWebServer` → `GET /.well-known/agent-card.json` → **200 card body** (`name` truthy, `skills` array), NOT 503. (2) Flag off → **not 200, ∈{404,503}** (503: `deps.a2a` undefined), no card body. (3) `buildA2aServerDeps` yields the EXPOSE-complete shape; asserts `'remotes' in deps === false` + `'client' in deps === false`.
+
+## Gate
+- `bun run typecheck` → clean (`tsc --noEmit`).
+- `bun run lint:file -- src/server/a2a/wire.ts src/server/main.ts src/server/app.ts src/daemon/core.ts tests/server/a2a-boot-wiring.test.ts` → "Checked 5 files. No fixes applied."
+- `bun run docs:check` → ✔ living docs present + linked; every src subsystem documented.
+- Regression: `tests/server/a2a-*.test.ts` + `main-queue-boot.test.ts` + `tests/daemon/**` → **46 + 3 pass, 0 fail** (the logged `triggers.stop failed / chokidar close failed` is an intentional degrade-path assertion, not a failure).
+
+## Self-review
+- **`deps.a2a` constructed ONLY when enabled?** YES — ternary on `cfg.AGENT_A2A_ENABLED`; off ⇒ `undefined`. Proven by test 2.
+- **Card served when on / dark when off?** YES — test 1 (200 card), test 2 (503, no body).
+- **No import of the not-yet-built T20/T22 factories?** YES — only the 3 existing EXPOSE factories; grep-confirmed no consumer touches remotes/client.
+- **Mirrors triggers injection exactly, no start/stop?** YES — `a2a` sits beside `triggers` in `StartOptions`/`deps` (main.ts) and `CreateDaemonOptions`/the injected call (core.ts). No `start()`/`stop()`, no shutdown teardown, no drain.
+- **Security:** `rootStore` (SAME instance the session guard verifies against) passed as `ctx.rootTokens`, so rotate-root invalidates issued A2A Bearers too.
+
+## Deferred (explicit)
+`remotes` + `client` (CONSUME side) → **Task 20 (`createA2aClient`) + Task 22 (`createRemoteStore`), Increment 6**, which will extend `buildA2aServerDeps` + the `A2aServerDeps` type.
+
+## Concerns
+- **404-vs-503 fail-safe nuance:** flag off ⇒ we don't construct `deps.a2a` ⇒ card route returns **503** (app.ts `if (!deps.a2a)` guard) rather than `handleAgentCard`'s **404**. Both hide the card body (no skill leak); the brief explicitly accepts 503 ("routes report unavailable... advertising nothing"). `handleAgentCard`'s 404-when-off remains a defense-in-depth second layer for the standalone-wired-but-flag-off combination, which our flag-gated construction never produces in production. Flagged for reviewer awareness; no action taken.

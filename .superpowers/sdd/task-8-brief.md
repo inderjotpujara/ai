@@ -1,59 +1,63 @@
-### Task 8: Config knobs + telemetry keys + trigger spans
+### Task 8: task-map.ts — the OrchestratorResult/JobStatus ↔ task-state bijection (HARD §7.1)
 
 **Files:**
-- Modify: `src/config/schema.ts` (append a "Triggers (Slice 25)" group), `src/telemetry/spans.ts` (`ATTR`)
-- Create: `src/triggers/spans.ts`
-- Test: `tests/triggers/spans.test.ts`, `tests/config/trigger-knobs.test.ts`
+- Create: `src/a2a/task-map.ts`
+- Test: `tests/a2a/task-map.test.ts`
 
 **Interfaces:**
-- Consumes: `ATTR`, `inSpan` from `../telemetry/spans.ts`; `trace` from `@opentelemetry/api`; `Trigger`, `TriggerOutcome` from `./types.ts`.
+- Consumes: `OrchestratorResult` from `../core/orchestrator.ts`; `JobStatus` from `../queue/types.ts`; `TaskStateWire`, `A2aTask`, `A2aArtifact`, `JsonRpcErrorSchema` from `../contracts/index.ts`.
 - Produces:
-  - `CONFIG_SPEC` entries (each `doc` names its read site, per the no-hardcode rule):
-    - `AGENT_TRIGGERS_POLL_MS` (number, def `1000`) — scheduler tick cadence (`scheduler.ts`).
-    - `AGENT_TRIGGERS_MAX_CHAIN_DEPTH` (number, def `8`) — §7.3 chain-cycle cap (`fire.ts`).
-    - `AGENT_TRIGGERS_WATCH_ROOT` (string, def `'~/.agent/inbox'`) — documented as "the file-watch confinement root; the leading `~` is expanded against the live home dir at the watcher read site (`watcher.ts`/`confine.ts`), the dir is created `0700` on first watcher start, and every file-trigger path is confined under it (§7.4)".
-    - `AGENT_TRIGGERS_ENABLED` (boolean, def `false`) — documented as "governs ONLY whether a **standalone** `startWebServer` (no injected daemon queue) auto-constructs and starts its own triggers engine. Defaults OFF so an existing/ad-hoc `startWebServer()` (as every current server test calls it) never spins a scheduler, watches files, or leaves an open handle — the I3 invariant. The **daemon** always constructs+injects its engine explicitly (via `opts.triggers`, ignoring this flag), so the real deployment runs triggers unconditionally; the flag is the standalone-server opt-in (`AGENT_TRIGGERS_ENABLED=1`)." **(No `AGENT_TRIGGERS_PATH` knob — the repo registry is the compile-time `triggers/index.ts` import, so a path override would have no consumer.)**
-  - `ATTR` keys: `TRIGGER_ID: 'trigger.id'`, `TRIGGER_TYPE: 'trigger.type'`, `TRIGGER_ORIGIN: 'trigger.origin'`, `TRIGGER_OUTCOME: 'trigger.outcome'`.
-  - `src/triggers/spans.ts`: `recordTriggerRegister(t: Trigger): void`, `withTriggerFireSpan<T>(t: Trigger, fn: (rec: { outcome: (o: TriggerOutcome) => void }) => Promise<T>): Promise<T>`, `recordTriggerSkip(t: Trigger, outcome: TriggerOutcome): void`.
+  - `orchestratorResultToTaskState(r: OrchestratorResult): TaskStateWire` — `answer→Completed`, `gap→Failed`, `resource→Failed` (per the D3 table).
+  - `orchestratorResultToArtifact(r: OrchestratorResult): A2aArtifact | undefined` — for `answer`, one text-part artifact carrying `r.text`; for `gap`/`resource`, `undefined` (the failure detail rides the JSON-RPC error / task-status message).
+  - `resultToTaskError(r: OrchestratorResult): { code: number; message: string; data?: unknown } | undefined` — `gap → { code: -32001, message: 'missing-capability', data: { missingCapability } }`, `resource → { code: -32002, message: r.message }`, `answer → undefined`.
+  - `jobStatusToTaskState(s: JobStatus): TaskStateWire` — `Queued→Submitted`, `Running→Working`, `Done→Completed`, `Failed→Failed`, `Canceled→Canceled`, `Interrupted→Failed` (the projection `tasks/get` uses before the orchestrator result is known).
+  - `CONSENT_UNAVAILABLE_ERROR_CODE = -32003` + `consentUnavailableError(): { code; message: 'consent-unavailable'; data? }` — the typed error a **fail-closed** mid-run consent gate lands on (a remote A2A task runs as a queued job whose dispatch hardcodes `confirm: async () => false`, `src/server/jobs/dispatch.ts:200`, so a consent gate declines → the job goes `Failed`). Reused by Task 13's `Failed→failed` + typed-`consent-unavailable` mapping. (`TaskStateWire.InputRequired` stays in the enum for protocol completeness but is **never emitted** this slice — there is no live client / promptId round-trip substrate.)
 
-- [ ] **Step 1: Write the failing tests** — knobs load with the documented defaults; a fire span sets `TRIGGER_OUTCOME` via the recorder (assert against an in-memory span exporter using the repo's existing test tracer harness, or minimally that the helpers run without a tracer as a no-op):
+- [ ] **Step 1: Write the failing tests** — every `OrchestratorResult` variant maps to the spec-table state; the `JobStatus` projection is total:
 
 ```ts
 import { expect, test } from 'bun:test';
-import { loadConfig } from '../../src/config/schema.ts';
-test('trigger knobs carry computed/conventional defaults', () => {
-  const { values } = loadConfig({});
-  expect(values.AGENT_TRIGGERS_POLL_MS).toBe(1000);
-  expect(values.AGENT_TRIGGERS_MAX_CHAIN_DEPTH).toBe(8);
-  expect(values.AGENT_TRIGGERS_WATCH_ROOT).toBe('~/.agent/inbox');
-  expect(values.AGENT_TRIGGERS_ENABLED).toBe(false);
+import { JobStatus } from '../../src/queue/types.ts';
+import { TaskStateWire } from '../../src/contracts/index.ts';
+import {
+  jobStatusToTaskState,
+  orchestratorResultToArtifact,
+  orchestratorResultToTaskState,
+  resultToTaskError,
+} from '../../src/a2a/task-map.ts';
+
+test('answer → completed with a text artifact', () => {
+  const r = { kind: 'answer', text: 'done' } as const;
+  expect(orchestratorResultToTaskState(r)).toBe(TaskStateWire.Completed);
+  expect(orchestratorResultToArtifact(r)?.parts[0]).toMatchObject({ kind: 'text', text: 'done' });
+  expect(resultToTaskError(r)).toBeUndefined();
 });
-```
-
-```ts
-import { expect, test } from 'bun:test';
-import { JobKind } from '../../src/queue/types.ts';
-import { recordTriggerRegister, withTriggerFireSpan } from '../../src/triggers/spans.ts';
-import { TriggerOrigin, TriggerOutcome, TriggerType } from '../../src/triggers/types.ts';
-const t = { id: 't1', name: 'n', type: TriggerType.Cron, enabled: true,
-  target: { kind: JobKind.Chat, payload: {} }, config: { schedule: '* * * * *' },
-  origin: TriggerOrigin.Console, createdAt: 0, updatedAt: 0 };
-test('trigger span helpers are a no-op without a tracer', async () => {
-  recordTriggerRegister(t); // must not throw
-  const out = await withTriggerFireSpan(t, async (rec) => { rec.outcome(TriggerOutcome.Fired); return 42; });
-  expect(out).toBe(42);
+test('gap → failed + missing-capability error', () => {
+  const r = { kind: 'gap', missingCapability: 'ocr', message: 'no ocr' } as const;
+  expect(orchestratorResultToTaskState(r)).toBe(TaskStateWire.Failed);
+  expect(resultToTaskError(r)).toMatchObject({ message: 'missing-capability' });
+});
+test('resource → failed + resource error', () => {
+  const r = { kind: 'resource', message: 'oom' } as const;
+  expect(orchestratorResultToTaskState(r)).toBe(TaskStateWire.Failed);
+  expect(resultToTaskError(r)?.code).toBe(-32002);
+});
+test('jobStatus projection covers every queue status', () => {
+  expect(jobStatusToTaskState(JobStatus.Queued)).toBe(TaskStateWire.Submitted);
+  expect(jobStatusToTaskState(JobStatus.Running)).toBe(TaskStateWire.Working);
+  expect(jobStatusToTaskState(JobStatus.Interrupted)).toBe(TaskStateWire.Failed);
 });
 ```
 
 - [ ] **Step 2: Run tests to verify they fail** → FAIL.
-- [ ] **Step 3: Write minimal implementation** — add the four `CONFIG_SPEC` entries (each with a `doc` referencing the read site, per the no-hardcode rule); add the four `ATTR` keys near the Slice-24 daemon block; write `src/triggers/spans.ts` mirroring `src/daemon/spans.ts` exactly (`const tracer = () => trace.getTracer('agent')`, `inSpan('trigger.fire', ...)` for the fire span, `startSpan('trigger.register'|'trigger.skip')` for the one-shots). Set `TRIGGER_ID`/`TYPE`/`ORIGIN` on all three; `withTriggerFireSpan` exposes `rec.outcome` that sets `TRIGGER_OUTCOME`; `recordTriggerSkip` sets `TRIGGER_OUTCOME` from its arg.
+- [ ] **Step 3: Write minimal implementation** — pure switch functions; no I/O. Use early returns; the `JobStatus` switch is exhaustive over the enum.
 - [ ] **Step 4: Run tests to verify they pass** → PASS.
-- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/config/schema.ts src/telemetry/spans.ts src/triggers/spans.ts tests/triggers/spans.test.ts tests/config/trigger-knobs.test.ts`.
+- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/a2a/task-map.ts tests/a2a/task-map.test.ts`.
 
 ```bash
-git add src/config/schema.ts src/telemetry/spans.ts src/triggers/spans.ts tests/triggers/spans.test.ts tests/config/trigger-knobs.test.ts
-git commit -m "feat(triggers): config knobs + telemetry ATTR keys + trigger spans"
+git add src/a2a/task-map.ts tests/a2a/task-map.test.ts
+git commit -m "feat(a2a): OrchestratorResult/JobStatus ↔ A2A task-state bijection"
 ```
 
-*Model: Sonnet.*
+*Model: **Opus implementer + ADVERSARIAL-VERIFY (§7.1 task-state mapping).** Reviewer probes: is every `OrchestratorResult` and `JobStatus` variant mapped (no default-to-completed hole)? Does a `gap`/`resource` NEVER project to `completed`? Is the failure detail carried without leaking untrusted text as an instruction?*
 

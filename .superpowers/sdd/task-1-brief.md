@@ -1,70 +1,80 @@
-### Task 1: Engine trigger types + enums
+### Task 1: A2A wire contracts + parity test
 
 **Files:**
-- Create: `src/triggers/types.ts`
-- Test: `tests/triggers/types.test.ts`
+- Create: `src/contracts/a2a.ts`
+- Modify: `src/contracts/index.ts` (already `export *`; add `export * from './a2a.ts';`)
+- Test: `tests/contracts/a2a-contracts.test.ts`
 
 **Interfaces:**
-- Consumes: `JobKind`, `JobStatus` from `src/queue/types.ts`; `RunOrigin` from `src/contracts/enums.ts`.
-- Produces:
-  - `enum TriggerType { Cron='cron', Webhook='webhook', File='file', JobChain='jobchain' }`
-  - `enum TriggerOrigin { Repo='repo', Console='console' }`
-  - `enum TriggerOutcome { Fired='fired', SkippedOverlap='skipped-overlap', Failed='failed' }`
-  - `enum FileEventKind { Add='add', Change='change' }`
-  - `type CronConfig = { schedule: string; timezone?: string; catchUp?: boolean; allowOverlap?: boolean }`
-  - `type WebhookConfig = { hmac?: boolean }`
-  - `type FileConfig = { path: string; events?: FileEventKind[] }`
-  - `type JobChainConfig = { onKind?: JobKind; onName?: string; onStatus: JobStatus }`
-  - `type TriggerConfig = CronConfig | WebhookConfig | FileConfig | JobChainConfig`
-  - `type TriggerTarget = { kind: JobKind; payload: unknown }`
-  - `type Trigger = { id: string; name: string; type: TriggerType; enabled: boolean; target: TriggerTarget; config: TriggerConfig; origin: TriggerOrigin; nextRunAt?: number; lastFiredAt?: number; secretRef?: string; createdAt: number; updatedAt: number }`
-  - `type TriggerFiring = { id: string; triggerId: string; firedAt: number; jobId?: string; runId?: string; outcome: TriggerOutcome }`
-  - `type TriggerInput = { name: string; type: TriggerType; enabled?: boolean; target: TriggerTarget; config: TriggerConfig; origin: TriggerOrigin; secretRef?: string; nextRunAt?: number }`
+- Consumes: `z` from `zod` only. (Contracts stay isomorphic — import only `zod` + other contracts/enums. **`JobKindWire` is deliberately NOT imported here**: no Task-1 schema uses it, so importing it would trip biome `noUnusedImports` and fail Task 1's `lint:file` gate. It is introduced in Task 17, the first task with a `JobKindWire`-typed wire schema — see the `A2aSkillEntryWireSchema` note there.)
+- Produces (all exported from `src/contracts/a2a.ts`):
+  - `enum TaskStateWire { Submitted='submitted', Working='working', Completed='completed', Failed='failed', Canceled='canceled', Rejected='rejected', InputRequired='input-required', AuthRequired='auth-required' }` — lowercase-hyphenated, the JSON-RPC casing.
+  - `enum A2aMethod { MessageSend='message/send', MessageStream='message/stream', TasksGet='tasks/get', TasksCancel='tasks/cancel', TasksResubscribe='tasks/resubscribe' }`.
+  - `PartSchema` — discriminated union on `kind`: `{ kind: z.literal('text'), text: z.string() }` | `{ kind: z.literal('file'), file: z.object({ name: z.string().optional(), mimeType: z.string().optional(), bytes: z.string() }) }` | `{ kind: z.literal('data'), data: z.record(z.string(), z.unknown()) }`.
+  - `MessageSchema` / `A2aMessage`: `{ role: z.enum(['user','agent']), parts: z.array(PartSchema), messageId: z.string(), contextId: z.string().optional(), taskId: z.string().optional() }`.
+  - `ArtifactSchema` / `A2aArtifact`: `{ artifactId: z.string(), name: z.string().optional(), parts: z.array(PartSchema) }`.
+  - `TaskStatusSchema`: `{ state: z.enum(TaskStateWire), message: MessageSchema.optional(), timestamp: z.string().optional() }`.
+  - `TaskSchema` / `A2aTask`: `{ id: z.string(), contextId: z.string(), status: TaskStatusSchema, artifacts: z.array(ArtifactSchema).default([]), history: z.array(MessageSchema).default([]), kind: z.literal('task') }`.
+  - `AgentSkillSchema`: `{ id: z.string(), name: z.string(), description: z.string(), tags: z.array(z.string()).default([]), inputModes: z.array(z.string()).optional(), outputModes: z.array(z.string()).optional() }`.
+  - `AgentCardSchema` / `A2aAgentCard`: `{ name, description, version, protocolVersion: z.literal('1.0'), url: z.string(), preferredTransport: z.string().default('JSONRPC'), skills: z.array(AgentSkillSchema), capabilities: z.object({ streaming: z.boolean(), pushNotifications: z.boolean() }), defaultInputModes: z.array(z.string()), defaultOutputModes: z.array(z.string()), securitySchemes: z.record(z.string(), z.unknown()), security: z.array(z.record(z.string(), z.array(z.string()))).default([]) }`.
+  - JSON-RPC envelopes: `JsonRpcRequestSchema` (`{ jsonrpc: z.literal('2.0'), id: z.union([z.string(), z.number()]).nullable(), method: z.string(), params: z.unknown().optional() }`), `JsonRpcErrorSchema` (`{ code: z.number(), message: z.string(), data: z.unknown().optional() }`), `JsonRpcResponseSchema` (`{ jsonrpc: z.literal('2.0'), id: z.union([z.string(), z.number()]).nullable(), result: z.unknown().optional(), error: JsonRpcErrorSchema.optional() }`).
 
-- [ ] **Step 1: Write the failing test** — assert the enum string values are exactly the spec's wire strings (so a later rename breaks loudly).
+- [ ] **Step 1: Write the failing test** — `TaskStateWire` values, `Part` union round-trip, and a `protocolVersion !== "1.0"` reject:
 
 ```ts
 import { expect, test } from 'bun:test';
-import { TriggerOrigin, TriggerOutcome, TriggerType } from '../../src/triggers/types.ts';
+import {
+  AgentCardSchema,
+  PartSchema,
+  TaskStateWire,
+} from '../../src/contracts/a2a.ts';
 
-test('TriggerType holds the four source wire values', () => {
-  expect(Object.values(TriggerType).sort()).toEqual(
-    ['cron', 'file', 'jobchain', 'webhook'],
+test('TaskStateWire holds the eight A2A v1.0 wire states', () => {
+  expect(Object.values(TaskStateWire).sort()).toEqual(
+    [
+      'auth-required',
+      'canceled',
+      'completed',
+      'failed',
+      'input-required',
+      'rejected',
+      'submitted',
+      'working',
+    ],
   );
 });
-test('TriggerOrigin + TriggerOutcome wire values', () => {
-  expect(Object.values(TriggerOrigin).sort()).toEqual(['console', 'repo']);
-  expect(Object.values(TriggerOutcome).sort()).toEqual(
-    ['failed', 'fired', 'skipped-overlap'],
-  );
+
+test('PartSchema round-trips a text part and rejects an unknown kind', () => {
+  expect(PartSchema.parse({ kind: 'text', text: 'hi' })).toMatchObject({
+    kind: 'text',
+  });
+  expect(() => PartSchema.parse({ kind: 'audio', text: 'x' })).toThrow();
+});
+
+test('AgentCardSchema rejects a non-1.0 protocolVersion', () => {
+  const base = {
+    name: 'n', description: 'd', version: '1', protocolVersion: '0.3',
+    url: 'https://h/api/a2a', skills: [],
+    capabilities: { streaming: true, pushNotifications: false },
+    defaultInputModes: ['text/plain'], defaultOutputModes: ['text/plain'],
+    securitySchemes: {}, security: [],
+  };
+  expect(() => AgentCardSchema.parse(base)).toThrow();
+  expect(AgentCardSchema.parse({ ...base, protocolVersion: '1.0' })).toMatchObject({
+    protocolVersion: '1.0',
+  });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — `bun run test -- -t "TriggerType holds"` → FAIL (module not found).
-- [ ] **Step 3: Write minimal implementation** — create `src/triggers/types.ts` with the enums and `type`s from the Produces block above. `import { type JobKind, type JobStatus } from '../queue/types.ts'` and `import type { RunOrigin } from '../contracts/enums.ts'` (RunOrigin is only re-referenced in later modules; import lazily where used — types.ts itself needs only JobKind/JobStatus).
-- [ ] **Step 4: Run test to verify it passes** — `bun run test -- -t "TriggerType holds"` → PASS.
-- [ ] **Step 5: Land the `src/triggers/` docs stub in THIS commit (unblocks `docs:check`).** Creating the first `src/triggers/` file makes `scripts/docs-check.ts` fail on the pre-commit hook (it hard-fails on any undocumented top-level `src/<subsystem>`, and `.githooks/pre-commit` has no bypass). Insert a minimal stub section into `docs/architecture.md` — placed near the Queue/Daemon subsystem sections — so the `arch.includes('src/triggers')` substring check passes from this first commit. 2–4 sentences, marked as expanded later:
-
-```markdown
-### `src/triggers/` — trigger engine (Slice 25, stub)
-
-A durable poll-tick trigger engine that lives in the daemon: four sources —
-cron, webhook, file-watch, and job-chain — converge on `fire.ts`, which
-enqueues a target `JobKind`+payload via `JobStore.enqueue` (threading `origin`
-provenance) and writes a `trigger_firings` audit row. Triggers are authored
-from repo TS defs (`triggers/index.ts`, `origin=repo`) and console/API CRUD
-(`origin=console`), persisted in `jobs.db`.
-
-> Stub — expanded into the full subsystem writeup (module map, data-flow
-> edges, `/hooks/:token` route class) in this slice's docs task (Task 34).
-```
-
-- [ ] **Step 6: Gate + commit** — `bun run typecheck && bun run lint:file -- src/triggers/types.ts tests/triggers/types.test.ts && bun run docs:check` (docs-check now PASSES because the stub documents `src/triggers/`).
+- [ ] **Step 2: Run test to verify it fails** — `bun run test -- -t "TaskStateWire holds"` → FAIL (module not found).
+- [ ] **Step 3: Write minimal implementation** — create `src/contracts/a2a.ts` with the enums + schemas from the Produces block; add `export * from './a2a.ts';` to `src/contracts/index.ts`. Import only `zod` + `JobKindWire` (isomorphic — no engine imports).
+- [ ] **Step 4: Run test to verify it passes** — `bun run test -- -t "TaskStateWire holds"` → PASS (all three).
+- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/contracts/a2a.ts src/contracts/index.ts tests/contracts/a2a-contracts.test.ts`.
 
 ```bash
-git add src/triggers/types.ts tests/triggers/types.test.ts docs/architecture.md
-git commit -m "feat(triggers): engine trigger types + enums (+ src/triggers docs stub)"
+git add src/contracts/a2a.ts src/contracts/index.ts tests/contracts/a2a-contracts.test.ts
+git commit -m "feat(contracts): A2A v1.0 wire contracts (card/message/task/part + JSON-RPC + TaskStateWire)"
 ```
 
-*Model: Sonnet (mechanical type definition + a one-paragraph docs stub).*
+*Model: Sonnet (mechanical schema definition mirroring the `dto.ts`/`enums.ts` convention).*
 

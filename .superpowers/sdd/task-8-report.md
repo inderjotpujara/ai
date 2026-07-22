@@ -1,3 +1,42 @@
+# Task 8 Report — `src/a2a/task-map.ts` OrchestratorResult/JobStatus ↔ A2A task-state bijection (Slice 31, Incr 3)
+
+**Status:** DONE. Commit `0d746e4` — `feat(a2a): OrchestratorResult/JobStatus ↔ A2A task-state bijection`. Branch `slice-31-a2a-multimachine`. Model: Opus.
+
+(Note: `task-8-report.md` is reused per slice; the sections below this one are Slice 25b / Slice 25 Task 8 and are unrelated to Slice 31.)
+
+## Implemented — pure, I/O-free mappers in `src/a2a/task-map.ts`
+- `orchestratorResultToTaskState(r)` — `answer→Completed`; `gap`/`resource→Failed` (early return for `answer`, else `Failed`; a failure can never reach `Completed`).
+- `orchestratorResultToArtifact(r)` — `answer` → one text-part artifact (`ArtifactSchema.parse`d; `artifactId` via `randomUUID()`; `parts:[{kind:'text',text:r.text}]`); `gap`/`resource` → `undefined`.
+- `resultToTaskError(r)` — `gap → {code:-32001,message:'missing-capability',data:{missingCapability}}`; `resource → {code:-32002,message:r.message}`; `answer → undefined`.
+- `jobStatusToTaskState(s)` — `Queued→Submitted, Running→Working, Done→Completed, Failed→Failed, Canceled→Canceled, Interrupted→Failed`. Exhaustive `switch` with `const _exhaustive: never = s` default → compile-time totality.
+- `CONSENT_UNAVAILABLE_ERROR_CODE = -32003` + `consentUnavailableError()` (message `'consent-unavailable'`) — fail-closed mid-run-consent typed error, reused by Task 13. Also exported `MISSING_CAPABILITY_ERROR_CODE`/`RESOURCE_ERROR_CODE`.
+
+Confirmed against source: `OrchestratorResult` union (`core/orchestrator.ts:21-24`), `JobStatus` 6 members (`queue/types.ts:3-10`), `TaskStateWire` + `ArtifactSchema` (`artifactId`+`parts` required) from `contracts/a2a.ts`. `TaskStateWire.InputRequired`/`AuthRequired` left in enum, never emitted this slice.
+
+## TDD RED → GREEN
+- **RED:** `bun run test:file -- "tests/a2a/task-map.test.ts"` → `Cannot find module '../../src/a2a/task-map.ts'` (0 pass, 1 fail/error).
+- **GREEN:** after implementation → `9 pass / 0 fail / 27 expect() calls`.
+- Tests: 4 brief tests verbatim + probes — gap `data.missingCapability`+code, resource `message==r.message`, gap/resource → no artifact, a `Record<JobStatus,…>` loop asserting every member maps (and Failed/Interrupted/Canceled ≠ Completed), and `CONSENT_UNAVAILABLE_ERROR_CODE===-32003` + message `'consent-unavailable'`.
+
+## Gate (inline)
+- `bun run typecheck` → clean (`tsc --noEmit`) — confirms the `never` default compiles, so totality holds.
+- `bun run lint:file -- src/a2a/task-map.ts tests/a2a/task-map.test.ts` → 3 auto-fixable nits (import sort + formatting), fixed via `--write`; re-check clean.
+- pre-commit `docs-check` passed.
+
+## Files changed
+- `src/a2a/task-map.ts` (new), `tests/a2a/task-map.test.ts` (new)
+
+## Self-review (§7.1)
+- **Totality (OrchestratorResult):** all 3 variants mapped in every fn; state fn returns `Failed` for the non-`answer` tail.
+- **Totality (JobStatus):** all 6 `case`s + `never` default → a new member fails to compile. No default-to-completed hole.
+- **No failure→completed:** only `answer` and `Done` yield `Completed`; asserted by negative tests.
+- **No untrusted-text-as-instruction:** result text/message carried only as inert artifact-part text / error `data` / error `message`; never interpolated into anything executable (pure mappers, no I/O).
+
+## Concerns
+- None blocking. `orchestratorResultToArtifact` mints a fresh `artifactId` (`randomUUID()`, non-deterministic) per call — schema-valid (id required, none caller-supplied in this signature); Task 9 can override if a stable id is later needed.
+
+---
+
 # Task 8 Report — `GET /api/queue/stats` + shared `need()`/503 dep-guard (Slice 25b Incr 2)
 
 **Status:** DONE. Commit `f4a40d0` — `feat(server): GET /api/queue/stats + queue.stats.read span (Slice 25b Incr 2)`.
@@ -136,3 +175,49 @@ section is Slice 25 Task 8 (triggers config + telemetry), a different slice/bran
 - No consumer wires these knobs/spans yet (scheduler.ts, fire.ts, watcher.ts, confine.ts don't exist yet) —
   this task is purely the config+telemetry seam per the brief; later engine tasks read `AGENT_TRIGGERS_*`
   and call into `triggers/spans.ts`.
+
+## Fix wave (§7.1 totality symmetry)
+
+Two small fixes to `src/a2a/task-map.ts` giving the `OrchestratorResult` mappers the
+same compile-time totality guarantee the `JobStatus` switch already had.
+
+- **Fix 1 — compile-enforce OrchestratorResult totality.** Converted the three
+  `if/else` mappers (`orchestratorResultToTaskState`, `orchestratorResultToArtifact`,
+  `resultToTaskError`) to `switch (r.kind)` with a `default` tail
+  `const _exhaustive: never = r;`. A future 4th `OrchestratorResult` variant now fails
+  `tsc` in all three instead of silently returning `Failed`/`undefined` (the
+  Failed-with-no-error desync). Runtime behavior for the current 3 variants is
+  unchanged: answer→Completed+artifact+no-error; gap→Failed+{-32001,'missing-capability',
+  data.missingCapability}; resource→Failed+{-32002,message}.
+- **Fix 2 — derive TaskError from the contract.** Replaced the hand-rolled
+  `type TaskError = { code; message; data? }` with `type TaskError = JsonRpcError`
+  (imported from `../contracts/index.ts`, i.e. `z.infer<typeof JsonRpcErrorSchema>`),
+  used by `resultToTaskError` / `consentUnavailableError`. Shapes verified compatible
+  (code:number, message:string, data?:unknown) so a schema change can't drift a
+  duplicate. Typecheck passing is the proof the derived type still satisfies every call site.
+
+**Gate — `tsc` passes (this is what proves Fix 1's guard):**
+
+```
+$ bun run typecheck
+$ tsc --noEmit
+(no output — clean)
+
+$ bun run lint:file -- src/a2a/task-map.ts tests/a2a/task-map.test.ts
+Checked 2 files in 5ms. No fixes applied.
+```
+
+**Tests — all 9 original stay green + 1 added (10 total):**
+
+```
+$ bun run test:file -- "tests/a2a/task-map.test.ts"
+ 10 pass
+ 0 fail
+ 35 expect() calls
+Ran 10 tests across 1 file.
+```
+
+The added test (`a Failed projection always carries a defined typed error (gap + resource)`)
+asserts the guard's runtime-observable intent — every non-answer result that maps to
+`Failed` also yields a defined `JsonRpcError` (no Failed-with-no-error desync). No existing
+test was weakened.

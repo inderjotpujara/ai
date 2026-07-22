@@ -201,6 +201,13 @@ export const ATTR = {
   TRIGGER_TYPE: 'trigger.type',
   TRIGGER_ORIGIN: 'trigger.origin',
   TRIGGER_OUTCOME: 'trigger.outcome',
+  // A2A interop (Slice 31). NEVER put a full peer URL in a span attribute —
+  // A2A_PEER_HOST is the host only (privacy).
+  A2A_METHOD: 'a2a.method',
+  A2A_SKILL_ID: 'a2a.skill.id',
+  A2A_TASK_STATE: 'a2a.task.state',
+  A2A_PEER_HOST: 'a2a.peer.host',
+  A2A_OUTCOME: 'a2a.outcome',
 } as const;
 
 export type ModelSelectInfo = {

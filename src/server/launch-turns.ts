@@ -9,6 +9,8 @@ import { withMcpRun } from '../cli/with-mcp-run.ts';
 import { withRunTelemetry } from '../cli/with-run.ts';
 import { BuilderKind } from '../contracts/enums.ts';
 import type { Agent } from '../core/agent-def.ts';
+import { runGuardedAgent } from '../core/delegate.ts';
+import type { OrchestratorResult } from '../core/orchestrator.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import type { CrewBuilderDeps } from '../crew-builder/types.ts';
@@ -21,6 +23,7 @@ import {
   toCrewBuildResultDto,
 } from './builders/map-result.ts';
 import type { RunCrewTurn } from './crews/run.ts';
+import type { RunAgentTurn } from './jobs/dispatch.ts';
 import type { RunModelPullTurn } from './models/pull.ts';
 import type { RunWorkflowTurn } from './workflows/run.ts';
 
@@ -76,6 +79,46 @@ export function createRealRunWorkflowTurn(runsRoot: string): RunWorkflowTurn {
           onBeforeDelegate: selection.onBeforeDelegate,
           ledger,
         });
+      } finally {
+        await selection.close();
+      }
+    });
+}
+
+/**
+ * Real, non-test `RunAgentTurn` (§7.4 / capstone B3): run ONE registered
+ * specialist agent to completion under its own `withMcpRun` scope, mirroring
+ * `createRealRunWorkflowTurn`'s composition (MCP mount + live model selection)
+ * but building just the single named agent instead of the full agent map + a
+ * super-agent orchestrator. Dispatch invokes it for an A2A Chat skill bound to
+ * an agent ref, so exposing that one skill exposes ONLY that agent — not every
+ * local specialist + MCP + remotes.
+ *
+ * `runGuardedAgent` (the SAME guarded-delegation path the orchestrator/workflow
+ * engine use) resolves the agent's model via the select-hook, wall-clock-bounds
+ * it on the pool's signal, and RETURNS a structured `{ text } | { error }`
+ * instead of throwing — mapped here onto the terminal `OrchestratorResult` the
+ * A2A produce side projects to a task artifact (`answer`) or a `failed` task
+ * (`resource`).
+ */
+export function createRealRunAgentTurn(runsRoot: string): RunAgentTurn {
+  return async ({ ref, task, signal, runId }) =>
+    withMcpRun({ runsRoot, runId }, async ({ reg, ledger }) => {
+      const factory = AGENTS[ref];
+      if (!factory) throw new Error(`unknown agent: ${ref}`);
+      const agent = factory(reg.forAgent(ref));
+      const selection = await createSelectionRuntime({ ledger });
+      try {
+        const outcome = await runGuardedAgent(
+          agent,
+          task,
+          selection.onBeforeDelegate,
+          signal,
+          ledger,
+        );
+        return 'error' in outcome
+          ? ({ kind: 'resource', message: outcome.error } as OrchestratorResult)
+          : ({ kind: 'answer', text: outcome.text } as OrchestratorResult);
       } finally {
         await selection.close();
       }

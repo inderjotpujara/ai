@@ -3,16 +3,18 @@ import { type KeyboardEvent, useRef } from 'react';
 import { RegionErrorBoundary } from '../../shared/ui/error-boundary.tsx';
 import { nextTabIndex } from '../../shared/ui/tab-list.ts';
 import { DevicesTab } from './devices-tab.tsx';
+import { FederationTab } from './federation-tab.tsx';
 import { JobsTab } from './jobs-tab.tsx';
 import { OverviewTab } from './overview-tab.tsx';
 import { TriggersTab } from './triggers-tab.tsx';
 
-/** The four Ops tabs. `enum` per this repo's enum-over-union convention. */
+/** The five Ops tabs. `enum` per this repo's enum-over-union convention. */
 export enum OpsTab {
   Overview = 'overview',
   Jobs = 'jobs',
   Triggers = 'triggers',
   Devices = 'devices',
+  Federation = 'federation',
 }
 
 const TABS: { id: OpsTab; label: string }[] = [
@@ -20,6 +22,7 @@ const TABS: { id: OpsTab; label: string }[] = [
   { id: OpsTab.Jobs, label: 'Jobs' },
   { id: OpsTab.Triggers, label: 'Triggers' },
   { id: OpsTab.Devices, label: 'Devices & Access' },
+  { id: OpsTab.Federation, label: 'Federation' },
 ];
 
 /** The Ops console shell (Slice 25b): one section, four roving-tabindex
@@ -102,6 +105,7 @@ export function OpsArea() {
                   {t.id === OpsTab.Jobs && <JobsTab />}
                   {t.id === OpsTab.Devices && <DevicesTab />}
                   {t.id === OpsTab.Triggers && <TriggersTab />}
+                  {t.id === OpsTab.Federation && <FederationTab />}
                 </RegionErrorBoundary>
               </div>
             ),

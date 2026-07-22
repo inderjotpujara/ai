@@ -276,6 +276,10 @@ graph TD
         srotate["security/{rotate,rotate-route}.ts · POST /api/security/rotate-root (Slice 25b)"]
         shooks["hooks/webhook.ts · POST /hooks/:token (outside /api guard, inside perimeter, Slice 25)"]
         strigroutes["triggers/{list,detail,firings,create,patch,delete,fire}.ts · seven /api/triggers* routes (mutations behind requireTrustedLocal, Slice 25)"]
+        sa2acard["a2a/card.ts · GET /.well-known/agent-card.json (outside /api guard, fail-safe 404, Slice 31)"]
+        sa2arpc["a2a/rpc.ts + stream-route.ts · POST /api/a2a (A2A-Bearer verify-before-parse+replay, past device guard, Slice 31)"]
+        sa2aconsole["a2a/{config,skills,token,remotes,remotes-test}.ts · six /api/a2a/* Federation-tab routes (requireTrustedLocal, Slice 31)"]
+        sa2await["a2a/wire.ts · buildA2aServerDeps (single constructor, no start/stop, Slice 31)"]
     end
     subgraph TRIGGERS["Triggers engine · src/triggers (Slice 25)"]
         trigtypes["types.ts · TriggerType/Origin/Outcome enums + Trigger/TriggerFiring/TriggerConfig"]
@@ -289,6 +293,67 @@ graph TD
         trigsecrets["secret-store.ts + webhook-verify.ts · ~/.agent/trigger-secrets.json 0600 + HMAC/replay/token-hash"]
         trigengine["engine.ts · createTriggersEngine (composition root, lifecycle-bound to the daemon)"]
     end
+    subgraph A2A["A2A interop · src/a2a (Slice 31)"]
+        a2acard["card.ts · buildAgentCard (allowlist→skills) + cardEtag"]
+        a2aallow["allowlist.ts · A2aAllowlist (least-privilege put/resolve, resolve-then-reject)"]
+        a2aserver["server.ts · dispatchA2aRpc (message/send·tasks/get·tasks/cancel)"]
+        a2ataskidx["task-index.ts · createTaskIndex (taskId≡jobId + contextId cache)"]
+        a2ataskmap["task-map.ts · OrchestratorResult/JobStatus↔TaskStateWire (exhaustive)"]
+        a2astream["stream.ts · frameRunSpanAsA2a (pure SSE re-framer over handleRunStream)"]
+        a2aenroll["enroll.ts · A2aEnrollment (Bearer issue/verify/revoke, D5 separate-from-session)"]
+        a2areplay["replay-guard.ts · createReplayGuard (nonce+timestamp bounded LRU)"]
+        a2acanon["canonical.ts · hashCard (key-sorted sha256, ETag+pin share)"]
+        a2aclient["client.ts · createA2aClient (discover/verifyPin/invoke, SSRF+timeout+size-cap)"]
+        a2amount["mount.ts · remoteAsToolSet/mountRemotes/liveRemoteDelegateTools → delegate_to_&lt;name&gt; (live in CHAT turns, T29b; crew/workflow follow-on)"]
+        a2aremotes["remotes.ts · RemoteStore (pinned remotes, 0600, token stripped at DTO)"]
+        a2aspans["spans.ts · a2a.server.*/a2a.client.* spans (ATTR/inSpan reuse)"]
+    end
+    subgraph A2APEER["External A2A peers (Slice 31, other hosts — not this repo)"]
+        a2ainbound(["Remote orchestrator · EXPOSE caller"])
+        a2aoutbound(["Remote orchestrator · CONSUME target"])
+    end
+
+    %% Slice 31 A2A data flow: EXPOSE — a remote caller GETs the card (no auth),
+    %% then drives POST /api/a2a (its own A2A Bearer + replay guard, verified
+    %% BEFORE the body is parsed) which resolves-then-rejects against the
+    %% allowlist and enqueues onto the SAME Slice-24 JobStore as any other job
+    %% API caller (origin=Remote); CONSUME — the Federation console discovers +
+    %% hash-pins a remote's card, persists it, and (T29b) liveRemoteDelegateTools
+    %% splices it as a live delegate_to_<name> into CHAT turns (gated by
+    %% AGENT_A2A_ENABLED, local-wins on name collision); crew/workflow = follow-on.
+    a2ainbound -.-> sa2acard
+    a2ainbound -.-> sa2arpc
+    sa2acard --> a2acard
+    sa2acard --> a2aallow
+    a2acard --> a2aallow
+    a2acard --> a2acanon
+    sa2arpc --> a2aserver
+    sa2arpc --> a2aenroll
+    sa2arpc --> a2areplay
+    sa2arpc --> a2astream
+    a2aserver --> a2aallow
+    a2aserver --> a2ataskidx
+    a2aserver --> a2ataskmap
+    a2aserver --> qstore
+    a2aserver --> a2aspans
+    a2astream --> a2ataskmap
+    sa2aconsole --> a2aallow
+    sa2aconsole --> a2aenroll
+    sa2aconsole --> a2aremotes
+    sa2aconsole --> a2aclient
+    sa2await --> a2aallow
+    sa2await --> a2aenroll
+    sa2await --> a2ataskidx
+    sa2await --> a2aremotes
+    sa2await --> a2aclient
+    dcore --> sa2await
+    a2aclient --> a2acanon
+    a2aclient --> a2aspans
+    a2aclient --> sredirect
+    a2aclient -.-> a2aoutbound
+    a2amount --> a2aclient
+    a2amount --> mcpclient
+    a2amount -.-> a2aoutbound
 
     %% Slice 25 trigger data flow: the poll-tick scheduler, the file watcher, and
     %% the job-chain observer all funnel through the ONE fire.ts convergence point,
@@ -2076,7 +2141,7 @@ agent-builder suggests from (§18).
 - **`types.ts`** — `McpTransportKind` (`Stdio`/`Http`), `McpAuthKind` (`Static`/`OAuth`) + `httpAuthSchema` (Slice 18, the optional `auth: {kind: OAuth}` on an HTTP entry), the raw Zod schemas (`stdioEntrySchema`/`httpEntrySchema`), the validated `StdioServerEntry`/`HttpServerEntry` union (`McpServerEntry`, each carrying the as-written `raw` value alongside the env-expanded fields), `McpConfig` (`entries`/`dormant`/`warnings`), and `PackEntry`.
 - **`config.ts`** — `loadMcpConfig(path, env)`: reads `mcp.json` (default `./mcp.json`, override `AGENT_MCP_CONFIG`), expands `${VAR}`/`${VAR:-default}` (`expandVars`), and degrades per-entry rather than throwing — a malformed entry warns and is skipped, an entry with an unresolved required var goes to `dormant`, and a VS-Code-style `servers` root (instead of `mcpServers`) is tolerated with a warning.
 - **`consent.ts`** — `specHash` (identity hash over raw command/args/env-**key-names**, or url/header-**names** — never values, so secrets are never hashed or stored), `toolsHash` (fingerprints the live tool set: name+description+schema), `ensureConsent` (the gate itself), `pinTools`/`checkDrift` (the rug-pull check), `dangerFlags` (sudo / `rm -rf` / curl\|sh pattern warnings), and `readApprovals`/`writeApprovals` against `.mcp-approvals.json` (git-ignored, atomic temp+rename write).
-- **`mount.ts`** — `mountAll(config)`: for each entry, consent-gate → mount (stdio or HTTP) → hash + drift-check + pin → collect. Returns a `MountedRegistry` — `merged` (every tool, for workflow tool-steps), `forAgent(name)` (unscoped entries + entries naming that agent — the per-agent slice), `mounted`/`skipped` (for status/telemetry), `close()`. Also `warnUnknownAgents` — a typo guard for an `agents` entry naming an agent that doesn't exist (Slice 18 wires it into `chat.ts` too, matching `flow.ts`; `crew.ts` is deliberately excluded because crews use `reg.merged`, not `reg.forAgent`, so agent-scoping doesn't apply). **MCP OAuth (Slice 18 wiring, Slice 26 live):** `resolveAuthProvider(entry, authProviders, warn)` passes an injected `OAuthClientProvider` into the HTTP transport when an entry declares `auth.kind = OAuth` (`McpAuthKind`, `httpAuthSchema` in `types.ts`); the static-header path (github/brave/exa) is unchanged (no `auth` → no `authProvider`), and a declared-OAuth entry with no registered provider **warns and mounts without auth** (degrade, never crash). As of Slice 26 the provider actually supplied is the real, live `createOAuthProvider` (below) — see "Live OAuth" for the completed handshake.
+- **`mount.ts`** — `mountAll(config)`: for each entry, consent-gate → mount (stdio or HTTP) → hash + drift-check + pin → collect. Returns a `MountedRegistry` — `merged` (every tool, for workflow tool-steps), `forAgent(name)` (unscoped entries + entries naming that agent — the per-agent slice), `mounted`/`skipped` (for status/telemetry), `close()`. Also `warnUnknownAgents` — a typo guard for an `agents` entry naming an agent that doesn't exist (Slice 18 wires it into `chat.ts` too, matching `flow.ts`; `crew.ts` is deliberately excluded because crews use `reg.merged`, not `reg.forAgent`, so agent-scoping doesn't apply). **A2A consume-side reuse (Slice 31, `src/a2a/mount.ts`):** a discovered/pinned remote peer's `delegate_to_<name>` `ToolSet` (`remoteAsToolSet`/`mountRemotes`) is deliberately shaped to be a drop-in `MountedRegistry.forAgent` entry — same failure-returns-not-throws contract as a local specialist. `mountAll`/`loadMcpConfig` still do not themselves read the A2A remote store; instead the dedicated `liveRemoteDelegateTools` seam (`a2a/mount.ts`, Task 29b) reads it fresh each turn and both chat entrypoints (`server/chat/run-turn.ts`, `src/cli/chat.ts`) pass its output into `createOrchestrator` as `remoteTools` — so a consumed remote IS spliced into a live CHAT session (gated by `AGENT_A2A_ENABLED`, local-wins on name collision); crew/workflow consume-delegation remains a seam-ready follow-on (see the `src/a2a/` subsystem section's CONSUME note). **MCP OAuth (Slice 18 wiring, Slice 26 live):** `resolveAuthProvider(entry, authProviders, warn)` passes an injected `OAuthClientProvider` into the HTTP transport when an entry declares `auth.kind = OAuth` (`McpAuthKind`, `httpAuthSchema` in `types.ts`); the static-header path (github/brave/exa) is unchanged (no `auth` → no `authProvider`), and a declared-OAuth entry with no registered provider **warns and mounts without auth** (degrade, never crash). As of Slice 26 the provider actually supplied is the real, live `createOAuthProvider` (below) — see "Live OAuth" for the completed handshake.
 - **`oauth-provider.ts`** (Slice 26, NEW) — `createOAuthProvider(serverName, opts)` returns a `LiveOAuthClientProvider`: a real `@ai-sdk/mcp` `OAuthClientProvider` implementation backed by the Slice-26 token store. Implements the full optional surface the SDK's `authInternal` looks for, not just the required minimum: `tokens`/`saveTokens` (round-trip through `token-store.ts`), `codeVerifier`/`saveCodeVerifier` (PKCE), `state`/`saveState`/`storedState` (an in-memory per-flow CSRF nonce — implementing these makes the SDK mint and verify a real `state` param instead of skipping CSRF protection), `clientInformation`/`saveClientInformation` (absent → the SDK runs Dynamic Client Registration / CIMD, no preconfigured `client_id` required), and `authorizationServerInformation`/`saveAuthorizationServerInformation` (persists the discovered AS metadata so the **second**, code-exchange `auth()` call — on a possibly-fresh provider instance, e.g. after a process restart — doesn't throw "Stored OAuth authorization server metadata is required when exchanging an authorization code", the exact error the live Linear handshake hit before this was added). `redirectToAuthorization(url)` binds a one-shot loopback listener (`ensureServer`, built the same way as `loopback.ts`'s `awaitOAuthRedirect` but bound once per provider instance and reused for both the advertised `redirectUrl` and the actual callback, since DCR and the authorization URL must agree on the same port) and opens the browser; the non-contract `waitForRedirect()` method (not part of `OAuthClientProvider`) is what `client.ts` awaits after the SDK throws `UnauthorizedError`.
 - **`@ai-sdk/mcp` v2 note (Slice 23; revisited Slice 24 Incr 5, item 14).** Under `@ai-sdk/mcp@2`, the HTTP transport's `redirect` option defaults to `'error'` (an SSRF hardening — v1 followed 3xx). `client.ts`'s `buildHttpTransportConfig` now sets `redirect: 'error'` **explicitly** (rather than relying on the SDK's implicit default) and additionally wires a `fetch` option (`redirectSafeFetch`, backed by `http-redirect.ts`'s `noRedirectFetch`) that independently re-checks the response status and throws on any 3xx — a defense-in-depth second guard so the SSRF protection survives even if a future edit swapped in a custom `fetch` that ignored `redirect`. Locked by `tests/mcp/redirect-ssrf.test.ts` (`noRedirectFetch` unit tests) and the `buildHttpTransportConfig` suite in `tests/mcp/client.test.ts` (asserts `transport.redirect === 'error'` and that `transport.fetch` itself rejects a redirect) — a future edit that weakens either to `'follow'` fails these tests. The two built-in servers are stdio (unaffected); this only touches user-configured remote HTTP servers, now more relevant since Slice 24 opens remote (Tailscale-tunneled) access — deliberately not weakened to `'follow'`.
 - **`loopback.ts`** (Slice 26, NEW) — `loopbackRedirectUri(port)` (`http://127.0.0.1:<port>/callback`) and `awaitOAuthRedirect(buildAuthUrl, expectedState, deps?)`: binds an ephemeral localhost server, opens the authorization URL in the browser, resolves `{code, state}` on the first `/callback` hit (rejecting on a `state` mismatch or a missing `code`), and always stops the server on exit — a wall-clock timeout (default 180s) guards a no-show. `oauth-provider.ts` reuses `loopbackRedirectUri` but implements its own listener (a provider instance's redirect+callback must share one bound port across two separate SDK calls, which this standalone helper isn't shaped for).
@@ -2327,6 +2392,8 @@ threw without them).
 - **`runs/<runId>/`** (git-ignored) — `spans.jsonl` (the OTel trace, canonical) + `answer.txt` / `gap.txt` / `resource.txt` / `unverified.txt` (human-facing artifacts; the last written on a Slice-13 `--verify` abstention). `runId = run-<pid>`. Read by the run-viewer; override the root with `AGENT_RUNS_ROOT` (tests).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 - **`<registry>/.generated.json` + `<registry>/<name>.golden.json` + `<registry>/archive/`** (tracked, Slice 20) — per-registry (`agents/`, `crews/`, `workflows/`) verified-build sidecars: the capability **manifest** (`.generated.json` — per generated artifact: original need, `CapabilitySignature` + embedding vector, `verifiedLevel`, `goldenPath`, `createdAtMs`/`lastUsedMs`/`useCount`, `lastEvalPass`), the per-artifact **golden set**, and the reversible **archive** directory `bun run archive --prune` moves idle near-duplicates into (§20).
+- **`AGENT_A2A_SKILLS_PATH`** (git-ignored, default `a2a-skills.json`, Slice 31) — the EXPOSE-side allowlist (`{skills: SkillEntry[]}`) AND the issued-A2A-Bearer registry (`a2a-tokens.json`, sibling in the same dir — metadata + a one-way hash fingerprint per token, never the raw secret) share this one path family, `0700` dir / `0600` file, atomic temp+rename, fail-closed load (mirrors `~/.agent/devices.json`).
+- **`AGENT_A2A_REMOTES_PATH`** (git-ignored, default `~/.config/ai/a2a-remotes.json`, Slice 31) — the CONSUME-side `RemoteStore`: one `{name, baseUrl, cardUrl, token, pinnedCardHash, skillId}` row per discovered+pinned remote peer (`skillId` captured at `remotes add` time via `resolveSkillId`, Task 30-FIX). Same `0700`/`0600`/atomic/fail-closed discipline; `token` is the remote's Bearer and is stripped before it ever reaches a DTO (`toRemoteDto`); `skillId` is not secret and does reach the DTO. `load()` drops (with one structured warn) any legacy record persisted before `skillId` existed.
 
 ---
 
@@ -3680,6 +3747,320 @@ path.
 
 ---
 
+### `src/a2a/` — A2A interop (Slice 31)
+
+One **A2A v1.0** layer over the Slice-24 daemon + queue, hand-rolled (not
+`@a2a-js/sdk`, still v1.0-beta at the time this shipped) and driven from the
+web console. EXPOSE lets a remote orchestrator enqueue work on THIS daemon
+through an Agent Card + JSON-RPC surface, gated by a least-privilege skill
+allowlist; CONSUME lets THIS orchestrator discover, pin, and delegate to a
+remote peer's exposed skills. Both sides reuse Slice-24/25 substrate rather
+than duplicating it: the queue (`JobStore.enqueue`), the run-stream SSE
+engine, the HMAC root-token machinery, and the MCP mount/delegate contract.
+
+#### EXPOSE module chain (`src/a2a/`)
+
+`card.ts`'s `buildAgentCard` builds the wire-shape card 1:1 from
+`allowlist.ts`'s `A2aAllowlist.list()` — an empty allowlist advertises
+`skills: []`, never a default. `allowlist.ts` is the security boundary: `put`
+is author-time-validated (`refExistsFor`) so a skill can only be exposed if
+its `ref` resolves to a REGISTERED agent/crew/workflow (only `JobKind.{Chat,
+Crew,Workflow}` are exposable — a `Pull`/`Build` ref can never reach the
+allowlist), and `resolve` re-validates at invoke time and returns `undefined`
+(never a default target) for anything unlisted — the server **resolves-then-
+rejects**, so an unauthorized skill can never reach a model. `server.ts`'s
+`dispatchA2aRpc` handles the three non-streaming JSON-RPC methods:
+`handleMessageSend` resolves the skill FIRST (§7.4), wraps the inbound
+message's text in `delimitUntrusted` (shared with the chat transcript
+builder, §7.2 — a remote's text is data, never instructions), then
+pre-mints a run and calls `JobStore.enqueue({..., origin: RunOrigin.Remote})`
+before binding `taskId === jobId` (1:1 identity) plus a `contextId` in
+`task-index.ts`'s tiny in-memory map (durable identity needs no help from
+this cache — `jobIdForTask` falls back to `taskId` itself post-restart; the
+map is **bounded** by `AGENT_A2A_MAX_TASK_INDEX`, evicting the oldest binding
+past the cap — safe because identity resolves from the durable job store and
+the contextId falls back to the taskId);
+`handleTasksGet`/`handleTasksCancel` project the job's queue status through
+`task-map.ts`'s exhaustive, `never`-tailed bijections
+(`jobStatusToTaskState`/`orchestratorResultToTaskState`/
+`orchestratorResultToArtifact`) so an added `JobStatus`/`OrchestratorResult`
+member fails `tsc` until mapped — a `gap`/`resource` failure can never
+project to `completed`. `handleTasksCancel` of a **RUNNING** task fires the
+worker pool's per-job `AbortController` (`buildA2aServerDeps` threads the same
+live `pool` through — exact parity with `POST /api/jobs/:id/cancel`), so the
+in-flight turn is actually aborted and the pool's aborted-guard skips `markDone`;
+a finishing turn therefore can never regress `canceled→completed`. A queued or
+terminal task uses the bare store transition (no in-flight controller).
+`stream.ts`'s `frameRunSpanAsA2a` is a PURE re-framer
+that maps one run `SpanDTO` (from the single Slice-24 `handleRunStream`
+engine — no parallel stream) onto one A2A SSE frame
+(`TaskStatusUpdateEvent`/`TaskArtifactUpdateEvent`); only real span frames
+carry an `id:` line (so `Last-Event-ID` reconnect replay stays keyed on the
+run-stream's own wire ids), and a terminal run root
+(`chat.run`/`agent.run`/`crew.run`/`workflow.run`) always maps to a
+`final:true` frame — never `undefined` — so the terminal frame is never
+dropped. `enroll.ts`'s `A2aEnrollment` mints/verifies/revokes the **A2A
+Bearer** (D5): `payload=base64url({tokenId,kind:'a2a'})`,
+`sig=HMAC-SHA256(root,payload)` — signed by the SAME daemon root as a
+device session token but with a disjoint payload shape (`kind:'a2a'`
+vs `deviceId`/`exp`), checked against its OWN registry, so neither
+verifier ever accepts the other's token even though they share a root;
+the root is resolved PER CALL so a `rotate-root` invalidates every
+outstanding A2A Bearer at once. `replay-guard.ts`'s `createReplayGuard`
+fronts `POST /api/a2a` with a bounded-LRU seen-nonce set (hard-capped by the
+`AGENT_A2A_MAX_SEEN_NONCES` knob, oldest evicted past it) + a
+`±AGENT_A2A_REPLAY_WINDOW_MS` timestamp check (malformed proof → `401`,
+stale/replayed → `409`). `canonical.ts`'s `hashCard` (recursive key-sort +
+sha256) is the ONE canonicalization shared by the expose-side ETag
+(`card.ts`'s `cardEtag`) and the consume-side pin (`client.ts`), so the two
+can never diverge.
+
+#### CONSUME module chain (`src/a2a/`)
+
+`client.ts`'s `createA2aClient` is the §7.3 security-sensitive surface: every
+outbound fetch (`discover`/`verifyPin`/`invoke`) goes through
+`noRedirectFetch` (`src/mcp/http-redirect.ts`'s SSRF guard, reused verbatim
+— `redirect:'error'` + a defensive 3xx reject) wrapped in a wall-clock
+`AGENT_A2A_FETCH_TIMEOUT_MS` timeout, and every response body is read under
+a **double** `AGENT_A2A_MAX_CARD_BYTES` cap (declared `Content-Length` AND a
+running streamed-byte count, so a lying/absent header can't slip an
+unbounded body past the guard). `discover` computes `hashCard(card)` as the
+pin; `verifyPin` re-fetches and HARD-rejects on ANY hash mismatch — it NEVER
+silently re-pins (the rug-pull/card-spoof defense). At `remotes add` time,
+`resolveSkillId(card, explicit?)` (`client.ts`, Task 30-FIX) picks the ONE
+skill every future delegation to that remote will target — an
+explicit-and-advertised id is used verbatim, a card advertising exactly one
+skill is auto-picked, and anything else (zero skills, several skills with no
+explicit choice, or an explicit id the card doesn't advertise) fails closed
+with an error listing the advertised ids (capped at 128 chars either way) —
+so a `RemoteAgent` is only ever persisted once a target skill is certain. The
+same add-time path runs `cardUrlHostMismatch(operatorCardUrl, card.url)`: the
+peer-advertised invoke `url` MUST stay on the operator-vouched cardUrl's
+`host:port` AND must not **downgrade** its scheme (an `https` cardUrl advertising
+an `http` url is rejected — the Bearer would ship in cleartext; an `http→https`
+upgrade is allowed), an §7.3 SSRF + scheme-pin guard both persist sites inherit.
+`mount.ts` turns a discovered+pinned `RemoteAgent` into a `delegate_to_<name>`
+`ToolSet` shaped to be a drop-in for the MCP mount seam
+(`MountedRegistry.forAgent` → `createSuperAgent`'s `toolsFor`, the same seam
+a local specialist rides): `delegateAndPoll` sends via `message/send` with
+`metadata: { skillId: remote.skillId }` on EVERY send (a two-box live-verify
+caught an earlier version sending no `metadata` at all, so a skill-gated
+EXPOSE peer rejected every real delegation with `-32004 "skill not
+allowed"` before enqueue, §7.4) — `message/send` itself only returns a
+`submitted` shell (an earlier adversarial review caught an early version
+returning that shell as the "answer", breaking every real delegation) — then
+polls `tasks/get` (metadata-free) until a terminal state, bounded by
+`AGENT_A2A_TASK_TIMEOUT_MS`/`AGENT_A2A_POLL_INTERVAL_MS`; `remoteAsToolSet`
+layers a per-remote circuit breaker (`wrapToolsWithBreaker('a2a:<name>', …)`,
+reusing `src/mcp/client.ts`'s breaker wrapper) UNDER an outer catch that
+converts every throw (a peer error or a tripped `CircuitOpenError`) into a
+structured `{ error }` — **failure returns, never throws**, exactly the
+local `asDelegateTool` contract — and `mountRemotes` merges several remotes
+into one `ToolSet` (name-clash → warn-and-override). `remotes.ts`'s
+`RemoteStore` persists `{name, baseUrl, cardUrl, token, pinnedCardHash,
+skillId}` (0700/0600, atomic temp+rename, fail-closed load, mirroring
+`device-registry.ts`; `load()` drops any legacy pre-skillId record with one
+structured warn rather than silently); the token never leaves this store
+raw — `server/a2a/remotes.ts`'s `toRemoteDto` is the ONE place a
+`RemoteAgent` is narrowed to its wire form, stripping `token`
+unconditionally (`skillId` is not secret and does reach the DTO).
+
+> **CONSUME live-mounting — the CHAT path is spliced (Task 29b); crew/workflow
+> is seam-ready follow-on.** `liveRemoteDelegateTools` (`a2a/mount.ts`) is the
+> one seam a live turn calls: gated by `AGENT_A2A_ENABLED` (off ⇒ `{}`, a turn
+> is byte-for-byte unchanged), it reads `RemoteStore` fresh each turn and returns
+> a `delegate_to_<name>` `ToolSet` for every configured remote. Both chat
+> entrypoints wire it in — `server/chat/run-turn.ts` (web) and `src/cli/chat.ts`
+> (CLI) pass its output as `deps.remoteTools`, and `createOrchestrator`
+> (`src/core/orchestrator.ts`) merges those tools alongside the local
+> specialists into the router's toolset + routing catalog. **Local wins on a
+> name collision** — a remote whose `delegate_to_<name>` matches a local
+> specialist is dropped with a warning, never silently shadowing the local
+> agent. So a remote added via the Federation console / `agent a2a remotes add`
+> becomes a live delegate the orchestrator can choose mid-CHAT-turn, no restart.
+> **Still a follow-on:** crew and workflow sessions do NOT yet consume
+> `remoteTools` (they build their toolset via `reg.merged`, a different seam);
+> splicing consumed remotes into those is scoped seam-ready future work, not a
+> regression. And note the observability gap (inherited from Task 21, now live):
+> a remote delegate executes as a plain tool call outside `runGuardedAgent`, so
+> **no `agent.delegation` span** fires for the remote hop (only the client's own
+> `a2a.client.invoke` span), and a remote failure / open circuit is NOT recorded
+> to the `DegradationLedger` nor emitted as a Degrade/Delegation status event —
+> the per-remote breaker still protects the run. Documented forward-item.
+
+#### Route layer (`src/server/a2a/`) + boot wiring
+
+`wire.ts`'s `buildA2aServerDeps` is the single constructor for
+`A2aServerDeps` (mirrors how the Slice-25 triggers engine is built once and
+injected), shared by the daemon/standalone boot and the CLI: it builds the
+allowlist, the enrollment store (over the SAME hoisted `rootTokens` the
+session guard verifies against), the task index, and — Increment 6 —
+`remotes`/`client`. Unlike the queue/triggers, A2A stores have **no
+start/stop lifecycle** — this is a pure deps handoff, not a lifecycle-bound
+engine. `card.ts`'s `handleAgentCard` serves `GET
+/.well-known/agent-card.json`: `404` (fail-safe, indistinguishable from "no
+such route") while `AGENT_A2A_ENABLED` is off, else a `200` with a strong
+`ETag` (`cardEtag`) and `Cache-Control: max-age=AGENT_A2A_CARD_TTL`, or a
+`304` on a matching `If-None-Match`. `rpc.ts`'s `handleA2aRpc` serves `POST
+/api/a2a`: `404` fail-safe, then — **verify-before-parse** — the A2A Bearer
+(length-capped before any crypto runs, verified against the SEPARATE `D5`
+enrollment store, a corrupt registry caught as a `401` deny never a `500`),
+then the replay guard, and ONLY THEN the JSON-RPC body is read and
+dispatched (a streaming method routes to `stream-route.ts`'s
+`handleA2aStream` first, which reuses `handleMessageSend`'s resolve-then-
+reject/enqueue then re-frames `handleRunStream`'s SSE via `stream.ts`).
+`config.ts`/`skills.ts`/`token.ts`/`remotes.ts`/`remotes-test.ts` are the
+trusted-local console reads/writes (below). **Route placement** (`app.ts`):
+the card route sits AFTER the Host/Origin perimeter but BEFORE the `/api`
+session guard (the one unauthenticated read, alongside `/hooks/:token`);
+`POST /api/a2a` is explicitly let past the DEVICE session guard (it
+authenticates with its own A2A Bearer, never a device session token) but
+still sits behind the same perimeter; the four `/api/a2a/{config,skills,
+token,remotes}` surfaces are ordinary `/api` routes additionally gated by
+`requireTrustedLocal` (editing the exposure surface or adding a delegation
+target is privileged config, same class as device pairing/rotate-root).
+**Boot wiring (Task 18, closing a plan-audit CRITICAL — B1):**
+`server/main.ts` and `src/daemon/core.ts` both accept an optional injected
+`a2a` dep; when absent, `server/main.ts` self-constructs `deps.a2a` via
+`buildA2aServerDeps` ONLY when `AGENT_A2A_ENABLED` is on, else leaves it
+`undefined`. **Capstone B7b:** the two PUBLIC/bearer routes — the card route
+and `POST /api/a2a` — degrade to the SAME featureless `404` (`card.ts`'s
+`notFound()`, reused by `app.ts`) they already return when the flag is off,
+so an unconfigured surface is never distinguishable from a disabled one via
+a status-code fingerprint. The four trusted-local admin routes
+(`{config,skills,token,remotes}`) are unaffected and still degrade to a
+uniform `503` via the same `need()` helper the triggers/queue routes use,
+rather than the outer catch's opaque `500` — that shape is appropriate there
+because those routes already sit behind `requireTrustedLocal` (no discovery
+value in hiding "not configured" from an authenticated local operator).
+
+#### Data flow
+
+**EXPOSE.** A remote peer `GET`s the agent card (no auth) → mints/receives an
+A2A Bearer out of band (an operator issues one from the Federation tab or
+`agent a2a token issue`) → `POST /api/a2a` `message/send` with a `skillId` →
+Bearer+replay verified → allowlist resolve-then-reject → untrusted text
+fenced → `JobStore.enqueue(origin=Remote)` → `Submitted` task returned →
+the remote polls `tasks/get` (or opens `message/stream`/`tasks/resubscribe`
+for the re-framed SSE) until a terminal state. This is exactly the
+Slice-24 job-queue path (§24.1/24.2) with one new entry door and one new
+`RunOrigin` value — no parallel execution engine.
+
+**CONSUME.** An operator, from the Federation tab's Consume panel (or `agent
+a2a remotes add`), pastes a remote's card URL + Bearer → `POST
+/api/a2a/remotes/test` dry-runs discover+pin with NOTHING persisted → on
+confirm, `POST /api/a2a/remotes` discovers+pins again, resolves the target
+`skillId` off the discovered card via `resolveSkillId` (explicit-and-
+advertised → use it; sole advertised skill → auto-pick; otherwise fail
+closed listing the advertised ids), and persists the `RemoteAgent` — now
+including that `skillId` — (§7.3 — a failed discover, or a failed skill
+resolution, never reaches the store, so there is no half-written/unpinned/
+skill-less remote). From there `agent a2a call <name> "<task>"` (or, per the
+honest gap above, a future live-session mount) drives the same
+`delegateAndPoll` send→poll loop, which sends the persisted `skillId` as
+`metadata.skillId` on every `message/send` (Task 30-FIX — the skill-gated
+EXPOSE side needs it to resolve-then-reject, §7.4); the Federation tab's
+"recent remote tasks" list surfaces via the existing `GET
+/api/runs?origin=remote` / `/runs/$runId` deep-link — no new run-history
+plumbing, the remote task rides the normal Runs browser.
+
+#### Security recap (§7.1–§7.4, all adversarially reviewed)
+
+**§7.1 fail-closed consent.** `task-map.ts`'s `consentDeclinedToTaskError`
+projects a job whose terminal `error` carries a `consent-declined`/
+`consent-unavailable` marker onto the typed `failed` state — but this
+detector is honestly **forward-looking, not currently emitted**: no
+dispatch path today lands a consent-tagged `Failed` job on an
+A2A-reachable kind (MCP-mount consent fail-closes by skipping the server,
+never failing a job; Build's consent returns a `declined` result and Build
+is not A2A-reachable). The load-bearing guarantee — a remote task NEVER
+hangs, EVERY `Failed` job projects to terminal `failed`
+(`jobStatusToTaskState`) — does not depend on this marker; the marker is
+only a refinement, dormant until a future durable queue-consent capability
+(scoped out, spec §2 non-goals) actually stamps it. **§7.2 untrusted
+inbound + credential separation.** Every inbound message's text is fenced
+via `delimitUntrusted` before it ever reaches an orchestrator; the A2A
+Bearer is a wholly separate credential domain from a browser device
+session (D5) sharing only the root HMAC key; the Bearer/nonce/timestamp
+never appear in a log, DTO, or span. **§7.3 outbound SSRF/DoS + rug-pull
+defense.** Every consume-side fetch is redirect-rejecting, wall-clock
+timeout-bounded, and double byte-capped; a pinned card hash mismatch is a
+hard reject, never a silent re-pin. **§7.4 least-privilege exposure.** Only
+`Chat`/`Crew`/`Workflow` refs pointing at a REGISTERED target are
+exposable; the server resolves-then-rejects before any enqueue; a
+hand-edited allowlist entry naming a since-deregistered ref is re-validated
+(and rejected) at invoke time, not just at `put` time.
+
+**Real defects an adversarial review caught + fixed in this slice** (per the
+SDD ledger): (1) a non-`{Chat,Crew,Workflow}` `JobKind` with a registered
+ref could slip past the allowlist's least-privilege check — closed by
+`refExistsFor`'s explicit kind switch; (2) the streaming re-framer could
+emit a terminal `completed`/`failed` frame BEFORE a same-poll child's
+progress artifact, losing the trailing frame on a spec-conformant client —
+closed by buffering the terminal frame until upstream EOF; (3) the
+consume-side `delegateAndPoll` originally returned `message/send`'s
+`submitted` shell as if it were the answer, breaking every real delegation
+(a unit test with a fabricated `Completed` task masked it) — closed by the
+send→poll-to-terminal loop above.
+
+#### Telemetry
+
+`src/a2a/spans.ts` mirrors `src/daemon/spans.ts`'s idiom exactly — no
+parallel emission path, every helper a no-op without a registered tracer.
+`a2a.server.card` (`card.cache_hit`), `a2a.server.task` (wrapping
+`message/send`/`tasks/get`/`tasks/cancel`, carrying `A2A_METHOD`/
+`A2A_SKILL_ID`/`A2A_TASK_STATE`/`A2A_OUTCOME`), `a2a.client.discover` and
+`a2a.client.invoke` (`A2A_PEER_HOST` — **host only, never a full URL**,
+plus method/task-state). The consume-side `delegate_to_<name>` tool emits
+NO second delegation span of its own — `withDelegationSpan`
+(`agent.delegation`) already fires when the orchestrator invokes it through
+`runGuardedAgent`, so the A2A hop nests under the existing span for free
+(the reuse the honest-gap note above still describes as unwired for a live
+session).
+
+#### Configuration (env fallback-only, per this repo's rule)
+
+`AGENT_A2A_ENABLED` (default `false`) gates the two **runtime** A2A surfaces —
+the EXPOSE server (card route + `POST /api/a2a`) and CONSUME-side **live
+in-session** remote mounting (`liveRemoteDelegateTools`); with it off both are
+dark. It does **NOT** gate the standalone `agent a2a` operator CLI: `skills`/
+`token`/`remotes`/`call`/`card` are explicit one-shot operator actions against
+local stores + a chosen peer, so `agent a2a call` delegates to a remote even
+with the flag OFF (the flag governs the always-on daemon surfaces, not deliberate
+operator commands). Other knobs: `AGENT_A2A_CARD_TTL` (300s),
+`AGENT_A2A_REPLAY_WINDOW_MS` (300 000ms), `AGENT_A2A_MAX_SEEN_NONCES` (50 000 —
+the replay guard's seen-nonce hard cap, `a2a/replay-guard.ts`),
+`AGENT_A2A_MAX_TASK_INDEX` (50 000 — the in-memory task-index binding cap,
+`a2a/task-index.ts`; the oldest binding is evicted past it, identity still
+resolves from the durable job store), `AGENT_A2A_SKILLS_PATH` (`a2a-skills.json`,
+the expose allowlist) with the issued-token registry in a SEPARATE file
+`AGENT_A2A_TOKENS_PATH` (`a2a-tokens.json` — different top-level JSON shapes, so
+they must not share a path), `AGENT_A2A_REMOTES_PATH`
+(`~/.config/ai/a2a-remotes.json`, leading `~` expanded at the read site),
+`AGENT_A2A_FETCH_TIMEOUT_MS` (15 000ms), `AGENT_A2A_MAX_CARD_BYTES` (262 144 =
+256 KiB), `AGENT_A2A_TASK_TIMEOUT_MS` (120 000ms = 2min),
+`AGENT_A2A_POLL_INTERVAL_MS` (1 000ms).
+
+#### CLI (`src/cli/a2a.ts`) + Web (`web/src/features/ops/federation-tab.tsx`)
+
+`agent a2a skills|token|remotes|call|card` mirrors `runDaemonCli`'s
+injected-deps dispatch shape byte-for-byte: `skills` manages the expose
+allowlist, `token` issues/revokes/lists A2A Bearers (the raw secret printed
+exactly once), `remotes` manages consume-side peers (`add` discovers+pins
+before persisting), `call` reuses `delegateAndPoll` (the SAME function
+`mount.ts`'s tool uses — one definition, two call sites), and `card` prints
+this node's own Agent Card. The **Federation tab** (Ops console, registered
+alongside Jobs/Queue/Triggers) is the PRIMARY UX per this slice's web-focused
+scope: an **Expose panel** (allowlist editor validated against `JobKindWire`,
+a live card preview, token-issue with the secret shown once and never
+re-fetched) and a **Consume panel** (remote list, an add-remote dialog that
+dry-run **test**s before **confirm**ing — re-locking if the URL is edited
+after a successful test — and a "recent remote tasks" list reusing the
+existing `GET /api/runs?origin=remote` + `/runs/$runId` deep link, no new
+run-history plumbing).
+
+---
+
 ## 24. Always-on daemon + task queue + resumable jobs + secure remote access (Slice 24, Phase E; Slice 25b added the Ops-console HTTP surfaces below — the web UI itself is its own section immediately after this one)
 
 Through Slice 23 the BFF was a **foreground** `Bun.serve` whose runs were
@@ -4019,6 +4400,23 @@ fallback), and `TokenGuard.principal()` (the authorizing device's session
 job's run root. (A `queued`-job cancel via `server/jobs/cancel.ts` bypasses the
 pool and so emits no `job.cancel` span — out of brief scope.)
 
+**Slice 31 addition — a fifth route class + a sixth provenance value.** The
+job-API route classes above (`sjenqueue`/`sjlist`/`sjretry`/…) gain a
+security-distinct sibling: `POST /api/a2a` (`src/server/a2a/rpc.ts`) is a
+JSON-RPC envelope over the SAME `JobStore.enqueue`, but authenticates with
+its OWN A2A Bearer (D5, never a device session token) and sits PAST the
+`/api` device-session guard rather than behind it; `GET
+/.well-known/agent-card.json` (`src/server/a2a/card.ts`) is the one
+unauthenticated read OUTSIDE the `/api` guard entirely (matching `/hooks/
+:token`'s placement), fail-safe `404`-ing whenever `AGENT_A2A_ENABLED` is
+off. An inbound `message/send` enqueues exactly like any other job-API
+caller, but stamps the reserved `RunOrigin.Remote` (`job.origin =
+RunOrigin.Remote`) instead of `Daemon`/`Schedule`/`Webhook`/`Api` — the
+sixth and, as of this slice, final reserved `RunOrigin` value — read back
+by the same `run-dto.ts` `readRunOrigin`/`RunListQuery.origin` facet the
+Ops-console Runs browser already uses for `Schedule`/`Webhook`/`Api`. See
+the `src/a2a/` subsystem section above for the full narrative.
+
 ### 24.8 Configuration knobs (env fallback-only, per the repo rule — never hardcoded)
 
 All registered in `config/schema.ts` (`bun run config` dumps the effective table):
@@ -4262,17 +4660,20 @@ replay is not nonce-deduped (see above).
 root→session auth entirely **backend-only** — the only client was the CLI.
 Slice 25b adds the operator surface: one new top-level nav entry **Ops** at
 `/ops` (`web/src/app/app-shell.tsx`'s `NAV`, `web/src/app/router.tsx`'s
-`opsRoute`) with a roving-tabindex sub-nav of four tabs whose active tab is a
-`?tab=overview|jobs|triggers|devices` search param (`OpsSearch`,
-deep-linkable, plus a `go-ops` + four per-tab `⌘K` commands in
-`web/src/app/commands.ts`): **Overview** (daemon/queue health cards + a
-redacted logs tail), **Jobs** (the queue table + detail drawer + cancel/
-resume/retry), **Triggers** (originally shipped in this slice as a
+`opsRoute`) with a roving-tabindex sub-nav — **five tabs since Slice 31** —
+whose active tab is a `?tab=overview|jobs|triggers|devices|federation`
+search param (`OpsSearch`, deep-linkable, plus a `go-ops` + per-tab `⌘K`
+commands in `web/src/app/commands.ts`): **Overview** (daemon/queue health
+cards + a redacted logs tail), **Jobs** (the queue table + detail drawer +
+cancel/resume/retry), **Triggers** (originally shipped in this slice as a
 read-only IA-only **stub** — cron/webhook/event → `JobKind`, "arrives in
 Slice 25", no backend wiring; **replaced by a fully live tab in Slice 25**,
 see the `src/triggers/` subsystem section above for the shipped backend +
-console), and **Devices & Access** (bind posture, device pairing with a QR,
-revoke, break-glass root rotate). It follows the existing feature-module
+console), **Devices & Access** (bind posture, device pairing with a QR,
+revoke, break-glass root rotate), and **Federation** (A2A EXPOSE/CONSUME
+console, added Slice 31 — `web/src/features/ops/federation-tab.tsx`, see the
+`src/a2a/` subsystem section above for the full narrative). It follows the
+existing feature-module
 conventions exactly
 (`web/src/features/ops/`, `data-testid="area-ops"`, one `RegionErrorBoundary`
 per tab so one failing card never blanks the console, `apiFetch` + a zod

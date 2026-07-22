@@ -1,3 +1,38 @@
+# Task 15 (Slice 31) — `src/a2a/enroll.ts` A2A Bearer issue/verify/revoke (§7.2 HARD)
+
+## Status: COMPLETE
+- Commit: `d6553db` — `feat(a2a): A2A Bearer enrollment (HMAC-from-root, revocable, D5 two-stores separation)`
+- Branch: `slice-31-a2a-multimachine`
+
+## Implemented
+`createA2aEnrollment({ rootTokens, registryPath? })` → `{ issue, verify, revoke, list }` in `src/a2a/enroll.ts`; tests in `tests/a2a/enroll.test.ts`.
+- **Token shape (D5-distinct):** `payload = base64url({ tokenId, kind: 'a2a' })`, `sig = HMAC-SHA256(currentRoot, payload)` hex, `token = ${payload}.${sig}`. Reuses `session-token.ts` sign + `sigMatches` (constant-time) idioms.
+- **Root per-call:** `currentRoot = () => deps.rootTokens.getOrCreateRoot()` — never captured; `rotate()` invalidates every Bearer at once (the `session-token.ts:76` idiom).
+- **Registry:** `StoredToken = { id, label, createdAt, hash }`, `hash = sha256(token)` one-way fingerprint, NEVER the raw token. Atomic 0600 temp+rename writes + fail-closed load mirroring `device-registry.ts`. Default path `join(dirname(AGENT_A2A_SKILLS_PATH), 'a2a-tokens.json')` — beside the allowlist.
+- **verify:** constant-time HMAC-vs-current-root FIRST, then `kind==='a2a'` + `tokenId` string discriminator, then registry membership (re-read from disk for live cross-process revoke, matching `allowlist.resolve`). `revoke(id)` removes the row; `list()` strips `hash` → metadata only.
+
+## TDD RED → GREEN
+- RED (`bun run test:file -- "tests/a2a/enroll.test.ts"`): `Cannot find module '../../src/a2a/enroll.ts'` → 0 pass / 1 fail / 1 error.
+- GREEN (same): `5 pass, 0 fail, 24 expect() calls`.
+- Tests: (1) issue→verify round-trip + length-guarded garbage/truncated/tampered = false, never throws; (2) revoke invalidates one, sibling survives; (3) mutable fake root → rotate invalidates pre-rotate token, post-rotate token verifies; (4) **D5 both directions with the SAME root** — A2A token → `session.verifySessionToken` null; session token → `enroll.verify` false; (5) `list()` rows have no token/sig/hash field; on-disk file contains neither raw token nor sig.
+
+## Gate (all green)
+- `bun run typecheck` — clean.
+- `bun run lint:file -- src/a2a/enroll.ts tests/a2a/enroll.test.ts` — clean (fixed one import-order finding pre-commit).
+
+## §7.2 security self-check
+- **Constant-time:** all secret-material compares route through `sigMatches` (`timingSafeEqual` + length guard); no `===` on sig. `tokenId` registry lookup is non-secret (public in the readable payload) and only reached AFTER HMAC authenticity passes.
+- **Root per-call:** resolved via `getOrCreateRoot()` on every issue/verify; rotate-invalidates-all proven by test 3.
+- **D5 disjoint:** proven with a SHARED root — separation rests only on the `kind:'a2a'` payload discriminator + separate stores, not a different key. Session payload (`{deviceId,exp}`) lacks `kind`/`tokenId`; A2A payload lacks `deviceId`/`exp`.
+- **Secret never persisted/DTO/span/log:** only `hash` reaches disk; `issue()` is the sole raw-token return; `list()` returns `{id,label,createdAt}`; no logging, no span emission in this module.
+
+## Concerns
+- `verify` re-reads the registry per call (live cross-process revoke, matching `allowlist.resolve`). A present-but-corrupt file makes `load` throw mid-verify (fail-closed = deny) rather than returning false; the future `server/a2a/rpc.ts` caller should treat a thrown auth check as rejection.
+- `hash` is audit-only, not consulted by `verify` (HMAC-over-payload already fully binds the token given its `tokenId`); kept as the record's `sig/hash` field per the brief.
+- No consumer wires `createA2aEnrollment` yet (rpc route is a later increment) — this task ships the primitive + tests only, per scope.
+
+---
+
 # Task 15 report — Ops telemetry + ServerDeps security seam (Slice 25b Incr 3)
 
 **Commit:** `ff0f90a` — feat(telemetry): DEVICE_ID + pair/revoke/rotate-root spans + session-root getter + security seam (Slice 25b Incr 3)

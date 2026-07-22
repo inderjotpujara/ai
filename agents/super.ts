@@ -29,6 +29,12 @@ export function createSuperAgent(
   ledger?: DegradationLedger,
   mediaStore?: MediaStore,
   events?: EventSink,
+  /** Slice 31, Task 29b: pre-built `delegate_to_<name>` tools for mounted A2A
+   *  remote peers (`mountRemotes`). Forwarded to the orchestrator so a remote
+   *  is a delegate target alongside the local specialists. Empty/undefined ⇒
+   *  no change. `onRemoteWarn` sinks the local-wins name-collision warning. */
+  remoteTools?: ToolSet,
+  onRemoteWarn?: (msg: string) => void,
 ): Agent {
   const agents: Agent[] = agentNames().map((name) => {
     const factory = AGENTS[name];
@@ -53,5 +59,7 @@ export function createSuperAgent(
     ledger,
     mediaStore,
     events,
+    remoteTools,
+    warn: onRemoteWarn,
   });
 }

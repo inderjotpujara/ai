@@ -28,7 +28,7 @@ function renderOpsRouter() {
 }
 
 describe('OpsArea', () => {
-  it('renders the Ops shell with four tabs, defaulting to Overview', async () => {
+  it('renders the Ops shell with five tabs, defaulting to Overview', async () => {
     renderAt('/ops');
     expect(await screen.findByTestId('area-ops')).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute(
@@ -40,6 +40,7 @@ describe('OpsArea', () => {
     expect(
       screen.getByRole('tab', { name: 'Devices & Access' }),
     ).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Federation' })).toBeInTheDocument();
   });
 
   it('deep-links to a tab via ?tab=', async () => {
@@ -53,7 +54,7 @@ describe('OpsArea', () => {
     expect(screen.getByTestId('ops-panel-jobs')).toBeInTheDocument();
   });
 
-  it('click-switches across all four tabs, updating aria-selected + the ?tab= search param each time', async () => {
+  it('click-switches across all five tabs, updating aria-selected + the ?tab= search param each time', async () => {
     const router = renderOpsRouter();
     await screen.findByTestId('area-ops');
     expect(router.state.location.search).toEqual({ tab: 'overview' });
@@ -89,6 +90,16 @@ describe('OpsArea', () => {
     expect(screen.getByTestId('ops-panel-devices')).toBeInTheDocument();
     expect(router.state.location.search).toEqual({ tab: 'devices' });
 
+    fireEvent.click(screen.getByTestId('ops-tab-federation'));
+    await waitFor(() =>
+      expect(screen.getByTestId('ops-tab-federation')).toHaveAttribute(
+        'aria-selected',
+        'true',
+      ),
+    );
+    expect(screen.getByTestId('ops-panel-federation')).toBeInTheDocument();
+    expect(router.state.location.search).toEqual({ tab: 'federation' });
+
     fireEvent.click(screen.getByTestId('ops-tab-overview'));
     await waitFor(() =>
       expect(screen.getByTestId('ops-tab-overview')).toHaveAttribute(
@@ -106,11 +117,13 @@ describe('OpsArea', () => {
     const jobs = screen.getByTestId('ops-tab-jobs');
     const triggers = screen.getByTestId('ops-tab-triggers');
     const devices = screen.getByTestId('ops-tab-devices');
+    const federation = screen.getByTestId('ops-tab-federation');
 
     expect(overview).toHaveAttribute('tabIndex', '0');
     expect(jobs).toHaveAttribute('tabIndex', '-1');
     expect(triggers).toHaveAttribute('tabIndex', '-1');
     expect(devices).toHaveAttribute('tabIndex', '-1');
+    expect(federation).toHaveAttribute('tabIndex', '-1');
 
     overview.focus();
     fireEvent.keyDown(overview, { key: 'ArrowRight' });
@@ -126,25 +139,28 @@ describe('OpsArea', () => {
     expect(devices).toHaveFocus();
 
     fireEvent.keyDown(devices, { key: 'ArrowRight' });
+    expect(federation).toHaveFocus();
+
+    fireEvent.keyDown(federation, { key: 'ArrowRight' });
     expect(overview).toHaveFocus(); // wraps past the last tab
 
     fireEvent.keyDown(overview, { key: 'ArrowLeft' });
-    expect(devices).toHaveFocus(); // wraps before the first tab
+    expect(federation).toHaveFocus(); // wraps before the first tab
   });
 
   it('Home jumps to the first tab, End to the last', async () => {
     renderAt('/ops');
     const overview = await screen.findByTestId('ops-tab-overview');
-    const devices = screen.getByTestId('ops-tab-devices');
+    const federation = screen.getByTestId('ops-tab-federation');
 
     overview.focus();
     fireEvent.keyDown(overview, { key: 'End' });
-    expect(devices).toHaveFocus();
+    expect(federation).toHaveFocus();
     await waitFor(() =>
-      expect(devices).toHaveAttribute('aria-selected', 'true'),
+      expect(federation).toHaveAttribute('aria-selected', 'true'),
     );
 
-    fireEvent.keyDown(devices, { key: 'Home' });
+    fireEvent.keyDown(federation, { key: 'Home' });
     expect(overview).toHaveFocus();
     await waitFor(() =>
       expect(overview).toHaveAttribute('aria-selected', 'true'),

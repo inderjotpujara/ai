@@ -7,6 +7,7 @@ import {
   WorkflowRunRequestSchema,
 } from '../../contracts/index.ts';
 import { noopEventSink } from '../../core/events.ts';
+import type { OrchestratorResult } from '../../core/orchestrator.ts';
 import { ProviderKind } from '../../core/types.ts';
 import type { CrewDef } from '../../crew/types.ts';
 import type { IngestFlags } from '../../media/ingest.ts';
@@ -20,6 +21,20 @@ import type { RunCrewTurn } from '../crews/run.ts';
 import type { RunModelPullTurn } from '../models/pull.ts';
 import type { RunWorkflowTurn } from '../workflows/run.ts';
 
+/** Runs ONE registered specialist agent (by its `AGENTS` registry name) to
+ *  completion under its own `withMcpRun` scope. Dispatch invokes it for a
+ *  `JobKind.Chat` job that carries an `a2aRef` — an A2A Chat skill bound to a
+ *  single agent (§7.4 / capstone B3) — so the job runs ONLY that agent, NOT the
+ *  full super-agent orchestrator (which would expose every local specialist +
+ *  MCP + remotes, the "run-anything" exposure D2 forbids). Implementations MUST
+ *  be `async`. */
+export type RunAgentTurn = (input: {
+  ref: string;
+  task: string;
+  signal?: AbortSignal;
+  runId: string;
+}) => Promise<OrchestratorResult>;
+
 /** What the dispatch registry needs to run each `JobKind` — the SAME turn
  *  functions the HTTP routes already build (`src/server/launch-turns.ts`) plus
  *  the crew/workflow registry lookups (`crews/index.ts`, `workflows/index.ts`).
@@ -32,6 +47,13 @@ export type JobDispatchDeps = {
   getWorkflow: (name: string) => WorkflowDef | undefined;
   runModelPull: RunModelPullTurn;
   runChatTurn: RunChatTurn;
+  /** Runs a SINGLE registered agent for an A2A Chat skill bound to an agent ref
+   *  (§7.4 / capstone B3). Optional so pre-B3 dispatch-unit fixtures that never
+   *  enqueue an `a2aRef` chat job keep compiling; the real daemon/server wire it
+   *  (`createRealRunAgentTurn`). A Chat job that DOES carry an `a2aRef` with this
+   *  dep absent throws (a permanent, non-retryable defect — never a silent
+   *  fall-through to the full orchestrator). */
+  runAgentTurn?: RunAgentTurn;
   runBuilderTurn: RunBuilderTurn;
   /** Runs root the dispatched job's runId lives under (Task 24, item 17) —
    *  used ONLY to stamp the job's `origin` provenance marker `run-dto.ts`'s
@@ -70,6 +92,12 @@ const PullJobPayloadSchema = ModelPullRequestSchema.extend({
 const ChatJobPayloadSchema = z.object({
   task: z.string(),
   media: z.custom<IngestFlags>().optional(),
+  /** Set ONLY by the A2A produce side (`a2a/server.ts`) for a Chat skill whose
+   *  allowlisted ref is a single registered agent: the job must run ONLY that
+   *  agent, never the full super-agent orchestrator (§7.4 / capstone B3). Absent
+   *  for every non-A2A chat job (the synchronous `/api/chat` + normal enqueue),
+   *  which keep the unchanged full-orchestrator behavior. */
+  a2aRef: z.string().min(1).optional(),
 });
 
 /** A build job payload = the builder request (`kind`+`need`+flags) — the SAME
@@ -169,7 +197,26 @@ function buildExecutor(kind: JobKindT, deps: JobDispatchDeps): JobExecutor {
       };
     case JobKind.Chat:
       return async (job, signal) => {
-        const { task, media } = ChatJobPayloadSchema.parse(job.payload);
+        const { task, media, a2aRef } = ChatJobPayloadSchema.parse(job.payload);
+        // §7.4 / capstone B3: an A2A Chat skill bound to a single agent
+        // (`a2aRef`) runs ONLY that registered agent — never the full
+        // super-agent orchestrator (which would expose every local specialist +
+        // MCP + remotes). No `a2aRef` ⇒ the unchanged full-orchestrator chat.
+        if (a2aRef !== undefined) {
+          if (!deps.runAgentTurn) {
+            // Permanent defect (never a silent fall-through to the orchestrator):
+            // an a2aRef job requires the single-agent runner to be wired.
+            throw new Error(
+              'chat job carries a2aRef but no runAgentTurn dep is wired',
+            );
+          }
+          return deps.runAgentTurn({
+            ref: a2aRef,
+            task,
+            signal,
+            runId: requireRunId(job),
+          });
+        }
         // Execute under the job's pre-minted runId (T17 resolved the T16 seam
         // gap): RunChatTurn now accepts a runId and threads it into
         // `withMcpRun`, so the chat run dir === job.runId (the id returned as

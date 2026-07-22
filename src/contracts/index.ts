@@ -1,3 +1,4 @@
+export * from './a2a.ts';
 export * from './dto.ts';
 export * from './enums.ts';
 export * from './events.ts';

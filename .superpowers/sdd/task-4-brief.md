@@ -1,66 +1,79 @@
-### Task 4: Queue provenance + chain-depth columns
+### Task 4: A2A skill allowlist store + ref resolution (HARD §7.4)
 
 **Files:**
-- Modify: `src/queue/types.ts:50-58` (`JobInput`), `:31-48` (`JobRecord`); `src/queue/migrations.ts` (append a migration); `src/queue/store.ts` (`JobRowRaw`, `toJobRecord`, `enqueue`)
-- Test: `tests/queue/store-origin.test.ts`
+- Create: `src/a2a/allowlist.ts`
+- Test: `tests/a2a/allowlist.test.ts`
 
 **Interfaces:**
-- Consumes: `RunOrigin` from `src/contracts/enums.ts`.
+- Consumes: `JobKind` from `../queue/types.ts`; `AGENTS` from `../../agents/index.ts`; `getCrew` from `../../crews/index.ts`; `getWorkflow` from `../../workflows/index.ts`; the `~/.agent`-style atomic-write idiom from `src/server/security/device-registry.ts`; `loadConfig` for `AGENT_A2A_SKILLS_PATH`.
 - Produces:
-  - `JobInput` gains `origin?: RunOrigin` and `chainDepth?: number`.
-  - `JobRecord` gains `origin: RunOrigin | undefined` and `chainDepth: number`.
-  - `JOB_MIGRATIONS` gains a third entry `add-origin-and-chain-depth`.
 
-- [ ] **Step 1: Write the failing test** — a job enqueued with `origin`/`chainDepth` reads them back; a default job reads `origin: undefined, chainDepth: 0`:
+```ts
+export type SkillEntry = {
+  skillId: string;
+  name: string;
+  description: string;
+  kind: JobKind;        // Chat | Crew | Workflow — the enqueue target kind
+  ref: string;          // registered agent name (AGENTS) | crew name | workflow name
+};
+export type ResolvedTarget = { kind: JobKind; ref: string };
+export type A2aAllowlist = {
+  list(): SkillEntry[];
+  /** Author-time validation: the ref MUST resolve to a REGISTERED agent/crew/
+   *  workflow for its kind, else throw AllowlistError. NEVER a "run anything"
+   *  entry (§7.4). */
+  put(entry: SkillEntry): void;
+  remove(skillId: string): void;
+  /** Invoke-time re-check: resolve a presented skillId to its target, or
+   *  undefined if unlisted (server resolves-then-rejects — never a fall-through
+   *  to a generic orchestrator run, §7.4). */
+  resolve(skillId: string): ResolvedTarget | undefined;
+};
+export function createA2aAllowlist(config: { path?: string }): A2aAllowlist;
+export function refExistsFor(kind: JobKind, ref: string): boolean; // AGENTS/getCrew/getWorkflow lookup
+```
+
+  File format: `{ skills: SkillEntry[] }` at `AGENT_A2A_SKILLS_PATH` (0700 dir / 0600 file, atomic temp+rename — byte-for-byte `device-registry.ts persist`). `put` validates `refExistsFor(entry.kind, entry.ref)` (Chat/Crew→`getCrew` or `AGENTS`, Workflow→`getWorkflow`) — throws `AllowlistError` on a non-existent ref, so an operator cannot expose a skill that maps to nothing. `resolve` re-reads and returns `{ kind, ref }` only for a listed `skillId`. Fail-closed on a corrupt (present-but-unparseable) file (throw, never `{ skills: [] }` — the `device-registry.ts load` precedent).
+
+- [ ] **Step 1: Write the failing tests** — a valid put/resolve round-trip; an unknown ref rejects at author-time; an unlisted skillId resolves to `undefined`:
 
 ```ts
 import { expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RunOrigin } from '../../src/contracts/enums.ts';
-import { createJobStore } from '../../src/queue/store.ts';
 import { JobKind } from '../../src/queue/types.ts';
+import { createA2aAllowlist } from '../../src/a2a/allowlist.ts';
 
-test('enqueue persists origin + chainDepth, defaults are undefined/0', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'jobs-'));
-  const store = createJobStore({ path: dir }, {});
-  const a = store.enqueue({ kind: JobKind.Chat, payload: {}, origin: RunOrigin.Schedule, chainDepth: 3 });
-  const b = store.enqueue({ kind: JobKind.Chat, payload: {} });
-  expect(store.getJob(a.id)?.origin).toBe(RunOrigin.Schedule);
-  expect(store.getJob(a.id)?.chainDepth).toBe(3);
-  expect(store.getJob(b.id)?.origin).toBeUndefined();
-  expect(store.getJob(b.id)?.chainDepth).toBe(0);
-  store.close();
+const p = () => join(mkdtempSync(join(tmpdir(), 'a2a-')), 'a2a-skills.json');
+
+test('put a valid agent-backed skill; resolve returns its target', () => {
+  const al = createA2aAllowlist({ path: p() });
+  al.put({ skillId: 'ask', name: 'Ask', description: 'qa',
+    kind: JobKind.Chat, ref: 'file_qa' }); // file_qa is a registered agent
+  expect(al.resolve('ask')).toEqual({ kind: JobKind.Chat, ref: 'file_qa' });
+  expect(al.list().map((s) => s.skillId)).toEqual(['ask']);
+});
+test('put rejects a skill whose ref is not a registered agent/crew/workflow (§7.4)', () => {
+  const al = createA2aAllowlist({ path: p() });
+  expect(() => al.put({ skillId: 'x', name: 'X', description: '',
+    kind: JobKind.Crew, ref: 'no_such_crew' })).toThrow();
+});
+test('resolve returns undefined for an unlisted skill (resolve-then-reject)', () => {
+  const al = createA2aAllowlist({ path: p() });
+  expect(al.resolve('ghost')).toBeUndefined();
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — `bun run test -- -t "enqueue persists origin"` → FAIL (columns/fields missing).
-- [ ] **Step 3: Write minimal implementation.**
-  - `src/queue/migrations.ts` — append:
-
-```ts
-  {
-    name: 'add-origin-and-chain-depth',
-    up: (db: Database) => {
-      // Slice 25: trigger-fired jobs carry provenance (RunOrigin.Schedule/
-      // Webhook/Api) so the runs `?origin=` facet lights up; chain_depth is the
-      // §7.3 A→B→A cycle guard — every hop increments it, fire.ts caps it.
-      db.run(`ALTER TABLE jobs ADD COLUMN origin TEXT`);
-      db.run(`ALTER TABLE jobs ADD COLUMN chain_depth INTEGER NOT NULL DEFAULT 0`);
-    },
-  },
-```
-
-  - `src/queue/types.ts` — add `origin?: RunOrigin` + `chainDepth?: number` to `JobInput`; `origin: RunOrigin | undefined` + `chainDepth: number` to `JobRecord`; `import { RunOrigin } from '../contracts/enums.ts'` at the top (one-directional; contracts imports nothing from queue).
-  - `src/queue/store.ts` — add `origin: string | null` + `chain_depth: number` to `JobRowRaw`; in `toJobRecord` set `origin: (r.origin ?? undefined) as RunOrigin | undefined, chainDepth: r.chain_depth`; in `enqueue` extend the INSERT column list + values with `origin` (`input.origin ?? null`) and `chain_depth` (`input.chainDepth ?? 0`).
-- [ ] **Step 4: Run test to verify it passes** → PASS.
-- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/queue/types.ts src/queue/migrations.ts src/queue/store.ts tests/queue/store-origin.test.ts && bun run test -- -t "claimNext"` (regression-check the existing claim tests still pass).
+- [ ] **Step 2: Run tests to verify they fail** → FAIL.
+- [ ] **Step 3: Write minimal implementation** per the Produces block; copy the `device-registry.ts` load/persist/atomic-write structure (fail-closed load). `refExistsFor`: `kind===Workflow ? !!getWorkflow(ref) : kind===Crew ? !!getCrew(ref) : (!!AGENTS[ref] || !!getCrew(ref))` (Chat may target an agent or a crew, per the launch surface).
+- [ ] **Step 4: Run tests to verify they pass** → PASS.
+- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/a2a/allowlist.ts tests/a2a/allowlist.test.ts`.
 
 ```bash
-git add src/queue/types.ts src/queue/migrations.ts src/queue/store.ts tests/queue/store-origin.test.ts
-git commit -m "feat(queue): job origin + chain_depth columns"
+git add src/a2a/allowlist.ts tests/a2a/allowlist.test.ts
+git commit -m "feat(a2a): least-privilege skill allowlist store + author-time ref resolution"
 ```
 
-*Model: Opus (touches the shared claim-path SQL + column ordering; a mis-ordered INSERT value list silently corrupts every job row).* Reviewer verifies the INSERT column/value lists stay aligned and the existing `JobDtoSchema` still parses (it ignores `chainDepth`; `availableAt`/`retriedFrom` unaffected).
+*Model: **Opus implementer + ADVERSARIAL-VERIFY (§7.4 least-privilege).** Reviewer probes: is there ANY path to expose an unregistered ref or a free-form "run anything" skill? Does `resolve` genuinely return `undefined` (never a default target) for an unlisted id? Is the load fail-closed on a corrupt file?*
 

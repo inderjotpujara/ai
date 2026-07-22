@@ -383,3 +383,42 @@ of runs when the Fired and SkippedOverlap firings shared a millisecond.
 - `bun run lint:file -- src/triggers/store.ts src/triggers/fire.ts tests/triggers/store.test.ts tests/triggers/fire.test.ts` — clean (no fixes).
 - `bun run test:file -- tests/triggers/` — **37 pass / 0 fail** (189 expect calls; +1 new determinism test).
 - Previously-flaky loop: `for i in {1..20}; do bun test tests/triggers/fire.test.ts -t "overlap skip"; done` → **PASSED 20/20**.
+
+---
+---
+
+# Slice 31 — Task 9: `src/a2a/server.ts` + `src/a2a/task-index.ts` (A2A JSON-RPC dispatch, §7.2 + §7.4)
+
+**Status: COMPLETE.** Commit `708d58c` — `feat(a2a): JSON-RPC server (message/send→enqueue, tasks/get, tasks/cancel)` on `slice-31-a2a-multimachine`.
+
+## Implemented
+
+- **`src/a2a/task-index.ts`** — `createTaskIndex()` → `{ taskIdForJob, jobIdForTask, contextFor, bind }`. taskId IS the jobId (1:1); durable identity needs no map. A tiny in-memory bidirectional map caches `taskId → jobId` + `contextId`; `jobIdForTask`/`contextFor` fall back to the durable identity (taskId itself) when the cache is cold post-restart, so identity survives a restart without persistence.
+- **`src/a2a/server.ts`** — `A2aServerDeps`, `A2aRpcResult`, `handleMessageSend`, `handleTasksGet`, `handleTasksCancel`, `dispatchA2aRpc`. Mirrors `handleJobEnqueue`'s pre-mint-runId + `createRun` + `jobStore.enqueue` shape. Per-kind payload: Chat→`{task}`, Crew/Workflow→`{name: ref, input}`, plus `a2aRef` (dispatch's zod schemas strip the extra key).
+- **`src/server/chat/task.ts`** (refactor) — extracted the fenced delimited-untrusted primitive into exported `delimitUntrusted(preamble, text)`, reused by both `buildTaskFromMessages` (byte-identical output — existing chat-task tests green) and the A2A server. `buildTaskFromMessages` can't be reused directly for a single inbound A2A message: it leaves the *latest* user turn unfenced (correct for local chat, wrong for a fully-untrusted remote peer).
+
+## TDD RED → GREEN
+
+- **RED**: moved both impl files aside → `bun test tests/a2a/server.test.ts` → `error: Cannot find module '../../src/a2a/server.ts'`, `0 pass 1 fail`. Restored.
+- **GREEN**: `bun test tests/a2a/server.test.ts tests/server/chat-task.test.ts` → `11 pass 0 fail, 37 expect()`.
+- 7 cases (6 brief + artifactId stability): listed-skill enqueue origin=Remote + Submitted + taskId===jobId; unlisted→-32004, enqueue spy NOT called; inbound parts fenced-untrusted (injected bare `TRANSCRIPT` neutralized → exactly 1 closing fence line); tasks/get Running→working; tasks/cancel→canceled (markCanceled fired); unknown method→-32601; two tasks/get on the same Done job return the SAME `job-done-1-artifact-0`.
+
+## Gate
+
+- `bun run typecheck` → clean.
+- `bun run lint:file -- src/a2a/server.ts src/a2a/task-index.ts src/server/chat/task.ts tests/a2a/server.test.ts` → exit 0, no warnings (removed `!` non-null assertions via a `req()` helper to match repo test convention).
+- `tests/a2a/` + `tests/server/chat-task.test.ts` → 32 pass. Full `tests/server` → 455 pass / 1 fail: `sse-reconcile.integration.test.ts` "late subscriber…", passes 3/3 in isolation — a pre-existing SSE-timing flake under full-suite concurrency, unreachable from a pure string builder + new A2A files.
+
+## Security self-check
+
+- **§7.4 resolve-then-reject BEFORE enqueue**: `deps.allowlist.resolve(skillId)` is the FIRST thing inside the span; `undefined` → `fail(-32004)` returned before `newRunId`/`createRun`/`enqueue`. NO fall-through — the only path to `enqueue` is a resolved target (test asserts enqueue spy length 0 on the unlisted path). Defense-in-depth: `buildJobPayload` returns undefined for any non-{Chat,Crew,Workflow} kind → also rejects pre-enqueue (a Pull/Build can never enqueue via A2A even under a tampered allowlist).
+- **§7.2 untrusted inbound content**: inbound text → `untrustedInboundText` → `delimitUntrusted` (neutralizeFence + `<<<TRANSCRIPT … TRANSCRIPT` fence). Never spliced as an instruction; embedded fence-closing lines neutralized (test proves exactly one bare closing line survives; text is not a leading instruction).
+- **taskId↔jobId identity across get/cancel**: `bind(job.id, job.id, contextId)`; get + cancel resolve `jobIdForTask(taskId)` (identity) → `getJob`, return `id: taskId`. 1:1 holds.
+- **artifactId stability**: `projectArtifacts` derives `${taskId}-artifact-0`, overriding `task-map`'s per-call `randomUUID()` → stable across polls (test-verified).
+
+## Notes / deviations
+
+- **`A2aServerDeps.pool?` (additive, optional)** — NOT in the brief's Produces block. The fixed deps had only `jobStore`, but a truly RUNNING job needs the pool's per-job AbortController to abort in-flight work (mirrors `server/jobs/cancel.ts`). Added OPTIONAL: present → `pool.cancel(id)` for a Running job; absent (unit tests, queued/terminal) → `jobStore.markCanceled(id)`. Task 12 wires the real pool. Backward-compatible with the declared shape.
+- **Error-code overlap `-32001`** — used here for A2A `TaskNotFoundError` (top-level RPC error on get/cancel of an unknown task). `task-map.ts` also defines `-32001` = `MISSING_CAPABILITY`, but that rides a *completed-but-failed task's terminal error field*, never the top-level RPC position — documented in-code. `-32004` "skill not allowed" aligns with A2A's `UnsupportedOperationError`.
+- **`createRun` API** matched the brief (`createRun(runsRoot, id)` in `src/run/run-store.ts`) — no deviation.
+- Persisted payload carries `a2aRef`; dispatch's per-kind zod schemas strip it (unknown-key strip) — inert provenance, not consumed by dispatch.

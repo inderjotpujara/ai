@@ -210,8 +210,7 @@ path to a recognizable n8n/CrewAI experience. The **Engine line** and
 | **Per-device pairing/revoke + break-glass root rotate (web UI)** — ✅ **shipped (Slice 25b)** | Slice 24's durable root→session auth had no browser-side management surface — pairing a device meant hand-editing state. Slice 25b adds the daemon's first **positive** device registry (`~/.agent/devices.json`) behind a new `requireTrustedLocal` gate (session guard **and** a genuinely loopback Host **and** allowed origin), plus `GET/POST /api/devices`, `POST /api/devices/:id/revoke`, and a break-glass `POST /api/security/rotate-root`, all surfaced in the console's Devices & Access tab (pairing QR, revoke, rotate-confirm). Distinct from Slice 26's remote **MCP-server** OAuth — this is auth *to our own daemon*. See [`docs/architecture.md`](architecture.md) §24.5. | secure remote access (Slice 24) ✅ |
 | **Scheduled / triggered agents** — ✅ **shipped (Slice 25)** | Cron- and event-driven (file added → process it) — the n8n "trigger" concept that turns workflows into **automations**. A durable poll-tick scheduler (`src/triggers/`) converges four sources — **cron** (Croner v10, atomic `BEGIN IMMEDIATE` claim, fire-once-on-boot misfire catch-up), **webhook** (`POST /hooks/:token`, outside the `/api` guard, token-hash + HMAC + replay window + rate limit), **file-watch** (chokidar v4, path-confined), and **job-chain** (a pool `onSettled` observer, depth-capped A→B→A cycle guard) — onto Slice 24's `POST /api/jobs` enqueue path via one `fire.ts` convergence point; fired runs thread `RunOrigin` provenance so the Slice-25b `?origin=` facet lights up for free. Both authoring surfaces ship (repo `triggers/index.ts` defs + full console/API CRUD); Slice 25b's stubbed Triggers tab is now a live console. See [`docs/architecture.md`](architecture.md) §"`src/triggers/` — trigger engine". | daemon ✅ |
 | **Resumable long jobs** (`--resume <run-id>`) — ✅ **shipped (Slice 24)** | Multi-hour crew/workflow jobs resume at **DAG-node** granularity via a custom per-node checkpoint (`src/workflow/checkpoint.ts`, atomic `runs/<id>/checkpoint.json`) — `--resume`/re-enqueue skips completed nodes with no re-execution; a durable boot re-enqueue auto-resumes interrupted durable jobs. (The `@ai-sdk/workflow` substrate was spike-ruled-out — it ships no durable store/DAG/resume.) See §24.4. | run store ✅ |
-| **Multi-machine** | Laptop delegates heavy work to the Mac Mini over the network. | daemon ✅ |
-| **A2A interop** | Expose this orchestrator as an agent other tools can call; consume external agents (Agent2Agent protocol). | daemon |
+| **Multi-machine + A2A interop** ⭐ — ✅ **shipped (Slice 31 — closes Phase E)** | Laptop delegates heavy work to another box over the network, and this orchestrator both **exposes** itself as an agent other A2A-speaking tools can call and **consumes** external agents. Shipped as one hand-rolled **A2A v1.0** layer (JSON-RPC over HTTP+SSE) over the Slice-24 daemon/queue: **expose** — `GET /.well-known/agent-card.json` (public discovery, `404` fail-safe while off) + `POST /api/a2a` (a SEPARATE A2A-Bearer credential verified BEFORE the body is parsed, then a replay guard, then a least-privilege allowlist resolve-then-reject) maps an inbound task onto the SAME `JobStore.enqueue` (`origin=Remote`); streaming re-frames the existing run-stream SSE engine. **Consume** — `src/a2a/client.ts` discovers+hash-pins a remote card (SSRF-guarded, hard-reject on any pin mismatch) and `src/a2a/mount.ts` shapes a `delegate_to_<name>` `ToolSet` matching the MCP mount's failure-returns contract — **spliced into a live CHAT session's tool set** via `liveRemoteDelegateTools` → `createOrchestrator` (both web + CLI chat, gated by `AGENT_A2A_ENABLED`, local agent wins on a name collision); crew/workflow consume-delegation remains a documented seam-ready follow-on (they build their toolset via a different seam). Manual invocation (`agent a2a call`, or the Federation console tab) still covers crew/workflow and direct use. Three real defects an adversarial review caught + fixed (allowlist kind-leak, terminal-SSE-frame ordering, a `submitted`-shell delegate bug). See [`docs/architecture.md`](architecture.md) §"`src/a2a/` — A2A interop". | daemon ✅ |
 
 ## Phase F — Capability breadth  *(pull in on demand — NOT the critical path)*
 
@@ -421,7 +420,7 @@ Slice 26), not license to create more.
           See `docs/architecture.md` §"Voice (web UI — Slice 30b Phase 7)",
           §"Telemetry (web UI — Slice 30b Phase 8)", §"Accessibility (a11y,
           web UI — Slice 30b Phase 8)", §7 "Observability".
-22. **Multi-machine + A2A interop** (Phase E, **Slice 31 — last**) — laptop delegates heavy work to the Mac Mini; expose this orchestrator as an agent others can call + consume external agents via A2A. **Moved to the very end** (user directive 2026-07-04): everything runs Mac-Mini-local by default and nothing else depends on it.
+22. ✅ **shipped, Slice 31 (closes Phase E)** — **Multi-machine + A2A interop** — one hand-rolled A2A v1.0 layer (JSON-RPC over HTTP+SSE) over the Slice-24 daemon/queue: **expose** registered agents/crews/workflows to a remote peer via a public agent card + a least-privilege allowlist + a separate A2A-Bearer-gated JSON-RPC endpoint mapping onto the same `JobStore.enqueue` (`origin=Remote`), and **consume** a remote peer's skills via a discover→hash-pin→persist client, driven from a new Ops-console Federation tab. Scope note: the consume-side `delegate_to_<name>` `ToolSet` is shaped to be a drop-in MCP-mount specialist, and — as of Task 29b — **is spliced into a live CHAT session** (`liveRemoteDelegateTools` → `createOrchestrator`, both web + CLI chat, gated by `AGENT_A2A_ENABLED`, local agent wins on a name collision); crew/workflow consume-delegation remains a documented seam-ready follow-on (they build their toolset via a different seam that doesn't yet consume `remoteTools`) — `agent a2a call` and the Federation tab's task history still cover crew/workflow and direct manual invocation. See [`docs/architecture.md`](architecture.md) §"`src/a2a/` — A2A interop".
 
 > **North star for the D→E arc:** a user should be able to describe *any* need
 > in chat — one specialist, a multi-step crew, a scheduled automation — and
@@ -442,11 +441,19 @@ Slice 26), not license to create more.
 > break-glass root rotate, all over the web — and **Slice 25 then shipped
 > the triggers/schedule backend itself**: a durable poll-tick scheduler
 > converging cron/webhook/file-watch/job-chain sources onto the Slice-24
-> queue, with the console's Triggers tab now fully live. What remains of E
-> is multi-machine + A2A (Slice 31).
+> queue, with the console's Triggers tab now fully live. **Slice 31 then
+> shipped multi-machine + A2A interop, closing Phase E entirely** — this
+> orchestrator can now both expose itself to, and consume, a remote A2A
+> peer over the same daemon/queue substrate (scope note: the consume-side
+> delegate tool is spliced into a live CHAT session — both web and CLI —
+> gated by `AGENT_A2A_ENABLED` with local-agent-wins on a name collision;
+> crew/workflow consume-delegation remains a documented seam-ready
+> follow-on; see the `src/a2a/` architecture-doc section for the full
+> narrative). **Phase E is now complete.**
 
-Modalities & multi-machine (Phases F + the deferred A2A) come in on demand —
-after the compose→verify→automate core exists.
+Modalities (Phase F) come in on demand — after the compose→verify→automate
+core exists; multi-machine/A2A no longer waits on it, having shipped as
+Slice 31 above.
 
 ### Backlog beyond Slice 30 (proposed 2026-07-05, not yet locked)
 
@@ -488,9 +495,16 @@ next slice is now **23** (Dependency major-upgrade), following Slice 21's
 landing (graceful degradation + retries, shipped 2026-07-05). **Codex
 (formerly Slice 22) was deferred by the user 2026-07-05 to the very end and
 renumbered Slice 38** — slot 22 is intentionally vacated. After 23 come 24–30
-per the committed sequence above, then the 31–38 backlog in order (each its
-own brainstorm → spec → plan → build cycle, one at a time). Slice 31 only
-becomes "next" once 30 ships; Codex/38 is deliberately last of all.
+per the committed sequence above, then Slice 31 (multi-machine + A2A interop,
+per item 22 of the recommended sequence above — this claimed the number 31
+before this backlog table's own provisional 2026-07-05 numbering, and has
+now **shipped**), then the remaining **32–37 backlog in order** (each its own
+brainstorm → spec → plan → build cycle, one at a time; the table row still
+labeled "31 — Self-improvement loop" below is this backlog's own stale
+provisional number from before Slice 31 was claimed by A2A — treat the
+table's **relative order**, not its literal numbers, as authoritative until
+each slice's own brainstorm locks a final number); Codex/38 is deliberately
+last of all.
 
 ---
 

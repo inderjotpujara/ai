@@ -1,3 +1,4 @@
+import type { A2aServerDeps } from '../a2a/server.ts';
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import type { WorkerPool } from '../queue/pool.ts';
@@ -5,6 +6,18 @@ import type { JobStore } from '../queue/store.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
+import { notFound as a2aNotFound, handleAgentCard } from './a2a/card.ts';
+import { handleA2aConfig } from './a2a/config.ts';
+import {
+  handleRemoteAdd,
+  handleRemoteDelete,
+  handleRemoteList,
+} from './a2a/remotes.ts';
+import { handleRemoteTest } from './a2a/remotes-test.ts';
+import { handleA2aRpc } from './a2a/rpc.ts';
+import { handleA2aSkillsPut } from './a2a/skills.ts';
+import { handleA2aTokenIssue, handleA2aTokenRevoke } from './a2a/token.ts';
+
 import type { RunBuilderTurn } from './builders/build.ts';
 import { handleBuilderBuild } from './builders/build.ts';
 import {
@@ -62,6 +75,7 @@ import {
   createTokenGuard,
   type SessionGuard,
 } from './security/token.ts';
+import { requireTrustedLocal } from './security/trusted-local.ts';
 import { handleSessionDelete } from './sessions/delete.ts';
 import { handleSessionDetail } from './sessions/detail.ts';
 import { handleSessionExport } from './sessions/export.ts';
@@ -196,6 +210,28 @@ export type ServerDeps = {
    *  otherwise undefined, and no scheduler/watcher handle is opened). Optional:
    *  the trigger routes degrade to 503 (via `need()`) when unset. */
   triggers?: TriggersEngine;
+  /** A2A deps, BOTH directions (Slice 31). Present only when the daemon/server
+   *  wires A2A up. Grown in Increment 3 (Task 10) from just `{ allowlist }` to
+   *  the full `A2aServerDeps` (allowlist + jobStore + runsRoot + taskIndex, plus
+   *  the optional running-job `pool` the route wires in Task 12) so the
+   *  JSON-RPC handler can enqueue/resolve/project tasks; Increment 5 (Task 16)
+   *  added `enrollment`, the D5 A2A-Bearer store the `POST /api/a2a` gate
+   *  verifies inbound requests against (verify-before-parse + replay window);
+   *  Increment 6 (Task 20/22) grew it with the CONSUME side — `remotes`
+   *  (`RemoteStore`) and `client` (`A2aClient`) — both built and wired by the
+   *  Federation console routes below. The card route reads only `allowlist`.
+   *  **NOTE (capstone B7b): absence is now a featureless 404, NOT a 503, for
+   *  the two PUBLIC/bearer A2A routes** (the card route and `POST /api/a2a`) —
+   *  those return the SAME `notFound()` (`a2a/card.ts`) they already return
+   *  when `AGENT_A2A_ENABLED` is off, so "disabled" and "unconfigured" are one
+   *  uniform, fingerprint-free surface. Every OTHER `/api/a2a/*` admin route
+   *  (config/skills/token/remotes — all behind the browser device session
+   *  guard, never public) still degrades to 503 via `need()` when this is
+   *  unset; that shape is unchanged. CONSTRUCTED at boot by `buildA2aServerDeps`
+   *  (Slice 31, Task 18) — `server/a2a/wire.ts` — ONLY when `AGENT_A2A_ENABLED`
+   *  is on, so with the flag off this stays undefined and the whole surface is
+   *  dark. */
+  a2a?: A2aServerDeps;
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
@@ -278,6 +314,33 @@ export function buildFetch(
         });
       }
 
+      // A2A public discovery (Slice 31 §Increment 2). The ONE unauthenticated
+      // READ on the expose surface — a remote orchestrator fetches it with NO
+      // Bearer to learn our advertised skills before enrolling. Placed here for
+      // the SAME reason as the /hooks branch: AFTER the Host/Origin perimeter
+      // (still enforced above) but BEFORE the /api session guard, so it never
+      // requires our browser bearer yet is still fronted by DNS-rebinding/CSRF
+      // defense. Only GET matches; any other method falls through to
+      // serveStatic (a .json path → plain 404), so nothing else is exposed
+      // here. Fail-safe layering: `handleAgentCard` 404s whenever
+      // AGENT_A2A_ENABLED is off (discovery reveals nothing until an operator
+      // enables the surface). An unwired `deps.a2a` (capstone B7b) returns the
+      // SAME featureless 404 — NOT the generic need()-shaped 503 — so a
+      // disabled-by-flag daemon and a disabled-by-missing-dep daemon are
+      // byte-identical to a caller; neither leaks that A2A exists here.
+      if (
+        req.method === 'GET' &&
+        url.pathname === '/.well-known/agent-card.json'
+      ) {
+        if (!deps.a2a) {
+          return a2aNotFound();
+        }
+        return handleAgentCard(req, {
+          allowlist: deps.a2a.allowlist,
+          publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+        });
+      }
+
       if (url.pathname.startsWith('/api')) {
         // `navigator.sendBeacon` can't set an Authorization header, so the
         // beacon carries its token in the request BODY (not the URL — a query
@@ -288,7 +351,17 @@ export function buildFetch(
         // stays header-bearer-only. The exception is scoped to the beacon.
         const isBeacon =
           req.method === 'POST' && url.pathname === '/api/telemetry';
-        if (!isBeacon && !guard.verify(req)) {
+        // POST /api/a2a is the A2A JSON-RPC endpoint. It is let past THIS
+        // (browser DEVICE session) guard for the SAME structural reason as the
+        // beacon — but authenticates with a DIFFERENT credential: the A2A
+        // Bearer, verified inside `handleA2aRpc` against a SEPARATE token store
+        // (D5 two-stores split, added in Task 16). A device session token is
+        // NEVER accepted here — the route does not touch the device path at
+        // all. The Host/Origin perimeter above STILL fronts it, and the handler
+        // 404s while `AGENT_A2A_ENABLED` is off, so nothing is reachable until
+        // an operator enables the expose surface.
+        const isA2aRpc = req.method === 'POST' && url.pathname === '/api/a2a';
+        if (!isBeacon && !isA2aRpc && !guard.verify(req)) {
           return json({ error: 'unauthorized' }, 401);
         }
         return await handleApi(req, url, deps, guard);
@@ -340,6 +413,24 @@ async function handleApi(
         }
         if (req.method === 'POST' && url.pathname === '/api/telemetry') {
           const res = await handleTelemetry(req, guard);
+          rec.status(res.status);
+          return res;
+        }
+        // A2A JSON-RPC. Reached PAST the device session guard (see the
+        // guard-exception in buildFetch) but still behind the Host/Origin
+        // perimeter; `handleA2aRpc` owns the enable-gate (404 when
+        // AGENT_A2A_ENABLED is off) and, from Task 16, the A2A-Bearer check.
+        // An unwired `deps.a2a` (capstone B7b) is handled HERE, deliberately
+        // bypassing the generic `need()` → `DepUnavailableError` → 503 path
+        // (below) that every other admin a2a/* route still uses: this is one
+        // of the two PUBLIC/bearer A2A routes, so absence returns the SAME
+        // featureless 404 the flag-off path returns, not a 503 fingerprint.
+        if (req.method === 'POST' && url.pathname === '/api/a2a') {
+          if (!deps.a2a) {
+            rec.status(404);
+            return a2aNotFound();
+          }
+          const res = await handleA2aRpc(req, deps.a2a);
           rec.status(res.status);
           return res;
         }
@@ -480,6 +571,137 @@ async function handleApi(
               sessionTokens: need(deps.sessionTokens, 'sessionTokens'),
               deviceRegistry: need(deps.deviceRegistry, 'deviceRegistry'),
               bindInfo: need(deps.bindInfo, 'bindInfo'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // --- A2A config console (Slice 31 Task 17) -----------------------
+        // The DEVICE-session-guarded, trusted-local config surface the
+        // Federation tab reads/writes — DISTINCT from the A2A-Bearer protocol
+        // route `POST /api/a2a` above. All four are trusted-local; the mutating
+        // handlers gate internally (the `handleDeviceRevoke` precedent), while
+        // the GET view (whose handler takes no req/guard) is gated here. An
+        // unwired `deps.a2a` degrades to 503 via `need` (the outer catch maps
+        // `DepUnavailableError`). Action (`/token`) precedes the `:id` detail.
+        if (req.method === 'GET' && url.pathname === '/api/a2a/config') {
+          const forbidden = requireTrustedLocal(req, guard, deps.policy);
+          if (forbidden) {
+            rec.status(forbidden.status);
+            return forbidden;
+          }
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleA2aConfig({
+            allowlist: a2a.allowlist,
+            enrollment: a2a.enrollment,
+            publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+          });
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'PUT' && url.pathname === '/api/a2a/skills') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleA2aSkillsPut(
+            req,
+            {
+              allowlist: a2a.allowlist,
+              enrollment: a2a.enrollment,
+              publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/a2a/token') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleA2aTokenIssue(
+            req,
+            { enrollment: a2a.enrollment, policy: deps.policy },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action-before-:id: this bare-:id DELETE follows the fixed `/token`
+        // POST above so `POST /api/a2a/token` is never captured as a revoke id.
+        const a2aTokenRevoke = url.pathname.match(
+          /^\/api\/a2a\/token\/([^/]+)$/,
+        );
+        if (req.method === 'DELETE' && a2aTokenRevoke?.[1]) {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleA2aTokenRevoke(
+            a2aTokenRevoke[1],
+            req,
+            { enrollment: a2a.enrollment, policy: deps.policy },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // --- A2A remotes (CONSUME side, Slice 31 Task 22) -------------------
+        // The Federation console's remote-agent CRUD — which remote peers
+        // THIS node delegates to, distinct from the expose-side token/skills
+        // routes above. All four gate `requireTrustedLocal` INTERNALLY (the
+        // `handleA2aTokenIssue`/`handleA2aTokenRevoke` precedent), so this
+        // block just narrows the optional CONSUME deps via `need` (a missing
+        // `deps.a2a`/`.remotes`/`.client` degrades to 503, never a throw). The
+        // `/test` dry-run action is matched before the bare-`:name` DELETE
+        // detail below, mirroring the `/token` vs `/token/:id` ordering.
+        if (req.method === 'GET' && url.pathname === '/api/a2a/remotes') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleRemoteList(
+            req,
+            {
+              remotes: need(a2a.remotes, 'a2a.remotes'),
+              client: need(a2a.client, 'a2a.client'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/a2a/remotes/test') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleRemoteTest(
+            req,
+            { client: need(a2a.client, 'a2a.client'), policy: deps.policy },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/a2a/remotes') {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = await handleRemoteAdd(
+            req,
+            {
+              remotes: need(a2a.remotes, 'a2a.remotes'),
+              client: need(a2a.client, 'a2a.client'),
+              policy: deps.policy,
+            },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        // Action-before-:id: this bare-:name DELETE follows the `/test`
+        // action above so `POST /api/a2a/remotes/test` is never captured here.
+        const a2aRemoteDelete = url.pathname.match(
+          /^\/api\/a2a\/remotes\/([^/]+)$/,
+        );
+        if (req.method === 'DELETE' && a2aRemoteDelete?.[1]) {
+          const a2a = need(deps.a2a, 'a2a');
+          const res = handleRemoteDelete(
+            a2aRemoteDelete[1],
+            req,
+            {
+              remotes: need(a2a.remotes, 'a2a.remotes'),
+              client: need(a2a.client, 'a2a.client'),
               policy: deps.policy,
             },
             guard,

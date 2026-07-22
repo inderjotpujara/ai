@@ -1,4 +1,5 @@
 import qwenRouter from '../../../models/qwen-router.ts';
+import { liveRemoteDelegateTools } from '../../a2a/mount.ts';
 import { runChatSession } from '../../cli/run-chat-session.ts';
 import { createSelectHook } from '../../cli/select-hook.ts';
 import { withMcpRun } from '../../cli/with-mcp-run.ts';
@@ -133,6 +134,12 @@ export function createRealRunChatTurn(
             routerNumCtx: engine.routerNumCtx(),
             mediaStore: store,
             memoryStore,
+            // Slice 31 (Task 29b): surface every configured A2A remote as a
+            // `delegate_to_<name>` orchestrator delegate for THIS turn. Flag-
+            // gated + fresh-read inside the helper (`AGENT_A2A_ENABLED` off ⇒
+            // `{}`, zero change); no peer is contacted at build, only when the
+            // model invokes the delegate.
+            remoteTools: liveRemoteDelegateTools(),
           },
         });
         return result;

@@ -615,6 +615,80 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: false,
     doc: 'Governs ONLY whether a standalone startWebServer (no injected daemon queue) auto-constructs and starts its own triggers engine. Defaults OFF so an existing/ad-hoc startWebServer() (as every current server test calls it) never spins a scheduler, watches files, or leaves an open handle — the I3 invariant. The daemon always constructs+injects its engine explicitly (via opts.triggers, ignoring this flag), so the real deployment runs triggers unconditionally; the flag is the standalone-server opt-in (AGENT_TRIGGERS_ENABLED=1). (No AGENT_TRIGGERS_PATH knob — the repo registry is the compile-time triggers/index.ts import, so a path override would have no consumer.)',
   },
+
+  // --- A2A interop (Slice 31) ---
+  {
+    env: 'AGENT_A2A_ENABLED',
+    kind: 'boolean',
+    def: false,
+    doc: 'Gates the two RUNTIME A2A surfaces: (1) the EXPOSE server — the card route (`server/a2a/card.ts`) 404s and `POST /api/a2a` (`server/a2a/rpc.ts`) rejects when off; and (2) as of Task 29b, CONSUME-side LIVE in-session mounting — `liveRemoteDelegateTools` (`a2a/mount.ts`) returns `{}` when off, so a configured remote surfaces as a `delegate_to_<name>` orchestrator delegate mid-turn only when this is on. Default OFF so the daemon neither exposes anything nor live-mounts any remote until an operator authors an allowlist + issues a token from the Federation tab; flipping it on lights up both those runtime surfaces at once. It does NOT gate the standalone `agent a2a` operator CLI (skills/token/remotes/call/card): that is an explicit, deliberate operator action against local stores + a chosen peer, so `agent a2a call` delegates to a remote even with this flag OFF — the flag governs the always-on daemon surfaces, not one-shot operator commands.',
+  },
+  {
+    env: 'AGENT_A2A_CARD_TTL',
+    kind: 'number',
+    def: 300,
+    doc: 'card `Cache-Control: max-age` seconds (`a2a/card.ts`).',
+  },
+  {
+    env: 'AGENT_A2A_REPLAY_WINDOW_MS',
+    kind: 'number',
+    def: 300_000,
+    doc: 'inbound request replay window; a request whose timestamp is outside ±window is rejected (`a2a/enroll.ts` / `server/a2a/rpc.ts`, §7.2).',
+  },
+  {
+    env: 'AGENT_A2A_MAX_SEEN_NONCES',
+    kind: 'number',
+    def: 50_000,
+    doc: '§7.2 anti-replay hard cap: the maximum number of seen nonces the replay guard remembers (`a2a/replay-guard.ts`). Well past the count a legitimate peer emits inside one window; a bound purely to cap memory under a distinct-nonce flood — the oldest is evicted once the count crosses it. A config knob (not a hardcode) mirroring the window-is-a-knob discipline.',
+  },
+  {
+    env: 'AGENT_A2A_MAX_TASK_INDEX',
+    kind: 'number',
+    def: 50_000,
+    doc: '§7.3 memory bound: the maximum number of A2A taskId→jobId / contextId bindings the in-memory task index retains (`a2a/task-index.ts`). The oldest binding is evicted once the count crosses it, so a long-lived daemon fielding many remote tasks cannot grow the map without limit. Identity survives eviction — `taskId === jobId` resolves from the durable job store regardless — and the contextId falls back to the taskId. Env-fallback only.',
+  },
+  {
+    env: 'AGENT_A2A_SKILLS_PATH',
+    kind: 'string',
+    def: 'a2a-skills.json',
+    doc: 'expose allowlist store path, mirroring `AGENT_QUEUE_PATH` (`a2a/allowlist.ts`). The issued-token registry lives in a SEPARATE file — see `AGENT_A2A_TOKENS_PATH`.',
+  },
+  {
+    env: 'AGENT_A2A_TOKENS_PATH',
+    kind: 'string',
+    def: 'a2a-tokens.json',
+    doc: 'issued A2A Bearer token registry; SEPARATE file from the allowlist [AGENT_A2A_SKILLS_PATH] because the two use different top-level JSON shapes — the allowlist persists `{skills:[...]}` (an object) while the token registry persists `[...]` (an array), so sharing one path fail-closed-crashes the daemon on boot (enroll.ts `load()` throws on a non-array). Sibling of the allowlist by default. Read at `a2a/enroll.ts`.',
+  },
+  {
+    env: 'AGENT_A2A_REMOTES_PATH',
+    kind: 'string',
+    def: '~/.config/ai/a2a-remotes.json',
+    doc: 'consume remote-agent store; the leading `~` is expanded at the read site (`a2a/remotes.ts`), 0700 dir / 0600 file.',
+  },
+  {
+    env: 'AGENT_A2A_FETCH_TIMEOUT_MS',
+    kind: 'number',
+    def: 15_000,
+    doc: '§7.3 malicious-peer DoS guard: wall-clock timeout (ms) applied to EVERY outbound remote fetch — discover/verifyPin/invoke — so a hostile peer that hangs the socket can never stall the local process (`a2a/client.ts`). Mirrors the Slice-21 reliability wall-clock posture on this outbound path.',
+  },
+  {
+    env: 'AGENT_A2A_MAX_CARD_BYTES',
+    kind: 'number',
+    def: 262_144,
+    doc: '§7.3 malicious-peer DoS guard: hard byte cap on any remote response body (agent card or invoke result). A body exceeding it — by declared Content-Length OR by streamed byte count for a lying/absent header — is rejected before it can be buffered whole, preventing a memory-exhaustion DoS (`a2a/client.ts`). Default 262144 = 256 KiB (a card is small).',
+  },
+  {
+    env: 'AGENT_A2A_TASK_TIMEOUT_MS',
+    kind: 'number',
+    def: 120_000,
+    doc: "Overall wall-clock budget (ms) for a `delegate_to_<name>` consume-side delegation: `message/send` returns a `submitted` task, then `a2a/mount.ts` polls `tasks/get` until the remote task reaches a terminal state or this budget is exhausted (→ structured `{ error: 'remote task timed out' }`, never a hang). Default 120000 = 2 min.",
+  },
+  {
+    env: 'AGENT_A2A_POLL_INTERVAL_MS',
+    kind: 'number',
+    def: 1_000,
+    doc: 'Interval (ms) between `tasks/get` polls in the `delegate_to_<name>` send→poll-to-terminal loop (`a2a/mount.ts`), while the remote task is still `submitted`/`working`. Default 1000 = 1s.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in
