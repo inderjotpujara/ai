@@ -29,8 +29,11 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { loadConfig } from '../config/schema.ts';
+import { createLogger } from '../log/logger.ts';
 import { expandHome } from '../triggers/confine.ts';
 import type { RemoteAgent } from './client.ts';
+
+const log = createLogger('a2a.remotes');
 
 /**
  * The remote-name charset — IDENTICAL to `A2aRemoteAddRequestSchema.name`
@@ -150,26 +153,45 @@ function load(path: string): RemoteAgent[] {
         `to start with an unreadable remote store (fail closed).`,
     );
   }
-  return parsed
-    .filter(
-      (r): r is RemoteAgent =>
-        typeof r === 'object' &&
-        r !== null &&
-        typeof (r as RemoteAgent).name === 'string' &&
-        typeof (r as RemoteAgent).baseUrl === 'string' &&
-        typeof (r as RemoteAgent).cardUrl === 'string' &&
-        typeof (r as RemoteAgent).token === 'string' &&
-        typeof (r as RemoteAgent).pinnedCardHash === 'string' &&
-        typeof (r as RemoteAgent).skillId === 'string',
-    )
-    .map(
-      (r): RemoteAgent => ({
-        name: r.name,
-        baseUrl: r.baseUrl,
-        cardUrl: r.cardUrl,
-        token: r.token,
-        pinnedCardHash: r.pinnedCardHash,
-        skillId: r.skillId,
-      }),
+  // Otherwise-well-formed except `skillId` — a pre-Task-30-FIX legacy record
+  // (persisted before `skillId` existed on disk). Distinct from `isRemote`
+  // below so a genuinely malformed entry (missing name/baseUrl/etc.) is
+  // dropped silently as before, while a legacy skillId-less record is
+  // dropped LOUDLY (it once named a real remote whose delegation target is
+  // now unknown — fail closed, but tell the operator so it can be re-added).
+  const isLegacyShape = (r: unknown): boolean =>
+    typeof r === 'object' &&
+    r !== null &&
+    typeof (r as RemoteAgent).name === 'string' &&
+    typeof (r as RemoteAgent).baseUrl === 'string' &&
+    typeof (r as RemoteAgent).cardUrl === 'string' &&
+    typeof (r as RemoteAgent).token === 'string' &&
+    typeof (r as RemoteAgent).pinnedCardHash === 'string' &&
+    typeof (r as RemoteAgent).skillId !== 'string';
+  const isRemote = (r: unknown): r is RemoteAgent =>
+    typeof r === 'object' &&
+    r !== null &&
+    typeof (r as RemoteAgent).name === 'string' &&
+    typeof (r as RemoteAgent).baseUrl === 'string' &&
+    typeof (r as RemoteAgent).cardUrl === 'string' &&
+    typeof (r as RemoteAgent).token === 'string' &&
+    typeof (r as RemoteAgent).pinnedCardHash === 'string' &&
+    typeof (r as RemoteAgent).skillId === 'string';
+  const droppedCount = parsed.filter(isLegacyShape).length;
+  if (droppedCount > 0) {
+    log.warn(
+      `dropped ${droppedCount} legacy remote(s) lacking skillId — re-add them`,
+      { path, count: droppedCount },
     );
+  }
+  return parsed.filter(isRemote).map(
+    (r): RemoteAgent => ({
+      name: r.name,
+      baseUrl: r.baseUrl,
+      cardUrl: r.cardUrl,
+      token: r.token,
+      pinnedCardHash: r.pinnedCardHash,
+      skillId: r.skillId,
+    }),
+  );
 }

@@ -66,26 +66,42 @@ export type RemoteAgent = {
  * rule against the just-discovered `A2aAgentCard`; the client itself never
  * chooses a skill.
  */
+/** Same cap as `A2aRemoteAddRequestSchema.skillId` (`src/contracts/a2a.ts`) —
+ *  that schema only bounds the OPERATOR-typed explicit skillId; a sole-skill
+ *  auto-pick or a CLI-resolved id both flow from the peer-controlled card and
+ *  never pass through the schema, so `resolveSkillId` re-enforces the same
+ *  cap here for every path before a skillId is ever persisted. */
+const MAX_SKILL_ID_LENGTH = 128;
+
 export function resolveSkillId(card: A2aAgentCard, explicit?: string): string {
   const ids = card.skills.map((s) => s.id);
   const available = ids.length === 0 ? '(none)' : ids.join(', ');
-  if (explicit !== undefined && explicit !== '') {
-    if (ids.includes(explicit)) return explicit;
+  const chosen = ((): string => {
+    if (explicit !== undefined && explicit !== '') {
+      if (ids.includes(explicit)) return explicit;
+      throw new Error(
+        `remote does not advertise skillId ${JSON.stringify(explicit)} ` +
+          `(available skills: ${available})`,
+      );
+    }
+    if (ids.length === 1) return ids[0] as string;
+    if (ids.length === 0) {
+      throw new Error(
+        'remote advertises no skills — nothing to delegate to; refusing to add',
+      );
+    }
     throw new Error(
-      `remote does not advertise skillId ${JSON.stringify(explicit)} ` +
-        `(available skills: ${available})`,
+      `remote advertises multiple skills (${available}) — ` +
+        'pass an explicit skillId to select one',
+    );
+  })();
+  if (chosen.length > MAX_SKILL_ID_LENGTH) {
+    throw new Error(
+      `resolved skillId ${JSON.stringify(chosen)} exceeds the ` +
+        `${MAX_SKILL_ID_LENGTH}-char cap (length ${chosen.length}) — refusing to add`,
     );
   }
-  if (ids.length === 1) return ids[0] as string;
-  if (ids.length === 0) {
-    throw new Error(
-      'remote advertises no skills — nothing to delegate to; refusing to add',
-    );
-  }
-  throw new Error(
-    `remote advertises multiple skills (${available}) — ` +
-      'pass an explicit skillId to select one',
-  );
+  return chosen;
 }
 
 export type DiscoverResult =

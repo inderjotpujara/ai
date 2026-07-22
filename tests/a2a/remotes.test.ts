@@ -1,9 +1,14 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RemoteAgent } from '../../src/a2a/client.ts';
 import { createRemoteStore } from '../../src/a2a/remotes.ts';
+import { setLogSink } from '../../src/log/logger.ts';
+
+afterEach(() => {
+  setLogSink(undefined);
+});
 
 function tempPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'a2a-remotes-')), 'a2a-remotes.json');
@@ -93,6 +98,42 @@ test('a non-array store file fails closed (throws at construction)', () => {
   const path = tempPath();
   writeFileSync(path, '{"name":"x"}');
   expect(() => createRemoteStore({ path })).toThrow();
+});
+
+test('load drops a legacy skillId-less record but warns exactly once (review minor 1)', () => {
+  const path = tempPath();
+  const legacy = { ...remote({ name: 'old-peer' }) } as Partial<RemoteAgent>;
+  delete legacy.skillId;
+  writeFileSync(path, JSON.stringify([remote({ name: 'good-peer' }), legacy]));
+
+  const lines: string[] = [];
+  setLogSink((l) => lines.push(l));
+
+  const store = createRemoteStore({ path });
+
+  expect(store.list().map((r) => r.name)).toEqual(['good-peer']);
+  const records = lines.map((l) => JSON.parse(l));
+  const warnings = records.filter((r) => r.level === 'warn');
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]?.msg).toContain('1 legacy remote');
+  expect(warnings[0]?.msg).toMatch(
+    /dropped 1 legacy remote\(s\) lacking skillId — re-add them/,
+  );
+});
+
+test('load does not warn when zero legacy records are dropped', () => {
+  const path = tempPath();
+  writeFileSync(path, JSON.stringify([remote({ name: 'good-peer' })]));
+
+  const lines: string[] = [];
+  setLogSink((l) => lines.push(l));
+
+  createRemoteStore({ path });
+
+  const warnings = lines
+    .map((l) => JSON.parse(l))
+    .filter((r) => r.level === 'warn');
+  expect(warnings).toHaveLength(0);
 });
 
 test('an absent store file is a legitimate empty list, not an error', () => {

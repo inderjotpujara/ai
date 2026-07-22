@@ -66,3 +66,13 @@ test('an empty-string explicit skillId is treated as absent (falls back to the r
   // multi with empty explicit → still ambiguous → error
   expect(() => resolveSkillId(card([skill('a'), skill('b')]), '')).toThrow();
 });
+
+test('a sole/chosen skill id over the 128-char cap throws (review minor 2)', () => {
+  const tooLong = 'x'.repeat(129);
+  expect(() => resolveSkillId(card([skill(tooLong)]))).toThrow(/128/);
+});
+
+test('a sole/chosen skill id at exactly the 128-char cap is ok', () => {
+  const atCap = 'x'.repeat(128);
+  expect(resolveSkillId(card([skill(atCap)]))).toBe(atCap);
+});
