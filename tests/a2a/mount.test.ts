@@ -28,6 +28,7 @@ function remote(name: string): RemoteAgent {
     cardUrl: `https://${name}.ts.net/.well-known/agent-card.json`,
     token: 'secret',
     pinnedCardHash: 'hash',
+    skillId: `${name}-skill`,
   };
 }
 
@@ -158,6 +159,36 @@ test('delegate polls tasks/get from submitted → working → completed and retu
   // The remote's COMPLETED answer is returned (pre-fix code returned {error}).
   expect(out.text).toBe('the remote answer');
   expect(out.error).toBeUndefined();
+});
+
+test('delegate sends metadata.skillId = the remote stored skillId on message/send (two-box live-verify defect: -32004 skill not allowed)', async () => {
+  const { client, calls } = lifecycleClient('answer', 0);
+  const peer = remote('gated'); // skillId === 'gated-skill'
+  const set = remoteAsToolSet(peer, client, FAST);
+
+  const out = (await set.delegate_to_gated?.execute?.(
+    { task: 'do it' },
+    OPTS,
+  )) as {
+    text?: string;
+    error?: string;
+  };
+  expect(out.text).toBe('answer');
+
+  // The message/send invoke MUST carry the skill-gated peer's stored skillId in
+  // params.metadata — a skill-gated EXPOSE peer rejects an absent skillId with
+  // JSON-RPC -32004 BEFORE enqueue (§7.4). Pre-fix code sent only { message }.
+  const send = calls.find((c) => c.method === A2aMethod.MessageSend);
+  expect(send).toBeDefined();
+  const params = send?.params as {
+    message: unknown;
+    metadata?: { skillId?: string };
+  };
+  expect(params.metadata?.skillId).toBe('gated-skill');
+  // tasks/get polling carries NO skill metadata (no skill needed to poll).
+  const get = calls.find((c) => c.method === A2aMethod.TasksGet);
+  const getParams = get?.params as { metadata?: unknown };
+  expect(getParams?.metadata).toBeUndefined();
 });
 
 test('a terminal failed remote task returns a structured error (never the text, never a throw)', async () => {

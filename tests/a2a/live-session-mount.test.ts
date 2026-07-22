@@ -36,6 +36,7 @@ function remote(name: string): RemoteAgent {
     cardUrl: `https://${name}.ts.net/.well-known/agent-card.json`,
     token: 'secret',
     pinnedCardHash: 'hash',
+    skillId: `${name}-skill`,
   };
 }
 

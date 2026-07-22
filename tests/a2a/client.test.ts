@@ -100,6 +100,7 @@ test('verifyPin passes when the re-fetched card still matches the pin', async ()
     baseUrl: BASE_URL,
     cardUrl: CARD_URL,
     token: 'secret-bearer',
+    skillId: 'ask',
     pinnedCardHash: hashCard(card),
   };
   const res = await client.verifyPin(remote);
@@ -123,6 +124,7 @@ test('verifyPin hard-rejects a card whose body changed since the pin (§7.3 rug-
     baseUrl: BASE_URL,
     cardUrl: CARD_URL,
     token: 'secret-bearer',
+    skillId: 'ask',
     pinnedCardHash: pinned,
   };
   const res = await client.verifyPin(remote);
@@ -137,6 +139,7 @@ test('verifyPin blocks a redirecting host too', async () => {
     baseUrl: BASE_URL,
     cardUrl: CARD_URL,
     token: 'secret-bearer',
+    skillId: 'ask',
     pinnedCardHash: 'deadbeef',
   };
   const res = await client.verifyPin(remote);
@@ -159,6 +162,7 @@ test('invoke POSTs a JSON-RPC message/send to baseUrl with the Bearer + freshnes
     baseUrl: BASE_URL,
     cardUrl: CARD_URL,
     token: 'secret-bearer',
+    skillId: 'ask',
     pinnedCardHash: 'x',
   };
   const message = {
@@ -197,6 +201,7 @@ test('invoke surfaces a JSON-RPC error as a thrown error', async () => {
     baseUrl: BASE_URL,
     cardUrl: CARD_URL,
     token: 'secret-bearer',
+    skillId: 'ask',
     pinnedCardHash: 'x',
   };
   const message = {
@@ -232,6 +237,7 @@ test('invoke rejects a hung peer within the fetch timeout (§7.3 DoS)', async ()
     baseUrl: BASE_URL,
     cardUrl: CARD_URL,
     token: 'secret-bearer',
+    skillId: 'ask',
     pinnedCardHash: 'x',
   };
   const message = {

@@ -111,6 +111,7 @@ const remote: RemoteAgent = {
   cardUrl: 'http://peer.local/.well-known/agent-card.json',
   token: validToken,
   pinnedCardHash: 'sha256:unused-in-invoke',
+  skillId: 'ask',
 };
 
 const message = {

@@ -23,6 +23,7 @@ function makeRemote(overrides: Partial<RemoteAgent> = {}): RemoteAgent {
     cardUrl: 'https://peer.example/.well-known/agent-card.json',
     token: 'peer-bearer-secret',
     pinnedCardHash: 'sha256-abc123',
+    skillId: 'default-skill',
     ...overrides,
   };
 }
@@ -66,9 +67,9 @@ function harness() {
         calls.push({ fn: 'remotes.list', args: [] });
         return state.remotes;
       },
-      add: async (cardUrl, token) => {
-        calls.push({ fn: 'remotes.add', args: [cardUrl, token] });
-        return makeRemote({ name: 'peer-2', cardUrl, token });
+      add: async (cardUrl, token, skillId) => {
+        calls.push({ fn: 'remotes.add', args: [cardUrl, token, skillId] });
+        return makeRemote({ name: 'peer-2', cardUrl, token, skillId });
       },
       remove: (name) => {
         calls.push({ fn: 'remotes.remove', args: [name] });
@@ -173,11 +174,29 @@ test('remotes add calls deps.remotes.add and prints the pinned hash', async () =
   );
   expect(h.calls).toContainEqual({
     fn: 'remotes.add',
-    args: ['https://peer.example/card.json', 'peer-token'],
+    args: ['https://peer.example/card.json', 'peer-token', undefined],
   });
   const printed = h.out.join('\n');
   expect(printed).toContain('peer-2');
   expect(printed).toContain('sha256-abc123');
+});
+
+test('remotes add forwards an optional 3rd-arg skillId to deps.remotes.add', async () => {
+  const h = harness();
+  await runA2aCli(
+    [
+      'remotes',
+      'add',
+      'https://peer.example/card.json',
+      'peer-token',
+      'deep-research',
+    ],
+    h.deps,
+  );
+  expect(h.calls).toContainEqual({
+    fn: 'remotes.add',
+    args: ['https://peer.example/card.json', 'peer-token', 'deep-research'],
+  });
 });
 
 test('remotes remove calls deps.remotes.remove with the name', async () => {

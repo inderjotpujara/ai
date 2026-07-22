@@ -99,7 +99,7 @@ export function createRemoteStore(config: { path?: string }): RemoteStore {
             `${REMOTE_NAME_REGEX.source} (letters, digits, '_' or '-', 1–64 chars)`,
         );
       }
-      // Field-strip to exactly the five persisted fields (defense-in-depth):
+      // Field-strip to exactly the six persisted fields (defense-in-depth):
       // the type forbids extras at compile time only — an `as any`/spread
       // caller could otherwise smuggle a stray property onto disk.
       const clean: RemoteAgent = {
@@ -108,6 +108,7 @@ export function createRemoteStore(config: { path?: string }): RemoteStore {
         cardUrl: r.cardUrl,
         token: r.token,
         pinnedCardHash: r.pinnedCardHash,
+        skillId: r.skillId,
       };
       remotes = [...remotes.filter((x) => x.name !== clean.name), clean];
       persist();
@@ -158,7 +159,8 @@ function load(path: string): RemoteAgent[] {
         typeof (r as RemoteAgent).baseUrl === 'string' &&
         typeof (r as RemoteAgent).cardUrl === 'string' &&
         typeof (r as RemoteAgent).token === 'string' &&
-        typeof (r as RemoteAgent).pinnedCardHash === 'string',
+        typeof (r as RemoteAgent).pinnedCardHash === 'string' &&
+        typeof (r as RemoteAgent).skillId === 'string',
     )
     .map(
       (r): RemoteAgent => ({
@@ -167,6 +169,7 @@ function load(path: string): RemoteAgent[] {
         cardUrl: r.cardUrl,
         token: r.token,
         pinnedCardHash: r.pinnedCardHash,
+        skillId: r.skillId,
       }),
     );
 }

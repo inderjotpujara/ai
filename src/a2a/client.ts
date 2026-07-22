@@ -38,14 +38,55 @@ class ResponseTooLargeError extends Error {}
 
 /** A discovered + pinned remote peer. `token` is its A2A Bearer (secret;
  *  sent only to `baseUrl`); `pinnedCardHash` is the hash that must still match
- *  on every subsequent `verifyPin`. */
+ *  on every subsequent `verifyPin`; `skillId` is the peer skill EVERY delegation
+ *  targets — sent as `message/send` `metadata.skillId` so a skill-gated EXPOSE
+ *  peer resolves it through its §7.4 allowlist instead of rejecting the call
+ *  with `-32004 "skill not allowed"` (Task 30-FIX; skillId is NOT secret and MAY
+ *  appear in a DTO/log, unlike `token`). */
 export type RemoteAgent = {
   name: string;
   baseUrl: string;
   cardUrl: string;
   token: string;
   pinnedCardHash: string;
+  skillId: string;
 };
+
+/**
+ * Resolve, at add-time, WHICH advertised skill every future delegation to this
+ * remote will target (Task 30-FIX). Fail-closed — NEVER guesses:
+ *  - an explicit `skillId` that the card advertises → use it verbatim;
+ *  - else the card advertises exactly ONE skill → auto-pick it;
+ *  - else (0 skills, or >1 with no explicit choice, or an explicit id the card
+ *    does NOT advertise) → THROW, listing the available skill ids so the
+ *    operator can pass one. An empty-string explicit is treated as "absent".
+ *
+ * Lives here (beside `cardUrlHostMismatch`) because BOTH add surfaces — the HTTP
+ * handler (`server/a2a/remotes.ts`) and the CLI (`cli/a2a.ts`) — apply the same
+ * rule against the just-discovered `A2aAgentCard`; the client itself never
+ * chooses a skill.
+ */
+export function resolveSkillId(card: A2aAgentCard, explicit?: string): string {
+  const ids = card.skills.map((s) => s.id);
+  const available = ids.length === 0 ? '(none)' : ids.join(', ');
+  if (explicit !== undefined && explicit !== '') {
+    if (ids.includes(explicit)) return explicit;
+    throw new Error(
+      `remote does not advertise skillId ${JSON.stringify(explicit)} ` +
+        `(available skills: ${available})`,
+    );
+  }
+  if (ids.length === 1) return ids[0] as string;
+  if (ids.length === 0) {
+    throw new Error(
+      'remote advertises no skills — nothing to delegate to; refusing to add',
+    );
+  }
+  throw new Error(
+    `remote advertises multiple skills (${available}) — ` +
+      'pass an explicit skillId to select one',
+  );
+}
 
 export type DiscoverResult =
   | { ok: true; card: A2aAgentCard; pinnedCardHash: string }

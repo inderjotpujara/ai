@@ -22,6 +22,7 @@ import {
   cardUrlHostMismatch,
   type createA2aClient,
   type RemoteAgent,
+  resolveSkillId,
 } from '../../a2a/client.ts';
 import type { RemoteStore } from '../../a2a/remotes.ts';
 import {
@@ -57,6 +58,7 @@ export function toRemoteDto(r: RemoteAgent): A2aRemoteDto {
     baseUrl: r.baseUrl,
     cardUrl: r.cardUrl,
     pinnedCardHash: r.pinnedCardHash,
+    skillId: r.skillId,
   };
 }
 
@@ -103,6 +105,20 @@ export async function handleRemoteAdd(
     return json({ error: `discover failed: ${mismatch}` }, 400);
   }
 
+  // Task 30-FIX: resolve WHICH advertised skill every delegation targets, from
+  // the just-discovered card + the optional body `skillId`, fail-closed (never
+  // guesses). An ambiguous/absent/unlisted skill is a 400 — nothing persisted —
+  // so a stored remote always carries a valid delegation target.
+  let skillId: string;
+  try {
+    skillId = resolveSkillId(discovered.card, body.skillId);
+  } catch (err) {
+    return json(
+      { error: err instanceof Error ? err.message : 'skill selection failed' },
+      400,
+    );
+  }
+
   const remote: RemoteAgent = {
     name: body.name,
     // The card's own `url` is the remote's JSON-RPC endpoint (the same field
@@ -113,6 +129,7 @@ export async function handleRemoteAdd(
     cardUrl: body.cardUrl,
     token: body.token,
     pinnedCardHash: discovered.pinnedCardHash,
+    skillId,
   };
   deps.remotes.add(remote);
   return json(toRemoteDto(remote), 201);

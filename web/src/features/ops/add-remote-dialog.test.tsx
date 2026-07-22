@@ -10,20 +10,30 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-const DISCOVERED_CARD = {
-  name: 'peer-agent',
-  description: 'a remote peer',
-  version: '1.0.0',
-  protocolVersion: '1.0',
-  url: 'http://peer.example/a2a',
-  preferredTransport: 'JSONRPC',
-  skills: [],
-  capabilities: { streaming: false, pushNotifications: false },
-  defaultInputModes: ['text'],
-  defaultOutputModes: ['text'],
-  securitySchemes: {},
-  security: [],
-};
+function cardWith(skillIds: string[]) {
+  return {
+    name: 'peer-agent',
+    description: 'a remote peer',
+    version: '1.0.0',
+    protocolVersion: '1.0',
+    url: 'http://peer.example/a2a',
+    preferredTransport: 'JSONRPC',
+    skills: skillIds.map((id) => ({
+      id,
+      name: id,
+      description: `the ${id} skill`,
+      tags: [],
+    })),
+    capabilities: { streaming: false, pushNotifications: false },
+    defaultInputModes: ['text'],
+    defaultOutputModes: ['text'],
+    securitySchemes: {},
+    security: [],
+  };
+}
+
+// Default discovered card advertises a single skill → auto-selected.
+const DISCOVERED_CARD = cardWith(['summarize']);
 
 describe('AddRemoteDialog', () => {
   it('dry-runs test then persists on confirm', async () => {
@@ -76,6 +86,8 @@ describe('AddRemoteDialog', () => {
         name: 'peer-agent',
         cardUrl: 'http://peer.example/.well-known/agent-card.json',
         token: 'peer-bearer-token',
+        // Sole advertised skill is auto-selected and sent on the add call.
+        skillId: 'summarize',
       }),
     );
 
@@ -88,6 +100,87 @@ describe('AddRemoteDialog', () => {
 
     // A successful add closes the dialog.
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it('renders a skill picker from the tested card and sends the chosen skillId on confirm', async () => {
+    const testRemote = vi.fn().mockResolvedValue({
+      card: cardWith(['summarize', 'deep-research', 'translate']),
+      pinnedCardHash: 'deadbeefcafefeed',
+    });
+    const addRemote = vi.fn().mockResolvedValue({});
+
+    render(
+      <AddRemoteDialog
+        open
+        onOpenChange={() => {}}
+        testRemote={testRemote}
+        addRemote={addRemote}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('add-remote-name'), {
+      target: { value: 'peer-agent' },
+    });
+    fireEvent.change(screen.getByTestId('add-remote-card-url'), {
+      target: { value: 'http://peer.example/.well-known/agent-card.json' },
+    });
+    fireEvent.change(screen.getByTestId('add-remote-token'), {
+      target: { value: 'peer-bearer-token' },
+    });
+    fireEvent.click(screen.getByTestId('add-remote-test'));
+
+    // A picker appears, populated from the card's skills[].
+    const picker = (await screen.findByTestId(
+      'add-remote-skill',
+    )) as HTMLSelectElement;
+    expect(picker).toBeInTheDocument();
+    expect(screen.getByText(/deep-research/)).toBeInTheDocument();
+
+    // Operator selects a non-default skill.
+    fireEvent.change(picker, { target: { value: 'deep-research' } });
+
+    fireEvent.click(screen.getByTestId('add-remote-confirm'));
+    await waitFor(() =>
+      expect(addRemote).toHaveBeenCalledWith({
+        name: 'peer-agent',
+        cardUrl: 'http://peer.example/.well-known/agent-card.json',
+        token: 'peer-bearer-token',
+        skillId: 'deep-research',
+      }),
+    );
+  });
+
+  it('locks Confirm when the tested card advertises no skills (nothing to delegate to)', async () => {
+    const testRemote = vi.fn().mockResolvedValue({
+      card: cardWith([]),
+      pinnedCardHash: 'deadbeefcafefeed',
+    });
+    const addRemote = vi.fn().mockResolvedValue({});
+
+    render(
+      <AddRemoteDialog
+        open
+        onOpenChange={() => {}}
+        testRemote={testRemote}
+        addRemote={addRemote}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('add-remote-name'), {
+      target: { value: 'peer-agent' },
+    });
+    fireEvent.change(screen.getByTestId('add-remote-card-url'), {
+      target: { value: 'http://peer.example/.well-known/agent-card.json' },
+    });
+    fireEvent.change(screen.getByTestId('add-remote-token'), {
+      target: { value: 'peer-bearer-token' },
+    });
+    fireEvent.click(screen.getByTestId('add-remote-test'));
+    await screen.findByTestId('add-remote-preview');
+
+    // No skills → Confirm stays disabled; add is never callable.
+    expect(screen.getByTestId('add-remote-confirm')).toBeDisabled();
+    expect(addRemote).not.toHaveBeenCalled();
   });
 
   it('re-locks Confirm if the card URL changes after a successful test', async () => {
@@ -133,6 +226,7 @@ describe('Federation Consume panel', () => {
     baseUrl: 'http://peer1.example/a2a',
     cardUrl: 'http://peer1.example/.well-known/agent-card.json',
     pinnedCardHash: 'abc123def456abc123def456',
+    skillId: 'summarize',
   };
 
   const RUN = {

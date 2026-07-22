@@ -209,12 +209,14 @@ export type A2aTokenIssueResponse = z.infer<typeof A2aTokenIssueResponseSchema>;
 
 /** Wire DTO for one discovered+pinned remote. OMITS `token` — the remote's
  *  Bearer lives only in the server-side store (`a2a/remotes.ts`) and must
- *  never reach a client, span, or log. */
+ *  never reach a client, span, or log. `skillId` (the delegation target chosen
+ *  at add-time, Task 30-FIX) is NOT secret and DOES appear here. */
 export const A2aRemoteDtoSchema = z.object({
   name: z.string(),
   baseUrl: z.string(),
   cardUrl: z.string(),
   pinnedCardHash: z.string(),
+  skillId: z.string(),
 });
 export type A2aRemoteDto = z.infer<typeof A2aRemoteDtoSchema>;
 
@@ -237,6 +239,10 @@ export const A2aRemoteAddRequestSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   cardUrl: z.string().min(1).max(2048),
   token: z.string().min(1),
+  // Optional operator-chosen delegation target (Task 30-FIX). When omitted the
+  // server auto-picks a sole-skill card and rejects an ambiguous/empty one; when
+  // present it must be a skill the discovered card advertises (`resolveSkillId`).
+  skillId: z.string().min(1).max(128).optional(),
 });
 export type A2aRemoteAddRequest = z.infer<typeof A2aRemoteAddRequestSchema>;
 

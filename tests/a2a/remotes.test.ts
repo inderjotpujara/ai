@@ -20,6 +20,7 @@ function remote(overrides: Partial<RemoteAgent> = {}): RemoteAgent {
     cardUrl: 'https://peer.ts.net/.well-known/agent-card.json',
     token: 'SUPER_SECRET_BEARER',
     pinnedCardHash: 'deadbeef',
+    skillId: 'summarize',
     ...overrides,
   };
 }
@@ -67,6 +68,19 @@ test('a fresh store over the same file sees a persisted add', () => {
   createRemoteStore({ path }).add(remote());
   const reopened = createRemoteStore({ path });
   expect(reopened.list().map((r) => r.name)).toEqual(['peer']);
+});
+
+test('the store round-trips the target skillId across a file reload (two-box defect fix)', () => {
+  const path = tempPath();
+  createRemoteStore({ path }).add(remote({ skillId: 'deep-research' }));
+  // In-memory round-trip.
+  expect(createRemoteStore({ path }).get('peer')?.skillId).toBe(
+    'deep-research',
+  );
+  // The skillId is persisted to the file (it is NOT secret — unlike token, it
+  // may live in the DTO/logs).
+  const raw = readFileSync(path, 'utf8');
+  expect(raw).toContain('deep-research');
 });
 
 test('a corrupt store file fails closed (throws at construction)', () => {

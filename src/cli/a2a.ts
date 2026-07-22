@@ -14,8 +14,9 @@
  *   token [issue <label>|revoke <id>|list]   — expose-side A2A Bearers (§7.2);
  *     `issue` prints the raw secret EXACTLY ONCE — never persisted or
  *     re-printed by this CLI (`list` only ever returns `{id,label,createdAt}`)
- *   remotes [list|add <cardUrl> <token>|remove <name>] — consume-side peers
- *     (§7.3); `add` discovers+pins the card BEFORE persisting
+ *   remotes [list|add <cardUrl> <token> [skillId]|remove <name>] — consume-side
+ *     peers (§7.3); `add` discovers+pins the card BEFORE persisting and resolves
+ *     the delegation-target skill (fail-closed on an ambiguous/absent skill)
  *   call <name> '<task>'                     — message/send→poll-to-terminal
  *     to a mounted remote, reusing `delegateAndPoll` (`a2a/mount.ts`) so this
  *     CLI's `call` and the orchestrator's `delegate_to_<name>` tool share the
@@ -31,7 +32,11 @@ import type { SkillEntry } from '../a2a/allowlist.ts';
 import { createA2aAllowlist } from '../a2a/allowlist.ts';
 import { buildAgentCard } from '../a2a/card.ts';
 import type { RemoteAgent } from '../a2a/client.ts';
-import { cardUrlHostMismatch, createA2aClient } from '../a2a/client.ts';
+import {
+  cardUrlHostMismatch,
+  createA2aClient,
+  resolveSkillId,
+} from '../a2a/client.ts';
 import type { IssuedToken } from '../a2a/enroll.ts';
 import { createA2aEnrollment } from '../a2a/enroll.ts';
 import { delegateAndPoll } from '../a2a/mount.ts';
@@ -52,7 +57,10 @@ export type A2aCliDeps = {
   };
   remotes: {
     list(): RemoteAgent[];
-    add(cardUrl: string, token: string): Promise<RemoteAgent>;
+    /** `skillId` is the optional operator-chosen delegation target (Task
+     *  30-FIX); when omitted the add auto-picks a sole-skill card and errors on
+     *  an ambiguous/absent one, listing the available ids. */
+    add(cardUrl: string, token: string, skillId?: string): Promise<RemoteAgent>;
     remove(name: string): void;
   };
   /** `message/send` → poll-to-terminal to a mounted remote (Task 20/21's
@@ -84,8 +92,13 @@ function formatTokensTable(tokens: IssuedToken[]): string {
 }
 
 function formatRemotesTable(remotes: RemoteAgent[]): string {
-  const header = ['name', 'baseUrl', 'pinnedCardHash'];
-  const rows = remotes.map((r) => [r.name, r.baseUrl, r.pinnedCardHash]);
+  const header = ['name', 'skillId', 'baseUrl', 'pinnedCardHash'];
+  const rows = remotes.map((r) => [
+    r.name,
+    r.skillId,
+    r.baseUrl,
+    r.pinnedCardHash,
+  ]);
   return table([header, ...rows]);
 }
 
@@ -169,7 +182,7 @@ async function runTokenCli(argv: string[], deps: A2aCliDeps): Promise<void> {
 }
 
 async function runRemotesCli(argv: string[], deps: A2aCliDeps): Promise<void> {
-  const [sub, cardUrlOrName, token] = argv;
+  const [sub, cardUrlOrName, token, skillId] = argv;
   if (sub === 'list' || sub === undefined) {
     const remotes = deps.remotes.list();
     deps.print(
@@ -179,18 +192,23 @@ async function runRemotesCli(argv: string[], deps: A2aCliDeps): Promise<void> {
   }
   if (sub === 'add') {
     if (!cardUrlOrName || !token) {
-      deps.print('usage: agent a2a remotes add <cardUrl> <token>');
+      deps.print('usage: agent a2a remotes add <cardUrl> <token> [skillId]');
       return;
     }
     let remote: RemoteAgent;
     try {
-      remote = await deps.remotes.add(cardUrlOrName, token);
+      // `skillId` (optional 3rd arg) is passed through; on an ambiguous/absent
+      // skill `add` throws with a message listing the available ids (Task
+      // 30-FIX), printed below like any other add error.
+      remote = await deps.remotes.add(cardUrlOrName, token, skillId);
     } catch (err) {
       deps.print(`error: ${errMessage(err)}`);
       process.exitCode = 1;
       return;
     }
-    deps.print(`added ${remote.name} (pinned ${remote.pinnedCardHash})`);
+    deps.print(
+      `added ${remote.name} (skill ${remote.skillId}, pinned ${remote.pinnedCardHash})`,
+    );
     return;
   }
   if (sub === 'remove') {
@@ -281,7 +299,7 @@ function buildRealA2aDeps(): A2aCliDeps {
     },
     remotes: {
       list: () => remoteStore.list(),
-      add: async (cardUrl, token) => {
+      add: async (cardUrl, token, skillId) => {
         // Discover + pin BEFORE persisting (§7.3) — the SAME ordering
         // `handleRemoteAdd` (server/a2a/remotes.ts) uses: a failed/rejected
         // discover never reaches the store.
@@ -296,6 +314,9 @@ function buildRealA2aDeps(): A2aCliDeps {
         if (mismatch !== undefined) {
           throw new Error(`discover failed: ${mismatch}`);
         }
+        // Task 30-FIX: resolve the delegation-target skill from the card +
+        // optional `skillId` (fail-closed) — the SAME rule as `handleRemoteAdd`.
+        const resolvedSkillId = resolveSkillId(discovered.card, skillId);
         const remote: RemoteAgent = {
           // No separate `--name` arg on this thin CLI: the discovered card's
           // own `name` is the remote's display/lookup name (the Federation
@@ -306,6 +327,7 @@ function buildRealA2aDeps(): A2aCliDeps {
           cardUrl,
           token,
           pinnedCardHash: discovered.pinnedCardHash,
+          skillId: resolvedSkillId,
         };
         remoteStore.add(remote);
         return remote;

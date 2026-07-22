@@ -16,7 +16,10 @@ import type { SessionGuard } from '../../src/server/security/token.ts';
 
 // --- handler-level harness (mirrors tests/server/a2a-token-api.test.ts) -----
 
-function validCard(url: string): A2aAgentCard {
+function validCard(
+  url: string,
+  skillIds: string[] = ['default-skill'],
+): A2aAgentCard {
   return {
     name: 'peer',
     description: 'a remote peer',
@@ -24,7 +27,12 @@ function validCard(url: string): A2aAgentCard {
     protocolVersion: '1.0',
     url,
     preferredTransport: 'JSONRPC',
-    skills: [],
+    skills: skillIds.map((id) => ({
+      id,
+      name: id,
+      description: `the ${id} skill`,
+      tags: [],
+    })),
     capabilities: { streaming: true, pushNotifications: false },
     defaultInputModes: ['text/plain'],
     defaultOutputModes: ['text/plain'],
@@ -115,6 +123,7 @@ test('GET /api/a2a/remotes requires trusted-local (403 from a non-loopback princ
     cardUrl: 'https://peer.ts.net/card.json',
     token: 'SECRET',
     pinnedCardHash: 'h',
+    skillId: 'summarize',
   });
   const res = handleRemoteList(listReq(), c, remoteGuard);
   expect(res.status).toBe(403);
@@ -128,6 +137,7 @@ test('GET /api/a2a/remotes never returns the token', async () => {
     cardUrl: 'https://peer.ts.net/card.json',
     token: 'SUPER_SECRET_BEARER',
     pinnedCardHash: 'h',
+    skillId: 'summarize',
   });
   const res = handleRemoteList(listReq(), c, localGuard);
   expect(res.status).toBe(200);
@@ -175,6 +185,110 @@ test('POST /api/a2a/remotes (trusted-local) pins via discover BEFORE persisting'
   // The response DTO omits the token.
   const body = (await res.json()) as Record<string, unknown>;
   expect(body).not.toHaveProperty('token');
+});
+
+test('POST /api/a2a/remotes auto-picks the sole advertised skill and persists it as skillId', async () => {
+  const c = ctx((cardUrl) => ({
+    ok: true,
+    card: validCard(cardUrl, ['research']),
+    pinnedCardHash: `hash-of-${cardUrl}`,
+  }));
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'peer',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(201);
+  expect(c.remotes.get('peer')?.skillId).toBe('research');
+  const body = (await res.json()) as Record<string, unknown>;
+  expect(body.skillId).toBe('research');
+});
+
+test('POST /api/a2a/remotes uses an explicit skillId when present in the card', async () => {
+  const c = ctx((cardUrl) => ({
+    ok: true,
+    card: validCard(cardUrl, ['a', 'b', 'c']),
+    pinnedCardHash: `hash-of-${cardUrl}`,
+  }));
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'peer',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+      skillId: 'b',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(201);
+  expect(c.remotes.get('peer')?.skillId).toBe('b');
+});
+
+test('POST /api/a2a/remotes rejects an explicit skillId absent from the card — 400, nothing persisted', async () => {
+  const c = ctx((cardUrl) => ({
+    ok: true,
+    card: validCard(cardUrl, ['a', 'b']),
+    pinnedCardHash: `hash-of-${cardUrl}`,
+  }));
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'peer',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+      skillId: 'ghost',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(400);
+  const body = (await res.json()) as { error: string };
+  expect(body.error).toContain('ghost');
+  expect(c.remotes.list()).toEqual([]);
+});
+
+test('POST /api/a2a/remotes rejects a multi-skill card with no explicit choice — 400 listing ids, nothing persisted', async () => {
+  const c = ctx((cardUrl) => ({
+    ok: true,
+    card: validCard(cardUrl, ['alpha', 'beta']),
+    pinnedCardHash: `hash-of-${cardUrl}`,
+  }));
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'peer',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(400);
+  const body = (await res.json()) as { error: string };
+  expect(body.error).toContain('alpha');
+  expect(body.error).toContain('beta');
+  expect(c.remotes.list()).toEqual([]);
+});
+
+test('POST /api/a2a/remotes rejects a zero-skill card — 400, nothing persisted', async () => {
+  const c = ctx((cardUrl) => ({
+    ok: true,
+    card: validCard(cardUrl, []),
+    pinnedCardHash: `hash-of-${cardUrl}`,
+  }));
+  const res = await handleRemoteAdd(
+    addReq({
+      name: 'peer',
+      cardUrl: 'https://peer.ts.net/card.json',
+      token: 't',
+    }),
+    c,
+    localGuard,
+  );
+  expect(res.status).toBe(400);
+  expect(c.remotes.list()).toEqual([]);
 });
 
 test('POST /api/a2a/remotes rejects a name with a space (invalid delegate-tool key) — 400, no discover, nothing persisted', async () => {
@@ -304,6 +418,7 @@ test('DELETE /api/a2a/remotes/:name requires trusted-local, then removes (idempo
     cardUrl: 'https://peer.ts.net/card.json',
     token: 'SECRET',
     pinnedCardHash: 'h',
+    skillId: 'summarize',
   });
 
   const forbidden = handleRemoteDelete(

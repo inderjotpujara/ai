@@ -55,6 +55,9 @@ export function AddRemoteDialog({
   const [name, setName] = useState('');
   const [cardUrl, setCardUrl] = useState('');
   const [token, setToken] = useState('');
+  // The delegation-target skill (Task 30-FIX). Chosen from the tested card's
+  // advertised `skills[]`; auto-selected when the card advertises exactly one.
+  const [skillId, setSkillId] = useState('');
   const [testResult, setTestResult] = useState<
     A2aRemoteTestResponse | undefined
   >(undefined);
@@ -69,6 +72,7 @@ export function AddRemoteDialog({
     setName('');
     setCardUrl('');
     setToken('');
+    setSkillId('');
     setTestResult(undefined);
     setTestedCardUrl(undefined);
     setError(undefined);
@@ -89,9 +93,17 @@ export function AddRemoteDialog({
       const result = await testRemote({ cardUrl });
       setTestResult(result);
       setTestedCardUrl(cardUrl);
+      // Pre-select the first advertised skill so the picker's shown option and
+      // the confirmed value always agree (a sole skill is thus auto-selected);
+      // the operator can change it before Confirm. A card advertising NO skills
+      // leaves this '' and Confirm stays locked (fail-closed, mirrors the
+      // server's `resolveSkillId` — a peer with no skill cannot be delegated to).
+      const skills = result.card.skills;
+      setSkillId(skills[0]?.id ?? '');
     } catch (e) {
       setTestResult(undefined);
       setTestedCardUrl(undefined);
+      setSkillId('');
       setError(e instanceof Error ? e.message : 'test failed');
     } finally {
       setTesting(false);
@@ -102,14 +114,17 @@ export function AddRemoteDialog({
     !!testResult &&
     testedCardUrl === cardUrl &&
     !!name.trim() &&
-    !!token.trim();
+    !!token.trim() &&
+    // A delegation-target skill MUST be chosen — a peer with no selectable skill
+    // cannot be delegated to (§7.4: the peer would reject every call with -32004).
+    !!skillId;
 
   async function handleConfirm() {
     if (!canConfirm || submitting) return;
     setSubmitting(true);
     setError(undefined);
     try {
-      await addRemote({ name, cardUrl, token });
+      await addRemote({ name, cardUrl, token, skillId });
       handleOpenChange(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'add failed');
@@ -147,9 +162,11 @@ export function AddRemoteDialog({
             onChange={(e) => {
               setCardUrl(e.target.value);
               // Editing the URL invalidates any prior test result — Confirm
-              // must not use a preview that no longer matches this URL.
+              // must not use a preview (or its skill) that no longer matches
+              // this URL.
               setTestResult(undefined);
               setTestedCardUrl(undefined);
+              setSkillId('');
             }}
             placeholder="https://peer.example/.well-known/agent-card.json"
           />
@@ -196,6 +213,38 @@ export function AddRemoteDialog({
             <p className="mt-1 font-mono text-xs text-[var(--color-muted)]">
               Pin: {testResult.pinnedCardHash}
             </p>
+
+            {/* Delegation-target skill picker (Task 30-FIX). Populated from the
+                card's advertised skills[]; a sole skill is pre-selected. A card
+                that advertises none cannot be delegated to — Confirm stays
+                locked. SECURITY: skill id/name are peer-authored — rendered via
+                plain interpolation only, never dangerouslySetInnerHTML. */}
+            {testResult.card.skills.length > 0 ? (
+              <label
+                className={`${FIELD_CLASS} mt-3`}
+                htmlFor="add-remote-skill"
+              >
+                Delegate skill
+                <select
+                  id="add-remote-skill"
+                  data-testid="add-remote-skill"
+                  className={INPUT_CLASS}
+                  value={skillId}
+                  onChange={(e) => setSkillId(e.target.value)}
+                >
+                  {testResult.card.skills.map((skill) => (
+                    <option key={skill.id} value={skill.id}>
+                      {skill.name} ({skill.id})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <p className="mt-3 text-sm text-[var(--color-muted)]">
+                This agent advertises no skills — it cannot be added as a
+                delegation target.
+              </p>
+            )}
           </div>
         )}
 
