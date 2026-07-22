@@ -2393,7 +2393,7 @@ threw without them).
 - **`model-images/`** (git-ignored) — the project-local Ollama model store (`OLLAMA_MODELS`, set by `serve.sh`) + `catalog.json` (discovery output: `{ writtenAt, candidates[] }`, atomic temp+rename).
 - **`<registry>/.generated.json` + `<registry>/<name>.golden.json` + `<registry>/archive/`** (tracked, Slice 20) — per-registry (`agents/`, `crews/`, `workflows/`) verified-build sidecars: the capability **manifest** (`.generated.json` — per generated artifact: original need, `CapabilitySignature` + embedding vector, `verifiedLevel`, `goldenPath`, `createdAtMs`/`lastUsedMs`/`useCount`, `lastEvalPass`), the per-artifact **golden set**, and the reversible **archive** directory `bun run archive --prune` moves idle near-duplicates into (§20).
 - **`AGENT_A2A_SKILLS_PATH`** (git-ignored, default `a2a-skills.json`, Slice 31) — the EXPOSE-side allowlist (`{skills: SkillEntry[]}`) AND the issued-A2A-Bearer registry (`a2a-tokens.json`, sibling in the same dir — metadata + a one-way hash fingerprint per token, never the raw secret) share this one path family, `0700` dir / `0600` file, atomic temp+rename, fail-closed load (mirrors `~/.agent/devices.json`).
-- **`AGENT_A2A_REMOTES_PATH`** (git-ignored, default `~/.config/ai/a2a-remotes.json`, Slice 31) — the CONSUME-side `RemoteStore`: one `{name, baseUrl, cardUrl, token, pinnedCardHash}` row per discovered+pinned remote peer. Same `0700`/`0600`/atomic/fail-closed discipline; `token` is the remote's Bearer and is stripped before it ever reaches a DTO (`toRemoteDto`).
+- **`AGENT_A2A_REMOTES_PATH`** (git-ignored, default `~/.config/ai/a2a-remotes.json`, Slice 31) — the CONSUME-side `RemoteStore`: one `{name, baseUrl, cardUrl, token, pinnedCardHash, skillId}` row per discovered+pinned remote peer (`skillId` captured at `remotes add` time via `resolveSkillId`, Task 30-FIX). Same `0700`/`0600`/atomic/fail-closed discipline; `token` is the remote's Bearer and is stripped before it ever reaches a DTO (`toRemoteDto`); `skillId` is not secret and does reach the DTO. `load()` drops (with one structured warn) any legacy record persisted before `skillId` existed.
 
 ---
 
@@ -3816,26 +3816,39 @@ a **double** `AGENT_A2A_MAX_CARD_BYTES` cap (declared `Content-Length` AND a
 running streamed-byte count, so a lying/absent header can't slip an
 unbounded body past the guard). `discover` computes `hashCard(card)` as the
 pin; `verifyPin` re-fetches and HARD-rejects on ANY hash mismatch — it NEVER
-silently re-pins (the rug-pull/card-spoof defense). `mount.ts` turns a
-discovered+pinned `RemoteAgent` into a `delegate_to_<name>` `ToolSet` shaped
-to be a drop-in for the MCP mount seam (`MountedRegistry.forAgent` →
-`createSuperAgent`'s `toolsFor`, the same seam a local specialist rides):
-`delegateAndPoll` sends via `message/send` (which only returns a `submitted`
-shell — an adversarial review caught an early version returning that shell
-as the "answer", breaking every real delegation) then polls `tasks/get`
-until a terminal state, bounded by `AGENT_A2A_TASK_TIMEOUT_MS`/
-`AGENT_A2A_POLL_INTERVAL_MS`; `remoteAsToolSet` layers a per-remote circuit
-breaker (`wrapToolsWithBreaker('a2a:<name>', …)`, reusing `src/mcp/client.ts`'s
-breaker wrapper) UNDER an outer catch that converts every throw (a peer
-error or a tripped `CircuitOpenError`) into a structured `{ error }` —
-**failure returns, never throws**, exactly the local `asDelegateTool`
-contract — and `mountRemotes` merges several remotes into one `ToolSet`
-(name-clash → warn-and-override). `remotes.ts`'s `RemoteStore` persists
-`{name, baseUrl, cardUrl, token, pinnedCardHash}` (0700/0600, atomic
-temp+rename, fail-closed load, mirroring `device-registry.ts`); the token
-never leaves this store raw — `server/a2a/remotes.ts`'s `toRemoteDto` is the
-ONE place a `RemoteAgent` is narrowed to its wire form, stripping `token`
-unconditionally.
+silently re-pins (the rug-pull/card-spoof defense). At `remotes add` time,
+`resolveSkillId(card, explicit?)` (`client.ts`, Task 30-FIX) picks the ONE
+skill every future delegation to that remote will target — an
+explicit-and-advertised id is used verbatim, a card advertising exactly one
+skill is auto-picked, and anything else (zero skills, several skills with no
+explicit choice, or an explicit id the card doesn't advertise) fails closed
+with an error listing the advertised ids (capped at 128 chars either way) —
+so a `RemoteAgent` is only ever persisted once a target skill is certain.
+`mount.ts` turns a discovered+pinned `RemoteAgent` into a `delegate_to_<name>`
+`ToolSet` shaped to be a drop-in for the MCP mount seam
+(`MountedRegistry.forAgent` → `createSuperAgent`'s `toolsFor`, the same seam
+a local specialist rides): `delegateAndPoll` sends via `message/send` with
+`metadata: { skillId: remote.skillId }` on EVERY send (a two-box live-verify
+caught an earlier version sending no `metadata` at all, so a skill-gated
+EXPOSE peer rejected every real delegation with `-32004 "skill not
+allowed"` before enqueue, §7.4) — `message/send` itself only returns a
+`submitted` shell (an earlier adversarial review caught an early version
+returning that shell as the "answer", breaking every real delegation) — then
+polls `tasks/get` (metadata-free) until a terminal state, bounded by
+`AGENT_A2A_TASK_TIMEOUT_MS`/`AGENT_A2A_POLL_INTERVAL_MS`; `remoteAsToolSet`
+layers a per-remote circuit breaker (`wrapToolsWithBreaker('a2a:<name>', …)`,
+reusing `src/mcp/client.ts`'s breaker wrapper) UNDER an outer catch that
+converts every throw (a peer error or a tripped `CircuitOpenError`) into a
+structured `{ error }` — **failure returns, never throws**, exactly the
+local `asDelegateTool` contract — and `mountRemotes` merges several remotes
+into one `ToolSet` (name-clash → warn-and-override). `remotes.ts`'s
+`RemoteStore` persists `{name, baseUrl, cardUrl, token, pinnedCardHash,
+skillId}` (0700/0600, atomic temp+rename, fail-closed load, mirroring
+`device-registry.ts`; `load()` drops any legacy pre-skillId record with one
+structured warn rather than silently); the token never leaves this store
+raw — `server/a2a/remotes.ts`'s `toRemoteDto` is the ONE place a
+`RemoteAgent` is narrowed to its wire form, stripping `token`
+unconditionally (`skillId` is not secret and does reach the DTO).
 
 > **CONSUME live-mounting — the CHAT path is spliced (Task 29b); crew/workflow
 > is seam-ready follow-on.** `liveRemoteDelegateTools` (`a2a/mount.ts`) is the
@@ -3921,14 +3934,20 @@ Slice-24 job-queue path (§24.1/24.2) with one new entry door and one new
 **CONSUME.** An operator, from the Federation tab's Consume panel (or `agent
 a2a remotes add`), pastes a remote's card URL + Bearer → `POST
 /api/a2a/remotes/test` dry-runs discover+pin with NOTHING persisted → on
-confirm, `POST /api/a2a/remotes` discovers+pins again and persists the
-`RemoteAgent` (§7.3 — a failed discover never reaches the store, so there is
-no half-written/unpinned remote). From there `agent a2a call <name> "<task>"`
-(or, per the honest gap above, a future live-session mount) drives the same
-`delegateAndPoll` send→poll loop the Federation tab's "recent remote tasks"
-list surfaces via the existing `GET /api/runs?origin=remote` /
-`/runs/$runId` deep-link — no new run-history plumbing, the remote task rides
-the normal Runs browser.
+confirm, `POST /api/a2a/remotes` discovers+pins again, resolves the target
+`skillId` off the discovered card via `resolveSkillId` (explicit-and-
+advertised → use it; sole advertised skill → auto-pick; otherwise fail
+closed listing the advertised ids), and persists the `RemoteAgent` — now
+including that `skillId` — (§7.3 — a failed discover, or a failed skill
+resolution, never reaches the store, so there is no half-written/unpinned/
+skill-less remote). From there `agent a2a call <name> "<task>"` (or, per the
+honest gap above, a future live-session mount) drives the same
+`delegateAndPoll` send→poll loop, which sends the persisted `skillId` as
+`metadata.skillId` on every `message/send` (Task 30-FIX — the skill-gated
+EXPOSE side needs it to resolve-then-reject, §7.4); the Federation tab's
+"recent remote tasks" list surfaces via the existing `GET
+/api/runs?origin=remote` / `/runs/$runId` deep-link — no new run-history
+plumbing, the remote task rides the normal Runs browser.
 
 #### Security recap (§7.1–§7.4, all adversarially reviewed)
 
