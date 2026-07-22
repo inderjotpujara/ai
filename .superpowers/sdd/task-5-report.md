@@ -1,52 +1,130 @@
-# Task 5 Report: Trigger tables migration
+### Task 5: Build the A2A Agent Card — Report
 
-## Status
-Done.
+**Status:** Implemented, TDD RED→GREEN, gate clean, committed.
 
-## Files
-- Created `src/triggers/migrations.ts`
-- Created `tests/triggers/migrations.test.ts`
+**Branch:** `slice-31-a2a-multimachine` (unchanged, no branch switch).
 
-## What was implemented
-- `TRIGGER_MIGRATIONS: Migration[]` — two entries, `init-triggers` (creates
-  `triggers` table + `idx_triggers_due` + `idx_triggers_token` indexes) and
-  `init-trigger-firings` (creates `trigger_firings` table +
-  `idx_firings_list` index), matching the brief's exact column set/SQL
-  verbatim.
-- `JOBS_DB_MIGRATIONS: Migration[] = [...JOB_MIGRATIONS, ...TRIGGER_MIGRATIONS]`
-  — `JOB_MIGRATIONS` is imported live from `src/queue/migrations.ts` (not
-  copied), so it is guaranteed to stay a strict, up-to-date prefix. Extensive
-  header comment on `JOBS_DB_MIGRATIONS` documents the single-`PRAGMA
-  user_version`-per-database mechanism and why the trigger store must run
-  this superset rather than a bare `migrate(db, TRIGGER_MIGRATIONS)`.
-- `createJobStore` was NOT touched — it continues to call
-  `migrate(db, JOB_MIGRATIONS)` unchanged, per the brief.
+#### Files changed
+- Created `src/a2a/card.ts` — `buildAgentCard(deps)` + `cardEtag(card)`.
+- Created `tests/a2a/card.test.ts` — the brief's two tests verbatim + one added
+  stability/change test for `cardEtag`.
 
-## Tests (7 tests, 20 expect() calls, all passing)
-1. `JOBS_DB_MIGRATIONS is JOB_MIGRATIONS followed by TRIGGER_MIGRATIONS (strict prefix)` — structural check on the array composition itself.
-2. `open order 1: job store opens first (JOB_MIGRATIONS), then the trigger store runs the superset` — proves `migrate(db, JOB_MIGRATIONS)` then `migrate(db, JOBS_DB_MIGRATIONS)` yields both `jobs` and the two trigger tables, and `user_version` lands at `JOBS_DB_MIGRATIONS.length`.
-3. `open order 2: trigger store opens first (superset), then the job store opens (prefix) with no error` — proves the reverse open order is also safe: the superset creates everything, and the job store's later (unmodified) `migrate(db, JOB_MIGRATIONS)` call is a pure no-op (no error, no version regression, no re-run).
-4. `trigger tables land even after JOB_MIGRATIONS already advanced user_version` — the brief's literal Step-1 test, kept verbatim.
-5. `init-triggers creates the triggers table with the Trigger record columns` — full column-list assertion via `PRAGMA table_info`.
-6. `init-trigger-firings creates the trigger_firings table with the TriggerFiring record columns` — same, for the firings table.
-7. `JOBS_DB_MIGRATIONS is idempotent (re-migrate is a no-op)` — re-running the superset twice is a no-op and returns the same final version.
+#### TDD trail
 
-## TDD sequence
-1. Wrote the test file first (including the brief's literal snippet) → confirmed FAIL (`Cannot find module '../../src/triggers/migrations.ts'`).
-2. Implemented `src/triggers/migrations.ts` per the brief.
-3. Re-ran → 7 pass, 0 fail.
+**RED** — wrote `tests/a2a/card.test.ts` (brief's two tests) importing the
+not-yet-existing `../../src/a2a/card.ts`:
+```
+$ bun test tests/a2a/card.test.ts
+error: Cannot find module '../../src/a2a/card.ts' from '/Users/inderjotsingh/ai/tests/a2a/card.test.ts'
+0 pass / 1 fail / 1 error
+```
 
-## Gate results
-- `bun run typecheck` — clean.
-- `bun run lint:file -- src/triggers/migrations.ts tests/triggers/migrations.test.ts` — one formatting fix applied (wrapped the test's multi-symbol import onto multiple lines to satisfy biome's line-width rule), then clean.
-- `bun test tests/triggers/migrations.test.ts` — 7 pass, 0 fail, 20 expect() calls.
+**GREEN** — implemented `src/a2a/card.ts` per the Produces block, added the
+third test (`cardEtag` stable across two builds of the same allowlist state,
+changes when a skill is added), reran:
+```
+$ bun test tests/a2a/card.test.ts
+3 pass
+0 fail
+7 expect() calls
+```
 
-## Commit
-`fe79b63` — "feat(triggers): trigger + trigger_firings tables (combined jobs.db migration list)"
-Files staged explicitly (`git add src/triggers/migrations.ts tests/triggers/migrations.test.ts`), not `git add -A` — the unrelated modified ledger/scratch files already present in the working tree (`.remember/`, `.superpowers/sdd/progress.md`, other task briefs/reports) were left untouched by this commit.
+Full `tests/a2a/` suite (allowlist + card + spans) still green:
+```
+$ bun test tests/a2a/
+11 pass / 0 fail / 17 expect() calls
+```
 
-## Concerns / notes for the reviewer
-- None outstanding. The two open-order tests (#2 and #3 above) are the concrete proof the audit asked for: both directions end with all tables present and `user_version` at the correct final value (`JOBS_DB_MIGRATIONS.length`), and neither direction throws.
-- `createJobStore` and `JOB_MIGRATIONS` itself were left completely untouched — confirmed by reading `src/queue/migrations.ts` before writing any code; no edits were made there. `JOB_MIGRATIONS` currently has 3 entries (post Task 4's origin/chain_depth migration), so `JOBS_DB_MIGRATIONS.length` is 5.
-- No `createTriggerStore` yet — that's a later task in this slice. This task's only contract surface is the exported `TRIGGER_MIGRATIONS` / `JOBS_DB_MIGRATIONS` arrays for that later task to consume.
-- This report file previously held stale content from an unrelated earlier "Task 5" (a Slice 25b DaemonLogs query/response contract task) — it has been overwritten with this task's actual report.
+**Gate:**
+```
+$ bun run typecheck
+$ tsc --noEmit    (clean)
+
+$ bun run lint:file -- src/a2a/card.ts tests/a2a/card.test.ts
+Checked 2 files. No fixes applied.   (after one `biome check --write` pass to
+                                       fix long-line wraps in both new files)
+```
+
+**Commit:** `637f378 feat(a2a): build v1.0 Agent Card from the skill allowlist (skills:[] when empty)`
+— staged only `src/a2a/card.ts` + `tests/a2a/card.test.ts` (other repo-wide
+unstaged/untracked files already present in the working tree — `.remember/`,
+`.superpowers/sdd/progress.md`, other task briefs/reports, `AGENTS.md` — were
+left untouched by this commit).
+
+#### Implementation notes
+- `buildAgentCard({ allowlist, publicBaseUrl, name?, version? })`:
+  - `skills`: `allowlist.list().map(...)` → `{ id: skillId, name, description }`
+    per entry; `tags`/`inputModes`/`outputModes` are left for
+    `AgentSkillSchema.parse` to default (`tags: []`), since
+    `AgentCardSchema.parse` recursively validates/defaults the `skills` array.
+    Empty allowlist ⇒ `skills: []` (no special-casing needed — `list()` on an
+    empty store already returns `[]`).
+  - `protocolVersion: '1.0'`, `url: \`${publicBaseUrl}/api/a2a\``,
+    `capabilities: { streaming: true, pushNotifications: false }`,
+    `defaultInputModes`/`defaultOutputModes: ['text/plain','application/json']`,
+    `securitySchemes: { a2aBearer: { type: 'http', scheme: 'bearer' } }`,
+    `security: [{ a2aBearer: [] }]` — all pinned exactly per the brief.
+  - `preferredTransport` is omitted from the raw object and left to
+    `AgentCardSchema`'s own `.default('JSONRPC')`, rather than hardcoding it a
+    second time in this module.
+  - `name`/`version` default to `pkg.name`/`pkg.version` (`package.json`,
+    imported the same way `src/version.ts`'s `APP_VERSION` does) when the
+    caller doesn't override — the brief left these defaults unspecified, and
+    reusing the existing package-metadata pattern avoided inventing a new one.
+    `description` is NOT a `deps` field per the brief's signature; it's a fixed
+    module-level string describing the orchestrator (not any one skill).
+  - Returns `AgentCardSchema.parse(...)` — self-validating, per the brief.
+- `cardEtag(card)`: `sha256` over a recursively key-sorted canonical JSON
+  serialization (private `canonicalize` helper — arrays mapped element-wise,
+  objects rebuilt with `Object.keys(...).sort()`). A code comment on both the
+  helper and the export notes Task 20 extracts this into the shared
+  `src/a2a/canonical.ts` (`canonicalizeCard`/`hashCard`), and `cardEtag`
+  re-points there per the plan's task-dependency note (line 1213 of the plan
+  doc lists `canonicalizeCard`/`hashCard` as "re-pointed from `card.ts
+  cardEtag` (Task 5→20)").
+- Added test (beyond the brief's two): `cardEtag` is stable across two
+  `buildAgentCard` calls over the same (empty) allowlist state, and changes
+  once a skill is `put`. This proves canonicalization + hashing are both
+  deterministic and sensitive to actual content changes, not just object
+  identity.
+
+#### Self-review
+- **Card fields match the brief exactly**: `protocolVersion`, `capabilities`,
+  `url` shape, the single `a2aBearer` HTTP-bearer `securitySchemes` entry +
+  matching `security` array, both default-mode arrays, and `skills: []` on an
+  empty allowlist — all verified directly against the Produces block and
+  covered by tests (or trivially true from `AgentCardSchema.parse`'s own
+  shape).
+- **YAGNI**: only `buildAgentCard` and `cardEtag` are exported; `canonicalize`
+  is a private, unexported helper. No route/HTTP/Cache-Control wiring here —
+  that's Task 6's `AGENT_A2A_CARD_TTL` consumer, correctly out of scope for
+  this module (this module never imports `loadConfig`; `buildAgentCard`'s
+  actual signature takes `publicBaseUrl` as a plain `deps` field rather than
+  reading config internally, matching the brief's literal signature over the
+  looser "Consumes" prose).
+- **Test hygiene**: tests mirror the existing `tests/a2a/allowlist.test.ts`
+  convention (`mkdtempSync(join(tmpdir(), 'a2a-'))` per test, no shared mutable
+  state across tests, `JobKind` import from `src/queue/types.ts`). Formatting
+  matches repo style after `biome check --write` (both files were originally
+  written with the brief's single-line object literals, which violated the
+  project's line-length rule; biome's reflow is now the committed form).
+- **No regressions**: full `tests/a2a/` directory (11 tests across 3 files)
+  and `bun run typecheck` both pass clean.
+
+#### Concerns
+- `name`/`version` defaults (`pkg.name`/`pkg.version`) were not specified in
+  the brief or the plan doc; inferred from the existing `src/version.ts`
+  (`APP_VERSION` from `package.json`) precedent rather than hardcoding a
+  literal like `'agent-framework'`. Flagging in case Task 6/9 (the HTTP route
+  that actually serves this card) expects a different display name — trivial
+  to override via the optional `name`/`version` deps either way, so no
+  functional risk, just worth a glance in the next task's review.
+- `cardEtag`'s canonicalizer is intentionally the "for now" version called out
+  in the brief; it does not yet handle non-JSON-safe values (`Date`, `Map`,
+  `undefined` fields) since the parsed `A2aAgentCard` never contains any — a
+  non-issue today, moot once Task 20 replaces it with the shared
+  `canonicalizeCard`.
+- This report file previously held stale content from an unrelated earlier
+  "Task 5" (a Slice 25/25b trigger-migrations task, reusing the same task
+  number in a different slice) — it has been overwritten with this task's
+  actual report.

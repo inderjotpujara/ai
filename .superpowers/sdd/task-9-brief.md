@@ -1,139 +1,55 @@
-### Task 9: fire.ts — the single convergence point
+### Task 9: server.ts — JSON-RPC dispatch (message/send, tasks/get, tasks/cancel) (HARD §7.2 + §7.4)
 
 **Files:**
-- Create: `src/triggers/fire.ts`, `src/triggers/substitute.ts`
-- Test: `tests/triggers/fire.test.ts`, `tests/triggers/substitute.test.ts`
+- Create: `src/a2a/server.ts`, `src/a2a/task-index.ts`
+- Test: `tests/a2a/server.test.ts`
 
 **Interfaces:**
-- Consumes: `TriggerStore` (Task 7); `JobStore`, `JobStatus`, `JobKind` from `src/queue/`; `RunOrigin` from contracts; `createRun` from `src/run/run-store.ts`; `newRunId` from `src/run/run-id.ts`; `withTriggerFireSpan`/`recordTriggerSkip` (Task 8); `substituteTemplate` (this task).
+- Consumes: `A2aAllowlist` (Task 4); `task-map.ts` (Task 8); `JobStore`, `JobKind` from `../queue/`; `RunOrigin` from `../contracts/index.ts`; `newRunId` from `../run/run-id.ts`; `createRun` from `../run/run-store.ts`; `MessageSchema`, `A2aTask`, `TaskStateWire`, `A2aMethod`, `JsonRpcRequestSchema` from `../contracts/index.ts`; `withA2aServerTaskSpan` (Task 2).
 - Produces:
-  - `src/triggers/substitute.ts`: `substituteTemplate(payload: unknown, vars: Record<string, string>): unknown` — deep recursive walk; in every STRING it replaces `{{key}}` (matching `/\{\{\s*([\w.]+)\s*\}\}/g`) with `vars[key]` when present, leaving unknown keys literal. **No `eval`, no `Function`, no template engine** (§7.3). Non-string leaves pass through untouched.
-  - `src/triggers/fire.ts`:
+  - `src/a2a/task-index.ts`: `createTaskIndex(): { taskIdForJob(jobId): string; jobIdForTask(taskId): string | undefined; contextFor(taskId): string; bind(taskId, jobId, contextId): void }` — the A2A `taskId` IS the queue `jobId` (1:1); `contextId` groups a multi-turn conversation. A tiny in-memory bidirectional map seeded from the queue (durable identity = the jobId; the map only caches contextId grouping).
+  - `src/a2a/server.ts`:
 
 ```ts
-export type FireReason = 'cron' | 'webhook' | 'file' | 'chain' | 'manual';
-export type FireContext = {
-  reason: FireReason;
-  vars?: Record<string, string>;
-  chainDepth?: number;   // depth of the job ABOUT to be created (chain hops)
-  bypassOverlap?: boolean; // manual test-fire ignores overlap protection
-};
-export type FireResult =
-  | { fired: true; jobId: string; runId: string }
-  | { fired: false; outcome: TriggerOutcome };
-export type FireTrigger = (t: Trigger, ctx: FireContext) => Promise<FireResult>;
-export function createFireTrigger(deps: {
-  triggerStore: TriggerStore;
+export type A2aServerDeps = {
+  allowlist: A2aAllowlist;
   jobStore: JobStore;
   runsRoot: string;
-  maxChainDepth: () => number;
-}): FireTrigger;
+  taskIndex: ReturnType<typeof createTaskIndex>;
+};
+export type A2aRpcResult =
+  | { ok: true; result: unknown }
+  | { ok: false; error: { code: number; message: string; data?: unknown } };
+export function handleMessageSend(params: unknown, deps: A2aServerDeps): Promise<A2aRpcResult>;
+export function handleTasksGet(params: unknown, deps: A2aServerDeps): Promise<A2aRpcResult>;
+export function handleTasksCancel(params: unknown, deps: A2aServerDeps): Promise<A2aRpcResult>;
+/** Pure JSON-RPC dispatcher over the three (non-streaming) methods; streaming
+ *  methods are handled at the route (Task 12). Unknown method → -32601. */
+export function dispatchA2aRpc(rpc: unknown, deps: A2aServerDeps): Promise<A2aRpcResult>;
 ```
 
-- [ ] **Step 1: Write the failing tests.** Substitution:
+  Flow for `message/send`: `MessageSchema.parse(params.message)` (400/-32602 on bad shape); **the skillId comes from `params.metadata.skillId` (or a `data` part) and is resolved via `deps.allowlist.resolve(skillId)` — an unlisted/absent skill → `{ ok:false, error:{ code:-32004, message:'skill not allowed' } }` BEFORE any enqueue (resolve-then-reject, §7.4; never reaches a model)**; build the job payload from `message.parts` **treated as UNTRUSTED** — extract text via a delimited untrusted-transcript wrapper (reuse the existing delimited-untrusted handling; never let inbound text act as orchestrator instructions, §7.2); pre-mint `runId` + `createRun`; `deps.jobStore.enqueue({ kind: target.kind, payload: { ...built, a2aRef: target.ref }, origin: RunOrigin.Remote, runId })`; `deps.taskIndex.bind(job.id, job.id, contextId)`; return `A2aTask { id: job.id, contextId, status: { state: Submitted }, artifacts: [], history: [message], kind: 'task' }`. Wrap in `withA2aServerTaskSpan({ method, skillId })`. `tasks/get`: `jobIdForTask` → `jobStore.getJob` → project via `jobStatusToTaskState` (+ artifact from the job result when Done). `tasks/cancel`: fire the existing job cancel (`jobStore` cancel path / AbortSignal) → task `Canceled`.
+
+- [ ] **Step 1: Write the failing tests** (fake `JobStore`):
 
 ```ts
-import { expect, test } from 'bun:test';
-import { substituteTemplate } from '../../src/triggers/substitute.ts';
-test('substitutes {{file.path}} in nested string values only', () => {
-  const out = substituteTemplate(
-    { task: 'process {{file.path}}', n: 3, nested: { p: '{{file.path}}' } },
-    { 'file.path': '/data/x.csv' },
-  );
-  expect(out).toEqual({ task: 'process /data/x.csv', n: 3, nested: { p: '/data/x.csv' } });
-});
-test('unknown placeholders are left literal (never evaluated)', () => {
-  expect(substituteTemplate({ a: '{{secret}}' }, {})).toEqual({ a: '{{secret}}' });
-});
-```
-
-  Fire (fake stores):
-
-```ts
-// A due cron fire enqueues with origin=Schedule, records a Fired firing, returns ids.
-test('cron fire enqueues origin=schedule + records a Fired firing', async () => { /* ... */ });
-// overlap: latest firing's job still Running + !allowOverlap → SkippedOverlap, no enqueue.
-test('overlap skip when the previous job is still running', async () => { /* ... */ });
-// chain-depth cap: ctx.chainDepth > maxChainDepth() → Failed, no enqueue.
-test('chain-depth cap halts a runaway chain', async () => { /* ... */ });
+test('message/send to a listed skill enqueues origin=Remote and returns a submitted Task', async () => { /* allowlist.put(ask→file_qa); resolve; assert enqueue called with origin=Remote + kind, task.status.state==='submitted' */ });
+test('message/send to an UNLISTED skill rejects pre-enqueue (§7.4, no job)', async () => { /* skillId 'ghost' → error code -32004, enqueue spy NOT called */ });
+test('inbound message parts are wrapped as UNTRUSTED in the payload (§7.2)', async () => { /* payload text is delimited/quoted, not spliced as an instruction */ });
+test('tasks/get projects the job status to a task state', async () => { /* fake job Running → task working */ });
+test('tasks/cancel fires the job cancel → canceled', async () => { /* assert cancel called, state canceled */ });
+test('unknown method → -32601', async () => { /* dispatchA2aRpc({method:'foo'}) */ });
 ```
 
 - [ ] **Step 2: Run tests to verify they fail** → FAIL.
-- [ ] **Step 3: Write minimal implementation.** `substitute.ts` first. Then `fire.ts` — the whole body (this is the §7.3 convergence; write it in full):
-
-```ts
-const ORIGIN_FOR: Record<FireReason, RunOrigin> = {
-  cron: RunOrigin.Schedule,
-  webhook: RunOrigin.Webhook,
-  file: RunOrigin.Api,
-  chain: RunOrigin.Api,
-  manual: RunOrigin.Api,
-};
-
-export function createFireTrigger(deps: {
-  triggerStore: TriggerStore; jobStore: JobStore;
-  runsRoot: string; maxChainDepth: () => number;
-}): FireTrigger {
-  return (t, ctx) =>
-    withTriggerFireSpan(t, async (rec) => {
-      const now = Date.now();
-      // §7.3 chain-cycle guard: the depth of the job about to be created. A
-      // chain fire passes ctx.chainDepth = finishedJob.chainDepth + 1; the cap
-      // is enforced HERE (the single convergence point) so no source can bypass it.
-      const depth = ctx.chainDepth ?? 0;
-      if (depth > deps.maxChainDepth()) {
-        deps.triggerStore.recordFiring({ triggerId: t.id, firedAt: now, outcome: TriggerOutcome.Failed });
-        rec.outcome(TriggerOutcome.Failed);
-        return { fired: false, outcome: TriggerOutcome.Failed };
-      }
-      // Overlap protection: skip if the previous fired job is still in flight,
-      // unless the trigger allows overlap or this is a manual test-fire.
-      const allowOverlap =
-        ctx.bypassOverlap === true ||
-        (t.type === TriggerType.Cron && (t.config as CronConfig).allowOverlap === true);
-      if (!allowOverlap) {
-        const last = deps.triggerStore.latestFiring(t.id);
-        if (last?.jobId) {
-          const prev = deps.jobStore.getJob(last.jobId);
-          if (prev && (prev.status === JobStatus.Queued || prev.status === JobStatus.Running)) {
-            deps.triggerStore.recordFiring({ triggerId: t.id, firedAt: now, outcome: TriggerOutcome.SkippedOverlap });
-            recordTriggerSkip(t, TriggerOutcome.SkippedOverlap);
-            rec.outcome(TriggerOutcome.SkippedOverlap);
-            return { fired: false, outcome: TriggerOutcome.SkippedOverlap };
-          }
-        }
-      }
-      // Pre-mint + pre-create the run dir so an immediate /api/runs/:id/stream
-      // never 404s (mirrors handleJobEnqueue). dispatch's markJobOrigin will
-      // also write the origin marker at execution time.
-      const runId = newRunId();
-      await createRun(deps.runsRoot, runId);
-      const job = deps.jobStore.enqueue({
-        kind: t.target.kind,
-        payload: substituteTemplate(t.target.payload, ctx.vars ?? {}),
-        origin: ORIGIN_FOR[ctx.reason],
-        chainDepth: depth,
-        runId,
-      });
-      deps.triggerStore.recordFiring({
-        triggerId: t.id, firedAt: now, jobId: job.id, runId, outcome: TriggerOutcome.Fired,
-      });
-      deps.triggerStore.update(t.id, { lastFiredAt: now });
-      rec.outcome(TriggerOutcome.Fired);
-      return { fired: true, jobId: job.id, runId };
-    });
-}
-```
-
-> **NOTE (M7) — the firing-audit row and the job enqueue span two connections.** `deps.jobStore.enqueue(...)` writes through the JobStore's connection and `deps.triggerStore.recordFiring(...)` through the TriggerStore's — two separate `bun:sqlite` handles onto the same `jobs.db`, not one transaction. A crash in the sliver between them can leave a job enqueued with no matching `trigger_firings` row (or, on the skip/fail paths, a firing row with no job). This is an **audit-only gap** — the job itself is durable and runs normally; only the firing-history/console record may be missing one entry. Accepted for this slice (unifying the two writes into a single transaction would couple the two stores' connection management for a cosmetic audit record); documented rather than fixed.
-
+- [ ] **Step 3: Write minimal implementation** per the Produces block. Mirror `handleJobEnqueue` (`src/server/jobs/enqueue.ts:71`) for the pre-mint-run + enqueue shape.
 - [ ] **Step 4: Run tests to verify they pass** → PASS.
-- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/triggers/fire.ts src/triggers/substitute.ts tests/triggers/fire.test.ts tests/triggers/substitute.test.ts`.
+- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/a2a/server.ts src/a2a/task-index.ts tests/a2a/server.test.ts`.
 
 ```bash
-git add src/triggers/fire.ts src/triggers/substitute.ts tests/triggers/fire.test.ts tests/triggers/substitute.test.ts
-git commit -m "feat(triggers): fire convergence (origin/chain-depth/overlap) + template substitution"
+git add src/a2a/server.ts src/a2a/task-index.ts tests/a2a/server.test.ts
+git commit -m "feat(a2a): JSON-RPC server (message/send→enqueue, tasks/get, tasks/cancel)"
 ```
 
-*Model: **Opus implementer + adversarial verify** (HARD §7.2/§7.3). Reviewer probes: is the chain cap truly unbypassable by any `reason`? Is `substituteTemplate` provably non-`eval` (grep the diff for `Function`/`eval`/`new Function`)? Does a skip still write an audit firing?*
+*Model: **Opus implementer + ADVERSARIAL-VERIFY (§7.2 untrusted-content + §7.4 invoke-time resolve-then-reject).** Reviewer probes: is the allowlist resolve genuinely BEFORE any enqueue (no fall-through to a generic run)? Are inbound parts provably UNTRUSTED (delimited, never instructions)? Does the taskId↔jobId identity hold across get/cancel?*
 

@@ -1,121 +1,51 @@
-# Task 13 Report — `device-registry.ts` (persisted positive device list)
+# Task 13 report — fail-closed mid-run consent → typed `failed` (no hang) (HARD §7.1)
 
-## Status: DONE
+**Slice 31 (A2A interop), Increment 4. Commit `a44aa2f` on `slice-31-a2a-multimachine`.**
 
-Commit `1fa220f` — `feat(security): persisted positive device registry (Slice 25b Incr 3, D4)`.
+## What was implemented
 
-## Registry API (`src/server/security/device-registry.ts`)
-- `DeviceRecord = { deviceId, label, createdAt, exp }` — aligns exactly with `DeviceDtoSchema` in `src/contracts/dto.ts` (T4). No token field anywhere.
-- `createDeviceRegistry({ path? }): DeviceRegistry`, default path `~/.agent/devices.json` via `defaultDeviceRegistryPath()`.
-- `list(now = Date.now())` — returns live devices, drops `exp <= now` (predicate `exp > now`), and **persists** the prune so a fresh registry over the same file sees the same result.
-- `append(rec)` — **upsert**: filters out any existing row with the same `deviceId`, then appends (last write wins). No duplicate deviceIds.
-- `remove(deviceId)` — drops one (no-op if absent).
-- `clear()` — drops all (T19 rotate-root).
+1. **`src/a2a/task-map.ts`** (core deliverable, pure):
+   - `CONSENT_DECLINED_MARKER = 'consent-declined'` — the canonical token a declined mid-run consent gate would leave on a job's terminal `error`.
+   - `consentDeclinedToTaskError(job: ConsentJobView)` — total over `JobStatus`: returns `{ state: TaskStateWire.Failed, error: consentUnavailableError() }` **only** when `status === Failed` AND `error` carries the consent-decline marker; `undefined` for every other status and for a plain `Failed` with an unrelated/absent error. The `Failed → failed` state it emits is exactly Task 8's `jobStatusToTaskState(Failed)`, so it can never contradict the base projection — it only *attaches* the typed error.
+2. **`src/a2a/stream.ts`** (pure framer): `a2aStatusFrame` gained an optional `error` arg that rides the status `message` as an inert `data` part; `frameRunSpanAsA2a` gained an optional `terminalError` that attaches to the `failed` terminal frame (ignored on a `completed` frame).
+3. **`src/a2a/server.ts`** `handleTasksGet`: a consent-declined `Failed` job surfaces the typed `consent-unavailable` error on its terminal `failed` status message. (The brief named `rpc.ts` for "tasks/get result", but the tasks/get projection actually lives in `a2a/server.ts` — `rpc.ts` only wraps the dispatcher. `rpc.ts` was left unchanged; the gate still lints it clean.)
+4. **`src/server/a2a/stream-route.ts`**: the terminal-frame path passes the consent projection's error into `frameRunSpanAsA2a` when the backing job failed-on-consent.
+5. **`tests/a2a/consent-fail-closed.test.ts`**: 6 tests (see below).
 
-## Secure-file handling — matched siblings
-- **Mode/atomicity:** dir `mkdirSync(..., { mode: 0o700 })`, file written `0o600`. Writes are **atomic temp+rename** — serialize to `${path}.<rand>.tmp` (minted 0600 up front so data is never briefly world-readable), then `renameSync` over the target; temp is unlinked on failure. This is stronger than the siblings' plain `writeFileSync` but satisfies the Task-13 security bar's explicit "atomic (temp+rename)" requirement while keeping the same 0600/0700 convention — additive hardening, not an invented idiom.
-- **Fail-closed on corrupt:** `load()` mirrors `loadRevoked` in `session-token.ts` exactly — ABSENT file (ENOENT) → `[]` (nothing paired yet); PRESENT-but-unparseable JSON → throws; PRESENT-but-not-a-JSON-array → throws. A tampered/unreadable positive list refuses to start rather than silently collapsing to "no devices" (which would drop the audit trail / un-list every device). Valid arrays are field-validated (deviceId/label:string, createdAt/exp:number) so malformed rows are filtered.
-- **Path traversal:** the file path is fixed (config or `~/.agent/devices.json`); `deviceId`/`label` are stored as record fields only, never interpolated into any filesystem path.
+## What dispatch.ts actually records for a declined consent + how I detect it — HONESTY
 
-## No-token-stored confirmation
-Registry persists only the four metadata fields. Test `append then list returns the device (no token field ever)` asserts `'token' in item === false`. The minted token lives only in the pair response body (T17), never here.
+**Investigated (`dispatch.ts`, `queue/types.ts`, `queue/store.ts`, `mcp/consent.ts`, `agent-builder/builder.ts`, `server/consent/registry.ts`):** a settled job's failure is a single `error: string | undefined` title (`markFailed` writes it). I traced every mid-run consent path an A2A-reachable job (Chat/Crew/Workflow — the only kinds `buildJobPayload` enqueues) can hit:
+
+- **MCP-mount consent** (`mcp/consent.ts` `ensureConsent`) fail-closes by **SKIPPING** the server (a `warn` + `return false`) — it never fails the job, never writes an error.
+- **Builder consent** (`confirm: async () => false` at `dispatch.ts:200`) returns a `{ kind: 'declined' }` **result** (job goes `Done`, not `Failed`), and the Build kind is **not A2A-reachable** anyway (defense-in-depth guard in `buildJobPayload`).
+- The `ConfirmPort` (`server/consent/registry.ts`) emits a `Confirm` `StatusEvent` keyed by `promptId` and returns a promise that only settles via `POST .../respond` — but dispatch wires `noopEventSink`, so there is no live client and **no substrate** for a round-trip (exactly as the brief states).
+
+**Conclusion: a declined-consent A2A job is NOT distinguishable today from any other `Failed` job — no dispatch path sets a consent-specific marker.** Therefore `consentDeclinedToTaskError` is a **best-effort, forward-looking detector**: it matches `CONSENT_DECLINED_MARKER` (best-effort substring, case-insensitive) so the scoped future durable **queue-consent** capability (Task 13 §2 non-goals) has one canonical token to stamp. Until then the refinement is **dormant** — called out in a prominent code comment on the marker and in the test-file header. **I did NOT fabricate a marker in `dispatch.ts`** (it is unmodified, per the brief).
+
+**The load-bearing §7.1 guarantee holds regardless:** the no-hang / terminal-`failed` outcome is carried entirely by Task 8's already-shipped `jobStatusToTaskState` `Failed → failed` projection. The typed `consent-unavailable` error is a refinement of that terminal state, never the guarantee.
 
 ## TDD RED → GREEN
-- RED: `bun test` → "Cannot find module device-registry.ts" (module missing).
-- GREEN: 7 tests, 12 expect() calls, all pass. Coverage: append→list (no token field), upsert-on-duplicate, prune-expired-and-persist (incl. fresh-registry-over-same-file), remove+clear, corrupt-JSON fail-closed, non-array fail-closed, and **0600 mode assertion** (`statSync(path).mode & 0o777 === 0o600`).
+
+- **RED:** `bun run test:file -- "tests/a2a/consent-fail-closed.test.ts"` → `SyntaxError: Export named 'CONSENT_DECLINED_MARKER' not found` (0 pass, 1 fail).
+- **GREEN:** after implementation → `6 pass, 0 fail, 19 expect() calls`.
+- Regression: `bun test tests/a2a/` → `39 pass`; `bun test tests/server/a2a` → `14 pass`.
+
+Tests: (1) marker job → `failed` + `consent-unavailable`; (2) plain `Failed` (unrelated / absent error) → `undefined`; (3) every non-`Failed` status → `undefined`; (4) `jobStatusToTaskState(Failed) === failed` (Task 8 reuse); (5) integration — `handleTasksGet` on a consent-declined job resolves **within a 1s wall-clock race** to terminal `failed`, asserts NOT `input-required`/`working`/`submitted`, and carries the typed error (proves no hang); (6) terminal STREAM frame carries `consent-unavailable`.
 
 ## Gate
-- `bun run typecheck` clean.
-- `bun run lint:file` clean (biome, after auto-format/import-sort).
-- `bun test tests/server/` → 329 pass / 0 fail (71 files) — no regressions.
 
-## Files changed
-- `src/server/security/device-registry.ts` (new)
-- `tests/server/security/device-registry.test.ts` (new)
+`bun run typecheck` → clean. `bun run lint:file -- <touched files>` → clean (after fixing an unknown-cast + import-sort). `git commit` pre-commit `docs-check` → passed.
 
-## Concerns
-- None blocking. Reviewer note: I chose atomic temp+rename over the siblings' plain `writeFileSync` because the Task-13 security bar explicitly requires atomicity; the siblings write tiny payloads and don't do this, so this is a deliberate hardening, not a divergence to flag. If the increment prefers strict idiom-matching the temp+rename could be dropped — but that would weaken the crash-safety the brief asked for.
+## Self-review
 
-## Fix — runtime field-strip (security-review follow-up, commit `67fc6ec`)
-
-**Finding:** the no-secret invariant ("registry never stores the minted token")
-was enforced only by the `DeviceRecord` TypeScript type, not at runtime. A
-caller that constructed `{...record, token}` (e.g. via an `as any` cast or a
-spread from the pair-response object) would sail past the type checker and
-`append()` would happily serialize the token straight into
-`~/.agent/devices.json`.
-
-**Fix:** both write/read paths now explicitly pick only the four allowed
-fields, dropping anything else before it can reach disk or a caller:
-
-```ts
-// append(rec) — src/server/security/device-registry.ts
-const clean: DeviceRecord = {
-  deviceId: rec.deviceId,
-  label: rec.label,
-  createdAt: rec.createdAt,
-  exp: rec.exp,
-};
-devices = [...devices.filter((d) => d.deviceId !== clean.deviceId), clean];
-persist();
-```
-
-`load()` applies the same pick (`.map` after the existing shape-validating
-`.filter`) so even a pre-existing on-disk file with stray extra keys is
-normalized on read, not just on write. No API signature, file mode,
-atomicity, or fail-closed logic changed.
-
-**Test added** (`tests/server/security/device-registry.test.ts`, `append
-strips extra properties (e.g. a token) at runtime, never persisting them`):
-appends a record cast `as unknown as Parameters<typeof reg.append>[0]` with
-extra `token: 'SUPER_SECRET'` and `foo: 1` fields, then:
-- `list()`'s returned item has neither `'token' in item` nor `'foo' in item`.
-- The **raw file contents** (`readFileSync(path, 'utf8')`) do **not** contain
-  the substring `'SUPER_SECRET'` — proving the secret never touched disk, not
-  just that the in-memory accessor hides it.
-
-Result: 8/8 tests pass (up from 7) — new test included, no regressions.
-
-**Gate:** `bun run typecheck` clean; `bun run lint:file -- src/server/security/device-registry.ts tests/server/security/device-registry.test.ts` clean (biome, no fixes needed); `bun test tests/server/` → 330 pass / 0 fail across 71 files.
-
-**Commit:** `67fc6ec` — `fix(security): runtime field-strip so device registry can never persist a token (Slice 25b T13 review)`. Only the two files above were staged.
-
----
-
-# Task 13 Report (Slice 25 — Scheduled + Triggered Agents) — `chain.ts` job-completion observer + pool onSettled seam (HARD §7.3)
-
-## Status: DONE
-
-Commit `2d6e358` — `feat(triggers): job-chain observer + pool onSettled seam (terminal-only)`.
-
-## What shipped
-- **`src/queue/pool.ts`** — added the `onSettled?: (job, status: Done|Failed) => void` seam to `createWorkerPool` opts + a private `safeSettled(job, status)` wrapper.
-  - Success path: `safeSettled(job, Done)` is called **inside the existing try, immediately after `markDone` succeeds** (I5). A throwing `markDone` falls to the catch WITHOUT firing — no phantom chain off an uncommitted completion.
-  - Fail path: `else if (after?.status === Failed) safeSettled(after, Failed)` after the existing retry re-read, inside the try. A retry re-queue (Queued) never reaches it; `markCanceled`/`markInterrupted` never call it. Terminal-only.
-  - `safeSettled` wraps `opts.onSettled?.(...)` in try/catch so a throwing observer can never wedge `runOne`/the claim loop.
-- **`src/triggers/chain.ts`** (new) — `createChainObserver({ triggerStore, fire, maxChainDepth })` → `{ handleJobSettled(job, status) }`. Iterates `triggerStore.list()`, skips non-enabled / non-`JobChain` (explicit `trigger.type === TriggerType.JobChain` branch — T1 non-discriminated-union carry), matches `(config as JobChainConfig)`: `onStatus === status` AND (`!onKind || onKind === job.kind`) AND (`!onName || onName === payloadName(job.payload)`). On a match: `fire(trigger, { reason: 'chain', chainDepth: (job.chainDepth ?? 0) + 1, vars: { 'chain.jobId': job.id, 'chain.runId': job.runId ?? '' } })`.
-
-## F1 trust-boundary carry (critical) — honored
-Fired depth derives ONLY from the finished job's PERSISTED `chainDepth` (`(job.chainDepth ?? 0) + 1`) — never any external input. The observer always increments + delegates; the cap is enforced downstream in `fire.ts` (verified: `fire.ts` treats `depth > maxChainDepth()` and non-integer/negative as cap-exceeded → Failed, no enqueue). `maxChainDepth` is kept in the observer deps for interface parity (per the brief signature) but is intentionally NOT consulted for capping — documented inline.
-
-## onName field resolution
-`onName` matches the finished job's `payload.name`. Confirmed via `src/server/jobs/dispatch.ts` (`CrewJobPayloadSchema`/`WorkflowJobPayloadSchema` = `{ name, input, ... }`) and `src/server/crews/run.ts` / `workflows/run.ts` (`payload: { name, input }`). `payloadName()` safely reads a string `name` off an object payload; chat/pull/build payloads have no `name`, so an `onName` filter never matches them.
-
-## Robustness
-`fire()` is fire-and-forget from the synchronous `handleJobSettled` seam; its returned promise gets a `.catch(() => {})` so a chain-fire rejection never surfaces as an unhandledRejection (the pool's `safeSettled` guards synchronous throws, not promise rejections).
-
-## Tests — TDD RED → GREEN
-- `tests/queue/pool-onsettled.test.ts` (5): onSettled(Done) fires once; onSettled(Failed) fires on terminal non-retryable failure; NOT called on retry re-queue; NOT called when `markDone` throws (no phantom + runOne does not reject); a throwing observer never wedges the claim loop (2nd job still reaches Done, no unhandledRejection).
-- `tests/triggers/chain.test.ts` (6): matching completion fires with depth+1 + correct reason/vars; depth threading passes `max+1` (cap enforced downstream); onStatus mismatch → no fire; onKind narrows; onName match/mismatch; disabled trigger skipped.
-- Result: **11/11 pass**. Broader regression: `bun test ./tests/queue/ ./tests/triggers/` → **141 pass / 0 fail** (logged SQLITE errors are other tests' intentional fault-injection).
-
-## Gate
-- `bun run typecheck` clean.
-- `bun run lint:file -- src/queue/pool.ts src/triggers/chain.ts tests/triggers/chain.test.ts tests/queue/pool-onsettled.test.ts` clean (biome, after auto-format).
-- `bun run test -- -t "onSettled"` → 5 pass / 0 fail.
-- pre-commit `docs:check` passed on commit.
+- **Deterministic terminal `failed`, never hang / never input-required?** Yes. Both surfaces (`tasks/get`, terminal stream frame) derive state from the settled job status via `jobStatusToTaskState` (`Failed → failed`, terminal). The consent projection can only emit `failed` (same state), never `input-required` — no promptId/resume path was added. The wall-clock race test proves resolution.
+- **Mapping total?** Yes. `consentDeclinedToTaskError` guards `status !== Failed` first (all other statuses → `undefined`); `jobStatusToTaskState` remains exhaustive with its `never` tail (untouched). No default-to-`completed` hole.
+- **Detection honest?** Yes — best-effort against a real field (`JobRecord.error`), no fabricated dispatch marker, limitation documented in code + tests + this report. (Deviation from the brief's sample test, which used a non-existent `failure` field cast `as never`: I used the real `error` field — the honest choice.)
+- **Fail-closed posture identical to existing dispatch?** Yes — `dispatch.ts` is unmodified; this task only *reads* the settled job and refines the already-terminal `failed`.
 
 ## Concerns
-- **Wiring not in scope:** this task only adds the seam + observer. Nothing yet calls `createWorkerPool({ onSettled })` with `createChainObserver(...).handleJobSettled` — that wiring (daemon composition) is a downstream task. Flagging so the slice's integration/live-verify step connects them.
-- **`maxChainDepth` unused in the observer body** by design (cap lives in fire.ts). Kept per the mandated brief signature; an adversarial reviewer may question it — rationale documented inline in `chain.ts`.
-- `triggerStore.list()` returns ALL triggers and the observer filters in-memory (no `listByType`). Fine at current scale; a `WHERE type='jobchain' AND enabled` query would be the optimization if trigger counts grow.
+
+- **Dormant refinement:** the `consent-unavailable` typed error never fires in production today (no marker emitted). By design per the locked fail-closed decision and the scoped-future queue-consent slice; the guarantee that matters (terminal `failed`, no hang) is live via the Task 8 projection. Flagged so the reviewer weighs it as a forward-looking seam, not dead-by-mistake.
+- **File-list deviation:** wiring landed in `a2a/server.ts` + `server/a2a/stream-route.ts` (where tasks/get and the terminal frame actually live), not `server/a2a/rpc.ts` (a thin wrapper). `rpc.ts` unchanged and lints clean.
+
+_(Note: this path previously held a stale Slice-25b `device-registry` report; overwritten with the active Slice-31 Task 13 report per the brief.)_

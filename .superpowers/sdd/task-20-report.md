@@ -1,156 +1,64 @@
-# Task 20 Report — `POST /api/jobs/:id/retry` + main.ts device/rotate security wiring (Slice 25b Ops Console)
+# Task 20 report — `src/a2a/client.ts` + `src/a2a/canonical.ts` (CONSUME-side discover/validate/PIN, §7.3)
 
-**Status:** DONE. Commit `de97d6f` on `slice-25b-ops-console`.
+**Status:** DONE. Commit `f1cd431` — `feat(a2a): remote client discover/validate/PIN (canonical hash, redirect:error SSRF guard)` on `slice-31-a2a-multimachine`.
 
-## Part A — Retry endpoint (§11 lineage)
+> Note: this path previously held a stale Slice-25b Task-20 report (different slice, same task number); it is preserved in git history and was overwritten per the task brief.
 
-`src/server/jobs/retry.ts` → `handleJobRetry(id, deps: {jobStore, runsRoot})`:
-- Loads the referenced job. Retryable set = `Failed`/`Canceled`/`Interrupted` only.
-- Unknown id OR a non-retryable state (`Done`/`Queued`/`Running`) → **404** (terminal-mismatch
-  collapses to 404, the same non-leaking idiom as detail/stream — a caller can't distinguish
-  "no such job" from "not retryable"). The brief resolved the top-level "404 or 409" ambiguity to
-  a uniform 404; implemented as 404.
-- On success: mints a fresh `runId`, pre-creates the run dir (`createRun`, mirroring the enqueue
-  path so an immediate `/api/runs/:runId/stream` never 404s), then
-  `enqueue({kind, payload, retriedFrom: job.id, runId})` — `retriedFrom` uses the T1 `retried_from`
-  column. Returns `202 JobLaunchResponse {jobId, runId}` (schema-parsed). `recordJobRetry` span emitted.
-- Route wired in `app.ts` as `POST /api/jobs/:id/retry`, matched BEFORE the bare `/api/jobs/:id`
-  detail and alongside `cancelMatch` (action-before-detail discipline). Behind the shared session
-  guard — a job mutation like cancel, NOT trusted-local.
+## Implemented
+- **`src/a2a/canonical.ts`** — shared, deterministic card canonicalization/hash.
+  - `canonicalizeCard(card)`: recursively **key-sorts objects, keeps arrays in order**, then `JSON.stringify`. Order-stable AND swap-safe AND array-order-significant (see self-check).
+  - `hashCard(card)`: `sha256(canonicalizeCard(card))` hex.
+- **`src/a2a/client.ts`** — `createA2aClient({ fetchImpl? })` → `{ discover, verifyPin, invoke }`, plus exported `RemoteAgent` / `DiscoverResult` types matching the brief's Produces block verbatim.
+  - `discover(cardUrl)`: `noRedirectFetch` GET (`redirect:'error'`) → non-200 reject → JSON-parse → explicit `protocolVersion !== '1.0'` reject → `AgentCardSchema.safeParse` → `{ ok:true, card, pinnedCardHash: hashCard(card) }`.
+  - `verifyPin(remote)`: re-fetches via the same guarded path; `hashCard(current) !== remote.pinnedCardHash` is a **HARD `{ ok:false }`** — never a silent re-pin (§7.3). Emits `a2a.client.discover` span outcome `pin-mismatch`.
+  - `invoke(remote, method, params)`: for message-bearing methods validates `params.message` with `MessageSchema` (outbound guard), then POSTs a JSON-RPC 2.0 envelope to `remote.baseUrl` via `noRedirectFetch` with `Authorization: Bearer <token>` + `x-a2a-timestamp` + `x-a2a-nonce` (peer's Task-16 replay guard). JSON-RPC `error` → thrown; non-200 → thrown; else returns `result`.
+  - Telemetry: `recordA2aClientDiscover` / `recordA2aClientInvoke` with **peer HOST only** (`new URL(...).host`), never the full URL, never the token.
+- **`src/a2a/card.ts`** — removed the local `canonicalize`/`createHash`; `cardEtag` now delegates to the shared `hashCard`, so the expose-side ETag and the consume-side pin can never diverge.
 
-## Part B — SECURITY-CRITICAL main.ts wiring (audit CRITICAL-1 completion)
+## TDD RED → GREEN
+- RED: `bun run test:file -- tests/a2a/canonical.test.ts tests/a2a/client.test.ts` → `Cannot find module '../../src/a2a/canonical.ts'` (2 fail, modules absent).
+- GREEN (focused): `... canonical.test.ts client.test.ts card.test.ts` → **16 pass / 0 fail** (incl. the pre-existing `card.test.ts cardEtag` test still passing after the re-point).
+- Full a2a suite: `bun test ./tests/a2a/` → **61 pass / 0 fail** across 11 files (no regressions).
 
-### The exact getter + same-instance construction (quoted)
+Tests cover: canonicalize stable under key reorder (same hash), **swap-safe** (moved value → different hash), **array-order significant** (reordered inputModes/skills → different hash), 64-hex stability; discover happy-path pin, discover rejects `protocolVersion!=='1.0'`, discover rejects non-200, discover blocks a 302 host (+ asserts `redirect:'error'` was passed); verifyPin pass, verifyPin HARD-reject on altered card, verifyPin blocks a 301 host; invoke POSTs correct envelope + Bearer + freshness headers to baseUrl, invoke throws on JSON-RPC error.
 
-Hoisted ONE `rootStore` above the auth `if/else` so pool/session-store/deps all share it:
+## Gate
+- `bun run typecheck` → clean.
+- `bun run lint:file -- <5 files>` → clean (fixed 3 `noNonNullAssertion` + import-sort issues surfaced on first run).
 
-```typescript
-const rootStore =
-  opts.rootTokens ??
-  createRootTokenStore({
-    path: opts.rootTokenPath ?? defaultRootTokenPath(),
-  });
-```
-
-Session store in the standalone `else` branch uses a root GETTER (not a captured string):
-
-```typescript
-sessionTokens = createSessionTokenStore({
-  path: opts.sessionRevocationPath ?? defaultRevocationPath(),
-  rootToken: () => rootStore.getOrCreateRoot(), // GETTER: honours rotate() on the live store
-});
-```
-
-And the SAME instance is passed as `deps.rootTokens`:
-
-```typescript
-deviceRegistry,
-rootTokens: rootStore,
-publicBaseUrl,
-```
-
-Invariant: the guard verifies via `deps.sessionTokens` whose getter re-reads
-`rootStore.getOrCreateRoot()`; rotate-root calls `rootStore.rotate()` (same instance) → the getter
-immediately sees the new root → every prior session token's HMAC sig stops verifying. With the old
-captured-string bug (`rootToken: rootStore.getOrCreateRoot()`), rotate would return 200 while
-revoked devices kept authenticating — the silent no-op this closes.
-
-### Other deps wired
-- `deviceRegistry = createDeviceRegistry({ path: opts.deviceRegistryPath ?? defaultDeviceRegistryPath() })`.
-- `publicBaseUrl = opts.publicBaseUrl ?? ((cfg.AGENT_WEB_PUBLIC_URL as string) || \`http://${bind}:${port}\`)`
-  (`??`/`||` parenthesized — mixing them unparenthesized is a syntax error).
-- `AGENT_WEB_PUBLIC_URL` config row added to `src/config/schema.ts`.
-- `StartOptions` gained `rootTokens?`, `deviceRegistryPath?`, `publicBaseUrl?` for test injection.
-- `sessionTokens` + `policy` already threaded; the pair/revoke/rotate routes assemble their exact
-  Deps via `need(...)` in app.ts (unchanged) — the optional ServerDeps fields now carry real values,
-  so those routes stop 503-ing.
-
-### One-pool / one-rootStore invariant
-The daemon (`src/daemon/core.ts:118`) injects ONLY `queue: {jobStore, pool, concurrency}` — NOT
-`sessionTokens`/`rootTokens`. So BOTH standalone and daemon boot flow through the same `else` branch;
-wiring the getter there covers both. No second rootStore or session store is constructed.
-
-## MANDATORY live rotate-invalidation test
-`tests/server/rotate-invalidation.integration.test.ts` boots a REAL standalone `startWebServer`
-(temp dirs, no injected session store = production path):
-1. Pairs a device from loopback (POST /api/devices, 202) → device token.
-2. Device token authenticates (GET /api/jobs → 200).
-3. POST /api/security/rotate-root with the correct root secret → 200, re-minted local token.
-4. Device token now → **401** (getter re-read the rotated root — the no-op-if-wired-wrong assertion).
-5. Re-minted local token → **200** (operator's tab survives, anti-self-DoS).
-6. Old local token → **401** (signed with the pre-rotate root, now dead).
-
-Fails if the session store captured the root as a string or used a different rootStore than
-`deps.rootTokens`. Passes → the wiring is correct.
-
-## TDD RED/GREEN
-- Retry: `tests/server/jobs/retry.test.ts` (5 tests incl. Canceled/Interrupted retryable,
-  unknown→404, Queued→404) → implemented → GREEN (5 pass).
-- Rotate wiring: live integration test → GREEN (1 pass, 6 assertions).
-
-## Gate results
-- `bun run typecheck` — clean.
-- `bun run lint:file` on all 6 changed files — clean (biome auto-formatted 2 test/impl files).
-- `bun test tests/server/ tests/queue/` — **429 pass, 0 fail** (92 files). Existing device/rotate
-  route tests + auth-durable + main-ops-deps all green against the wired harness.
-
-## Files changed
-- `src/server/jobs/retry.ts` (new)
-- `src/server/app.ts` (retry route + import)
-- `src/server/main.ts` (hoisted rootStore + getter + deviceRegistry/rootTokens/publicBaseUrl deps + StartOptions)
-- `src/config/schema.ts` (AGENT_WEB_PUBLIC_URL row)
-- `tests/server/jobs/retry.test.ts` (new)
-- `tests/server/rotate-invalidation.integration.test.ts` (new)
+## Self-review (SECURITY lens, §7.3)
+- **Order-stable?** Yes — recursive key sort; the reorder test confirms identical hash for shuffled-key cards, so a benign peer re-serialize never false-trips the pin.
+- **Swap-safe?** Yes — `JSON.stringify` preserves `"key":value` identity, so moving a value onto a different key changes the string → different hash (dedicated test).
+- **Array order significant?** Yes — arrays recursed but never sorted (dedicated test).
+- **`redirect:'error'` on ALL fetches (no SSRF)?** Yes — discover, verifyPin, and invoke all route through `noRedirectFetch` with `redirect:'error'`; a 3xx is rejected (belt-and-suspenders with the impl's redirect option). Redirect/transport failures are caught and returned as `ok:false`, never followed.
+- **Hash mismatch = HARD reject, never silent re-pin?** Yes — `verifyPin` returns `{ ok:false }` and emits `pin-mismatch`; it never writes back a new pin.
+- **Bearer never logged/span'd?** Yes — the token is only placed in the `Authorization` header to `remote.baseUrl`; spans carry `peerHost` (host only). Freshness headers are per-request random/time, not secrets.
 
 ## Concerns
-- `publicBaseUrl` loopback fallback uses the configured `port` at deps-construction time; when booted
-  with `opts.port: 0` (tests) the fallback string reads `:0`. Harmless — it's only a display string
-  for the pairing URL, and any real remote deployment sets `AGENT_WEB_PUBLIC_URL`.
-- Task 20b (loopback-only local-token injection, §7.1b) is a SEPARATE task in the brief, NOT in this
-  Task 20 scope — not implemented here.
-- Docs surfaces (architecture.md/README/ROADMAP/ledger/Artifact) are the slice-landing gate's
-  concern at increment close — not touched per-task.
-
+- `invoke` uses `Date.now()`/`randomUUID()` for the replay headers directly (not injectable); fine for real use, no test needed to pin those. A downstream task wanting deterministic replay-header tests could thread a clock/nonce dep later.
+- `invoke`'s outbound `MessageSchema` guard assumes `params.message` for `message/send`|`message/stream` (matches the server's `handleMessageSend`). Other methods pass `params` through unvalidated (correct — no message payload).
 
 ---
 
-# Task 20 Report — Generalize markDaemonOrigin + retry provenance carry (Slice 25 Triggers)
+## Fix wave (§7.3 outbound-fetch DoS)
 
-**Status:** DONE. Commit `5eba90d` on `slice-25-triggers`.
+**Gap:** `discover` / `verifyPin` / `invoke` fetched from a REMOTE peer with NO request timeout and NO response-size cap. §7.3's threat model is a peer that turns malicious (the rug-pull the pin defends against — and `verifyPin` re-fetches from exactly that peer). Such a peer could (a) return an unbounded body → `res.json()` buffers it whole → memory-exhaustion DoS, or (b) hang the socket forever → the local process stalls. The Slice-21 reliability posture mandates wall-clock timeouts; they were missing on this outbound path.
 
-## What shipped
-1. **Provenance generalization** (`src/server/jobs/dispatch.ts`): renamed
-   `markDaemonOrigin(runsRoot, runId)` → `markJobOrigin(runsRoot, runId, origin)`.
-   The `createJobDispatch` wrapper now passes `job.origin ?? RunOrigin.Daemon`, so a
-   cron-fired run stamps `runs/<id>/origin=schedule`, webhook→`webhook`,
-   file/chain→`api` (whatever `fire.ts` set), and a directly-enqueued job still
-   defaults to `daemon` (unchanged). The runs `?origin=` facet (Slice 25b) then
-   filters trigger-fired runs for free. `RunOrigin` already had Schedule/Webhook/Api
-   — no enum change. `markDaemonOrigin` had no external callers (only comments in
-   fire.ts:166 / daemon/spans.ts:42), so it was renamed cleanly, no alias needed.
+### Fix
+- **Two config knobs** (`src/config/schema.ts`, AGENT_A2A_* group, `{env,kind,def,doc}` shape, doc names read site `a2a/client.ts`): `AGENT_A2A_FETCH_TIMEOUT_MS` (number, def `15_000`) and `AGENT_A2A_MAX_CARD_BYTES` (number, def `262_144` = 256 KiB). Env-fallback only; never hardcoded at the call site. `createA2aClient(deps)` gained optional `timeoutMs` / `maxCardBytes` overrides (read from `loadConfig().values` when unset) so the guards are testable without touching `process.env`.
+- **Timeout — `timedFetch(url, init)`** wraps `noRedirectFetch` for ALL three outbound fetches. It arms an `AbortController` + `setTimeout(timeoutMs)`: on timeout it `controller.abort()`s the real request AND rejects the returned promise itself (via a `Promise` race), so a hung peer rejects cleanly even when `fetchImpl` ignores the abort signal (the injected test stub does). `redirect:'error'` is still forced, so the existing SSRF guard is untouched. `discover`/`verifyPin` catch the rejection → `{ ok:false, reason:'card fetch failed (redirect, timeout, or transport)' }`; `invoke` lets it throw (caught by its caller). No hang, no unhandled throw.
+- **Size cap — `readCappedJson(res)`** replaces `res.json()` on every read path. The cap is enforced **twice**: (1) a fast reject on the declared `Content-Length` (no bytes read), then (2) a running byte count while draining `res.body.getReader()` — the moment `total > maxCardBytes` it throws and `reader.cancel()`s the stream instead of buffering. **This is how the cap survives a lying/absent Content-Length:** a peer that omits or under-states the header still cannot slip an unbounded body through, because the streamed count aborts mid-flight (proven by a test that streams forever and would hang if the body were buffered whole). Over-cap → `ResponseTooLargeError` → `discover`/`verifyPin` `{ ok:false, reason:'...exceeds cap...' }` / `invoke` thrown-then-caught. Never OOM.
 
-2. **I6 carry** (`src/server/jobs/retry.ts`): the `handleJobRetry` re-enqueue now
-   carries `origin: job.origin` and `chainDepth: job.chainDepth` forward. Previously
-   a retried webhook/schedule job silently reset to daemon (dropped off the facet)
-   and a chained job reset to chainDepth 0 (evading the A→B→A cap on its next hop —
-   the T9 F1 finding: chainDepth must survive every hop incl. manual retry).
+### RED → GREEN (4 new tests in `tests/a2a/client.test.ts`)
+- **RED:** before the fix, `bun test tests/a2a/client.test.ts` **hung indefinitely** (killed at exit 144) — the "hung peer" stubs never resolve and the unbounded-stream stub buffers forever, which IS the bug the fix closes.
+- **GREEN:** `bun test --timeout 15000 tests/a2a/client.test.ts` → **13 pass / 0 fail** (9 pre-existing + 4 new), 30 expect() calls, ~140ms (no hang).
+- New cases: discover rejects a hung peer within the timeout (<2s, not the 15s default); invoke rejects a hung peer within the timeout; discover rejects an over-cap card by declared Content-Length (never buffered); discover rejects an over-cap body with a lying/absent Content-Length via the streamed byte-count guard (asserts a bounded number of stream pulls — proof of mid-stream abort, not whole-body buffering).
 
-3. **app.ts `/hooks/:token` route:** NOT modified — already wired by a prior task
-   (buildFetch lines 247-272, inside the perimeter, outside the /api session guard,
-   with malformed-token→404 handling). Added `tests/server/app-hooks-route.test.ts`
-   to lock the boundary the brief specified: forbidden Origin→403 (perimeter),
-   loopback POST no-bearer unknown token→404 not 401 (outside session guard), GET
-   falls through (POST-only).
+### Existing tests stay green
+- Task-20 focused suite (`canonical.test.ts client.test.ts card.test.ts`): **16 → 20 pass / 0 fail** (the 4 additions; all 16 prior tests unchanged and green).
+- Full a2a suite (`bun test tests/a2a/`): **61 → 65 pass / 0 fail** across 11 files — no regressions.
 
-## Tests
-`bun test` (dispatch-origin + retry-origin + app-hooks-route + pre-existing
-dispatch/retry/app/hooks-webhook): 54 pass, 0 fail. Broader sweep
-`tests/server/jobs tests/triggers`: 149 pass, 0 fail. typecheck clean; lint clean.
-
-New test files: `tests/server/dispatch-origin.test.ts` (Schedule/Webhook stamp +
-Daemon default), `tests/server/jobs/retry-origin.test.ts` (webhook+chainDepth=2,
-schedule+chainDepth=3, plain job stays undefined/0), `tests/server/app-hooks-route.test.ts`.
-
-## Concerns
-None. The app.ts deliverable in the brief was already complete from an earlier task;
-the added route test closes the coverage gap the brief called for.
+### Gate
+- `bun run typecheck` → clean.
+- `bun run lint:file -- src/a2a/client.ts src/config/schema.ts tests/a2a/client.test.ts` → clean (one Biome line-wrap fix applied).
+- `bun run docs:check` → clean (living docs present + linked; every src subsystem documented).
