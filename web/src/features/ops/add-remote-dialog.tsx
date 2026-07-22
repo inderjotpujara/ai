@@ -93,13 +93,14 @@ export function AddRemoteDialog({
       const result = await testRemote({ cardUrl });
       setTestResult(result);
       setTestedCardUrl(cardUrl);
-      // Pre-select the first advertised skill so the picker's shown option and
-      // the confirmed value always agree (a sole skill is thus auto-selected);
-      // the operator can change it before Confirm. A card advertising NO skills
-      // leaves this '' and Confirm stays locked (fail-closed, mirrors the
-      // server's `resolveSkillId` — a peer with no skill cannot be delegated to).
+      // Auto-select ONLY when the card advertises exactly one skill — then the
+      // choice is unambiguous. With >1 (or 0) skills, leave this '' so the
+      // operator must choose explicitly and Confirm stays locked until they do
+      // (fail-closed, mirroring the server/CLI `resolveSkillId`, which REFUSES
+      // to guess among multiple skills — a >1-skill card must never silently
+      // default to skills[0]).
       const skills = result.card.skills;
-      setSkillId(skills[0]?.id ?? '');
+      setSkillId(skills.length === 1 ? (skills[0]?.id ?? '') : '');
     } catch (e) {
       setTestResult(undefined);
       setTestedCardUrl(undefined);
@@ -232,6 +233,12 @@ export function AddRemoteDialog({
                   value={skillId}
                   onChange={(e) => setSkillId(e.target.value)}
                 >
+                  {/* Placeholder for the fail-closed unselected state (a >1-skill
+                      card is NOT auto-defaulted): forces a deliberate choice and
+                      makes the empty `skillId` representable in the control. */}
+                  <option value="" disabled>
+                    Select a skill…
+                  </option>
                   {testResult.card.skills.map((skill) => (
                     <option key={skill.id} value={skill.id}>
                       {skill.name} ({skill.id})

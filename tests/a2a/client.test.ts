@@ -316,3 +316,37 @@ test('cardUrlHostMismatch flags a peer-controlled invoke endpoint off the operat
     cardUrlHostMismatch('https://peer.ts.net/card.json', 'not a url'),
   ).toBeDefined();
 });
+
+test('cardUrlHostMismatch rejects an https→http scheme DOWNGRADE (Bearer would ship in cleartext) but allows an http→https upgrade', () => {
+  // Same host but the advertised url DOWNGRADES https→http: every delegation
+  // would POST `Authorization: Bearer` + task text to port 80 in cleartext.
+  // Rejected with a scheme-protocol reason (the mismatch caught the downgrade).
+  const downgrade = cardUrlHostMismatch(
+    'https://peer.ts.net/.well-known/agent-card.json',
+    'http://peer.ts.net/api/a2a',
+  );
+  expect(downgrade).toBeDefined();
+  expect(downgrade).toContain('protocol');
+  // https cardUrl → https advertised url: no downgrade → allowed.
+  expect(
+    cardUrlHostMismatch(
+      'https://peer.ts.net/.well-known/agent-card.json',
+      'https://peer.ts.net/api/a2a',
+    ),
+  ).toBeUndefined();
+  // http cardUrl → http advertised url: no change → allowed (already plaintext;
+  // the operator vouched for http, we do not force an upgrade).
+  expect(
+    cardUrlHostMismatch(
+      'http://peer.ts.net/.well-known/agent-card.json',
+      'http://peer.ts.net/api/a2a',
+    ),
+  ).toBeUndefined();
+  // http cardUrl → https advertised url: an UPGRADE — strictly safer, allowed.
+  expect(
+    cardUrlHostMismatch(
+      'http://peer.ts.net/.well-known/agent-card.json',
+      'https://peer.ts.net/api/a2a',
+    ),
+  ).toBeUndefined();
+});

@@ -3776,13 +3776,22 @@ builder, §7.2 — a remote's text is data, never instructions), then
 pre-mints a run and calls `JobStore.enqueue({..., origin: RunOrigin.Remote})`
 before binding `taskId === jobId` (1:1 identity) plus a `contextId` in
 `task-index.ts`'s tiny in-memory map (durable identity needs no help from
-this cache — `jobIdForTask` falls back to `taskId` itself post-restart);
+this cache — `jobIdForTask` falls back to `taskId` itself post-restart; the
+map is **bounded** by `AGENT_A2A_MAX_TASK_INDEX`, evicting the oldest binding
+past the cap — safe because identity resolves from the durable job store and
+the contextId falls back to the taskId);
 `handleTasksGet`/`handleTasksCancel` project the job's queue status through
 `task-map.ts`'s exhaustive, `never`-tailed bijections
 (`jobStatusToTaskState`/`orchestratorResultToTaskState`/
 `orchestratorResultToArtifact`) so an added `JobStatus`/`OrchestratorResult`
 member fails `tsc` until mapped — a `gap`/`resource` failure can never
-project to `completed`. `stream.ts`'s `frameRunSpanAsA2a` is a PURE re-framer
+project to `completed`. `handleTasksCancel` of a **RUNNING** task fires the
+worker pool's per-job `AbortController` (`buildA2aServerDeps` threads the same
+live `pool` through — exact parity with `POST /api/jobs/:id/cancel`), so the
+in-flight turn is actually aborted and the pool's aborted-guard skips `markDone`;
+a finishing turn therefore can never regress `canceled→completed`. A queued or
+terminal task uses the bare store transition (no in-flight controller).
+`stream.ts`'s `frameRunSpanAsA2a` is a PURE re-framer
 that maps one run `SpanDTO` (from the single Slice-24 `handleRunStream`
 engine — no parallel stream) onto one A2A SSE frame
 (`TaskStatusUpdateEvent`/`TaskArtifactUpdateEvent`); only real span frames
@@ -3798,7 +3807,8 @@ vs `deviceId`/`exp`), checked against its OWN registry, so neither
 verifier ever accepts the other's token even though they share a root;
 the root is resolved PER CALL so a `rotate-root` invalidates every
 outstanding A2A Bearer at once. `replay-guard.ts`'s `createReplayGuard`
-fronts `POST /api/a2a` with a bounded-LRU seen-nonce set + a
+fronts `POST /api/a2a` with a bounded-LRU seen-nonce set (hard-capped by the
+`AGENT_A2A_MAX_SEEN_NONCES` knob, oldest evicted past it) + a
 `±AGENT_A2A_REPLAY_WINDOW_MS` timestamp check (malformed proof → `401`,
 stale/replayed → `409`). `canonical.ts`'s `hashCard` (recursive key-sort +
 sha256) is the ONE canonicalization shared by the expose-side ETag
@@ -3823,7 +3833,12 @@ explicit-and-advertised id is used verbatim, a card advertising exactly one
 skill is auto-picked, and anything else (zero skills, several skills with no
 explicit choice, or an explicit id the card doesn't advertise) fails closed
 with an error listing the advertised ids (capped at 128 chars either way) —
-so a `RemoteAgent` is only ever persisted once a target skill is certain.
+so a `RemoteAgent` is only ever persisted once a target skill is certain. The
+same add-time path runs `cardUrlHostMismatch(operatorCardUrl, card.url)`: the
+peer-advertised invoke `url` MUST stay on the operator-vouched cardUrl's
+`host:port` AND must not **downgrade** its scheme (an `https` cardUrl advertising
+an `http` url is rejected — the Bearer would ship in cleartext; an `http→https`
+upgrade is allowed), an §7.3 SSRF + scheme-pin guard both persist sites inherit.
 `mount.ts` turns a discovered+pinned `RemoteAgent` into a `delegate_to_<name>`
 `ToolSet` shaped to be a drop-in for the MCP mount seam
 (`MountedRegistry.forAgent` → `createSuperAgent`'s `toolsFor`, the same seam
@@ -4005,10 +4020,22 @@ session).
 
 #### Configuration (env fallback-only, per this repo's rule)
 
-`AGENT_A2A_ENABLED` (default `false` — the expose surface is dark until an
-operator turns it on), `AGENT_A2A_CARD_TTL` (300s), `AGENT_A2A_REPLAY_WINDOW_MS`
-(300 000ms), `AGENT_A2A_SKILLS_PATH` (`a2a-skills.json` — the allowlist AND
-issued-token registry share this one path), `AGENT_A2A_REMOTES_PATH`
+`AGENT_A2A_ENABLED` (default `false`) gates the two **runtime** A2A surfaces —
+the EXPOSE server (card route + `POST /api/a2a`) and CONSUME-side **live
+in-session** remote mounting (`liveRemoteDelegateTools`); with it off both are
+dark. It does **NOT** gate the standalone `agent a2a` operator CLI: `skills`/
+`token`/`remotes`/`call`/`card` are explicit one-shot operator actions against
+local stores + a chosen peer, so `agent a2a call` delegates to a remote even
+with the flag OFF (the flag governs the always-on daemon surfaces, not deliberate
+operator commands). Other knobs: `AGENT_A2A_CARD_TTL` (300s),
+`AGENT_A2A_REPLAY_WINDOW_MS` (300 000ms), `AGENT_A2A_MAX_SEEN_NONCES` (50 000 —
+the replay guard's seen-nonce hard cap, `a2a/replay-guard.ts`),
+`AGENT_A2A_MAX_TASK_INDEX` (50 000 — the in-memory task-index binding cap,
+`a2a/task-index.ts`; the oldest binding is evicted past it, identity still
+resolves from the durable job store), `AGENT_A2A_SKILLS_PATH` (`a2a-skills.json`,
+the expose allowlist) with the issued-token registry in a SEPARATE file
+`AGENT_A2A_TOKENS_PATH` (`a2a-tokens.json` — different top-level JSON shapes, so
+they must not share a path), `AGENT_A2A_REMOTES_PATH`
 (`~/.config/ai/a2a-remotes.json`, leading `~` expanded at the read site),
 `AGENT_A2A_FETCH_TIMEOUT_MS` (15 000ms), `AGENT_A2A_MAX_CARD_BYTES` (262 144 =
 256 KiB), `AGENT_A2A_TASK_TIMEOUT_MS` (120 000ms = 2min),

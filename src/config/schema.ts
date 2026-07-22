@@ -621,7 +621,7 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     env: 'AGENT_A2A_ENABLED',
     kind: 'boolean',
     def: false,
-    doc: 'Governs BOTH directions of A2A: (1) the EXPOSE surface — the card route (`server/a2a/card.ts`) 404s and `POST /api/a2a` (`server/a2a/rpc.ts`) rejects when off; and (2) as of Task 29b, CONSUME-side live-mounting — `liveRemoteDelegateTools` (`a2a/mount.ts`) returns `{}` when off, so a configured remote surfaces as a `delegate_to_<name>` orchestrator delegate only when this is on. Default OFF so the daemon neither exposes anything nor mounts any remote until an operator authors an allowlist + issues a token from the Federation tab; flipping it on lights up both directions at once.',
+    doc: 'Gates the two RUNTIME A2A surfaces: (1) the EXPOSE server — the card route (`server/a2a/card.ts`) 404s and `POST /api/a2a` (`server/a2a/rpc.ts`) rejects when off; and (2) as of Task 29b, CONSUME-side LIVE in-session mounting — `liveRemoteDelegateTools` (`a2a/mount.ts`) returns `{}` when off, so a configured remote surfaces as a `delegate_to_<name>` orchestrator delegate mid-turn only when this is on. Default OFF so the daemon neither exposes anything nor live-mounts any remote until an operator authors an allowlist + issues a token from the Federation tab; flipping it on lights up both those runtime surfaces at once. It does NOT gate the standalone `agent a2a` operator CLI (skills/token/remotes/call/card): that is an explicit, deliberate operator action against local stores + a chosen peer, so `agent a2a call` delegates to a remote even with this flag OFF — the flag governs the always-on daemon surfaces, not one-shot operator commands.',
   },
   {
     env: 'AGENT_A2A_CARD_TTL',
@@ -634,6 +634,18 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     kind: 'number',
     def: 300_000,
     doc: 'inbound request replay window; a request whose timestamp is outside ±window is rejected (`a2a/enroll.ts` / `server/a2a/rpc.ts`, §7.2).',
+  },
+  {
+    env: 'AGENT_A2A_MAX_SEEN_NONCES',
+    kind: 'number',
+    def: 50_000,
+    doc: '§7.2 anti-replay hard cap: the maximum number of seen nonces the replay guard remembers (`a2a/replay-guard.ts`). Well past the count a legitimate peer emits inside one window; a bound purely to cap memory under a distinct-nonce flood — the oldest is evicted once the count crosses it. A config knob (not a hardcode) mirroring the window-is-a-knob discipline.',
+  },
+  {
+    env: 'AGENT_A2A_MAX_TASK_INDEX',
+    kind: 'number',
+    def: 50_000,
+    doc: '§7.3 memory bound: the maximum number of A2A taskId→jobId / contextId bindings the in-memory task index retains (`a2a/task-index.ts`). The oldest binding is evicted once the count crosses it, so a long-lived daemon fielding many remote tasks cannot grow the map without limit. Identity survives eviction — `taskId === jobId` resolves from the durable job store regardless — and the contextId falls back to the taskId. Env-fallback only.',
   },
   {
     env: 'AGENT_A2A_SKILLS_PATH',

@@ -150,6 +150,47 @@ describe('AddRemoteDialog', () => {
     );
   });
 
+  it('does NOT auto-select a skill when the card advertises MORE THAN ONE — Confirm stays locked until the operator chooses (fail-closed, matches API/CLI)', async () => {
+    const testRemote = vi.fn().mockResolvedValue({
+      card: cardWith(['summarize', 'deep-research', 'translate']),
+      pinnedCardHash: 'deadbeefcafefeed',
+    });
+    const addRemote = vi.fn().mockResolvedValue({});
+
+    render(
+      <AddRemoteDialog
+        open
+        onOpenChange={() => {}}
+        testRemote={testRemote}
+        addRemote={addRemote}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('add-remote-name'), {
+      target: { value: 'peer-agent' },
+    });
+    fireEvent.change(screen.getByTestId('add-remote-card-url'), {
+      target: { value: 'http://peer.example/.well-known/agent-card.json' },
+    });
+    fireEvent.change(screen.getByTestId('add-remote-token'), {
+      target: { value: 'peer-bearer-token' },
+    });
+    fireEvent.click(screen.getByTestId('add-remote-test'));
+
+    const picker = (await screen.findByTestId(
+      'add-remote-skill',
+    )) as HTMLSelectElement;
+    // No skill pre-selected → the picker's value is empty and Confirm is locked
+    // (a >1-skill card must NOT silently default to skills[0]).
+    expect(picker.value).toBe('');
+    expect(screen.getByTestId('add-remote-confirm')).toBeDisabled();
+    expect(addRemote).not.toHaveBeenCalled();
+
+    // Once the operator picks a skill, Confirm unlocks.
+    fireEvent.change(picker, { target: { value: 'translate' } });
+    expect(screen.getByTestId('add-remote-confirm')).not.toBeDisabled();
+  });
+
   it('locks Confirm when the tested card advertises no skills (nothing to delegate to)', async () => {
     const testRemote = vi.fn().mockResolvedValue({
       card: cardWith([]),

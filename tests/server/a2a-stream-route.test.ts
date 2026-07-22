@@ -14,7 +14,10 @@ import {
   type JobRecord,
   JobStatus,
 } from '../../src/queue/types.ts';
-import { handleA2aStream } from '../../src/server/a2a/stream-route.ts';
+import {
+  handleA2aStream,
+  parseSpanFrame,
+} from '../../src/server/a2a/stream-route.ts';
 import type { SpanRecord } from '../../src/telemetry/jsonl-exporter.ts';
 
 // ---- fakes ------------------------------------------------------------------
@@ -378,6 +381,33 @@ test('resubscribe on a Done run (whole snapshot in ONE poll): final:true is the 
   expect(childIdx).toBeGreaterThanOrEqual(0);
   expect(childIdx).toBeLessThan(finalIdx);
   expect(finalIdx).toBe(frames.length - 1); // final:true genuinely last
+});
+
+test('parseSpanFrame SKIPS a non-JSON upstream data line (returns undefined) instead of throwing — one bad line must not abort the A2A stream and drop the buffered terminal frame', () => {
+  // A well-formed SpanDTO data line parses to the span (re-framed normally).
+  const goodLine = JSON.stringify({
+    spanId: 'root',
+    parentSpanId: null,
+    name: 'chat.run',
+    offsetMs: 0,
+    durationMs: 100,
+    depth: 0,
+    status: 'ok',
+    degraded: false,
+    attributes: {},
+    events: [],
+  });
+  const good = parseSpanFrame(goodLine);
+  expect(good).toBeDefined();
+  expect(good?.spanId).toBe('root');
+
+  // A non-JSON line (a truncated / heartbeat / future-format upstream line) is
+  // SKIPPED — returns undefined, never throws (which would bubble to the reader
+  // catch and close the stream, losing the buffered final:true terminal frame).
+  expect(parseSpanFrame('this is : not json {')).toBeUndefined();
+  expect(parseSpanFrame('')).toBeUndefined();
+  // Valid JSON but not a SpanDTO shape → also skipped (mirrors safeParse).
+  expect(parseSpanFrame('{"not":"a span"}')).toBeUndefined();
 });
 
 test('a streaming reject returns a JSON-RPC error envelope (jsonrpc/id/error)', async () => {

@@ -28,12 +28,26 @@ import { createRemoteStore } from '../../a2a/remotes.ts';
 import type { A2aServerDeps } from '../../a2a/server.ts';
 import { createTaskIndex } from '../../a2a/task-index.ts';
 import type { loadConfig } from '../../config/schema.ts';
+import type { WorkerPool } from '../../queue/pool.ts';
 import type { JobStore } from '../../queue/store.ts';
 import type { RootTokenStore } from '../security/root-token.ts';
 
 export function buildA2aServerDeps(
   cfg: ReturnType<typeof loadConfig>['values'],
-  ctx: { jobStore: JobStore; runsRoot: string; rootTokens: RootTokenStore },
+  ctx: {
+    jobStore: JobStore;
+    runsRoot: string;
+    rootTokens: RootTokenStore;
+    /** The single worker pool draining `jobStore`. Threaded through so
+     *  `handleTasksCancel` can ABORT a RUNNING task's in-flight turn via the
+     *  pool's per-job `AbortController` — exact parity with the
+     *  `POST /api/jobs/:id/cancel` route (`server/jobs/cancel.ts`). Optional so
+     *  the EXPOSE-only unit fixtures that never cancel a running job can omit
+     *  it; production (`server/main.ts`) always passes the live pool. Without
+     *  it, cancelling a Running task falls back to the bare store markCanceled
+     *  and the finishing turn could regress canceled→done. */
+    pool?: WorkerPool;
+  },
 ): A2aServerDeps {
   // The allowlist and the issued-token registry are DISTINCT files with
   // DISTINCT top-level JSON shapes: the allowlist persists `{skills:[...]}` (an
@@ -54,6 +68,9 @@ export function buildA2aServerDeps(
     jobStore: ctx.jobStore,
     runsRoot: ctx.runsRoot,
     taskIndex: createTaskIndex(),
+    // The live worker pool (when injected) so a RUNNING-task cancel aborts the
+    // in-flight turn — parity with `POST /api/jobs/:id/cancel`.
+    pool: ctx.pool,
     // CONSUME side (Task 20/22): the remote store's own path knob
     // (`AGENT_A2A_REMOTES_PATH`) is separate from the expose-side skills
     // path — the two surfaces never share a file.

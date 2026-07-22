@@ -141,6 +141,21 @@ export function cardUrlHostMismatch(
       `cardUrl host "${expected.host}" (SSRF guard, §7.3)`
     );
   }
+  // SCHEME-DOWNGRADE guard (capstone Important-2): host equality alone is not
+  // enough. A card fetched over `https://peer/…` could advertise
+  // `url:"http://peer/api/a2a"`; every delegation would then POST the remote
+  // `Authorization: Bearer` + task text to port 80 in CLEARTEXT. So the
+  // advertised url's protocol must not DOWNGRADE the operator-vouched cardUrl's:
+  // an `http→https` UPGRADE is fine (strictly safer), `http→http`/`https→https`
+  // are unchanged, but `https→http` is REJECTED. `URL.protocol` carries the
+  // trailing ':' (`"https:"` / `"http:"`).
+  if (expected.protocol === 'https:' && actual.protocol !== 'https:') {
+    return (
+      `card.url protocol "${actual.protocol}" downgrades the operator-vouched ` +
+      `cardUrl protocol "${expected.protocol}" — the Bearer would ship in ` +
+      `cleartext (SSRF/scheme guard, §7.3)`
+    );
+  }
   return undefined;
 }
 

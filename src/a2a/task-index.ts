@@ -1,3 +1,5 @@
+import { loadConfig } from '../config/schema.ts';
+
 /**
  * A2A task identity index (Slice 31, Task 9).
  *
@@ -9,8 +11,20 @@
  * and the `contextId` for each bound task, falling back to the durable identity
  * (and to the taskId itself as a self-context) when the process was restarted
  * and the cache is cold.
+ *
+ * BOUNDED (§7.3 memory guard): a long-lived daemon fielding many remote tasks
+ * must not grow these maps without limit. `maxEntries` is a hard cap sized by a
+ * config knob (`AGENT_A2A_MAX_TASK_INDEX`, env-fallback only — NOT a hardcode);
+ * once a new binding crosses it, the OLDEST binding is evicted from both maps
+ * (Map insertion order → O(1) eviction, mirroring the replay-guard's cap). An
+ * evicted task loses only its cache entry: identity still resolves via
+ * `taskId === jobId` from the durable job store, and its contextId falls back to
+ * the taskId — so eviction is safe, never a correctness loss.
  */
-export function createTaskIndex(): {
+
+export function createTaskIndex(
+  maxEntries = Number(loadConfig().values.AGENT_A2A_MAX_TASK_INDEX),
+): {
   taskIdForJob(jobId: string): string;
   jobIdForTask(taskId: string): string | undefined;
   contextFor(taskId: string): string;
@@ -39,8 +53,20 @@ export function createTaskIndex(): {
       return contextByTask.get(taskId) ?? taskId;
     },
     bind(taskId: string, jobId: string, contextId: string): void {
+      // Re-binding an existing taskId is an update (Map.set on an existing key
+      // preserves its insertion position and does not grow size), so it never
+      // pushes the map over the cap on its own.
       jobByTask.set(taskId, jobId);
       contextByTask.set(taskId, contextId);
+      // Hard cap: once a NEW binding crosses `maxEntries`, evict the oldest from
+      // BOTH maps together (same insertion-ordered key). Identity + context both
+      // fall back safely for an evicted task, so this is memory-only.
+      while (jobByTask.size > maxEntries) {
+        const oldest = jobByTask.keys().next().value;
+        if (oldest === undefined) break;
+        jobByTask.delete(oldest);
+        contextByTask.delete(oldest);
+      }
     },
   };
 }

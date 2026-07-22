@@ -581,6 +581,11 @@ export function startWebServer(opts: StartOptions = {}): {
             jobStore,
             runsRoot,
             rootTokens: rootStore,
+            // Thread the SAME pool draining jobStore so an A2A tasks/cancel of a
+            // RUNNING task aborts its in-flight turn (parity with the
+            // POST /api/jobs/:id/cancel route), instead of a bare markCanceled
+            // the finishing turn could overwrite canceled→done.
+            pool,
           })
         : undefined),
   };

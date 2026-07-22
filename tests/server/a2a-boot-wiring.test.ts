@@ -3,11 +3,23 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createA2aEnrollment } from '../../src/a2a/enroll.ts';
+import { handleTasksCancel } from '../../src/a2a/server.ts';
 import { loadConfig } from '../../src/config/schema.ts';
+import { createWorkerPool } from '../../src/queue/pool.ts';
 import { createJobStore } from '../../src/queue/store.ts';
+import { JobKind, JobStatus } from '../../src/queue/types.ts';
 import { buildA2aServerDeps } from '../../src/server/a2a/wire.ts';
 import { startWebServer } from '../../src/server/main.ts';
 import { createRootTokenStore } from '../../src/server/security/root-token.ts';
+
+const waitFor = async (p: () => boolean, ms = 3000): Promise<void> => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (p()) return;
+    await Bun.sleep(10);
+  }
+  throw new Error('timeout waiting for condition');
+};
 
 const CARD_PATH = '/.well-known/agent-card.json';
 
@@ -118,6 +130,110 @@ test('buildA2aServerDeps yields the full EXPOSE+CONSUME shape (allowlist+enrollm
     expect(deps.remotes).toBeDefined();
     expect(deps.client).toBeDefined();
   } finally {
+    jobStore.close();
+  }
+});
+
+test('buildA2aServerDeps threads the worker pool through so A2A tasks/cancel of a RUNNING task can abort the in-flight turn (parity with POST /api/jobs/:id/cancel)', () => {
+  process.env.AGENT_A2A_SKILLS_PATH = join(
+    mkdtempSync(join(tmpdir(), 'a2a-boot-pool-')),
+    'a2a-skills.json',
+  );
+  const rootTokens = createRootTokenStore({
+    path: join(
+      mkdtempSync(join(tmpdir(), 'a2a-boot-pool-root-')),
+      'daemon-token',
+    ),
+  });
+  const jobStore = createJobStore(
+    { path: mkdtempSync(join(tmpdir(), 'a2a-boot-pool-queue-')) },
+    {},
+  );
+  const pool = createWorkerPool({
+    store: jobStore,
+    concurrency: 1,
+    dispatch: () => async () => undefined,
+  });
+  try {
+    const cfg = loadConfig().values;
+    const deps = buildA2aServerDeps(cfg, {
+      jobStore,
+      runsRoot: 'runs',
+      rootTokens,
+      pool,
+    });
+    // The SAME pool instance is on the deps — so handleTasksCancel's Running
+    // branch fires the pool's per-job AbortController, not the bare markCanceled.
+    expect(deps.pool).toBe(pool);
+  } finally {
+    jobStore.close();
+  }
+});
+
+test('a Running A2A task canceled via the wired pool aborts the turn AND a later settle cannot flip canceled→completed', async () => {
+  process.env.AGENT_A2A_SKILLS_PATH = join(
+    mkdtempSync(join(tmpdir(), 'a2a-cancel-skills-')),
+    'a2a-skills.json',
+  );
+  const rootTokens = createRootTokenStore({
+    path: join(mkdtempSync(join(tmpdir(), 'a2a-cancel-root-')), 'daemon-token'),
+  });
+  const jobStore = createJobStore(
+    { path: mkdtempSync(join(tmpdir(), 'a2a-cancel-queue-')) },
+    {},
+  );
+  // A controllable executor: it settles ONLY after `release()` (simulating the
+  // model turn finishing AFTER the cancel arrived), and records whether it saw
+  // its abort signal fire — proving the cancel actually reached the in-flight
+  // turn rather than merely stamping the row Canceled.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  let sawAbort = false;
+  const pool = createWorkerPool({
+    store: jobStore,
+    concurrency: 1,
+    pollMs: 5,
+    dispatch: () => (_job, signal) =>
+      new Promise((resolve) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            sawAbort = true;
+          },
+          { once: true },
+        );
+        // The turn "completes" (with a would-be Done result) only once released.
+        void gate.then(() => resolve({ kind: 'answer', text: 'late result' }));
+      }),
+  });
+  pool.start();
+  try {
+    const cfg = loadConfig().values;
+    const deps = buildA2aServerDeps(cfg, {
+      jobStore,
+      runsRoot: 'runs',
+      rootTokens,
+      pool,
+    });
+    const job = jobStore.enqueue({ kind: JobKind.Chat, payload: {} });
+    await waitFor(() => jobStore.getJob(job.id)?.status === JobStatus.Running);
+
+    // taskId === jobId identity — cancel via the A2A dispatch path.
+    const res = await handleTasksCancel({ id: job.id }, deps);
+    expect(res.ok).toBe(true);
+    expect(jobStore.getJob(job.id)?.status).toBe(JobStatus.Canceled);
+    expect(sawAbort).toBe(true); // the in-flight turn's signal was aborted
+
+    // The turn now finishes AFTER cancel; the pool's aborted-guard must skip
+    // markDone so the row stays Canceled (never regresses to Done/completed).
+    release();
+    await Bun.sleep(60);
+    expect(jobStore.getJob(job.id)?.status).toBe(JobStatus.Canceled);
+  } finally {
+    release();
+    await pool.stop();
     jobStore.close();
   }
 });

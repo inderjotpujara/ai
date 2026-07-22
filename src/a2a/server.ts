@@ -77,11 +77,17 @@ export type A2aServerDeps = {
   jobStore: JobStore;
   runsRoot: string;
   taskIndex: ReturnType<typeof createTaskIndex>;
-  /** OPTIONAL running-job aborter (the pool's per-job `AbortController`,
-   *  `server/jobs/cancel.ts`). When present, cancelling a RUNNING task aborts
-   *  the in-flight turn (the pool also marks it canceled); when absent (unit
-   *  tests, or a queued/terminal job) the store is marked directly. Additive,
-   *  optional — the route (Task 12) wires the real pool. */
+  /** OPTIONAL running-job aborter — the SAME worker pool draining `jobStore`
+   *  (`queue/pool.ts`), whose `cancel(id)` fires that job's per-job
+   *  `AbortController`. When present, cancelling a RUNNING task aborts the
+   *  in-flight turn AND `pool.cancel` marks it canceled; the pool's settle guard
+   *  (`pool.ts` — the synchronous `controller.signal.aborted` check before
+   *  `markDone`) then skips the terminal write, so a finishing turn can NOT
+   *  regress canceled→done (exact parity with `POST /api/jobs/:id/cancel`,
+   *  `server/jobs/cancel.ts`). When absent (EXPOSE-only unit fixtures, or a
+   *  queued/terminal job) the store is marked directly. `buildA2aServerDeps`
+   *  (`server/a2a/wire.ts`) threads the real pool in production
+   *  (`server/main.ts`). */
   pool?: { cancel(id: string): boolean };
   /** CONSUME-side deps (Task 20/22) — the remote-agent store + discover/pin/
    *  invoke client the `/api/a2a/remotes*` routes need. Optional so the

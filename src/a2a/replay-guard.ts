@@ -23,6 +23,8 @@
  * never grow memory without limit. No nonce value is ever logged.
  */
 
+import { loadConfig } from '../config/schema.ts';
+
 /** A `check` verdict: pass, or a rejection carrying the HTTP status the route
  *  should return. `401` = malformed freshness proof; `409` = stale/replayed. */
 export type ReplayVerdict = { ok: true } | { ok: false; status: 401 | 409 };
@@ -31,17 +33,19 @@ export type ReplayGuard = {
   check(nonce: string, tsMs: number): ReplayVerdict;
 };
 
-/** Hard ceiling on remembered nonces. Well past the count a legitimate peer
- *  emits inside a single window; a bound purely to cap memory under a flood. */
-const MAX_SEEN_NONCES = 50_000;
-
 /**
  * Build a replay guard over a fixed window. `now` is injectable (tests drive a
- * deterministic clock); it defaults to `Date.now`.
+ * deterministic clock); it defaults to `Date.now`. `maxSeenNonces` is the hard
+ * ceiling on remembered nonces — a config knob (`AGENT_A2A_MAX_SEEN_NONCES`,
+ * env-fallback only, NOT a hardcode) mirroring the window-is-a-knob discipline:
+ * well past the count a legitimate peer emits inside one window, a bound purely
+ * to cap memory under a distinct-nonce flood. Injectable so the cap-eviction is
+ * testable without inserting tens of thousands of nonces.
  */
 export function createReplayGuard(
   windowMs: number,
   now: () => number = Date.now,
+  maxSeenNonces = Number(loadConfig().values.AGENT_A2A_MAX_SEEN_NONCES),
 ): ReplayGuard {
   // nonce → the ms timestamp we first accepted it at. A Map preserves insertion
   // order, so the first key is always the oldest — an O(1) LRU eviction.
@@ -87,7 +91,7 @@ export function createReplayGuard(
 
       seen.set(nonce, nowMs);
       // Hard cap: drop the oldest until back under the ceiling.
-      while (seen.size > MAX_SEEN_NONCES) {
+      while (seen.size > maxSeenNonces) {
         const oldest = seen.keys().next().value;
         if (oldest === undefined) break;
         seen.delete(oldest);

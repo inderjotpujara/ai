@@ -51,3 +51,20 @@ test('the seen-nonce set is bounded (LRU) and never grows without limit', () => 
   // The most-recent nonce is still remembered → replay rejected.
   expect(guard.check('nonce-99999', clock)).toEqual({ ok: false, status: 409 });
 });
+
+test('the seen-nonce hard cap is a config knob (env-fallback), and exceeding it evicts the OLDEST nonce', () => {
+  const clock = 0;
+  // Cap injected at 3 (the knob is env-fallback in production, overridable here
+  // so the eviction is testable without a giant loop). Window huge so nothing
+  // ages out on time — only the cap can evict.
+  const guard = createReplayGuard(1_000_000, () => clock, 3);
+  expect(guard.check('a', clock)).toEqual({ ok: true });
+  expect(guard.check('b', clock)).toEqual({ ok: true });
+  expect(guard.check('c', clock)).toEqual({ ok: true });
+  // A 4th distinct nonce crosses the cap → the OLDEST ('a') is evicted.
+  expect(guard.check('d', clock)).toEqual({ ok: true });
+  // 'a' was evicted → it is now accepted again (no longer remembered).
+  expect(guard.check('a', clock)).toEqual({ ok: true });
+  // 'd' (most recent) is still remembered → replay rejected.
+  expect(guard.check('d', clock)).toEqual({ ok: false, status: 409 });
+});

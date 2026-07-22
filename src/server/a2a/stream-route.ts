@@ -81,6 +81,26 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * Parse a re-assembled upstream SSE `data:` payload into a `SpanDTO`, returning
+ * `undefined` (SKIP this line) when it is not JSON or not a valid span. The
+ * `JSON.parse` is wrapped in try/skip so ONE malformed upstream line (a
+ * truncated frame, a future non-span line) skips only that line rather than
+ * throwing out of the reader loop — an uncaught throw there degrades the whole
+ * A2A stream to a clean close and DROPS the buffered terminal (`final:true`)
+ * frame. Mirrors the adjacent `SpanDtoSchema.safeParse` skip-don't-throw.
+ */
+export function parseSpanFrame(dataPayload: string): SpanDTO | undefined {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(dataPayload);
+  } catch {
+    return undefined;
+  }
+  const parsed = SpanDtoSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
 const RESULT_KINDS = new Set(['answer', 'gap', 'resource']);
 function isOrchestratorResult(value: unknown): value is OrchestratorResult {
   return (
@@ -206,10 +226,11 @@ function reframedBody(
               if (line.startsWith('data:')) data.push(line.slice(5).trim());
             }
             if (data.length > 0) {
-              const parsed = SpanDtoSchema.safeParse(
-                JSON.parse(data.join('\n')),
-              );
-              if (parsed.success) reframe(controller, parsed.data);
+              // try/skip parse: a single non-JSON upstream line skips THIS frame
+              // only — it must never throw out of the loop (that would close the
+              // stream and drop the buffered terminal frame).
+              const span = parseSpanFrame(data.join('\n'));
+              if (span !== undefined) reframe(controller, span);
             }
             sep = buf.indexOf('\n\n');
           }
