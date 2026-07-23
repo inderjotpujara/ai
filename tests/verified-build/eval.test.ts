@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { evalRuns } from '../../src/verified-build/config.ts';
 import type { EvalDeps } from '../../src/verified-build/eval.ts';
-import { evalCases } from '../../src/verified-build/eval.ts';
+import { evalCases, runGoldenEval } from '../../src/verified-build/eval.ts';
+import { JudgeUnavailableError } from '../../src/verified-build/judge.ts';
 import type { GoldenCase } from '../../src/verified-build/types.ts';
 import { GoldenKind } from '../../src/verified-build/types.ts';
 
@@ -126,5 +127,78 @@ describe('evalCases', () => {
     });
     expect(res.passed).toBe(false);
     expect(judgeCalls).toBe(0);
+  });
+});
+
+describe('runGoldenEval', () => {
+  const oneCase: GoldenCase[] = [
+    { id: 'c0', input: 'x', assert: 'ok', kind: GoldenKind.TaskSuccess },
+  ];
+
+  test('returns an EvalResult bound to the selected judge for a qualifying candidate', async () => {
+    const res = await runGoldenEval({
+      cases: oneCase,
+      judgeCandidates: () => [{ model: 'J:32b', params: 32e9, family: 'jf' }],
+      generatorFamily: 'gf',
+      runCase: async () => 'answer',
+      judge: async () => true,
+    });
+    expect(res?.passed).toBe(true);
+    expect(res?.judgeModel).toBe('J:32b');
+    expect(res?.belowBar).toBe(false);
+  });
+
+  test('binds the SELECTED judge model into every judge call (C3), never the generator', async () => {
+    const seen: string[] = [];
+    const res = await runGoldenEval({
+      cases: oneCase,
+      judgeCandidates: () => [
+        { model: 'J:32b', params: 32e9, family: 'jf' },
+        { model: 'gen-twin', params: 32e9, family: 'gf' },
+      ],
+      generatorFamily: 'gf',
+      runCase: async () => 'answer',
+      judge: async (model) => {
+        seen.push(model);
+        return true;
+      },
+    });
+    expect(res?.passed).toBe(true);
+    expect(new Set(seen)).toEqual(new Set(['J:32b']));
+  });
+
+  test('returns null when no candidate clears the param bar (below bar)', async () => {
+    const res = await runGoldenEval({
+      cases: oneCase,
+      judgeCandidates: () => [{ model: 'small', params: 1e9, family: 'jf' }],
+      runCase: async () => 'answer',
+      judge: async () => true,
+    });
+    expect(res).toBeNull();
+  });
+
+  test('degrades to null (skip eval) when the judge model is unavailable', async () => {
+    const res = await runGoldenEval({
+      cases: oneCase,
+      judgeCandidates: () => [{ model: 'J:32b', params: 32e9, family: 'jf' }],
+      runCase: async () => 'answer',
+      judge: async () => {
+        throw new JudgeUnavailableError('J:32b');
+      },
+    });
+    expect(res).toBeNull();
+  });
+
+  test('a non-JudgeUnavailableError from the judge still propagates', async () => {
+    await expect(
+      runGoldenEval({
+        cases: oneCase,
+        judgeCandidates: () => [{ model: 'J:32b', params: 32e9, family: 'jf' }],
+        runCase: async () => 'answer',
+        judge: async () => {
+          throw new Error('unexpected boom');
+        },
+      }),
+    ).rejects.toThrow('unexpected boom');
   });
 });
