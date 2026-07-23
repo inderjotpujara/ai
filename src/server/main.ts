@@ -17,6 +17,7 @@ import { createWorkerPool, type WorkerPool } from '../queue/pool.ts';
 import { createJobStore, type JobStore } from '../queue/store.ts';
 import { createModelManager } from '../resource/model-manager.ts';
 import { runtimeFor } from '../runtime/registry.ts';
+import { createEvalHistoryStore } from '../self-improve/history.ts';
 import { createSessionStore } from '../session/store.ts';
 import {
   createTriggersEngine,
@@ -435,6 +436,18 @@ export function startWebServer(opts: StartOptions = {}): {
   const jobStore =
     injected?.jobStore ??
     createJobStore({ path: String(cfg.AGENT_QUEUE_PATH) }, {});
+  // Task 21 (Part B): the `/api/evals*` routes' read store — closes the
+  // Task-20 carry-forward that left `ServerDeps.evalHistory` unset (a
+  // permanent 503). Opens the SAME `jobs.db` the queue/trigger stores use
+  // (`AGENT_QUEUE_PATH`, exactly `createJobStore`'s derivation above and
+  // `createRealRunEvalTurn`'s per-run instance, `launch-turns.ts`) — never a
+  // second DB. Built unconditionally in BOTH standalone and daemon-injected
+  // mode (like `deviceRegistry` above): it is a cheap open + migrate, not a
+  // pool/engine with a start/stop lifecycle, so there is nothing here for
+  // injected mode to double-own.
+  const evalHistory = createEvalHistoryStore({
+    path: String(cfg.AGENT_QUEUE_PATH),
+  });
   let pool: WorkerPool;
   // Triggers engine (Task 16). Injected mode: the daemon owns it (start/stop +
   // onSettled wiring), we only surface it on ServerDeps. Standalone: we own it
@@ -567,6 +580,9 @@ export function startWebServer(opts: StartOptions = {}): {
     deviceRegistry,
     rootTokens: rootStore,
     publicBaseUrl,
+    // `/api/evals*` routes (Task 21 Part B) resolve this; construction above
+    // is unconditional, so this is never undefined in a real boot.
+    evalHistory,
     // Triggers routes (Increment 5) resolve this; undefined in standalone mode
     // with the flag off, so those routes degrade to 503 via need() (I3).
     triggers,
