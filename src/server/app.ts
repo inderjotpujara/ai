@@ -1,8 +1,10 @@
 import type { A2aServerDeps } from '../a2a/server.ts';
+import { REGISTRY_DIRS } from '../cli/archive.ts';
 import { explain } from '../errors/boundary.ts';
 import type { MemoryStore } from '../memory/store.ts';
 import type { WorkerPool } from '../queue/pool.ts';
 import type { JobStore } from '../queue/store.ts';
+import type { EvalHistoryStore } from '../self-improve/history.ts';
 import type { SessionStore } from '../session/store.ts';
 import { withServerRequestSpan } from '../telemetry/spans.ts';
 import type { TriggersEngine } from '../triggers/engine.ts';
@@ -37,6 +39,9 @@ import { handleDaemonStatus } from './daemon/status.ts';
 import { handleDeviceList } from './devices/list.ts';
 import { handleDevicePair } from './devices/pair.ts';
 import { handleDeviceRevoke } from './devices/revoke.ts';
+import { handleEvalHealth } from './evals/health.ts';
+import { handleEvalHistory } from './evals/history.ts';
+import { handleEvalReeval } from './evals/reeval.ts';
 import { handleFeedback } from './feedback.ts';
 import { handleWebhook } from './hooks/webhook.ts';
 import { ISOLATION_HEADERS } from './isolation-headers.ts';
@@ -232,6 +237,12 @@ export type ServerDeps = {
    *  is on, so with the flag off this stays undefined and the whole surface is
    *  dark. */
   a2a?: A2aServerDeps;
+  /** The append-only `eval_history` store (Slice 32, Task 20) the
+   *  `/api/evals*` routes read/enqueue-against. Optional — legacy fixtures
+   *  need not set it; the routes degrade to 503 (via `need()`) until a later
+   *  task wires the real store (shares the daemon's `jobs.db`, mirroring
+   *  `jobStore`). */
+  evalHistory?: Pick<EvalHistoryStore, 'listByArtifact'>;
 };
 
 /** A Slice-25b ops dep was not wired (the field is optional on ServerDeps so
@@ -740,6 +751,36 @@ async function handleApi(
         const jobDetail = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
         if (req.method === 'GET' && jobDetail?.[1]) {
           const res = handleJobDetail(jobDetail[1], deps);
+          rec.status(res.status);
+          return res;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/evals') {
+          const res = await handleEvalHealth({
+            history: need(deps.evalHistory, 'evalHistory'),
+            registryDirs: [...REGISTRY_DIRS],
+            runsRoot: deps.runsRoot,
+          });
+          rec.status(res.status);
+          return res;
+        }
+        // Exact-string `/reeval` sub-path MUST precede the bare-:artifact
+        // regex below — same action-before-detail discipline as
+        // `/api/jobs/:id/cancel` vs `/api/jobs/:id`.
+        if (req.method === 'POST' && url.pathname === '/api/evals/reeval') {
+          const res = await handleEvalReeval(
+            req,
+            { jobStore: deps.jobStore, policy: deps.policy },
+            guard,
+          );
+          rec.status(res.status);
+          return res;
+        }
+        const evalDetail = url.pathname.match(/^\/api\/evals\/([^/]+)$/);
+        if (req.method === 'GET' && evalDetail?.[1]) {
+          const res = handleEvalHistory(evalDetail[1], {
+            history: need(deps.evalHistory, 'evalHistory'),
+            registryDirs: [...REGISTRY_DIRS],
+          });
           rec.status(res.status);
           return res;
         }
