@@ -213,7 +213,7 @@ test('summarizeRun resolves a standalone mcp.mount-only run via the RUN_ROOT_NAM
   expect(s?.outcome).toBe('ready');
 });
 
-test('TERMINAL_RUN_ROOTS excludes the ephemeral precursor roots and includes the 7 run/build/pull roots', () => {
+test('TERMINAL_RUN_ROOTS excludes the ephemeral precursor roots and includes the run/build/pull/eval roots', () => {
   for (const precursor of ['mcp.mount', 'memory.recall', 'memory.ingest']) {
     expect(TERMINAL_RUN_ROOTS.has(precursor)).toBe(false);
     // ...but they remain full run roots for the fallback path.
@@ -227,11 +227,33 @@ test('TERMINAL_RUN_ROOTS excludes the ephemeral precursor roots and includes the
     'agent.build',
     'crew.build',
     'model.pull',
+    // Slice 32: a golden-set re-eval run's own top-level root. An eval run IS a
+    // terminal root (like chat.run/agent.run), not an ephemeral precursor, so
+    // CLI --follow / summarizeRun classify + terminate on it.
+    'eval.reeval',
   ]) {
+    expect(RUN_ROOT_NAMES.has(terminal)).toBe(true);
     expect(TERMINAL_RUN_ROOTS.has(terminal)).toBe(true);
   }
   // TERMINAL_RUN_ROOTS is exactly RUN_ROOT_NAMES minus the 3 precursors.
   expect(TERMINAL_RUN_ROOTS.size).toBe(RUN_ROOT_NAMES.size - 3);
+});
+
+test('summarizeRun reports real durationMs/outcome for an eval.reeval-rooted trace (Slice 32)', async () => {
+  const dir = join(root, 'run-eval');
+  await mkdir(dir, { recursive: true });
+  const rootSpan = span({
+    name: 'eval.reeval',
+    spanId: 'a',
+    durationMs: 271,
+    attributes: { 'agent.outcome': 'regression' },
+  });
+  await writeFile(join(dir, 'spans.jsonl'), `${JSON.stringify(rootSpan)}\n`);
+  const s = await summarizeRun(root, 'run-eval');
+  // Would be durationMs 0 / outcome 'unknown' if eval.reeval were not a
+  // recognized terminal run root.
+  expect(s?.durationMs).toBe(271);
+  expect(s?.outcome).toBe('regression');
 });
 
 test('summarizeRun falls back to spans[0] when no recognized run root is present (never throws)', async () => {

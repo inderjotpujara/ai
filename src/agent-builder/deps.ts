@@ -229,7 +229,11 @@ export function makeBuilderModel(
   };
 }
 
-function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
+/** Map a model declaration to a judge candidate (params in absolute count).
+ *  Exported so the re-eval turn (`server/launch-turns.ts`, Slice 32) builds its
+ *  `judgeCandidates` from the SAME construction the builders use — one judge
+ *  ladder, not a divergent copy. */
+export function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
   return {
     model: decl.model,
     params: decl.footprint.approxParamsBillions * 1e9,

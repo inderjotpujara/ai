@@ -45,6 +45,7 @@ import {
   createRealRunAgentTurn,
   createRealRunBuilderTurn,
   createRealRunCrewTurn,
+  createRealRunEvalTurn,
   createRealRunModelPull,
   createRealRunWorkflowTurn,
 } from '../server/launch-turns.ts';
@@ -127,6 +128,9 @@ function buildRealDaemon() {
   // Single-agent runner for A2A Chat skills bound to an agent ref (B3).
   const runAgentTurn = createRealRunAgentTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
+  // Golden-set re-eval runner (Slice 32 Task 16) — the real `runEval`
+  // composition under an `eval.reeval` run scope.
+  const runEvalTurn = createRealRunEvalTurn(runsRoot);
   const runModelPull = createRealRunModelPull(runsRoot);
   const memoryEmbedModel =
     process.env.AGENT_MEMORY_EMBED_MODEL ?? 'qwen3-embedding:0.6b';
@@ -174,6 +178,7 @@ function buildRealDaemon() {
     runChatTurn,
     runAgentTurn,
     runBuilderTurn,
+    runEvalTurn,
     runsRoot,
   });
   // ONE `computeConcurrency()` call, hoisted to a local shared by the pool

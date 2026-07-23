@@ -32,6 +32,7 @@ import {
   createRealRunAgentTurn,
   createRealRunBuilderTurn,
   createRealRunCrewTurn,
+  createRealRunEvalTurn,
   createRealRunModelPull,
   createRealRunWorkflowTurn,
 } from './launch-turns.ts';
@@ -360,6 +361,8 @@ export function startWebServer(opts: StartOptions = {}): {
   // Single-agent runner for A2A Chat skills bound to an agent ref (B3).
   const runAgentTurn = createRealRunAgentTurn(runsRoot);
   const runBuilderTurn = createRealRunBuilderTurn(runsRoot);
+  // Golden-set re-eval runner (Slice 32 Task 16), same real turn the daemon wires.
+  const runEvalTurn = createRealRunEvalTurn(runsRoot);
   const runModelPull = createRealRunModelPull(runsRoot);
   const mcpConfigPath = defaultConfigPath();
   const mcpMountStatus = createMcpMountStatus();
@@ -460,6 +463,7 @@ export function startWebServer(opts: StartOptions = {}): {
       runChatTurn,
       runAgentTurn,
       runBuilderTurn,
+      runEvalTurn,
       runsRoot,
     });
     queueConcurrency = computeConcurrency();
