@@ -1,11 +1,14 @@
 import { generateText, type LanguageModel } from 'ai';
 import { AGENTS, agentNames } from '../../agents/index.ts';
+import { CREWS } from '../../crews/index.ts';
+import { WORKFLOWS } from '../../workflows/index.ts';
 import { buildAgent } from '../agent-builder/builder.ts';
 import {
   makeRealBuilderDeps,
   toJudgeCandidate,
 } from '../agent-builder/deps.ts';
 import type { BuilderDeps } from '../agent-builder/types.ts';
+import { REGISTRY_DIRS } from '../cli/archive.ts';
 import { runCrewCli } from '../cli/crew.ts';
 import { runFlow } from '../cli/flow.ts';
 import { createSelectHook } from '../cli/select-hook.ts';
@@ -38,6 +41,7 @@ import { resolveModel } from '../resource/selector.ts';
 import { runtimeFor } from '../runtime/registry.ts';
 import { type RunEvalDeps, runEval } from '../self-improve/executor.ts';
 import { createEvalHistoryStore } from '../self-improve/history.ts';
+import { replayGoldenCase } from '../self-improve/replay-case.ts';
 import { ATTR, inSpan } from '../telemetry/spans.ts';
 import { dryRunMs } from '../verified-build/config.ts';
 import { loadGolden } from '../verified-build/golden.ts';
@@ -321,8 +325,9 @@ export function createRealRunEvalTurn(runsRoot: string): RunEvalTurn {
       };
 
       const deps: RunEvalDeps = {
-        // The reusable-artifact registry dirs the reuse/archive readers scan.
-        registryDirs: ['agents', 'crews', 'workflows'],
+        // The reusable-artifact registry dirs the reuse/archive readers scan —
+        // the ONE canonical list (`src/cli/archive.ts`) so it can't drift.
+        registryDirs: [...REGISTRY_DIRS],
         runsRoot,
         history,
         upsertEntry,
@@ -347,34 +352,44 @@ export function createRealRunEvalTurn(runsRoot: string): RunEvalTurn {
             },
           );
         },
-        // Replay one golden case against the CURRENT model. Builds the REGISTERED
-        // agent with an empty toolset (MCP-free, matching the build-time golden
-        // eval) and runs it through the SAME guarded-delegation + `createSelectHook`
-        // path the CLI/builder use — the hook resolves the agent's live model, so
-        // the replay runs on "the model that would run today". A guarded failure
-        // returns its message (the judge then fails the case) rather than throwing.
-        // NOTE: crew/workflow artifacts are scanned for drift but `runCase`
-        // currently reconstructs only agent refs (AGENTS); a crew/workflow golden
-        // replay is a live-verify follow-on.
-        runCase: async (refName, _model, input) => {
-          const factory = AGENTS[refName];
-          if (!factory) {
-            throw new Error(`unknown agent for re-eval: ${refName}`);
-          }
-          const { selectHook } = await ensureEngine();
-          const agent = factory({});
-          const outcome = await runGuardedAgent(
-            agent,
-            input,
-            selectHook,
-            signal,
-          );
-          return 'error' in outcome ? outcome.error : outcome.text;
-        },
+        // Replay one golden case against the CURRENT model, for whichever
+        // artifact class `refName` names — agent, crew, OR workflow (Task-16
+        // fix: agents-only made a drifted crew/workflow throw → terminal
+        // Failed). `replayGoldenCase` resolves the ref across all three
+        // registries and dispatches on shape, MIRRORING crew-builder's
+        // `runArtifact` (same `runCrew`/`runWorkflow` + `defaultRunAgentStep`/
+        // `tools:{}` call shapes) so every class replays MCP-free exactly as the
+        // build-time golden eval proved it. The agent branch keeps the SAME
+        // guarded-delegation + `createSelectHook` path (the hook resolves the
+        // live model, so the agent runs on "the model that would run today");
+        // crew/workflow use the default resolve their build-time eval used. A
+        // run failure returns its message (the judge then fails the case) rather
+        // than throwing; a ref in NONE of the registries is the only throw.
+        runCase: (refName, _model, input) =>
+          replayGoldenCase(refName, input, {
+            agents: AGENTS,
+            crews: CREWS,
+            workflows: WORKFLOWS,
+            runAgent: async (agent, task) => {
+              const { selectHook } = await ensureEngine();
+              return runGuardedAgent(agent, task, selectHook, signal);
+            },
+            workflowAgentMap: () => {
+              const map: Record<string, Agent> = {};
+              for (const [name, factory] of Object.entries(AGENTS)) {
+                map[name] = factory({});
+              }
+              return map;
+            },
+          }),
         judgeCandidates: () => (engine?.registry ?? []).map(toJudgeCandidate),
         // Runs on the SELECTED judge model (never the generator), deterministically
-        // (temperature 0) and bounded by `dryRunMs()` — identical to the builder
-        // verify gate's judge, only the arg order differs (`(model, prompt)`).
+        // (temperature 0) and bounded by `dryRunMs()` — same behavior as the builder
+        // verify gate's judge. Arg order is `(model, prompt)` because this closure
+        // implements `ReevalDeps.judge`/`GoldenEvalBinding.judge` (model-first) —
+        // NOT `BuilderVerifyDeps.judge` `(prompt, model)`. Inverting to match the
+        // builder would break the binding `runGoldenEval` calls; the divergence is
+        // a typed-seam difference by design, not drift.
         judge: async (judgeModelId, prompt) => {
           const r = await generateText({
             model: await judgeModelFor(judgeModelId),
