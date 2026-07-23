@@ -1,7 +1,14 @@
-/** Self-improvement / continuous re-eval knobs (Slice 32). Mirrors the
- *  `envNumber` idiom in `src/verified-build/config.ts`, plus an `envBool`/
- *  `envStr` sibling for this module's boolean/string knobs. Env vars are
- *  fallback-only overrides — never the source of truth. */
+/** Self-improvement / continuous re-eval knobs (Slice 32). `envBool`/
+ *  `envStr` siblings for this module's boolean/string knobs. Env vars are
+ *  fallback-only overrides — never the source of truth.
+ *
+ *  `envNumber` deliberately does NOT use the legacy `Number(x) || fallback`
+ *  idiom (`src/verified-build/config.ts` and friends) — that idiom silently
+ *  rejects an explicit `0` (falsy) and falls back to the default, which is
+ *  wrong for a knob like `AGENT_REEVAL_HYSTERESIS=0` ("demote on any
+ *  confirmed regression, no noise margin"). Instead it mirrors the
+ *  `Number.isFinite`-based `coerce` in `src/config/schema.ts` (~line 724):
+ *  only a missing/empty/non-finite value falls back; a real `0` is honored. */
 
 const DEFAULT_REEVAL_ENABLED = true;
 const DEFAULT_SWEEP_CRON = '0 4 * * *';
@@ -9,7 +16,10 @@ const DEFAULT_HYSTERESIS = 0.15;
 const DEFAULT_RERUN_CASES = 2;
 
 function envNumber(name: string, fallback: number): number {
-  return Number(process.env[name]) || fallback;
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 /** Default-on convention (mirrors `telemetry/provider.ts` `recordIoEnabled` /
