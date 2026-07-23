@@ -23,7 +23,7 @@ import {
   toCrewBuildResultDto,
 } from './builders/map-result.ts';
 import type { RunCrewTurn } from './crews/run.ts';
-import type { RunAgentTurn } from './jobs/dispatch.ts';
+import type { RunAgentTurn, RunEvalTurn } from './jobs/dispatch.ts';
 import type { RunModelPullTurn } from './models/pull.ts';
 import type { RunWorkflowTurn } from './workflows/run.ts';
 
@@ -200,6 +200,24 @@ export function createRealRunBuilderTurn(runsRoot: string): RunBuilderTurn {
  * this phase — an internally-owned `AbortController` is created per pull
  * (wiring a user-triggered cancel is a natural follow-on, not required here).
  */
+/**
+ * Real, non-test `RunEvalTurn` (Slice 32) — STUBBED until Task 16.
+ *
+ * The real body opens a run via `withRunTelemetry`/`withMcpRun` under a root
+ * span `eval.reeval` (so `deriveRunKind` classifies it as `RunKind.Eval`) and
+ * calls `runEval(...)` from `../self-improve/executor.ts`. That executor does
+ * not exist until Task 14/16, so this factory THROWS on construction: Task 8
+ * lands only the dispatch seam + the fake-tested case, and deliberately does
+ * NOT wire `runEvalTurn` into `buildRealDaemon` (`src/cli/daemon.ts`) or
+ * `src/server/main.ts`. Throwing here (rather than returning a turn that throws)
+ * makes any premature wiring crash loudly at daemon-build time instead of
+ * dispatching a silent no-op eval run. Task 16 replaces this stub with the real
+ * `withRunTelemetry` + `runEval` composition and wires it into both call sites.
+ */
+export function createRealRunEvalTurn(_runsRoot: string): RunEvalTurn {
+  throw new Error('runEval not wired until Task 16');
+}
+
 export function createRealRunModelPull(runsRoot: string): RunModelPullTurn {
   return ({ runtime, provider, modelRef, runId }) =>
     withRunTelemetry({ runsRoot, runId }, () =>

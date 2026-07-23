@@ -35,6 +35,32 @@ export type RunAgentTurn = (input: {
   runId: string;
 }) => Promise<OrchestratorResult>;
 
+/** Slice 32: what a golden-set re-eval run replays against a newly-resolved
+ *  model. `Sweep` re-evals every reusable artifact (a manual/scheduled full
+ *  pass); `AffectedByPull` re-evals only the artifacts affected by a just-pulled
+ *  model (`reason: 'pull:<ref>'`); `Artifact` re-evals ONE artifact by `ref`
+ *  (which is then required — see `EvalJobPayloadSchema`). String enum per repo
+ *  rules (values are the wire form the payload carries). */
+export enum EvalMode {
+  Sweep = 'sweep',
+  AffectedByPull = 'affected-by-pull',
+  Artifact = 'artifact',
+}
+
+/** Runs a golden-set re-eval to completion under its own run scope (Slice 32).
+ *  Dispatch invokes it for a `JobKind.Eval` job carrying an `EvalJobPayload`.
+ *  The real body (`createRealRunEvalTurn`, `launch-turns.ts`) wraps `runEval`
+ *  (`src/self-improve/executor.ts`) — which does not exist until Task 14/16 —
+ *  so it is INJECTED here (exercised in tests with a fake) and only wired into
+ *  the daemon/server in Task 16. Implementations MUST be `async`. */
+export type RunEvalTurn = (input: {
+  mode: EvalMode;
+  ref?: string;
+  reason?: string;
+  runId: string;
+  signal?: AbortSignal;
+}) => Promise<OrchestratorResult>;
+
 /** What the dispatch registry needs to run each `JobKind` — the SAME turn
  *  functions the HTTP routes already build (`src/server/launch-turns.ts`) plus
  *  the crew/workflow registry lookups (`crews/index.ts`, `workflows/index.ts`).
@@ -55,6 +81,13 @@ export type JobDispatchDeps = {
    *  fall-through to the full orchestrator). */
   runAgentTurn?: RunAgentTurn;
   runBuilderTurn: RunBuilderTurn;
+  /** Runs a golden-set re-eval for a `JobKind.Eval` job (Slice 32). Optional so
+   *  pre-Slice-32 dispatch-unit fixtures that never enqueue an eval job keep
+   *  compiling; Task 16 wires the real runner (`createRealRunEvalTurn`) into the
+   *  daemon/server. An Eval job dispatched with this dep absent throws (a
+   *  permanent, non-retryable defect — never a silent no-op), mirroring the
+   *  `runAgentTurn`/`a2aRef` fail-fast above. */
+  runEvalTurn?: RunEvalTurn;
   /** Runs root the dispatched job's runId lives under (Task 24, item 17) —
    *  used ONLY to stamp the job's `origin` provenance marker `run-dto.ts`'s
    *  `readRunOrigin` later reads. Optional so existing dispatch-unit fixtures
@@ -106,6 +139,21 @@ const ChatJobPayloadSchema = z.object({
  *  auto-approve, mirroring `withConfirmTimeout`) and log is a no-op;
  *  `autoYes`/`force` in the payload still drive the builder's own deps. */
 const BuildJobPayloadSchema = BuilderBuildRequestSchema;
+
+/** An eval job payload = the re-eval `mode` + the `reason` it fired
+ *  (`'sweep' | 'pull:<ref>' | 'manual'`, telemetry only) + a `ref` naming the
+ *  single artifact for `mode=artifact`. `ref` is REQUIRED iff `mode=artifact`:
+ *  a targeted-artifact eval with no artifact to target is a permanent defect, so
+ *  the refine makes `.parse` throw rather than silently re-evaling nothing. */
+const EvalJobPayloadSchema = z
+  .object({
+    mode: z.enum(EvalMode),
+    ref: z.string().min(1).optional(),
+    reason: z.string().optional(),
+  })
+  .refine((p) => p.mode !== EvalMode.Artifact || !!p.ref, {
+    message: 'ref required for mode=artifact',
+  });
 
 /** A payload that fails its per-kind schema (or names a missing def) is a
  *  permanent, non-retryable defect — thrown here so the pool records a terminal
@@ -250,15 +298,24 @@ function buildExecutor(kind: JobKindT, deps: JobDispatchDeps): JobExecutor {
         });
       };
     case JobKind.Eval:
-      // Slice 32 Task 5 registers JobKind.Eval across the enum spine only;
-      // the real re-eval executor lands in Task 8. This stub exists solely
-      // to keep the `_exhaustive: never` check below honest — no Eval job is
-      // enqueued anywhere yet, so this branch is unreachable until Task 8
-      // wires a real executor here (which must replace, not wrap, this stub).
-      return async () => {
-        throw new Error(
-          'JobKind.Eval executor not yet implemented (Slice 32 Task 8)',
-        );
+      return async (job, signal) => {
+        // A bad payload (or mode=artifact with no ref) is a permanent,
+        // non-retryable defect — `.parse` throws so the pool records a terminal
+        // Failed rather than a retry loop (mirrors every other kind above).
+        const { mode, ref, reason } = EvalJobPayloadSchema.parse(job.payload);
+        if (!deps.runEvalTurn) {
+          // Fail-fast (never a silent no-op): an Eval job requires the re-eval
+          // runner to be wired (Task 16 wires the real one into the
+          // daemon/server), mirroring the `a2aRef`/`runAgentTurn` guard above.
+          throw new Error('eval job but no runEvalTurn dep is wired');
+        }
+        return deps.runEvalTurn({
+          mode,
+          ref,
+          reason,
+          runId: requireRunId(job),
+          signal,
+        });
       };
     default: {
       const _exhaustive: never = kind;
