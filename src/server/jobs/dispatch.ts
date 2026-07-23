@@ -249,6 +249,17 @@ function buildExecutor(kind: JobKindT, deps: JobDispatchDeps): JobExecutor {
           log: () => {},
         });
       };
+    case JobKind.Eval:
+      // Slice 32 Task 5 registers JobKind.Eval across the enum spine only;
+      // the real re-eval executor lands in Task 8. This stub exists solely
+      // to keep the `_exhaustive: never` check below honest — no Eval job is
+      // enqueued anywhere yet, so this branch is unreachable until Task 8
+      // wires a real executor here (which must replace, not wrap, this stub).
+      return async () => {
+        throw new Error(
+          'JobKind.Eval executor not yet implemented (Slice 32 Task 8)',
+        );
+      };
     default: {
       const _exhaustive: never = kind;
       throw new Error(`unhandled job kind: ${String(_exhaustive)}`);

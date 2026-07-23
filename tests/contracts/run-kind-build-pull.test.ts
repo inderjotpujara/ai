@@ -9,12 +9,17 @@ test('RunKind gains Build/Pull members (Slice 30b Phase 5)', () => {
 test('RunKind gains Mcp/Memory members (Slice 30b Phase 5 final review)', () => {
   expect(RunKind.Mcp as string).toBe('mcp');
   expect(RunKind.Memory as string).toBe('memory');
+});
+
+test('RunKind gains Eval (Slice 32)', () => {
+  expect(RunKind.Eval as string).toBe('eval');
   expect((Object.values(RunKind) as string[]).sort()).toEqual(
     [
       'agent',
       'build',
       'chat',
       'crew',
+      'eval',
       'mcp',
       'memory',
       'pull',

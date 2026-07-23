@@ -109,14 +109,16 @@ export enum CrewProcess {
   Hierarchical = 'hierarchical',
 }
 
-/** What a run IS (chat/agent/crew/workflow/build/pull/mcp/memory), derived by
- *  the mapper from the run's root span name. Distinct from RunOrigin (HOW a run
- *  was triggered). Build/Pull added Slice 30b Phase 5; Mcp/Memory added in the
- *  Phase 5 final review to recognize the ephemeral runs minted by
+/** What a run IS (chat/agent/crew/workflow/build/pull/mcp/memory/eval), derived
+ *  by the mapper from the run's root span name. Distinct from RunOrigin (HOW a
+ *  run was triggered). Build/Pull added Slice 30b Phase 5; Mcp/Memory added in
+ *  the Phase 5 final review to recognize the ephemeral runs minted by
  *  `POST /api/mcp/test-mount` (`mcp.mount` root) and
  *  `POST /api/memory/:space/{recall,ingest}` (`memory.recall`/`memory.ingest`
- *  roots) — without them those runs read as perpetually Running. All are
- *  contract-owned, no engine mirror needed (see `deriveRunKind`, Task 2). */
+ *  roots) — without them those runs read as perpetually Running. Eval added
+ *  Slice 32 for the `eval.reeval` root span (golden-set re-eval on a new
+ *  model, `src/self-improve/spans.ts`). All are contract-owned, no engine
+ *  mirror needed (see `deriveRunKind`, Task 2). */
 export enum RunKind {
   Chat = 'chat',
   Agent = 'agent',
@@ -126,6 +128,7 @@ export enum RunKind {
   Pull = 'pull',
   Mcp = 'mcp',
   Memory = 'memory',
+  Eval = 'eval',
 }
 
 /** Wire mirror of `src/verified-build/types.ts` VerifiedLevel (isomorphic
@@ -233,13 +236,14 @@ export enum JobPriorityWire {
   Normal = 'normal',
 }
 
-/** Wire mirror of `src/queue/types.ts` JobKind. Slice 24. */
+/** Wire mirror of `src/queue/types.ts` JobKind. Slice 24; Eval added Slice 32. */
 export enum JobKindWire {
   Chat = 'chat',
   Crew = 'crew',
   Workflow = 'workflow',
   Pull = 'pull',
   Build = 'build',
+  Eval = 'eval',
 }
 
 /** Wire mirror of `src/triggers/types.ts` TriggerType (isomorphic — no engine
