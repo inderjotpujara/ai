@@ -8,11 +8,12 @@
  * same payload shape for the web "re-eval now" button.
  *
  * `--agent <name>` enqueues `{mode: EvalMode.Artifact, ref: name,
- * reason:'manual'}` (re-evals ONE artifact); `--all` (or no flags — running
- * `bun run reeval` bare is the everyday "just re-check everything" case)
- * enqueues `{mode: EvalMode.Sweep, reason:'manual'}` (re-evals every reusable
- * artifact). A malformed invocation (`--agent` with no name, or an
- * unrecognized flag) fails closed: usage is printed and NOTHING is enqueued.
+ * reason:'manual'}` (re-evals ONE artifact); explicit `--all` enqueues
+ * `{mode: EvalMode.Sweep, reason:'manual'}` (re-evals every reusable
+ * artifact). Every other invocation — no args at all, `--agent` with no
+ * name, or an unrecognized flag — fails closed: usage is printed, a
+ * non-zero exit code is set, and NOTHING is enqueued. A bare `bun run
+ * reeval` never silently triggers a full sweep.
  *
  * `runReevalCli` is pure dispatch over an injected `ReevalCliDeps` seam — no
  * subcommand touches a store directly — so it is unit-testable without a real
@@ -38,7 +39,7 @@ type ParsedArgs =
   | { kind: 'usage' };
 
 function parseArgs(argv: string[]): ParsedArgs {
-  if (argv.length === 0 || argv[0] === '--all') return { kind: 'sweep' };
+  if (argv[0] === '--all') return { kind: 'sweep' };
   if (argv[0] === '--agent') {
     const ref = argv[1];
     return ref ? { kind: 'artifact', ref } : { kind: 'usage' };

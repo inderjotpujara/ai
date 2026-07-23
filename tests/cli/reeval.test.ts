@@ -47,12 +47,12 @@ test('reeval --all enqueues an Eval(sweep)', async () => {
   expect(out).toEqual(['enqueued job-1']);
 });
 
-test('reeval with no flags also enqueues a sweep (default)', async () => {
-  const { enqueued, deps } = harness();
+test('reeval with no flags fails closed: prints usage, enqueues nothing', async () => {
+  const { out, enqueued, deps } = harness();
   await runReevalCli([], deps);
-  expect(enqueued).toEqual([
-    { kind: JobKind.Eval, payload: { mode: EvalMode.Sweep, reason: 'manual' } },
-  ]);
+  expect(enqueued).toEqual([]);
+  expect(out).toEqual(['usage: bun run reeval [--all | --agent <name>]']);
+  expect(process.exitCode).toBe(1);
 });
 
 test('reeval --agent with no name prints usage and enqueues nothing', async () => {
