@@ -6,6 +6,7 @@ import { runGuardedAgent } from '../core/delegate.ts';
 import {
   Capability,
   type ModelDeclaration,
+  type ModelRequirement,
   PreferPolicy,
   RuntimeKind,
 } from '../core/types.ts';
@@ -229,6 +230,26 @@ export function makeBuilderModel(
   };
 }
 
+/** The ONE model requirement the agent builder resolves against to capture an
+ *  artifact's `verifiedWith` baseline. It is the SINGLE SOURCE OF TRUTH the
+ *  Slice-32 re-eval drift resolve (`server/launch-turns.ts`) MUST reuse — if the
+ *  two resolves differ (e.g. one passes `allowUncensored`, the other does not),
+ *  they select from different candidate sets and every artifact shows phantom
+ *  drift on every sweep (I4). `allowUncensored` is deliberately left UNSET here
+ *  (uncensored models stay filtered by `selectCandidates`); the builder is the
+ *  authority for what `verifiedWith` was captured against, so the re-eval aligns
+ *  to it, not the reverse. `role` affects only the resolve's error text (never
+ *  candidate selection), so the re-eval may pass the artifact's own need. */
+export function builderModelRequirement(
+  role = 'agent builder',
+): ModelRequirement {
+  return {
+    role,
+    requires: [Capability.Tools],
+    prefer: PreferPolicy.LargestThatFits,
+  };
+}
+
 /** Map a model declaration to a judge candidate (params in absolute count).
  *  Exported so the re-eval turn (`server/launch-turns.ts`, Slice 32) builds its
  *  `judgeCandidates` from the SAME construction the builders use — one judge
@@ -260,11 +281,7 @@ export async function makeRealBuilderDeps(
   const manager = createModelManager();
   const registry = await buildRegistry();
   const { decl, numCtx } = await resolveModel(
-    {
-      role: 'agent builder',
-      requires: [Capability.Tools],
-      prefer: PreferPolicy.LargestThatFits,
-    },
+    builderModelRequirement(),
     registry,
     {
       ensureReady: (d, o) => manager.ensureReady(d, o),

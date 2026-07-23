@@ -165,6 +165,85 @@ test('Artifact mode: drift + all-cases-fail-on-every-rerun demotes Behaves→Unv
   expect(regRow?.model).toBe('B:7b');
 });
 
+// C1 — the real post-build path: a freshly-built artifact has a captured
+// `verifiedWith` + `lastEvalPass:true` but NO `eval_history` row yet. The first
+// model swap must reconstruct the commit-time baseline and DEMOTE on a real
+// regression, never re-seed at the drifted model (which would mask it forever).
+test('C1: first drift after a normal build (verifiedWith set, NO history row, lastEvalPass true) auto-demotes, not seeds', async () => {
+  const dir = reg();
+  writeManifestEntry(
+    dir,
+    'a',
+    entryAt({ verifiedWith: verifiedWith('A:7b'), lastEvalPass: true }),
+  );
+  const captured = emptyCaptured();
+  const deps = makeDeps({
+    registryDirs: [dir],
+    resolveModel: () => 'B:7b', // drift A -> B
+    judgePass: false, // all cases fail on every re-run
+    latestPassing: undefined, // NO eval_history row yet
+    captured,
+  });
+  const res = await runEval(
+    { mode: EvalMode.Artifact, ref: 'a', reason: 'manual' },
+    deps,
+  );
+  const demote = captured.upserts.find((u) => u.name === 'a');
+  expect(demote?.entry.verifiedLevel).toBe(VerifiedLevel.Unverified); // demoted, NOT seeded
+  const regRow = captured.inserted.find((r) => r.regressed);
+  expect(regRow).toBeDefined();
+  expect(regRow?.model).toBe('B:7b'); // freshly-resolved model
+  expect(regRow?.baselineModel).toBe('A:7b');
+  expect((res as { text: string }).text).toBe('regression');
+});
+
+// C1 boundary: lastEvalPass FALSE means the manifest recorded a NON-passing
+// build — there is no commit-time pass to reconstruct, so with no history row
+// this correctly SEEDS (never a demote from a non-existent passing baseline).
+// A failing seed must ALSO leave the DEFINED verifiedWith untouched so future
+// drift is still detectable.
+test('C1 boundary: no history row + lastEvalPass:false seeds and preserves verifiedWith', async () => {
+  const dir = reg();
+  writeManifestEntry(
+    dir,
+    'a',
+    entryAt({ verifiedWith: verifiedWith('A:7b'), lastEvalPass: false }),
+  );
+  const captured = emptyCaptured();
+  const deps = makeDeps({
+    registryDirs: [dir],
+    resolveModel: () => 'B:7b',
+    judgePass: false, // failing seed
+    latestPassing: undefined,
+    captured,
+  });
+  const res = await runEval({ mode: EvalMode.Artifact, ref: 'a' }, deps);
+  expect((res as { text: string }).text).toContain('seed');
+  const up = captured.upserts.find((u) => u.name === 'a');
+  expect(up?.entry.verifiedLevel).toBe(VerifiedLevel.Behaves); // NOT demoted
+  expect(up?.entry.verifiedWith?.model).toBe('A:7b'); // failing seed keeps verifiedWith
+  expect(captured.inserted.every((r) => !r.regressed)).toBe(true);
+});
+
+// M5 — an inconclusive row records the FRESHLY-RESOLVED model as `model` and the
+// baseline as `baselineModel`, not the baseline in both slots.
+test('M5: inconclusive row records the resolved model, baseline as baselineModel', async () => {
+  const dir = reg();
+  writeManifestEntry(dir, 'a', entryAt({ verifiedWith: verifiedWith('A:7b') }));
+  const captured = emptyCaptured();
+  const deps = makeDeps({
+    registryDirs: [dir],
+    resolveModel: () => 'B:7b', // resolved (current) model
+    judgeCandidates: false, // no judge clears bar -> inconclusive
+    latestPassing: rowFor(),
+    captured,
+  });
+  await runEval({ mode: EvalMode.Artifact, ref: 'a' }, deps);
+  expect(captured.inserted).toHaveLength(1);
+  expect(captured.inserted[0]?.model).toBe('B:7b');
+  expect(captured.inserted[0]?.baselineModel).toBe('A:7b');
+});
+
 test('Artifact mode: no drift still evaluates, no demote when passing', async () => {
   const dir = reg();
   writeManifestEntry(dir, 'a', entryAt({ verifiedWith: verifiedWith('A:7b') }));

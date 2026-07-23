@@ -58,7 +58,10 @@ export function reevalHysteresis(): number {
 }
 
 /** Bounded extra re-runs of each failing case; a case is confirmed-regressed
- *  only on unanimous fail across all re-runs (D4, `regression.ts`). */
+ *  only on unanimous fail across all re-runs (D4, `regression.ts`). `0` means
+ *  NO confirmation pass — trust the first fail: every initially-regressed case
+ *  is confirmed directly (the rerun seam is skipped), so K=0 does NOT disable
+ *  demotion, it makes it maximally sensitive. */
 export function reevalRerunCases(): number {
   return envNumber('AGENT_REEVAL_RERUN_CASES', DEFAULT_RERUN_CASES);
 }

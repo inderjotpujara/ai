@@ -1245,10 +1245,11 @@ a parallel path): `withEvalReevalSpan` opens the `eval.reeval` root
 + golden/judge attrs) and `recordEvalRegression` adds an `eval.regression` event
 (`eval.regressed_count`/`eval.drop` + degrade from/to — counts + model ids only,
 never golden/output text). Slice 32 also makes the **`chat.feedback` span** an
-actual *consumer*: recorded since Slice 30b Phase 2 (`recordChatFeedback`,
-`chat.feedback.rating`), it is now read by the Evals/Health surface's
-`countThumbsDownTotal` — though only as an unattributed total pending a
-messageId→artifact join (§`src/self-improve/` caveats).
+*readable* eval seam: recorded since Slice 30b Phase 2 (`recordChatFeedback`,
+`chat.feedback.rating`), the Evals/Health surface's `countThumbsDownTotal`
+*proves* it is consumable, but has no production caller yet (tests only) — the
+surfaced per-artifact count is **0** pending a messageId→artifact attribution
+join (§`src/self-improve/` caveats).
 
 **Persistence — Sessions + chat recall (Slice 30b Phase 6, § "Persistence" /
 §3g above).** `memory.recall`'s span (already wired since Slice 12) is reused
@@ -4219,9 +4220,11 @@ tracer — carrying `eval.artifact` / `eval.mode` / `eval.baseline_model` /
 `eval.current_model` / `eval.outcome` + golden/judge attrs; `recordEvalRegression`
 adds the `eval.regression` event (`eval.regressed_count` / `eval.drop` +
 degrade from/to) on the active span. Additionally, the **`chat.feedback` span**
-(recorded since Slice 30b Phase 2 as the Slice-31 eval seam) is **now consumed**:
+(recorded since Slice 30b Phase 2 as the Slice-31 eval seam) is **readable** —
 `server/evals/feedback-read.ts`'s `countThumbsDownTotal` scans every run journal
-for `chat.feedback` spans rated `FeedbackRating.Down`.
+for `chat.feedback` spans rated `FeedbackRating.Down` and proves the signal is
+consumable — but it has **no production caller yet** (tests only); the health
+surface's per-artifact `thumbsDown` is **0**, pending the attribution join below.
 
 **HTTP + CLI surface.** `server/evals/` adds `GET /api/evals` (`handleEvalHealth`
 — per-artifact health rollup: baseline `verifiedWith` vs. the latest `eval_history`

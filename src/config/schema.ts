@@ -695,7 +695,7 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     env: 'AGENT_REEVAL_ENABLED',
     kind: 'boolean',
     def: true,
-    doc: 'Master switch for the self-improvement loop (sweep + pull hook + auto-demote), read by `src/self-improve/config.ts` `reevalEnabled()`. `0` disables all detection + demotion; the CLI / `POST /api/evals/reeval` still work manually.',
+    doc: "Master switch for the self-improvement loop (sweep + pull hook + auto-demote), read by `src/self-improve/config.ts` `reevalEnabled()`. `0` disables all detection + demotion; only a MANUAL SINGLE-artifact eval still runs (`bun run reeval --agent <name>` / `POST /api/evals/reeval {mode:'artifact'}` — `EvalMode.Artifact` bypasses the switch by design). A full sweep (`--all` / `mode:'all'` / the scheduled `reeval-sweep` / `reeval-on-pull` triggers) is a no-op while disabled.",
   },
   {
     env: 'AGENT_REEVAL_SWEEP_CRON',
@@ -713,7 +713,7 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     env: 'AGENT_REEVAL_RERUN_CASES',
     kind: 'number',
     def: 2,
-    doc: 'Bounded extra re-runs of each failing case; a case is confirmed-regressed only on unanimous fail across all re-runs (D4, `regression.ts`), read by `reevalRerunCases()`.',
+    doc: 'Bounded extra re-runs of each failing case; a case is confirmed-regressed only on unanimous fail across all re-runs (D4, `regression.ts`), read by `reevalRerunCases()`. `0` means no confirmation pass (trust the first fail — the rerun seam is skipped and every initially-regressed case is confirmed); it makes demotion maximally sensitive, it does NOT disable it.',
   },
 ];
 

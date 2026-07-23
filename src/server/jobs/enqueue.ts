@@ -79,6 +79,20 @@ export async function handleJobEnqueue(
     return json({ error: 'bad request' }, 400);
   }
 
+  // SECURITY (I2): an `Eval` job auto-demotes verified-level state, so re-eval
+  // was deliberately gated behind `requireTrustedLocal` on
+  // `POST /api/evals/reeval` (the master switch also lives there). This generic
+  // enqueue route is NOT trusted-local-gated, so an `Eval` job created here
+  // would bypass BOTH the guard and the switch — reject it. Eval jobs are only
+  // ever created through the guarded route (or the local CLI/triggers, which
+  // call `JobStore.enqueue` directly, not this HTTP handler).
+  if (body.kind === JobKindWire.Eval) {
+    return json(
+      { error: 'eval jobs must be enqueued via POST /api/evals/reeval' },
+      403,
+    );
+  }
+
   let payload = body.payload;
   if (body.kind === JobKindWire.Pull) {
     let pull: ReturnType<typeof ModelPullRequestSchema.parse>;

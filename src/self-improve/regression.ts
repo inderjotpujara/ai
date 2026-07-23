@@ -95,16 +95,29 @@ export async function decideRegression(
   // 3. Bounded unanimous-fail confirmation: re-run each regressed case K more
   //    times; CONFIRMED only if it fails on EVERY re-run. A case that recovers
   //    on any re-run (or has no re-run record) is dropped as noise.
-  const rr = await rerun(
-    regressed.map((c) => c.id),
-    rerunCases,
-  );
-  const confirmed = regressed.filter((c) => {
-    const runs = rr[c.id];
-    return (
-      Array.isArray(runs) && runs.length > 0 && runs.every((passed) => !passed)
-    );
-  });
+  //    K=0 (AGENT_REEVAL_RERUN_CASES=0) means "no confirmation pass — trust the
+  //    first fail": skip the rerun seam entirely and treat every initially-
+  //    regressed case as confirmed. (The `runs.length > 0` guard below is only
+  //    for the K>=1 path, where a MISSING rerun record means "not confirmed";
+  //    conflating that with a K=0 config would drop every case as noise and
+  //    silently disable ALL demotion.)
+  const confirmed =
+    rerunCases <= 0
+      ? regressed
+      : await (async () => {
+          const rr = await rerun(
+            regressed.map((c) => c.id),
+            rerunCases,
+          );
+          return regressed.filter((c) => {
+            const runs = rr[c.id];
+            return (
+              Array.isArray(runs) &&
+              runs.length > 0 &&
+              runs.every((passed) => !passed)
+            );
+          });
+        })();
   const regressedCaseIds = confirmed.map((c) => c.id);
 
   // 4. Aggregate drop over the confirmed set.

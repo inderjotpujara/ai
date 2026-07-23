@@ -47,7 +47,7 @@ import { verifiedWithFrom } from '../verified-build/verified-with.ts';
 import type { ApplyDeps } from './action.ts';
 import { applyRegressionOutcome } from './action.ts';
 import { reevalEnabled, reevalHysteresis, reevalRerunCases } from './config.ts';
-import type { EvalHistoryStore } from './history.ts';
+import type { EvalHistoryRow, EvalHistoryStore } from './history.ts';
 import {
   type ReevalDeps,
   ReevalSkip,
@@ -237,7 +237,15 @@ async function runArtifact(
         // inconclusive row (no verdict to diff), NEVER demote.
         rec.outcome('inconclusive');
         deps.history.insert(
-          inconclusiveRow(ref, entry.verifiedWith?.model, input.reason, now),
+          // M5: the row's `model` is the freshly-resolved model this re-eval
+          // graded against; `baselineModel` is the entry's captured baseline.
+          inconclusiveRow(
+            ref,
+            resolved.decl.model,
+            entry.verifiedWith?.model,
+            input.reason,
+            now,
+          ),
         );
         return { kind: 'answer', text: 'inconclusive: judge unavailable' };
       }
@@ -247,23 +255,17 @@ async function runArtifact(
       rec.judge(result.judgeModel, result.belowBar);
 
       const baselineRow = deps.history.latestPassing(ref);
-      // SEED when there is no baseline, OR re-SEED (Finding #2 guard) when the
-      // baseline's case-id universe differs from the fresh golden — diffing a
-      // stale/larger baseline would DILUTE `drop` and MASK a real regression.
-      if (!baselineRow || !sameCaseIds(baselineRow.perCase, result.perCase)) {
+      const baseline = selectBaseline(baselineRow, entry, result);
+      // SEED when there is no reconstructible baseline (verifiedWith absent, OR
+      // the build did not pass, OR — Finding #2 guard — the stored baseline's
+      // case-id universe differs from the fresh golden, which would DILUTE
+      // `drop` and MASK a real regression). Otherwise fall through to decide.
+      if (!baseline) {
         recordSeed(dir, ref, entry, result, r, input.reason, deps, now);
         rec.outcome(baselineRow ? 're-seed' : 'seed');
         return { kind: 'answer', text: `seeded baseline: ${ref}` };
       }
 
-      const baseline: EvalResult = {
-        passed: baselineRow.passed,
-        total: baselineRow.total,
-        passedCount: baselineRow.passedCount,
-        perCase: baselineRow.perCase,
-        judgeModel: baselineRow.judgeModel,
-        belowBar: baselineRow.belowBar,
-      };
       const golden = deps.loadGolden(entry.goldenPath);
       const decision = await decideRegression({
         baseline,
@@ -302,6 +304,58 @@ async function runArtifact(
   );
 }
 
+/**
+ * The `EvalResult` to diff the fresh re-eval against, or `undefined` when there
+ * is no reconstructible baseline (→ seed).
+ *
+ *  1. A stored passing `eval_history` row whose case-id universe MATCHES the
+ *     fresh golden is the baseline (the normal, post-first-drift path).
+ *  2. C1 — the FIRST drift after a normal build has NO history row yet, but the
+ *     manifest faithfully records the commit-time result: `verifiedWith` was
+ *     captured and `lastEvalPass === true` (§7.3). `Behaves` is granted only on
+ *     a full golden pass (`gate.ts` / `evalCases`), so the commit-time baseline
+ *     is reconstructible — a passing `EvalResult` over the fresh golden's case
+ *     ids. Without this, the first swap would `recordSeed` at the DRIFTED model
+ *     and permanently mask the regression (no demote, verifiedWith re-pinned).
+ *  3. Otherwise (no verifiedWith, a non-passing build, or a divergent stored
+ *     case-set) there is nothing trustworthy to diff → seed.
+ */
+function selectBaseline(
+  baselineRow: EvalHistoryRow | undefined,
+  entry: ManifestEntry,
+  fresh: EvalResult,
+): EvalResult | undefined {
+  if (baselineRow && sameCaseIds(baselineRow.perCase, fresh.perCase)) {
+    return {
+      passed: baselineRow.passed,
+      total: baselineRow.total,
+      passedCount: baselineRow.passedCount,
+      perCase: baselineRow.perCase,
+      judgeModel: baselineRow.judgeModel,
+      belowBar: baselineRow.belowBar,
+    };
+  }
+  if (
+    !baselineRow &&
+    entry.verifiedWith !== undefined &&
+    entry.lastEvalPass === true
+  ) {
+    return {
+      passed: true,
+      total: fresh.total,
+      passedCount: fresh.total,
+      perCase: fresh.perCase.map((c) => ({
+        id: c.id,
+        passed: true,
+        detail: 'commit-time pass (synthetic baseline)',
+      })),
+      judgeModel: '',
+      belowBar: false,
+    };
+  }
+  return undefined;
+}
+
 // ── Seed helpers (R5 — baseline capture, never a regression) ────────────────
 
 async function seedInline(
@@ -315,8 +369,16 @@ async function seedInline(
   const outcome = await reevalArtifact(entry, name, deps);
   if (outcome.kind === 'skipped') {
     if (outcome.reason === ReevalSkip.JudgeUnavailable) {
+      // Seed path: `verifiedWith` is absent here (seedInline only runs for a
+      // baseline-less entry), so both model slots are honestly empty.
       deps.history.insert(
-        inconclusiveRow(name, entry.verifiedWith?.model, reason, now),
+        inconclusiveRow(
+          name,
+          entry.verifiedWith?.model,
+          entry.verifiedWith?.model,
+          reason,
+          now,
+        ),
       );
     }
     return; // NoGolden → nothing recorded.
@@ -360,9 +422,17 @@ function recordSeed(
   // diff, silently under-reporting future regressions) — then swallowed so the
   // sweep continues.
   try {
+    // C1: a FAILING seed must NOT overwrite a DEFINED `verifiedWith` — doing so
+    // would re-pin the baseline to the drifted model and suppress all future
+    // drift detection. Leave it as-is (still record the row); only a passing
+    // seed, or a genuinely baseline-less entry, (re)captures verifiedWith.
+    const keepVerifiedWith =
+      entry.verifiedWith !== undefined && result.passed === false;
     deps.upsertEntry(dir, name, {
       ...entry,
-      verifiedWith: verifiedWithFrom(resolved, now()),
+      verifiedWith: keepVerifiedWith
+        ? entry.verifiedWith
+        : verifiedWithFrom(resolved, now()),
       lastEvalPass: result.passed,
     });
   } catch (err) {
@@ -520,6 +590,7 @@ function baselineRowFrom(
 function inconclusiveRow(
   name: string,
   model: string | undefined,
+  baselineModel: string | undefined,
   reason: string | undefined,
   now: () => number,
 ) {
@@ -527,7 +598,7 @@ function inconclusiveRow(
     id: randomUUID(),
     artifactId: name,
     model: model ?? '',
-    baselineModel: model,
+    baselineModel,
     ts: now(),
     passed: false,
     passedCount: 0,

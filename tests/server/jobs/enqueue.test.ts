@@ -40,6 +40,30 @@ test('POST /api/jobs 400s an invalid body', async () => {
   expect(res.status).toBe(400);
 });
 
+// I2 (security) — an `Eval` job mutates verified-level state (auto-demote) and
+// was deliberately put behind `requireTrustedLocal` on POST /api/evals/reeval.
+// The generic enqueue route must NOT be a back door that bypasses that guard.
+test('I2: POST /api/jobs rejects kind:eval (must go through /api/evals/reeval)', async () => {
+  const d = deps();
+  const res = await handleJobEnqueue(
+    new Request('http://x/api/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'eval',
+        payload: { mode: 'sweep', reason: 'manual' },
+      }),
+    }),
+    d as never,
+  );
+  expect(res.status).toBe(403);
+  const body = (await res.json()) as { error: string };
+  expect(body.error).toContain('/api/evals/reeval');
+  // nothing enqueued
+  expect(
+    d.jobStore.listJobs({ status: JobStatus.Queued, limit: 50 }).items,
+  ).toHaveLength(0);
+});
+
 test('POST /api/jobs resolves the pull provider SERVER-SIDE and embeds it in the persisted payload', async () => {
   const d = deps();
   const resolveProvider = () => 'hf' as never;

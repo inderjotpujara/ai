@@ -16,7 +16,7 @@ export type TriggerDef = Omit<TriggerInput, 'origin'>;
 
 /** name -> repo trigger definition (mirrors crews/index.ts). `reeval-sweep` +
  *  `reeval-on-pull` are the Slice 32 self-improvement-loop detection triggers
- *  (D1/D2): a periodic drift sweep and a hook off every completed
+ *  (D2): a periodic drift sweep and a hook off every completed
  *  `model.pull` job, both enqueuing a `JobKind.Eval` job. No new
  *  `TriggerType` — Cron + JobChain already exist (Slice 25). The master
  *  switch (`reevalEnabled()`) is NOT checked here: it gates execution

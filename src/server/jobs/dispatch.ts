@@ -38,7 +38,9 @@ export type RunAgentTurn = (input: {
 /** Slice 32: what a golden-set re-eval run replays against a newly-resolved
  *  model. `Sweep` re-evals every reusable artifact (a manual/scheduled full
  *  pass); `AffectedByPull` re-evals only the artifacts affected by a just-pulled
- *  model (`reason: 'pull:<ref>'`); `Artifact` re-evals ONE artifact by `ref`
+ *  model (`reason: 'pull'` — the `reeval-on-pull` JobChain sends a fixed
+ *  `'pull'`; the pulled model ref is NOT threaded into the reason); `Artifact`
+ *  re-evals ONE artifact by `ref`
  *  (which is then required — see `EvalJobPayloadSchema`). String enum per repo
  *  rules (values are the wire form the payload carries). */
 export enum EvalMode {
@@ -141,7 +143,8 @@ const ChatJobPayloadSchema = z.object({
 const BuildJobPayloadSchema = BuilderBuildRequestSchema;
 
 /** An eval job payload = the re-eval `mode` + the `reason` it fired
- *  (`'sweep' | 'pull:<ref>' | 'manual'`, telemetry only) + a `ref` naming the
+ *  (`'sweep' | 'pull' | 'manual'`, telemetry only — the pull hook sends a fixed
+ *  `'pull'`, the model ref is not threaded in) + a `ref` naming the
  *  single artifact for `mode=artifact`. `ref` is REQUIRED iff `mode=artifact`:
  *  a targeted-artifact eval with no artifact to target is a permanent defect, so
  *  the refine makes `.parse` throw rather than silently re-evaling nothing. */

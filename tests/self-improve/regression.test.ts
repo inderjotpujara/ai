@@ -33,6 +33,33 @@ test('no regressed cases → Pass', async () => {
   expect(out.drop).toBe(0);
 });
 
+// I3 — K=0 (AGENT_REEVAL_RERUN_CASES=0) means "0 confirmation re-runs = trust
+// the first fail". It must NOT silently disable all demotion: a regressed case
+// whose drop exceeds H is CONFIRMED without any rerun call.
+test('I3: K=0 confirms the initial regression (no rerun) → Regression when drop > H', async () => {
+  let rerunCalled = false;
+  const out = await decideRegression({
+    baseline: ev([
+      { id: 'c0', passed: true },
+      { id: 'c1', passed: true },
+    ]),
+    fresh: ev([
+      { id: 'c0', passed: false },
+      { id: 'c1', passed: true },
+    ]),
+    hysteresis: 0.15,
+    rerunCases: 0, // K=0
+    rerun: async () => {
+      rerunCalled = true;
+      return {};
+    },
+  });
+  expect(rerunCalled).toBe(false); // rerun skipped entirely for K=0
+  expect(out.verdict).toBe(RegressionVerdict.Regression);
+  expect(out.regressedCaseIds).toEqual(['c0']);
+  expect(out.drop).toBe(0.5); // 1/2 > 0.15
+});
+
 test('flip-then-recover is noise → WithinNoise, NOT a demote', async () => {
   const out = await decideRegression({
     baseline: ev([

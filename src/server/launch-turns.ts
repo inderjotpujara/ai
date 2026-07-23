@@ -4,6 +4,7 @@ import { CREWS } from '../../crews/index.ts';
 import { WORKFLOWS } from '../../workflows/index.ts';
 import { buildAgent } from '../agent-builder/builder.ts';
 import {
+  builderModelRequirement,
   makeRealBuilderDeps,
   toJudgeCandidate,
 } from '../agent-builder/deps.ts';
@@ -21,16 +22,11 @@ import type { Agent } from '../core/agent-def.ts';
 import { runGuardedAgent } from '../core/delegate.ts';
 import type { OrchestratorResult } from '../core/orchestrator.ts';
 import type { ResourceCapture } from '../core/resource-capture.ts';
-import {
-  Capability,
-  type ModelDeclaration,
-  PreferPolicy,
-} from '../core/types.ts';
+import type { ModelDeclaration } from '../core/types.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import type { CrewBuilderDeps } from '../crew-builder/types.ts';
 import { buildRegistry } from '../discovery/build-registry.ts';
-import { uncensoredEnabled } from '../media/policy.ts';
 import { resolveDestDir } from '../provisioning/dest-dir.ts';
 import { runModelPullBridge } from '../provisioning/pull-bridge.ts';
 import { providerFor } from '../provisioning/registry.ts';
@@ -338,13 +334,12 @@ export function createRealRunEvalTurn(runsRoot: string): RunEvalTurn {
         // `resolved.decl.model !== verifiedWith.model` compares like with like.
         resolve: async (need) => {
           const { registry } = await ensureEngine();
+          // I4: resolve against the SAME requirement the build-time capture used
+          // (`builderModelRequirement`), so `resolved.decl.model` compares like
+          // with like against the entry's `verifiedWith` — no uncensored
+          // asymmetry, no phantom drift. `role` (need) only colors error text.
           return resolveModel(
-            {
-              role: need || 'agent builder',
-              requires: [Capability.Tools],
-              prefer: PreferPolicy.LargestThatFits,
-              allowUncensored: uncensoredEnabled(),
-            },
+            builderModelRequirement(need || 'agent builder'),
             registry,
             {
               ensureReady: (d, o) => manager.ensureReady(d, o),
