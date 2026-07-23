@@ -16,6 +16,16 @@ export class JudgeUnavailableError extends Error {
 
 export type JudgeCandidate = { model: string; params: number; family: string };
 
+/** Heuristic "model family" from its tag, e.g. "qwen3.5" from "qwen3.5:9b".
+ *  The repo has no canonical model-family registry — this is only used to
+ *  prefer a judge from a DIFFERENT family than the generator (selectJudge),
+ *  a soft preference, not a correctness requirement. Lives here, next to
+ *  `selectJudge` and the `family`-typed fields it produces, so both the
+ *  agent-builder deps and the self-improve re-eval engine share one copy. */
+export function modelFamily(modelName: string): string {
+  return modelName.split(':')[0] ?? modelName;
+}
+
 export type JudgeDeps = {
   candidates: () => JudgeCandidate[];
   generatorFamily?: string;

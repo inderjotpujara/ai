@@ -22,6 +22,7 @@ import { dryRunMs } from '../verified-build/config.ts';
 import {
   type JudgeCandidate,
   JudgeUnavailableError,
+  modelFamily,
 } from '../verified-build/judge.ts';
 import { ReuseKind } from '../verified-build/types.ts';
 import { verifiedWithFrom } from '../verified-build/verified-with.ts';
@@ -226,14 +227,6 @@ export function makeBuilderModel(
       return r.text;
     },
   };
-}
-
-/** Heuristic "model family" from its tag, e.g. "qwen3.5" from "qwen3.5:9b".
- *  The repo has no canonical model-family registry — this is only used to
- *  prefer a judge from a DIFFERENT family than the generator (selectJudge),
- *  a soft preference, not a correctness requirement. */
-function modelFamily(modelName: string): string {
-  return modelName.split(':')[0] ?? modelName;
 }
 
 function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
