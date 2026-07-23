@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import type { Migration } from '../db/migrate.ts';
 import { JOB_MIGRATIONS } from '../queue/migrations.ts';
+import { EVAL_HISTORY_MIGRATIONS } from '../self-improve/history-migrations.ts';
 
 /**
  * Two migrations for `jobs.db`'s trigger tables (Slice 25, spec §7/§11).
@@ -81,8 +82,18 @@ export const TRIGGER_MIGRATIONS: Migration[] = [
  * `JOB_MIGRATIONS` (imported live, not copied) stays the authoritative jobs
  * list and the required strict prefix of this array; `createJobStore` is NOT
  * changed to use this superset.
+ *
+ * Slice 32 (Task 10) extends this same superset with `EVAL_HISTORY_MIGRATIONS`
+ * — `eval_history` also lives in `jobs.db`, so it follows the identical
+ * append-only-superset rule: appended AFTER `TRIGGER_MIGRATIONS`, never
+ * reordered ahead of the existing entries (that would corrupt an existing
+ * DB's `user_version` bookkeeping). `EVAL_HISTORY_MIGRATIONS` is defined in
+ * the leaf module `../self-improve/history-migrations.ts` (not in
+ * `../self-improve/history.ts`, which imports `JOBS_DB_MIGRATIONS` from this
+ * file) so the two files don't import each other.
  */
 export const JOBS_DB_MIGRATIONS: Migration[] = [
   ...JOB_MIGRATIONS,
   ...TRIGGER_MIGRATIONS,
+  ...EVAL_HISTORY_MIGRATIONS,
 ];

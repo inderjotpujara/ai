@@ -2,6 +2,7 @@ import { Database } from 'bun:sqlite';
 import { expect, test } from 'bun:test';
 import { migrate } from '../../src/db/migrate.ts';
 import { JOB_MIGRATIONS } from '../../src/queue/migrations.ts';
+import { EVAL_HISTORY_MIGRATIONS } from '../../src/self-improve/history-migrations.ts';
 import {
   JOBS_DB_MIGRATIONS,
   TRIGGER_MIGRATIONS,
@@ -15,16 +16,28 @@ function tableNames(db: Database): string[] {
   ).map((r) => r.name);
 }
 
-test('JOBS_DB_MIGRATIONS is JOB_MIGRATIONS followed by TRIGGER_MIGRATIONS (strict prefix)', () => {
+test('JOBS_DB_MIGRATIONS is JOB_MIGRATIONS, then TRIGGER_MIGRATIONS, then EVAL_HISTORY_MIGRATIONS (strict prefix, Slice 32 Task 10)', () => {
   expect(JOBS_DB_MIGRATIONS.length).toBe(
-    JOB_MIGRATIONS.length + TRIGGER_MIGRATIONS.length,
+    JOB_MIGRATIONS.length +
+      TRIGGER_MIGRATIONS.length +
+      EVAL_HISTORY_MIGRATIONS.length,
   );
   expect(JOBS_DB_MIGRATIONS.slice(0, JOB_MIGRATIONS.length)).toEqual(
     JOB_MIGRATIONS,
   );
-  expect(JOBS_DB_MIGRATIONS.slice(JOB_MIGRATIONS.length)).toEqual(
-    TRIGGER_MIGRATIONS,
-  );
+  expect(
+    JOBS_DB_MIGRATIONS.slice(
+      JOB_MIGRATIONS.length,
+      JOB_MIGRATIONS.length + TRIGGER_MIGRATIONS.length,
+    ),
+  ).toEqual(TRIGGER_MIGRATIONS);
+  expect(
+    JOBS_DB_MIGRATIONS.slice(JOB_MIGRATIONS.length + TRIGGER_MIGRATIONS.length),
+  ).toEqual(EVAL_HISTORY_MIGRATIONS);
+});
+
+test('JOBS_DB_MIGRATIONS ends with the eval_history migration (Slice 32)', () => {
+  expect(JOBS_DB_MIGRATIONS.at(-1)?.name).toBe('init-eval-history');
 });
 
 test('open order 1: job store opens first (JOB_MIGRATIONS), then the trigger store runs the superset', () => {
