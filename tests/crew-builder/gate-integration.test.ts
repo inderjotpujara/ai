@@ -25,6 +25,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BuilderModel } from '../../src/agent-builder/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import { buildCrewOrWorkflow } from '../../src/crew-builder/builder.ts';
 import type {
   CrewBuilderDeps,
@@ -34,7 +35,10 @@ import {
   readManifest,
   upsertEntry,
 } from '../../src/verified-build/manifest.ts';
-import type { ManifestEntry } from '../../src/verified-build/types.ts';
+import type {
+  ManifestEntry,
+  VerifiedWith,
+} from '../../src/verified-build/types.ts';
 import {
   GoldenKind,
   ReuseKind,
@@ -399,6 +403,33 @@ test('golden-eval judge runs on the model selectJudge picked, not the generator'
     expect(judgeIds.length).toBeGreaterThan(0);
     // Every judge call carries the cross-family pick — never the same-family twin.
     expect(new Set(judgeIds)).toEqual(new Set(['judge-big']));
+  } finally {
+    cleanup();
+  }
+});
+
+test('commit persists verifiedWith from the resolved model pick', async () => {
+  const { paths, workflowsDir, cleanup } = repoRootPaths();
+  try {
+    const { model } = fakeModel({});
+    const fakeVerifiedWith: VerifiedWith = {
+      runtime: RuntimeKind.Ollama,
+      model: 'A:7b',
+      paramsBillions: 7,
+      numCtx: 8192,
+      capturedAtMs: 1,
+    };
+    const deps = baseDeps(
+      paths,
+      model,
+      fakeVerify({ verifiedWith: fakeVerifiedWith }),
+    );
+
+    const r = await buildCrewOrWorkflow('run a fresh flow', deps);
+
+    expect(r.kind).toBe('written');
+    const manifest = readManifest(workflowsDir);
+    expect(manifest.entries.fresh_flow?.verifiedWith?.model).toBe('A:7b');
   } finally {
     cleanup();
   }

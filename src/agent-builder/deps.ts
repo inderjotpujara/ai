@@ -24,6 +24,7 @@ import {
   JudgeUnavailableError,
 } from '../verified-build/judge.ts';
 import { ReuseKind } from '../verified-build/types.ts';
+import { verifiedWithFrom } from '../verified-build/verified-with.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
 type GenerateTextFn = typeof generateText;
@@ -273,6 +274,10 @@ export async function makeRealBuilderDeps(
       listLoaded: () => listLoadedModels(),
     },
   );
+  // Captured once, right at the live resolve, for the Slice 32
+  // self-improvement baseline — the ACTUAL resolved decl, never the
+  // generator/BuilderModel's own idea of what it's running on.
+  const verifiedWith = verifiedWithFrom({ decl, numCtx });
   const model = runtimeFor(decl.runtime).createModel(decl);
   // Resolve (and cache) a LanguageModel for the judge `selectJudge` picked —
   // the judge must run on THAT model, never the generator grading itself
@@ -346,6 +351,7 @@ export async function makeRealBuilderDeps(
       },
       generatorFamily: modelFamily(decl.model),
       dir: 'agents',
+      verifiedWith,
       // `--force` (I1): downgrade a failing gate to an Unverified commit
       // instead of aborting (see gate.ts).
       force: opts.force === true,

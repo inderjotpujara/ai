@@ -5,7 +5,11 @@ import type {
   ValidationIssue,
 } from '../agent-builder/types.ts';
 import type { WritePaths } from '../agent-builder/write.ts';
-import type { ReuseKind, VerifiedLevel } from '../verified-build/types.ts';
+import type {
+  ReuseKind,
+  VerifiedLevel,
+  VerifiedWith,
+} from '../verified-build/types.ts';
 import type { CrewIR, WorkflowIR } from './ir.ts';
 
 export type Shape = 'crew' | 'workflow';
@@ -68,6 +72,11 @@ export type CrewBuilderVerifyDeps = {
    *  the generic `confirm`. Real impl: autoYes auto-reuses a Reuse-band
    *  match but DECLINES an Offer-band one (defaults to building new). */
   confirmReuse?: (kind: ReuseKind, text: string) => Promise<boolean>;
+  /** The model identity `resolveModel` picked for this build (Slice 32
+   *  self-improvement baseline) — mirrors agent-builder's
+   *  `BuilderVerifyDeps.verifiedWith`; the real impl passes through the
+   *  same resolved decl the agent-builder captured (one live resolve). */
+  verifiedWith?: VerifiedWith;
 };
 
 export type CrewBuilderDeps = {

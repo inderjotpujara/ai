@@ -91,6 +91,9 @@ export async function makeRealCrewBuilderDeps(
     confirmReuse: agentDeps.verify.confirmReuse,
     // `--force` (I1) threads through the agent-builder bundle unchanged.
     force: agentDeps.verify.force,
+    // Same live resolve the agent-builder captured (Slice 32 baseline) —
+    // never a second, independent resolve.
+    verifiedWith: agentDeps.verify.verifiedWith,
     runArtifact,
   };
   const deps: CrewBuilderDeps = {

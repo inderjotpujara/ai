@@ -278,6 +278,7 @@ async function verifyAndCommitProposal(
         lastUsedMs: 0,
         useCount: 0,
         lastEvalPass: level === VerifiedLevel.Behaves,
+        verifiedWith: verify.verifiedWith,
       });
       if (golden) {
         atomicWrite(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);
