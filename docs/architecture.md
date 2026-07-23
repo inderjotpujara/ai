@@ -4061,6 +4061,30 @@ run-history plumbing).
 
 ---
 
+### `src/self-improve/` — continuous re-eval loop (Slice 32, stub)
+
+Re-evaluates a generated artifact's persisted golden set whenever the model
+underneath it changes. Baseline capture (`ManifestEntry.verifiedWith`) →
+detection (a repo Cron sweep + a `model.pull` JobChain, both riding the existing
+trigger substrate) → `reeval.ts` (generation-free golden replay) →
+`regression.ts` (per-case + bounded re-run + hysteresis) → auto-demote
+Behaves→Unverified + append-only `eval_history` in `jobs.db` → Ops "Evals/Health"
+tab. A new `Eval` JobKind carries the work through the Slice-24 queue.
+
+Task 3 lands this slice's config + telemetry foundation only: four
+env-fallback-only knobs (`src/self-improve/config.ts` — `reevalEnabled()`/
+`reevalSweepCron()`/`reevalHysteresis()`/`reevalRerunCases()`, backing the
+`AGENT_REEVAL_*` `CONFIG_SPEC` entries, §2 Config) and the `eval.reeval`/
+`eval.regression` telemetry seam (`src/self-improve/spans.ts` —
+`withEvalReevalSpan`/`recordEvalRegression`, reusing `telemetry/spans.ts`'s
+`inSpan`/`ATTR` exactly like `daemon/spans.ts`'s `withJobRunSpan`; no-op
+without a tracer). No detection/regression engine exists yet.
+
+> Stub — expanded into the full subsystem writeup (module map, data-flow edges,
+> the `Eval` dispatch case) in this slice's docs task (Task 24).
+
+---
+
 ## 24. Always-on daemon + task queue + resumable jobs + secure remote access (Slice 24, Phase E; Slice 25b added the Ops-console HTTP surfaces below — the web UI itself is its own section immediately after this one)
 
 Through Slice 23 the BFF was a **foreground** `Bun.serve` whose runs were

@@ -66,7 +66,7 @@ export enum ChatRole {
   System = 'system',
 }
 
-/** Thumbs feedback on a chat message (Slice 30b Phase 2; Slice 31 consumes it). */
+/** Thumbs feedback on a chat message (Slice 30b Phase 2; Slice 32 consumes it). */
 export enum FeedbackRating {
   Up = 'up',
   Down = 'down',

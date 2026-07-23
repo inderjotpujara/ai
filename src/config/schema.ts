@@ -689,6 +689,32 @@ export const CONFIG_SPEC: ConfigEntry[] = [
     def: 1_000,
     doc: 'Interval (ms) between `tasks/get` polls in the `delegate_to_<name>` send→poll-to-terminal loop (`a2a/mount.ts`), while the remote task is still `submitted`/`working`. Default 1000 = 1s.',
   },
+
+  // --- Self-improvement / re-eval (Slice 32) ---
+  {
+    env: 'AGENT_REEVAL_ENABLED',
+    kind: 'boolean',
+    def: true,
+    doc: 'Master switch for the self-improvement loop (sweep + pull hook + auto-demote), read by `src/self-improve/config.ts` `reevalEnabled()`. `0` disables all detection + demotion; the CLI / `POST /api/evals/reeval` still work manually.',
+  },
+  {
+    env: 'AGENT_REEVAL_SWEEP_CRON',
+    kind: 'string',
+    def: '0 4 * * *',
+    doc: "Cron schedule for the periodic drift sweep (the repo Cron trigger's `config.schedule`, `triggers/index.ts`), read by `reevalSweepCron()`. Low-traffic hour by default.",
+  },
+  {
+    env: 'AGENT_REEVAL_HYSTERESIS',
+    kind: 'number',
+    def: 0.15,
+    doc: 'Aggregate pass-rate drop margin a confirmed regression must EXCEED before auto-demote (D4, `regression.ts`), read by `reevalHysteresis()`. Guards against judge noise.',
+  },
+  {
+    env: 'AGENT_REEVAL_RERUN_CASES',
+    kind: 'number',
+    def: 2,
+    doc: 'Bounded extra re-runs of each failing case; a case is confirmed-regressed only on unanimous fail across all re-runs (D4, `regression.ts`), read by `reevalRerunCases()`.',
+  },
 ];
 
 /** `Number(x)` succeeds but the same-family `envNumber` helpers in
