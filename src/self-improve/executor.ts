@@ -112,10 +112,23 @@ async function runSweep(
   deps: RunEvalDeps,
 ): Promise<OrchestratorResult> {
   const now = deps.now ?? Date.now;
-  const entries = orderHotFirst(
-    collectEntries(deps.registryDirs),
-    deps.runsRoot,
-  );
+  const collected = collectEntries(deps.registryDirs);
+  // Belt-and-suspenders (§7.2): `aggregateUsage` is hardened to skip
+  // malformed spans, but hot-first ordering must never be able to abort the
+  // sweep — degrade to unordered entries on any unexpected throw.
+  let entries: LocatedEntry[];
+  try {
+    entries = orderHotFirst(collected, deps.runsRoot);
+  } catch (err) {
+    log.warn(
+      'reeval sweep: hot-first ordering failed, using unordered entries',
+      {
+        runsRoot: deps.runsRoot,
+        err: String(err),
+      },
+    );
+    entries = collected;
+  }
   let enqueued = 0;
   let seeded = 0;
   for (const located of entries) {

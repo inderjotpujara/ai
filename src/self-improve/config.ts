@@ -37,7 +37,10 @@ function envStr(name: string, fallback: string): string {
 
 /** Master switch for the self-improvement loop (sweep + pull hook +
  *  auto-demote). `0` disables all detection + demotion; the CLI /
- *  `POST /api/evals/reeval` still work manually. */
+ *  `POST /api/evals/reeval` still work manually — a MANUAL single-artifact
+ *  eval (`EvalMode.Artifact`, e.g. `bun run reeval --agent <name>` or the Ops
+ *  "re-eval now" button) bypasses this switch by design and CAN still demote
+ *  (see `executor.ts`'s `mode !== Artifact` check). */
 export function reevalEnabled(): boolean {
   return envBool('AGENT_REEVAL_ENABLED', DEFAULT_REEVAL_ENABLED);
 }

@@ -246,6 +246,33 @@ test('Sweep enqueues per-artifact Eval only for DRIFTED artifacts (hot-first)', 
   }
 });
 
+test('§7.2: malformed spans.jsonl in runsRoot degrades ordering to unordered, sweep still processes drifted artifacts', async () => {
+  const dir = reg();
+  writeManifestEntry(dir, 'a', entryAt({ verifiedWith: verifiedWith('A:7b') }));
+  writeManifestEntry(dir, 'b', entryAt({ verifiedWith: verifiedWith('A:7b') }));
+  const runsRoot = mkdtempSync(join(tmpdir(), 'exec-bad-runs-'));
+  const rd = join(runsRoot, 'run-bad');
+  mkdirSync(rd, { recursive: true });
+  // Valid JSON, but no `attributes` object — the malformed-span shape that
+  // used to make `aggregateUsage` throw and abort the whole sweep.
+  writeFileSync(join(rd, 'spans.jsonl'), '1\n{"name":"x"}\n');
+  const captured = emptyCaptured();
+  const deps = makeDeps({
+    registryDirs: [dir],
+    runsRoot,
+    resolveModel: () => 'B:7b', // both a,b drift
+    captured,
+  });
+  const logs: string[] = [];
+  setLogSink((l) => logs.push(l));
+  const res = await runEval({ mode: EvalMode.Sweep }, deps);
+  expect(res.kind).toBe('answer');
+  const refs = captured.enqueued
+    .map((e) => (e.payload as { ref: string }).ref)
+    .sort();
+  expect(refs).toEqual(['a', 'b']); // sweep still processed both, unordered
+});
+
 test('R4 de-dup: sweep skips enqueue when a Queued/Running Eval for the ref exists', async () => {
   const dir = reg();
   writeManifestEntry(dir, 'a', entryAt({ verifiedWith: verifiedWith('A:7b') }));

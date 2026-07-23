@@ -12,6 +12,18 @@ const ID_ATTRS = [
   ATTR.WORKFLOW_ID,
 ] as const;
 
+/** §7.2: a line can be valid JSON yet not a usable span (a bare `1`, `"x"`,
+ *  or an object missing `attributes`) — that must be SKIPPED, never crash
+ *  `aggregateUsage` and abort a whole drift sweep over one bad line. */
+function isUsableSpan(value: unknown): value is SpanRecord {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { attributes?: unknown }).attributes === 'object' &&
+    (value as { attributes?: unknown }).attributes !== null
+  );
+}
+
 /** Synchronous, tolerant read of one run's spans.jsonl (mirrors
  *  run-trace.ts readSpans, which is async and unusable here). */
 function readSpansSync(runDir: string): SpanRecord[] {
@@ -25,7 +37,9 @@ function readSpansSync(runDir: string): SpanRecord[] {
   for (const line of raw.split('\n')) {
     if (line.length === 0) continue;
     try {
-      spans.push(JSON.parse(line) as SpanRecord);
+      const parsed: unknown = JSON.parse(line);
+      if (isUsableSpan(parsed)) spans.push(parsed);
+      // else: valid JSON but not a usable span shape — skip.
     } catch {
       // skip malformed lines
     }
