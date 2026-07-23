@@ -1,278 +1,141 @@
-# Task 14 — final-review fixes (Slice 29 voice input)
+# Task 14 review-gap fix (Slice 32, self-improvement loop) — telemetry coverage for `applyRegressionOutcome`
 
-Applies all whole-branch final-review findings for Slice 29 (voice input) in
-one pass: 2 Important (must-fix) + 6 Minors bundled in. Full verification run
-at the end, including both gated live-verify modes.
+## Gap being closed
 
-## IMPORTANT 1 (correctness) — live-mic PCM chunk byte-misalignment
+`applyRegressionOutcome` (`src/self-improve/action.ts`) calls, on a confirmed
+`Regression` only:
+3. `recordDegrade({ kind: DegradeKind.ModelDegraded, subject, reason, from, to })`
+   (`src/telemetry/spans.ts`)
+4. `recordEvalRegression({ artifact, regressedCount, drop, from, to })`
+   (`src/self-improve/spans.ts`)
 
-**Problem.** `src/voice/cli-io.ts` `frames()` converted each ffmpeg stdout
-chunk independently via `bytesToFloat32`, which floors to whole float32s and
-silently drops the trailing 1–3 bytes of any chunk whose length isn't a
-multiple of 4. A pipe read is not guaranteed 4-byte aligned, so a misaligned
-chunk both dropped a partial sample AND desynced the byte-phase of every
-subsequent chunk — garbled waveform, wrong/empty transcript.
+Both are OTel no-ops via `trace.getActiveSpan()` when no tracer provider is
+registered. All 6 pre-existing tests in `tests/self-improve/action.test.ts`
+call `applyRegressionOutcome` with no tracer registered, so steps 3–4 ran
+(or didn't run) completely unobserved by any assertion — a passing test
+suite gave zero signal about whether these two calls fire, with the right
+attributes, on `Regression`, or stay silent on `Pass`/`WithinNoise`/
+`Inconclusive`.
 
-**Fix.**
-- Added a new pure, exported helper `carryPcmChunk(leftover, chunk)` in
-  `src/voice/capture.ts` (co-located with `bytesToFloat32`, which it reuses
-  for the actual byte→Float32 copy). It concatenates `leftover + chunk`,
-  splits at the last 4-byte-aligned boundary (`whole = floor(combined.byteLength/4)*4`),
-  returns `{ floats, leftover }`, where `leftover` (0–3 bytes) carries into
-  the next call.
-- `src/voice/cli-io.ts`'s `frames()` now keeps `let leftover: Uint8Array = new Uint8Array(0)`
-  across the read loop, calls `carryPcmChunk(leftover, value)` on each chunk,
-  updates `leftover`, and only yields when `floats.length > 0`. On stream end
-  (`done`), any <4-byte leftover is correctly discarded — never consumed.
-- `captureFromFile` is unaffected (it buffers the whole ffmpeg stdout via
-  `.arrayBuffer()` before decoding once, so there's no chunk-boundary issue
-  there) — left untouched, as directed.
+## What was added (test-only)
 
-**Test.** Extracted the remainder-carry logic into `carryPcmChunk` specifically
-so it's hermetically testable without a real ffmpeg pipe. Added to
-`tests/voice/capture-file.test.ts`:
-- `carries a misaligned remainder across chunk boundaries without dropping or
-  shifting samples` — 5 float32 samples split at a byte-6 boundary (NOT a
-  multiple of 4); asserts the first chunk yields exactly 1 float + 2
-  leftover bytes, and feeding the leftover + second chunk back in yields the
-  remaining 4 floats with 0 leftover, and the reassembled samples exactly
-  match a non-split decode (compared against the source `Float32Array`'s own
-  values, not literal decimal constants, since 0.1 etc. don't round-trip
-  exactly through float32).
-- `discards a trailing sub-4-byte remainder with no more data (stream end)` —
-  confirms a dangling 2-byte tail at end-of-stream is simply never consumed.
-- `yields no floats when combined bytes are still under 4` — degenerate
-  case, two 1-byte chunks.
+File: `tests/self-improve/action.test.ts` (same file — reused the existing
+`entryAt`/`resultWith`/`fakeStore`/`call` helpers, per the existing fake-deps
+setup; did not create a new test file).
 
-## IMPORTANT 2 (security + correctness) — DYLD_LIBRARY_PATH from installed package, not process.cwd()
+New imports: `afterEach`, `beforeEach`, `describe` (bun:test);
+`BasicTracerProvider`/`InMemorySpanExporter` types; `DegradeKind`
+(`src/reliability/ledger.ts`); `ATTR`, `withRunSpan`
+(`src/telemetry/spans.ts`); `registerTestProvider`
+(`tests/helpers/otel-test-provider.ts`).
 
-**Problem.** `src/voice/transcribe.ts` (`defaultLoadSherpa`),
-`src/voice/stt-worker.mjs`, and `scripts/spikes/sherpa-bun-smoke.ts` all built
-the dyld search dir as `join(process.cwd(), 'node_modules', ...)`. This (a)
-would load an attacker-controlled dylib if voice is ever run from an
-untrusted cwd containing its own `node_modules/sherpa-onnx-darwin-arm64`, and
-(b) broke voice outright whenever the process launched from anywhere other
-than the repo root.
+New `describe('applyRegressionOutcome telemetry (active tracer registered)')`
+block, lifecycle mirrors `tests/telemetry/reliability-spans.test.ts`'s nested
+"structured attributes" describe (`beforeEach` → `registerTestProvider()`,
+`afterEach` → `await provider.shutdown(); exporter.reset()` — fresh
+InMemory-backed provider per test, no leak into other test files: confirmed
+by re-running the whole `tests/self-improve/` directory, still 35/35 green).
 
-**Fix (all three files, same approach).**
-- `transcribe.ts`: added `import { createRequire } from 'node:module'` +
-  `const require = createRequire(import.meta.url)`, replacing the old bare
-  global `require(...)` call (and the vestigial eslint-disable comment,
-  which did nothing under this repo's biome-only lint setup).
-- New `resolveSherpaDyldDirs()` in each file: calls
-  `require.resolve('sherpa-onnx-node')` to get the addon's real installed
-  entry path (e.g.
-  `/Users/inderjotsingh/ai/node_modules/sherpa-onnx-node/sherpa-onnx.js`),
-  locates the `…/node_modules/sherpa-onnx-node/` segment in that resolved
-  path, and slices off everything up to and including `node_modules` to get
-  the real `node_modules` root — robust even if the package's `main` entry
-  is nested deeper than the package folder itself. Throws a clear error if
-  the marker isn't found (defensive; shouldn't happen given the package is a
-  declared dependency).
-- Returns `[join(nodeModulesRoot, 'sherpa-onnx-node'), join(nodeModulesRoot, 'sherpa-onnx-darwin-arm64')]`,
-  which `defaultLoadSherpa()`/`loadSherpa()` prepend to
-  `DYLD_LIBRARY_PATH` exactly as before (existing value preserved via `??
-  ''`).
-- `stt-worker.mjs` already used `createRequire`; just replaced its
-  `process.cwd()`-based root with the same `require.resolve`-based
-  resolution.
-- `scripts/spikes/sherpa-bun-smoke.ts` (dev-only spike): same treatment, for
-  consistency — added `createRequire`, same `resolveSherpaDyldDirs`,
-  replaced the bare `require(...)` call.
+Each case wraps the `call(...)` invocation in `withRunSpan('run-…', 'sweep',
+async () => { ... })` so `trace.getActiveSpan()` inside `recordDegrade` /
+`recordEvalRegression` resolves to the `agent.run` span instead of being a
+no-op — `applyRegressionOutcome` itself opens no span, so the test has to
+supply the active-span context, exactly like `withRunSpan` does for
+`recordDegrade` in `reliability-spans.test.ts`.
 
-**Verified via the live tests** (see Verification below): both in-process
-and `AGENT_VOICE_EXEC=subprocess` modes load the real addon and transcribe a
-real `say`-generated clip correctly with the new resolution — confirming the
-dyld fix didn't break addon loading.
+### Test 1 — confirmed `Regression` fires both, with the right attrs
 
-## MINOR 3 (correctness) — subprocess timeout leaves `done` unawaited
+`RegressionVerdict.Regression`, `regressedCaseIds: ['c0', 'c2']`, `drop: 0.2`,
+`currentModel: 'B:7b'`, `baselineModel: 'A:7b'`, artifact name `'a'`.
 
-**Fix.** In `src/voice/transcribe.ts` `createSubprocessTranscriber`, the
-timeout branch now does:
-```ts
-if (err instanceof Error && err.message === 'timeout') {
-  kill();
-  done.catch(() => {});
-}
+Asserted on `reliability.degrade` event (`span.events.find(e.name ===
+'reliability.degrade')`):
+- `ATTR.ERROR_TYPE` (`'error.type'`) === `DegradeKind.ModelDegraded`
+- `'degrade.subject'` === `'a'`
+- `ATTR.RELIABILITY_DEGRADE_FROM` (`'degrade.from'`) === `'A:7b'`
+- `ATTR.RELIABILITY_DEGRADE_TO` (`'degrade.to'`) === `'B:7b'`
+
+Asserted on `eval.regression` event:
+- `ATTR.EVAL_ARTIFACT` (`'eval.artifact'`) === `'a'`
+- `ATTR.EVAL_REGRESSED_COUNT` (`'eval.regressed_count'`) === `2`
+- `ATTR.EVAL_DROP` (`'eval.drop'`) === `0.2`
+- `ATTR.RELIABILITY_DEGRADE_FROM` === `'A:7b'`
+- `ATTR.RELIABILITY_DEGRADE_TO` === `'B:7b'`
+
+(`RELIABILITY_DEGRADE_FROM`/`TO` are the exact attr keys `recordEvalRegression`
+reuses on the `eval.regression` event per `src/self-improve/spans.ts`.)
+
+### Test 2 — `Pass` / `WithinNoise` / `Inconclusive` fire NEITHER
+
+`test.each([['WithinNoise', ...], ['Pass', ...], ['Inconclusive', ...]] as
+const)` — one case per non-Regression verdict. Each asserts, on the finished
+`agent.run` span:
+- `span.events.find(e => e.name === 'reliability.degrade')` is `undefined`
+- `span.events.find(e => e.name === 'eval.regression')` is `undefined`
+
+This is the observability half of the "never-demote" guarantee already
+covered behaviorally (upsert-call-count assertions) by the pre-existing
+tests.
+
+## Evidence (GREEN)
+
+`action.ts` was not touched, so there is no before/after RED→GREEN diff to
+show for the production code; the point of this task is that the new
+assertions themselves are the previously-missing signal. All gate commands
+green, both the new file state and the whole `self-improve` directory:
+
 ```
-so a late rejection from the killed subprocess's `done` promise can't become
-an unhandled rejection.
-
-## MINOR 4 (correctness + security) — uncapped file decode
-
-**Fix.** `src/voice/capture.ts` `captureFromFile` now checks
-`samples.length > MAX_CAPTURE_SAMPLES` (the same 60s/16kHz cap the mic path
-already enforces, hoisted above `captureFromFile` so it's in scope) after
-decode, and if exceeded, logs a `console.error` notice and truncates via
-`samples.subarray(0, MAX_CAPTURE_SAMPLES)` — never throws. Symmetric with the
-mic path's `MAX_CAPTURE_SAMPLES` cap.
-
-**Test.** Added `truncates a decode that exceeds MAX_CAPTURE_SAMPLES instead
-of throwing` to `tests/voice/capture-file.test.ts` — feeds a fake decode of
-`MAX_CAPTURE_SAMPLES + 1600` samples and asserts the returned frames are
-truncated to exactly `MAX_CAPTURE_SAMPLES`.
-
-## MINOR 5 (security) — validate `--voice-in` is a local file before ffmpeg
-
-**Fix.** `captureFromFile` now takes an injectable `exists` dep (defaulting
-to `existsSync`, mirroring the `isModelReady(dir, exists)` pattern already
-used in `scripts/setup-voice.ts`) and throws
-`VoiceError('audio file not found: <path>')` before ever spawning ffmpeg if
-the path doesn't exist locally. `ingestVoice`'s existing degrade-to-warning
-logic handles this exactly like any other capture failure.
-
-**Test.** Added `throws VoiceError before spawning when the file does not
-exist` — asserts the mocked spawn is never called.
-
-**Test-suite note:** the two pre-existing `captureFromFile` tests
-(`decodes ffmpeg f32le stdout...`, `throws VoiceError when ffmpeg fails`)
-used a synthetic path (`'x.wav'`) that doesn't exist on disk; both now pass
-`exists: () => true` so the new guard doesn't short-circuit them before
-reaching the mocked spawn behavior under test.
-
-## MINOR 6 (security/UX) — raw-TTY process-exit backstop
-
-**Fix.** `src/voice/cli-io.ts`'s mic `onKey` now registers
-`process.once('exit', restore)` alongside the existing `restore` (renamed
-from the anonymous unsubscribe closure) that turns off the `data` listener
-and restores cooked mode. The returned unsubscribe function calls
-`process.removeListener('exit', restore)` before invoking `restore()` itself,
-so normal completion cleans up the listener; `restore` remains gated by the
-existing `unsubscribed` flag, so it's idempotent regardless of which path
-(normal unsubscribe vs. the exit backstop) fires first or both fire.
-
-## MINOR 7 (housekeeping) — delete the model archive after extraction
-
-**Fix.** `scripts/setup-voice.ts`: after a successful `tar -xjf` extraction,
-best-effort `await rm(archive, { force: true })` (logs but never throws on
-failure) so the ~100MB `.tar.bz2` doesn't linger in the voice cache dir.
-
-## MINOR 8 (docs) — two §23 wording fixes in `docs/architecture.md`
-
-**(a) Live-verify tense.** The "Testing + live-verify (honest status)"
-subsection said live-verify against the real addon "is **Task 13**, gated
-... exactly like the multimodal live-verify pass in §22" (present/pending
-framing). Reworded to past tense: it **ran and passed** — a `say`-generated
-speech clip transcribed correctly through both execution-seam branches
-(in-process and `AGENT_VOICE_EXEC=subprocess`), and the pass caught a real
-bug (the `.bytes()`-vs-`.arrayBuffer()` all-zero-buffer issue already
-documented in `capture.ts`'s `defaultSpawn` comment). Clarified that only
-interactive real-microphone capture remains a manual, human-in-the-loop step
-(can't be automated the way `say` automates the file path).
-
-**(b) Telemetry attribute count.** The telemetry paragraph claimed "all
-four" `VOICE_*` attributes are set on both success and failure paths inside
-the transcriber, but actually listed five attribute names and the up-front
-vs. per-call split was miscounted. Corrected: `ATTR.VOICE_STT_MODEL`,
-`ATTR.VOICE_CAPTURE_SOURCE`, and `ATTR.INPUT_MODALITY` (`'audio'`) are set
-**once up-front** inside `withVoiceTranscribeSpan` (verified in
-`src/telemetry/spans.ts` lines 812–814); `ATTR.VOICE_AUDIO_SECONDS`,
-`ATTR.VOICE_DURATION_MS`, and `ATTR.VOICE_OUTCOME` are the **three**
-attributes actually set inside each transcriber implementation on both the
-success and failure paths.
-
-## Verification
-
-All commands run from `/Users/inderjotsingh/ai`.
-
-### `bun test tests/voice/`
-```
- 38 pass
- 0 fail
- 68 expect() calls
-Ran 38 tests across 10 files. [225ms]
-```
-
-### `bun run typecheck`
-```
+$ bun run typecheck
 $ tsc --noEmit
-(no output — clean)
-```
-One fix needed along the way: `cli-io.ts`'s `let leftover = new Uint8Array(0)`
-inferred as `Uint8Array<ArrayBuffer>` (the concrete return type of the
-`Uint8Array` constructor), which didn't accept `carryPcmChunk`'s
-`Uint8Array<ArrayBufferLike>`-typed return on reassignment. Fixed by
-explicitly annotating `let leftover: Uint8Array = new Uint8Array(0);`.
+(clean, no output)
 
-### `bun run lint` (biome)
-```
-Checked 493 files in 95ms. No fixes applied.
-Found 14 warnings.
-```
-Exit code 0 (warnings only, all pre-existing `noExplicitAny` warnings in
-unrelated test files — none in any file touched by this task). Ran
-`bunx biome check --write` on every touched file first; it auto-fixed
-formatting in `src/voice/capture.ts` (no functional change).
+$ bun run lint:file -- tests/self-improve/action.test.ts
+$ biome check tests/self-improve/action.test.ts
+Checked 1 file in 7ms. No fixes applied.
 
-### `bun run docs:check`
-```
-✔ docs-check: living docs present + linked; every src subsystem documented.
-```
+$ bun run test:file -- tests/self-improve/action.test.ts
+$ bun test --path-ignore-patterns 'web/**' --path-ignore-patterns 'spikes/**' tests/self-improve/action.test.ts
+bun test v1.3.11 (af24e281)
 
-### Full suite (`bun run check` — docs · typecheck · lint · test)
-```
- 1083 pass
- 36 skip
+ 10 pass
  0 fail
- 2449 expect() calls
-Ran 1119 tests across 267 files. [252.70s]
+ 47 expect() calls
+Ran 10 tests across 1 file. [208.00ms]
 ```
 
-### Gated live-verify — in-process (default exec)
+10 = the original 6 + 1 (Regression telemetry) + 3 (`test.each` non-Regression
+cases). All pre-existing tests remain green, unmodified.
+
+Cross-file leak check — re-ran the whole `tests/self-improve/` directory to
+confirm the registered/shutdown tracer provider doesn't bleed into sibling
+files (`history.test.ts`, `regression.test.ts`, `spans.test.ts`, etc.):
+
 ```
-VOICE_LIVE=1 bun test tests/integration/voice.live.test.ts
-```
-```
-[voice.live] transcript (in-process): "The quick brown fox jumps."
- 4 pass
+$ bun run test:file -- tests/self-improve/
+ 35 pass
  0 fail
- 5 expect() calls
-Ran 4 tests across 1 file. [2.99s]
+ 110 expect() calls
+Ran 35 tests across 6 files. [532.00ms]
 ```
-
-### Gated live-verify — subprocess exec
-```
-AGENT_VOICE_EXEC=subprocess VOICE_LIVE=1 bun test tests/integration/voice.live.test.ts
-```
-```
-[voice.live] transcript (subprocess): "The quick brown fox jumps."
- 4 pass
- 0 fail
- 6 expect() calls
-Ran 4 tests across 1 file. [2.79s]
-```
-
-Both live runs transcribed the real `say`-generated clip correctly
-("fox"/"quick"/"brown" all present), confirming:
-- IMPORTANT 2's install-relative `DYLD_LIBRARY_PATH` resolution still loads
-  the real `sherpa-onnx-node` addon correctly in both exec modes.
-- IMPORTANT 1's `carryPcmChunk` fix doesn't regress `captureFromFile`'s
-  existing decode path (used by the live test's file-based capture) and is
-  sound at the byte-boundary seam per the added unit tests.
 
 ## Files changed
 
-- `src/voice/capture.ts` — `carryPcmChunk` helper, `exists` guard + injectable
-  dep, `MAX_CAPTURE_SAMPLES` cap on file decode (hoisted constants above
-  `captureFromFile`).
-- `src/voice/cli-io.ts` — `frames()` remainder-carry via `carryPcmChunk`;
-  `onKey` process-exit TTY restore backstop.
-- `src/voice/transcribe.ts` — install-relative `resolveSherpaDyldDirs` via
-  `createRequire`/`require.resolve`; unawaited `done` fix on subprocess
-  timeout.
-- `src/voice/stt-worker.mjs` — same install-relative dyld resolution.
-- `scripts/spikes/sherpa-bun-smoke.ts` — same install-relative dyld
-  resolution (dev-only spike, kept consistent).
-- `scripts/setup-voice.ts` — delete archive after successful extraction.
-- `docs/architecture.md` §23 — live-verify tense fix; telemetry attribute
-  count/split fix.
-- `tests/voice/capture-file.test.ts` — new tests for `carryPcmChunk`
-  (remainder-carry across boundaries, stream-end discard, under-4-byte
-  degenerate case), file-not-found guard, and the file-decode length cap;
-  existing two tests updated to inject `exists: () => true`.
+- `tests/self-improve/action.test.ts` — test-only addition (new imports +
+  one new `describe` block with 4 new test cases). No other file touched.
 
-## Items not fully fixed
+## `src/self-improve/action.ts` — UNCHANGED
 
-None — all 8 findings (2 Important + 6 Minor) were fixed and verified,
-including both gated live-verify runs against the real sherpa-onnx-node
-addon.
+Confirmed no edit was needed or made; behavior stays exactly as approved.
+
+## Concerns
+
+None. The gap is now closed with assertions on the exact attribute keys
+`recordDegrade`/`recordEvalRegression` emit (verified by reading
+`src/telemetry/spans.ts` and `src/self-improve/spans.ts` directly, not
+inferred) and the test lifecycle mirrors the two existing precedent files
+exactly (`tests/telemetry/reliability-spans.test.ts` for the `beforeEach`/
+`afterEach` reset pattern, `tests/self-improve/spans.test.ts` for the
+`eval.regression` event-attribute precedent). Note: this filename was
+previously used by an unrelated Slice-29 Task-14 fix report; it has been
+overwritten with this Slice-32 Task-14 content per the current task's
+`report path` instruction.
