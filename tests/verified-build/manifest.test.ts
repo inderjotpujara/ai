@@ -45,7 +45,7 @@ describe('manifest sidecar', () => {
   });
 
   test('absent file reads as empty manifest', () => {
-    expect(readManifest(dir)).toEqual({ version: 1, entries: {} });
+    expect(readManifest(dir)).toEqual({ version: 2, entries: {} });
   });
 
   test('upsert then read returns the entry', () => {
@@ -73,12 +73,42 @@ describe('manifest sidecar', () => {
 
   test('malformed file reads as empty manifest without throwing', () => {
     writeFileSync(manifestPath(dir), 'not json at all {{{');
-    expect(readManifest(dir)).toEqual({ version: 1, entries: {} });
+    expect(readManifest(dir)).toEqual({ version: 2, entries: {} });
   });
 
   test('json that is not a manifest object reads as empty manifest', () => {
     writeFileSync(manifestPath(dir), '"just a string"');
-    expect(readManifest(dir)).toEqual({ version: 1, entries: {} });
+    expect(readManifest(dir)).toEqual({ version: 2, entries: {} });
+  });
+
+  test('readManifest tolerates a v1 entry with no verifiedWith (undefined, no throw)', () => {
+    writeFileSync(
+      manifestPath(dir),
+      JSON.stringify({
+        version: 1,
+        entries: {
+          a: {
+            need: 'n',
+            signature: {
+              purpose: 'n',
+              tools: [],
+              modelTier: '',
+              io: '',
+              roles: [],
+            },
+            vector: [],
+            verifiedLevel: 'behaves',
+            goldenPath: `${dir}/a.golden.json`,
+            createdAtMs: 1,
+            lastUsedMs: 0,
+            useCount: 0,
+            lastEvalPass: true,
+          },
+        },
+      }),
+    );
+    const m = readManifest(dir);
+    expect(m.entries.a?.verifiedWith).toBeUndefined();
   });
 });
 
@@ -162,5 +192,13 @@ describe('rebuildFromArtifacts', () => {
 
   test('missing dir yields the empty manifest without throwing', () => {
     expect(rebuildFromArtifacts(join(dir, 'nope')).entries).toEqual({});
+  });
+
+  test('rebuildFromArtifacts leaves verifiedWith undefined', () => {
+    writeArtifactWithGolden(dir, 'summarizer', 'summarize urls');
+    // no .generated.json on disk — the "lost manifest" case; no live resolve
+    // happens offline, so the rebuilt entry cannot carry a model baseline.
+    const rebuilt = rebuildFromArtifacts(dir);
+    expect(rebuilt.entries.summarizer?.verifiedWith).toBeUndefined();
   });
 });

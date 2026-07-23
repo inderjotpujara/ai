@@ -1,3 +1,5 @@
+import type { RuntimeKind } from '../core/types.ts';
+
 export enum VerifiedLevel {
   Behaves = 'behaves',
   Runs = 'runs',
@@ -70,6 +72,19 @@ export type ReuseDecision = {
   similarity: number;
 };
 
+/** Model identity captured at the moment an eval last passed (Slice 32
+ *  self-improvement baseline). Absent on pre-Slice-32 entries and on any
+ *  entry rebuilt offline (`rebuildFromArtifacts`), since no live resolve ran. */
+export type VerifiedWith = {
+  runtime: RuntimeKind;
+  model: string;
+  paramsBillions: number;
+  numCtx: number;
+  /** Best-effort, parsed from the model tag (R2); undefined when not derivable. */
+  quant?: string;
+  capturedAtMs: number;
+};
+
 export type ManifestEntry = {
   need: string;
   signature: CapabilitySignature;
@@ -80,6 +95,9 @@ export type ManifestEntry = {
   lastUsedMs: number;
   useCount: number;
   lastEvalPass: boolean;
+  /** Model identity this entry last verified against; undefined = no baseline
+   *  captured yet (pre-Slice-32 entry or offline rebuild). */
+  verifiedWith?: VerifiedWith;
 };
 
 export type Manifest = {
