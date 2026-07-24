@@ -1,91 +1,178 @@
-# Task 17 report — A2A config/skills/token console API (behind requireTrustedLocal)
+# Task 17 report — repo Cron sweep + JobChain pull trigger defs
 
-**Slice 31 (A2A interop), Increment 5. Branch `slice-31-a2a-multimachine`. Commit `0c69a98`.**
+**Slice 32 (self-improvement loop). Branch `slice-32-self-improvement`.**
 
-(Note: this file previously held a Slice-25b Task 17 report — same filename, different slice; overwritten for the current Slice-31 Task 17.)
+(Note: this file previously held a Slice-31 Task 17 report — same filename,
+different slice; overwritten for the current Slice-32 Task 17.)
 
-## Implemented
+## Summary
 
-The browser-facing (server-side) config surface the Federation tab (Increment 7) will call — four
-routes, all trusted-local, distinct from the A2A-Bearer protocol route `POST /api/a2a`:
+Added two repo-registered `TriggerDef` entries to the empty `TRIGGERS`
+registry in repo-root `triggers/index.ts`, exactly matching the shapes in the
+task brief (`.superpowers/sdd/task-17-brief.md`). No new `TriggerType` — both
+ride the existing `TriggerType.Cron` / `TriggerType.JobChain` substrate. No
+engine change needed: `syncRepoTriggers` (`src/triggers/sync.ts`, called from
+`engine.ts:149`) already reads this registry at daemon boot.
 
-- `GET /api/a2a/config` — metadata-only view: `{ enabled, skills[], cardPreview, tokens[] }`. Never a raw token.
-- `PUT /api/a2a/skills` — set the exposed-skill allowlist; unknown ref → 400.
-- `POST /api/a2a/token` — mint an A2A Bearer; raw token returned EXACTLY ONCE (201).
-- `DELETE /api/a2a/token/:id` — revoke (idempotent 200).
+## The two defs
 
-### Files changed (6, +539)
-- **`src/contracts/a2a.ts`** — landed the deferred `JobKindWire` import (first live wire-layer consumer, keeps Task 1 lint-clean) via new DTOs: `IssuedTokenSchema`, `A2aSkillEntryWireSchema` (`kind: z.enum(JobKindWire)`), `A2aConfigResponseSchema`, `A2aSkillsPutRequestSchema`, `A2aTokenIssueRequestSchema`, `A2aTokenIssueResponseSchema`.
-- **`src/server/a2a/config.ts`** (new) — `handleA2aConfig(deps)` + shared `buildA2aConfig` + `toWireSkill` (engine `SkillEntry`→wire, `as unknown as JobKindWire` per `enqueue.ts` precedent). `enabled` from `loadConfig().values.AGENT_A2A_ENABLED === true`; `tokens` from `enrollment.list()` (metadata only).
-- **`src/server/a2a/skills.ts`** (new) — `handleA2aSkillsPut(req, deps, guard)`: trusted-local FIRST; parse; validate ALL refs via shared `refExistsFor` up front (all-or-nothing, no partial write) → 400 on unknown ref; then `allowlist.put` each; returns updated config.
-- **`src/server/a2a/token.ts`** (new) — `handleA2aTokenIssue(req, deps, guard)` (201, token once) + `handleA2aTokenRevoke(id, req, deps, guard)` (200, idempotent). Both trusted-local FIRST.
-- **`src/server/app.ts`** — routed all four (action `/token` before `:id`); GET config gated with `requireTrustedLocal` at the route (its handler takes no req/guard); mutating handlers gate internally (the `handleDeviceRevoke` precedent). Unwired `deps.a2a` degrades to 503 via `need`.
-- **`tests/server/a2a-token-api.test.ts`** (new) — handler-level harness mirroring `devices/revoke.test.ts`.
-
-### Deviation from brief
-The brief's Produces block wrote `handleA2aTokenRevoke(id, deps, guard)`, which cannot run `requireTrustedLocal(req, ...)` without a `req`. Implemented as `handleA2aTokenRevoke(id, req, deps, guard)` — matching the working `handleDeviceRevoke(id, req, deps, guard)` precedent. No functional impact.
-
-### Design choice
-PUT skills pre-validates every entry's ref with `refExistsFor` (the exact least-privilege check `allowlist.put` runs internally) BEFORE writing any entry, so a single unknown ref rejects the whole request (400) with the persisted allowlist untouched — avoids a partial write that a naive "put-in-a-loop, catch throw" would leave. Full-array replace-semantics were NOT implemented (no diff/remove) — brief specifies "put per entry"; upsert-by-skillId only.
-
-## TDD
-
-### RED
-`bun run test:file -- "tests/server/a2a-token-api.test.ts"`
-→ `error: Cannot find module '../../src/server/a2a/config.ts'` — 0 pass, 1 fail (handlers absent).
-
-### GREEN
-After implementing handlers + DTOs + routes:
+```ts
+'reeval-sweep': {
+  name: 'reeval-sweep',
+  type: TriggerType.Cron,
+  target: {
+    kind: JobKind.Eval,
+    payload: { mode: EvalMode.Sweep, reason: 'sweep' },
+  },
+  config: { schedule: reevalSweepCron() } satisfies CronConfig,
+},
+'reeval-on-pull': {
+  name: 'reeval-on-pull',
+  type: TriggerType.JobChain,
+  target: {
+    kind: JobKind.Eval,
+    payload: { mode: EvalMode.AffectedByPull, reason: 'pull' },
+  },
+  config: {
+    onKind: JobKind.Pull,
+    onStatus: JobStatus.Done,
+  } satisfies JobChainConfig,
+},
 ```
-bun run test:file -- "tests/server/a2a-token-api.test.ts"
- 5 pass  0 fail  21 expect() calls
+
+### Mapping to EvalMode
+
+- **`reeval-sweep`** (Cron): fires on the schedule read from
+  `reevalSweepCron()` (the `AGENT_REEVAL_SWEEP_CRON` knob, default
+  `0 4 * * *`, defined in `src/self-improve/config.ts`). Enqueues a
+  `JobKind.Eval` job with `payload.mode = EvalMode.Sweep` — a full re-eval
+  pass across every reusable artifact (D1: periodic drift sweep).
+- **`reeval-on-pull`** (JobChain): fires whenever a `JobKind.Pull` job reaches
+  `JobStatus.Done` (`config = { onKind: JobKind.Pull, onStatus: JobStatus.Done }`).
+  Enqueues a `JobKind.Eval` job with `payload.mode = EvalMode.AffectedByPull`
+  — a scoped re-eval of only the artifacts affected by the just-pulled model
+  (D1: pull-event detection).
+
+Both target `JobKind.Eval`, the job kind the dispatch registry (Task 16,
+`src/server/jobs/dispatch.ts`) already routes to `RunEvalTurn` /
+`createRealRunEvalTurn`.
+
+## Master-switch handling
+
+The brief does **not** call for gating registration on `reevalEnabled()`, and
+its RED test exercises no enabled/disabled branch — so per the controller's
+own instruction ("follow the brief"), I did **not** gate registration. I
+confirmed this is the correct call by reading `src/self-improve/config.ts`
+and its doc comment on `reevalEnabled()`:
+
+> "Master switch for the self-improvement loop (sweep + pull hook +
+> auto-demote). `0` disables all detection + demotion; ... A MANUAL
+> single-artifact eval ... bypasses this switch by design."
+
+The switch is enforced at **execution** time in
+`src/self-improve/executor.ts` (its `mode !== Artifact` check), not at
+**registration** time. Leaving both trigger defs always-registered means the
+Ops console always shows them (never silently absent when the loop is
+disabled) — consistent with how `sync.ts` handles an invalid repo Cron def
+(registered but forced `enabled: false`, never omitted) and how a repo
+`TriggerType.Webhook` def is registered visibly-disabled rather than dropped.
+I added a doc comment on `TRIGGERS` in `triggers/index.ts` explaining this
+choice explicitly so a future reader doesn't "fix" it by adding a gate.
+
+No engine/gating code was written; this task was pure registry-content.
+
+## TDD RED → GREEN
+
+**RED** — wrote `tests/triggers/repo-reeval-triggers.test.ts` (the brief's
+Step-1 test plus 3 extra assertions: schedule-from-knob, EvalMode payload on
+both defs, JobChainConfig shape) against the still-empty `TRIGGERS`:
+
 ```
-Tests: (1) issue from non-loopback principal → 403, `enrollment.list()` unchanged (no token minted); (2) issue returns raw token once (201) + config `tokens[]` entry has `{id,label}` but no `token` prop and the raw secret appears nowhere in serialized config; (3) PUT unknown ref → 400, allowlist unchanged; (4) PUT from remote → 403, nothing persisted; (5) DELETE remote → 403 (id still present) then local → 200 (id gone).
+$ bun run test:file -- "tests/triggers/repo-reeval-triggers.test.ts"
+ 0 pass
+ 4 fail
+error: script "test:file" exited with code 1
+```
 
-### Gate (all green)
-- `bun run typecheck` — clean.
-- `bun run lint:file -- <6 files>` — Checked 6 files, no errors (fixed import-collapse + import-sort + line-wrap during the run).
-- `bun run docs:check` — living docs present + linked; every src subsystem documented (`src/server/a2a` already documented; new files under existing subsystem).
-- Regression: full a2a suite (auth, rpc-route, card-route, stream-route, token-api, contracts) — `30 pass, 0 fail`.
+(all 4 failures were `undefined` lookups against the empty registry — the
+expected RED.)
 
-## Self-review — SECURITY lens
-- **Trusted-local FIRST + zero-side-effect-on-reject in ALL mutating handlers.** `handleA2aTokenIssue`, `handleA2aTokenRevoke`, `handleA2aSkillsPut` each call `requireTrustedLocal(req, guard, deps.policy)` as the first statement, before parsing the body or touching any store. Tests assert the reject path mints/removes/persists nothing (`enrollment.list()` / `allowlist.list()` unchanged on 403). GET config is also gated (at the route, since its handler is req/guard-free).
-- **Token returned exactly once, never in the config DTO.** `A2aTokenIssueResponseSchema` (`{id,token}`) is the only place `token` leaves; `enrollment.issue` returns it once and persists only `{id,label,createdAt,hash}`. `handleA2aConfig` sources tokens from `enrollment.list()` (metadata only) and `A2aConfigResponseSchema` has no `token` field. Test asserts the raw secret string is absent from the entire serialized config.
-- **Unknown ref → 400 reusing the allowlist validation.** PUT reuses `refExistsFor` — the exact function `allowlist.put` calls internally — so there is no second, drift-prone validation path, and no "run anything" exposure can be persisted.
-- **`:id` is opaque.** Revoke id flows only to `enrollment.revoke` (an array filter) — never the filesystem; a traversal-shaped id affects only its own (nonexistent) row (idempotent 200), same property as `handleDeviceRevoke`.
+**GREEN** — added the two entries + imports to `triggers/index.ts`:
+
+```
+$ bun run test:file -- "tests/triggers/repo-reeval-triggers.test.ts"
+ 4 pass
+ 0 fail
+ 10 expect() calls
+```
+
+Ran `bunx biome check --write` to fix import ordering/formatting (biome
+flagged import order + one multi-line `expect(...)` wrap), then re-verified:
+
+```
+$ bun run lint:file -- triggers/index.ts tests/triggers/repo-reeval-triggers.test.ts
+Checked 2 files in 3ms. No fixes applied.
+
+$ bun run typecheck
+$ tsc --noEmit    (clean, no output)
+
+$ bun run test:file -- "tests/triggers/repo-reeval-triggers.test.ts"
+ 4 pass, 0 fail, 10 expect() calls
+```
+
+Also ran the existing trigger-substrate suites that consume `TRIGGERS`
+indirectly, to confirm the now-non-empty registry doesn't regress them:
+
+```
+$ bun run test:file -- "tests/triggers/sync.test.ts" "tests/triggers/engine.test.ts" "tests/triggers/types.test.ts"
+ 11 pass, 0 fail, 32 expect() calls
+```
+
+## Files changed
+
+- `/Users/inderjotsingh/ai/triggers/index.ts` — added imports
+  (`reevalSweepCron`, `EvalMode`, `JobKind`/`JobStatus`, `CronConfig`/
+  `JobChainConfig`/`TriggerType`) and the two `TRIGGERS` entries + doc comment.
+- `/Users/inderjotsingh/ai/tests/triggers/repo-reeval-triggers.test.ts` (new)
+  — 4 tests covering type/target/config for both defs.
+
+Commit: `c0adbca` — `feat(triggers): repo Cron sweep + model.pull JobChain trigger defs → Eval (no new TriggerType)`.
+
+## Self-review
+
+- Field names verified against the LIVE registry via `codegraph_explore`
+  before writing anything (`triggers/index.ts`'s `TriggerDef`/`TRIGGERS`,
+  `src/triggers/types.ts`'s `TriggerType`/`CronConfig`/`JobChainConfig`/
+  `TriggerTarget`, `src/queue/types.ts`'s `JobKind`/`JobStatus`,
+  `src/server/jobs/dispatch.ts`'s `EvalMode`, `src/self-improve/config.ts`'s
+  `reevalSweepCron`) — no conflict with the brief, so I did not need to pause
+  and ask.
+- `reevalSweepCron()` is called at module-load (not lazily) — this matches
+  the brief's explicit note ("acceptable because `TRIGGERS` is read at boot
+  by `syncRepoTriggers`") and mirrors how the existing empty-registry
+  scaffold was already structured (a plain object literal, not a function).
+- No hardcoded cron string anywhere — schedule always comes from
+  `reevalSweepCron()`.
+- String-enum values only; no `console.log`; `type`-only imports used where
+  only types are needed (`CronConfig`, `JobChainConfig`, `TriggerInput`).
+- Did not touch `src/triggers/engine.ts`, `sync.ts`, or any dispatch wiring —
+  out of scope per the brief ("no engine change needed").
+- Left the `// TRIGGER-BUILDER:IMPORTS` / `// TRIGGER-BUILDER:ENTRIES`
+  scaffold markers untouched and in place (generated-content insertion
+  points for the trigger builder), placing my hand-written entries above
+  them as the brief's sample did.
 
 ## Concerns
-- None blocking. Minor: PUT is upsert-only (no removal of skills absent from the payload) per the brief; if the Federation tab expects true PUT-replace semantics, a follow-up would need to diff+remove. Flagging for Increment 7 wiring.
 
----
-
-## Fix wave (§7.4 replace-semantics)
-
-Two fixes applied on `slice-31-a2a-multimachine` (over commit `0c69a98`), closing the "PUT is upsert-only" concern flagged above.
-
-### Fix 1 (Important) — `PUT /api/a2a/skills` REPLACES, not upserts
-`handleA2aSkillsPut` (`src/server/a2a/skills.ts`) previously only `put` each payload entry, so a skill omitted from the desired set stayed exposed — an operator could not retract an exposure via the console (§7.4 silent over-exposure). Now, AFTER the all-refs-valid gate (unchanged), it computes the desired id set, `allowlist.remove(...)`s any currently-exposed skill absent from it, then upserts the desired entries. Ordering preserves the properties: trusted-local gate FIRST → schema parse → all-or-nothing ref validation (400 before any mutation) → remove-then-put → return updated config. A rejected request (bad ref / bad schema / non-loopback) removes nothing.
-
-### Fix 2 (Minor) — bound the skills payload
-`src/contracts/a2a.ts`: `A2aSkillsPutRequestSchema.skills` now `.max(100)`; `A2aSkillEntryWireSchema` fields bounded — `skillId`/`ref` `.max(128)`, `name` `.max(200)`, `description` `.max(2000)`. Cheap defense-in-depth; an over-cap PUT → schema reject → 400. Isomorphic contract stays valid (existing parses unaffected).
-
-### RED → GREEN evidence
-New tests added to `tests/server/a2a-token-api.test.ts`:
-- REPLACE: seed A(`file_qa`)+B(`web_fetch`), PUT only A → 200, `allowlist.list()` and `GET /api/a2a/config` show ONLY A (B un-exposed).
-- all-or-nothing: seed A+B, PUT [A, bad-ref C] → 400 and A+B intact (nothing removed).
-- bound: PUT 101-entry array → 400, nothing persisted.
-
-RED (before impl): `bun test tests/server/a2a-token-api.test.ts` → **6 pass / 2 fail** — REPLACE test saw `["B","A"]` (B not retracted); bound test got 200 instead of 400. (The all-or-nothing test already passed, since a bad ref rejects before any write.)
-
-GREEN (after impl):
-```
-$ bun test tests/server/a2a-token-api.test.ts
- 8 pass
- 0 fail
- 29 expect() calls
-```
-
-All 6 pre-existing Task-17 tests stay green. All-or-nothing property preserved (validate-all-refs-first → 400 before any remove/put).
-
-### Gate
-`bun run typecheck` clean · `bun run lint:file -- src/server/a2a/skills.ts src/contracts/a2a.ts tests/server/a2a-token-api.test.ts` clean · `bun run docs:check` clean.
+- None blocking. One minor observation for the slice's final review: because
+  both defs are unconditionally registered regardless of `reevalEnabled()`,
+  when the master switch is off the Ops console will still show
+  `reeval-sweep` / `reeval-on-pull` as "enabled" triggers that fire but whose
+  resulting Eval jobs presumably become no-ops (or are guarded) inside the
+  executor — worth the final review double-checking that
+  `src/self-improve/executor.ts`'s `mode !== Artifact` short-circuit is
+  actually reached for jobs dispatched via these triggers (i.e., the
+  Eval-job dispatch path in `dispatch.ts` doesn't itself skip the switch
+  check) so a disabled loop doesn't burn compute on sweep/pull jobs that
+  silently do nothing useful downstream. This is an integration concern
+  across Tasks 14/16/17, not a defect in this task's own scope.

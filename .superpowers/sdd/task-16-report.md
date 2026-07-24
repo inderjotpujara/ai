@@ -1,83 +1,63 @@
-# Task 16 report — Bearer gate on POST /api/a2a (verify-before-parse + replay + body cap)
+# Task 16 report (Slice 32) — wire the real Eval turn end-to-end
 
-**Slice 31 · Increment 5 · commit `8f6c1eb`**
-`feat(a2a): Bearer gate on POST /api/a2a (verify-before-parse, replay window, body cap)`
+**Status:** DONE_WITH_CONCERNS
+**Commit:** 521e8f4 — feat(self-improve): wire the real Eval turn (eval.reeval run root) into the daemon + standalone server
 
-## Implemented
+## What was wired (the 4 sites)
 
-The `POST /api/a2a` route now authenticates. Ordering in `handleA2aRpc` (after the
-`AGENT_A2A_ENABLED`-off 404 fail-safe, which stays first):
+### 1. `src/server/launch-turns.ts` — `createRealRunEvalTurn` unstubbed
+Replaced `throw new Error('runEval not wired until Task 16')`. The factory returns a **thin closure**; ALL heavy construction happens per-run inside the closure (never at factory time), so boot only allocates a function.
 
-1. **Extract `Authorization: Bearer` + length-cap up front** (`MAX_BEARER_TOKEN_LEN`,
-   token.ts idiom). Absent / non-Bearer / over-long → `401` before any crypto.
-2. **`deps.enrollment.verify(raw)` BEFORE the JSON-RPC body is read.** Verify failure →
-   `401` and the body is NEVER parsed. A thrown verify (corrupt registry, fail-closed
-   per Task 15) is caught → `401` deny, never a 500/crash.
-3. **Replay guard** against `x-a2a-timestamp` (seconds→ms) + `x-a2a-nonce`: missing
-   nonce / non-finite ts → `401`; stale ts or replayed nonce → `409`. Enforced before
-   dispatch.
-4. **Only then** `req.json()` + dispatch (the `maxRequestBodySize` 413 fronts the
-   handler at `Bun.serve`).
+Per eval run:
+- Opens the run scope with **`withRunTelemetry`** (NOT `withMcpRun`): a re-eval replays the persisted golden set, and the build-time baseline it diffs against was captured by a golden eval that runs the agent **MCP-free** (D4). Replaying with MCP mounted would grade against a different tool surface; skipping `withMcpRun` also avoids the `mcp.mount` precursor root that `deriveRunKind` classifies (as `RunKind.Mcp`) *ahead* of `eval.reeval`.
+- Builds `RunEvalDeps`: `registryDirs:['agents','crews','workflows']`, `runsRoot`, `history = createEvalHistoryStore({path: queuePath})`, `jobStore = createJobStore({path: queuePath})`, `upsertEntry`, `loadGolden`, plus the `ReevalDeps` seams. `queuePath = String(loadConfig().values.AGENT_QUEUE_PATH)` — the **directory** both stores join `jobs.db` onto, so the eval-history table lives in the SAME `jobs.db` the daemon's pool + trigger store use. No new DB/path.
+- Root span: `Artifact` mode → `runArtifact` opens its own `eval.reeval` root (`withEvalReevalSpan`), so the turn does NOT wrap (avoids double-nesting). `Sweep`/`AffectedByPull` (enqueue-only, no span) → turn wraps `runEval` in `inSpan('eval.reeval', …)` so those runs still classify `RunKind.Eval`.
+- `finally`: `history.close()`, `jobStore.close()`, `await manager.unloadAll()`.
 
-The Bearer / timestamp / nonce never enter a log, DTO, or span — rejections return a
-fixed featureless `{ error }` body.
+### 2 & 3. `src/cli/daemon.ts` (`buildRealDaemon`) + `src/server/main.ts`
+Both `createJobDispatch({…})` sites now pass `runEvalTurn: createRealRunEvalTurn(runsRoot)`. Confirmed via codegraph these are the ONLY two call sites (`buildRealDaemon` + `startWebServer`).
 
-### Files changed
-- **Created** `src/a2a/replay-guard.ts` — `createReplayGuard(windowMs, now?)` → `{ check(nonce, tsMs) }`.
-  Bounded insertion-ordered LRU (`Map`), evicts entries past the window on each check, hard
-  cap `MAX_SEEN_NONCES=50_000`. `401` for malformed proof, `409` for stale/replay.
-- **Modified** `src/server/a2a/rpc.ts` — the gate above; lazy process-wide replay-guard
-  singleton keyed to `AGENT_A2A_REPLAY_WINDOW_MS` (state must persist across requests).
-  Removed the "Task 16 seam" comment; updated the module header to the shipped posture.
-- **Modified** `src/a2a/server.ts` — grew `A2aServerDeps` with required `enrollment: A2aEnrollment`.
-- **Modified** `src/server/app.ts` — updated the `ServerDeps.a2a` doc (enrollment/Task 16);
-  the route already passes the whole `A2aServerDeps`, so enrollment is threaded by type.
-- **Tests created** `tests/a2a/replay-guard.test.ts`, `tests/server/a2a-auth.test.ts`.
-- **Tests updated** (required-field + gate-now-fronts-them): `tests/server/a2a-rpc-route.test.ts`
-  (real enrollment + valid Bearer/replay headers on the two reachability tests),
-  `tests/server/a2a-card-route.test.ts`, `tests/a2a/server.test.ts`,
-  `tests/a2a/consent-fail-closed.test.ts`, `tests/server/a2a-stream-route.test.ts` (stub enrollment
-  for dispatch-level harnesses that bypass the route gate).
+### 4. `src/run/run-trace.ts`
+Added `'eval.reeval'` to **`RUN_ROOT_NAMES`** and **`TERMINAL_RUN_ROOTS`** (an eval run is a terminal root like `chat.run`, not an ephemeral precursor). `deriveRunKind` already mapped `eval.reeval → RunKind.Eval` (Task 5). Now `summarizeRun` / CLI `--follow` classify + terminate on it.
+
+### Supporting: `src/agent-builder/deps.ts`
+Exported the previously-private `toJudgeCandidate` so the eval turn builds `judgeCandidates` from the SAME construction the builders use — one judge ladder, not a divergent copy.
+
+## Reusing the builders' resolve/runCase/judge (no divergent resolver)
+ONE `createModelManager` + ONE lazily-memoized `buildRegistry`:
+- **resolve(need)** → `resolveModel({role:need||'agent builder', requires:[Capability.Tools], prefer:LargestThatFits, allowUncensored: uncensoredEnabled()}, registry, {ensureReady: manager.ensureReady, listLoaded: listLoadedModels})` — the EXACT requirement `makeRealBuilderDeps` resolves against to capture `verifiedWith`, so drift detection compares like with like.
+- **runCase(ref,_model,input)** → `AGENTS[ref]({})` (empty toolset = MCP-free, matches build-time golden eval) run through `runGuardedAgent(agent, input, selectHook, signal)` where `selectHook = createSelectHook({…})` — the canonical resolve+warm+degrade path the CLI/builders use. A guarded failure returns its `error` string (judge then fails the case), never throws.
+- **judge(judgeModelId,prompt)** → `judgeModelFor` resolves the id to a LanguageModel via the SAME manager (degrade to `JudgeUnavailableError`, never self-grade), then `generateText({temperature:0, abortSignal: AbortSignal.timeout(dryRunMs())})` → `startsWith('yes')`. Identical to the builder gate's judge; only arg order differs.
+- **judgeCandidates()** → `(engine?.registry ?? []).map(toJudgeCandidate)`.
+
+The engine is lazily built (`ensureEngine`) on first real use, so a no-op pass (switch off / empty sweep) never calls `buildRegistry` or touches a model.
+
+## Boot-safety reasoning (Slice-31 lesson)
+- `createRealRunEvalTurn(runsRoot)` returns a closure only — no DB, registry, or manager at factory time. Both dispatch sites call it exactly like the sibling `createReal*Turn` factories (all construct lazily per-run). Boot cannot crash on it (unit test asserts construction no longer throws).
+- History + queue store open the SAME `jobs.db` — verified both derive `join(config.path ?? 'jobs', 'jobs.db')` from `AGENT_QUEUE_PATH` (default dir `jobs`). WAL + busy_timeout make the extra per-run connections safe. No new required env/path.
+- Typecheck + lint clean; both dispatch sites typecheck with the new dep.
 
 ## TDD RED → GREEN
+RED — rewrote `tests/self-improve/eval-turn.test.ts` (construction no-throw + offline disabled-Sweep → `{kind:'answer', text:'reeval disabled'}`) and extended `tests/run/run-trace.test.ts` (eval.reeval terminal + summarizeRun eval-rooted):
+```
+tests/self-improve/eval-turn.test.ts  → 2 fail ("runEval not wired until Task 16")
+tests/run/run-trace.test.ts           → 2 fail (durationMs 0 vs 271; eval.reeval not terminal)
+```
+GREEN after implementation:
+```
+eval-turn.test.ts 2 pass · run-trace.test.ts 17 pass · run-kind.test.ts 5 pass
+regression sweep (eval-turn+executor+run-trace+run-kind+dispatch+dispatch-origin): 52 pass / 0 fail
+```
 
-**RED** (`bun test tests/a2a/replay-guard.test.ts tests/server/a2a-auth.test.ts`):
-`1 pass / 8 fail / 1 error` — replay-guard suite errored (module absent); auth suite
-returned `200` where `401`/`409` expected (route ungated).
+## Per-task gate
+- `bun run typecheck` → clean
+- `bun run lint:file -- <7 files>` → clean (after biome import-order autofix)
+- `bun run docs:check` → pass (pre-commit; no new subsystem)
 
-**GREEN** (after implementation), focused:
-`bun test tests/a2a/replay-guard.test.ts tests/server/a2a-auth.test.ts tests/server/a2a-rpc-route.test.ts tests/server/a2a-card-route.test.ts`
-→ `19 pass / 0 fail`.
-
-Full a2a + server suites: `bun test tests/a2a tests/server` → **522 pass / 0 fail** (103 files).
-
-## Gate
-- `bun run typecheck` — clean (after adding enrollment to the 5 downstream A2aServerDeps sites).
-- `bun run lint:file -- <11 files>` — clean (one biome format auto-fix applied).
-- `bun run docs:check` — pass.
-
-## Self-review (SECURITY lens, §7.2)
-- **Verify PROVABLY precedes parse:** step 2 (`enrollment.verify`) runs before the only
-  `req.json()` call (step 4). The `no/absent Bearer → 401 BEFORE parse` test sends a
-  malformed body with no Bearer and asserts `401` with NO `jsonrpc` field — a parse error
-  would have been HTTP 200 `-32700`. Proven.
-- **Thrown verify caught → 401:** `try/catch` around `deps.enrollment.verify`. The
-  corrupt-registry test issues a valid-sig token, corrupts the registry on disk, presents
-  the token → verify's re-read throws → route returns `401` (asserted `not 500`).
-- **D5 device token rejected:** the route consults ONLY `deps.enrollment` (A2A store),
-  never the device session guard. Test mints a real session token sharing the same root →
-  `enrollment.verify` returns false (no `kind:'a2a'`) → `401`.
-- **Replay enforced pre-dispatch:** same nonce+ts twice → second is `409`; a ~1h-stale ts
-  → `409`; both before body dispatch.
-- **No secret in logs/spans:** no `console.*`; rejections carry a fixed generic body; the
-  handleApi span records only route/method/status, never the token/ts/nonce.
-- **DoS guard:** over-long Bearer rejected before verify; replay LRU hard-capped.
+## Files changed
+`src/server/launch-turns.ts`, `src/cli/daemon.ts`, `src/server/main.ts`, `src/run/run-trace.ts`, `src/agent-builder/deps.ts`, `tests/self-improve/eval-turn.test.ts`, `tests/run/run-trace.test.ts`.
 
 ## Concerns
-- The replay guard is a **lazy process-wide singleton** in rpc.ts (state must persist
-  across requests; not in the brief's `ServerDeps.a2a` grow-list, so not injected). It
-  reads the window once on first use. Acceptable and testable (unit test drives
-  `createReplayGuard` directly with an injected clock); noting the design choice.
-- `deps.a2a` (hence `enrollment`) is **not yet wired into a live daemon/main** — no
-  production construction site exists yet (only tests construct `A2aServerDeps`). Live
-  wiring is a downstream increment; nothing here breaks boot.
+1. **runCase is agent-scoped.** `registryDirs` scans agents/crews/workflows for drift (per brief) but `runCase` reconstructs only agent refs (`AGENTS`). A crew/workflow whose model drifts enqueues an Artifact eval job whose `runCase` throws `unknown agent for re-eval` → a terminal Failed job (surfaced, not a crash; sweep's per-artifact try/catch contains it). Crew/workflow golden-replay is a natural live-verify follow-on — flag in case the controller wants `registryDirs` narrowed to `['agents']` for now.
+2. **Composition covered by live-verify, not full unit invocation.** Like the sibling real turns, resolve/runCase/judge over live models + a drifted-artifact demote-to-Unverified can only run with Ollama. Unit test covers construction + the offline disabled path; the executor's demote + `regressed:true` behavior is covered by `executor.test.ts` with fakes. Recommend a live-verify pass (build agent → swap model → sweep → confirm demote + regressed `eval_history` row) before slice landing.
+3. **runCase ignores the passed `model` decl** (`_model`) — runs on what `createSelectHook` resolves for the agent's own `modelReq` ("the model that would run today"), while `resolve` (drift) uses the builder requirement. Both are current-model resolutions; for Ollama largest-that-fits they coincide. Documented inline.

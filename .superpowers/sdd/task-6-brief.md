@@ -1,33 +1,107 @@
-### Task 6: Serve `GET /.well-known/agent-card.json` (fail-safe + ETag)
+### Task 6: Extract the shared `runGoldenEval` binding helper
 
 **Files:**
-- Create: `src/server/a2a/card.ts`
-- Modify: `src/server/app.ts` (a branch in `buildFetch`, after `enforcePerimeter`, before the `/api` guard — beside the `/hooks/:token` branch at `app.ts:254`)
-- Test: `tests/server/a2a-card-route.test.ts`
+- Modify: `src/verified-build/eval.ts` (add `runGoldenEval`), `src/agent-builder/builder.ts:206-246` (`goldenEval` closure → call the helper), `src/crew-builder/builder.ts:244-273` (symmetric)
+- Test: extend `tests/verified-build/eval.test.ts`
 
 **Interfaces:**
-- Consumes: `buildAgentCard`, `cardEtag` (Task 5); `deps.a2a` (a new optional `ServerDeps.a2a` field — `{ allowlist, enrollment?, ... }`, added here as `{ allowlist: A2aAllowlist }` and grown in later tasks); `deps.publicBaseUrl`; `loadConfig` for `AGENT_A2A_ENABLED` + `AGENT_A2A_CARD_TTL`; `recordA2aCard` (Task 2).
+- Consumes: `evalCases`, `EvalDeps` (this file); `selectJudge`, `JudgeCandidate`, `JudgeUnavailableError` from `./judge.ts`; `GoldenCase`, `EvalResult` from `./types.ts`.
 - Produces:
-  - `src/server/a2a/card.ts`: `handleAgentCard(req: Request, deps: { allowlist: A2aAllowlist; publicBaseUrl: string }): Response` — **404 when `AGENT_A2A_ENABLED` is off** (fail-safe: discovery reveals nothing until exposed); else build the card, compute the ETag, honor `If-None-Match` (→ `304`), return `200` with `content-type: application/json`, `ETag`, and `Cache-Control: public, max-age=<AGENT_A2A_CARD_TTL>`. `recordA2aCard({ cacheHit })`.
-  - `app.ts` branch (in `buildFetch`, method GET, path `=== '/.well-known/agent-card.json'`): `if (!deps.a2a) return json({ error: 'a2a unavailable' }, 503); return handleAgentCard(req, { allowlist: deps.a2a.allowlist, publicBaseUrl: need(deps.publicBaseUrl, 'publicBaseUrl') });`. Placed OUTSIDE the `/api` session guard (public discovery) but INSIDE the Host/Origin perimeter (already enforced above).
+  ```ts
+  export type GoldenEvalBinding = {
+    cases: GoldenCase[];
+    judgeCandidates: () => JudgeCandidate[];
+    generatorFamily?: string;
+    runCase: (input: string) => Promise<string>;
+    judge: (model: string, prompt: string) => Promise<boolean>;
+  };
+  /** ONE eval-binding path shared by both builders' goldenEval closures AND
+   *  reeval.ts: select the judge (below-bar → null), bind EvalDeps, run
+   *  evalCases; a JudgeUnavailableError degrades to null (skip behavioral eval),
+   *  matching the gate's never-crash policy (builder.ts:238). */
+  export async function runGoldenEval(b: GoldenEvalBinding): Promise<EvalResult | null>;
+  ```
 
-- [ ] **Step 1: Write the failing tests:**
+- [ ] **Step 1: Write the failing test** — the helper selects a judge, binds, and returns an `EvalResult`; a below-bar judge (no qualifying candidate) → null; a `JudgeUnavailableError` from `judge` → null:
 
 ```ts
-test('card route 404s when AGENT_A2A_ENABLED is off (fail-safe)', async () => { /* build fetch with a2a wired, flag off → GET /.well-known/agent-card.json → 404 */ });
-test('card route serves the card + ETag when enabled, no bearer required', async () => { /* flag on → 200 + ETag + Cache-Control, reachable with NO Authorization header */ });
-test('If-None-Match matching the ETag returns 304', async () => { /* second GET with the ETag → 304 */ });
+test('runGoldenEval returns an EvalResult for a qualifying judge', async () => {
+  const res = await runGoldenEval({
+    cases: [{ id: 'c0', input: 'x', assert: 'ok', kind: GoldenKind.TaskSuccess }],
+    judgeCandidates: () => [{ model: 'J:32b', params: 32e9, family: 'jf' }],
+    generatorFamily: 'gf',
+    runCase: async () => 'answer',
+    judge: async () => true,
+  });
+  expect(res?.passed).toBe(true);
+  expect(res?.judgeModel).toBe('J:32b');
+});
+test('runGoldenEval returns null when no judge clears the bar (below bar)', async () => {
+  const res = await runGoldenEval({
+    cases: [{ id: 'c0', input: 'x', assert: 'ok', kind: GoldenKind.TaskSuccess }],
+    judgeCandidates: () => [{ model: 'small', params: 1e9, family: 'jf' }],
+    runCase: async () => 'answer',
+    judge: async () => true,
+  });
+  expect(res).toBeNull();
+});
 ```
 
-- [ ] **Step 2: Run tests to verify they fail** → FAIL.
-- [ ] **Step 3: Write minimal implementation** per the Produces block. Add the optional `a2a?: { allowlist: A2aAllowlist }` field to `ServerDeps` (`src/server/app.ts:89`) — grown in Increments 3/5/6.
-- [ ] **Step 4: Run tests to verify they pass** → PASS.
-- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/server/a2a/card.ts src/server/app.ts tests/server/a2a-card-route.test.ts`.
+- [ ] **Step 2: Run test to verify it fails** → FAIL (not exported).
+- [ ] **Step 3: Write minimal implementation** — move the `selectJudge(...) → if model null return null → try { evalCases(...) } catch JudgeUnavailableError → null` shape from `builder.ts:208-245` into `runGoldenEval`; then rewrite BOTH builders' `goldenEval` closures to delegate:
+
+```ts
+// src/verified-build/eval.ts — NEW
+export async function runGoldenEval(b: GoldenEvalBinding): Promise<EvalResult | null> {
+  const judgePick = selectJudge({ candidates: b.judgeCandidates, generatorFamily: b.generatorFamily });
+  if (judgePick.model === null) return null;
+  const judgeModelId = judgePick.model;
+  try {
+    return await evalCases(b.cases, {
+      runCase: b.runCase,
+      judge: (prompt) => b.judge(judgeModelId, prompt),
+      judgeModel: judgeModelId,
+      belowBar: judgePick.belowBar,
+    });
+  } catch (err) {
+    if (err instanceof JudgeUnavailableError) return null;
+    throw err;
+  }
+}
+```
+
+```ts
+// src/agent-builder/builder.ts:206 — goldenEval now delegates
+goldenEval: async (def, golden) => {
+  const { agent } = def as StagedAgent;
+  return runGoldenEval({
+    cases: golden.cases,
+    judgeCandidates: verify.judgeCandidates,
+    generatorFamily: verify.generatorFamily,
+    runCase: async (input) => {
+      try {
+        const r = await withWallClock(dryRunMs(), () =>
+          verify.runAgent(agent, input, AbortSignal.timeout(dryRunMs())),
+        );
+        return 'text' in r ? r.text : `error: ${r.error}`;
+      } catch (err) {
+        return `error: ${String(err)}`;
+      }
+    },
+    judge: (model, prompt) => verify.judge(prompt, model),
+  });
+},
+```
+
+(The crew-builder `goldenEval` at `crew-builder/builder.ts:244` gets the identical treatment with its own `runCrew`/`runAgent` seam.)
+
+- [ ] **Step 4: Run tests to verify they pass** — `bun run test:file -- "tests/verified-build/eval.test.ts" "tests/agent-builder/gate-integration.test.ts" "tests/crew-builder/gate-integration.test.ts"` → PASS (the refactor is behavior-preserving; the gate integration tests are the regression net).
+- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/verified-build/eval.ts src/agent-builder/builder.ts src/crew-builder/builder.ts tests/verified-build/eval.test.ts`.
 
 ```bash
-git add src/server/a2a/card.ts src/server/app.ts tests/server/a2a-card-route.test.ts
-git commit -m "feat(a2a): GET /.well-known/agent-card.json (public discovery, 404 when disabled, ETag)"
+git add src/verified-build/eval.ts src/agent-builder/builder.ts src/crew-builder/builder.ts tests/verified-build/eval.test.ts
+git commit -m "refactor(verified-build): extract shared runGoldenEval binding (one eval path for both builders + reeval)"
 ```
 
-*Model: Opus (route placement is security-sensitive — the card must be outside the session guard yet inside the perimeter, and MUST 404 when the flag is off; a card leaked while disabled advertises internal capability).*
+*Model: Opus (behavior-preserving refactor across two live builder files; the gate integration tests must stay green).*
 

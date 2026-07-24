@@ -1,43 +1,92 @@
-# Task 6 Report — `GET /.well-known/agent-card.json` (public discovery route)
+# Task 6 report (Slice 32) — extract shared `runGoldenEval` binding
 
-Slice 31 (A2A interop), Increment 2. Commit `0543f86`.
+## Summary
+Factored the duplicated golden-eval BINDING (selectJudge → build `EvalDeps` →
+`evalCases`, with JudgeUnavailableError → degrade-to-null) out of both builders
+into ONE shared helper `runGoldenEval` in `src/verified-build/eval.ts`. Both
+builders' `goldenEval` closures now delegate to it. Behavior-preserving.
 
-## Implemented
+Commit: `121d833 refactor(verified-build): extract shared runGoldenEval binding`
 
-- **`src/server/a2a/card.ts`** (new) — `handleAgentCard(req, { allowlist, publicBaseUrl })`:
-  - Reads config LIVE per request (`loadConfig().values`). **404 (featureless JSON `{error:'not found'}`) when `AGENT_A2A_ENABLED !== true`** — fail-safe: no card, no skills, no capability leak until an operator enables the surface.
-  - When enabled: builds the card via Task 5's `buildAgentCard`, computes a strong quoted `ETag` (`"<sha256>"`) via `cardEtag`, sets `Cache-Control: public, max-age=<AGENT_A2A_CARD_TTL>`.
-  - Honors `If-None-Match` (RFC-9110: comma-list + `*`) → `304` (with `ETag`+`Cache-Control`, empty body); else `200` + `content-type: application/json`.
-  - Calls `recordA2aCard({ cacheHit })` on both the 200 and 304 paths.
-- **`src/server/app.ts`** — added `a2a?: { allowlist: A2aAllowlist }` to `ServerDeps`; added the route branch in `buildFetch` immediately after the `/hooks` branch and BEFORE the `/api` session guard: `GET` + exact path `=== '/.well-known/agent-card.json'` → `503` (DepUnavailableError-shaped) if `!deps.a2a`, else `handleAgentCard(...)` with `need(deps.publicBaseUrl,...)`.
-- **`tests/server/a2a-card-route.test.ts`** (new) — 4 tests.
+## Closures' equivalence analysis (verified before designing the signature)
+Read both closures side by side (`src/agent-builder/builder.ts:206-246`,
+`src/crew-builder/builder.ts:244-283`). Byte-identical EXCEPT the `runCase` body:
+- Agent: `withWallClock(dryRunMs(), () => verify.runAgent(agent, input, AbortSignal.timeout(dryRunMs())))`
+- Crew:  `withWallClock(dryRunMs(), () => verify.runArtifact(runnable, shape, input))`
 
-## TDD RED → GREEN
+Everything else identical: same `selectJudge({candidates, generatorFamily})`,
+same `if (model === null) return null`, same `evalCases(cases, {runCase, judge:
+(prompt)=>verify.judge(prompt, judgeModelId), judgeModel, belowBar})`, same
+`catch (JudgeUnavailableError) → return null; else throw`.
 
-RED (before impl): `bun run test:file -- "tests/server/a2a-card-route.test.ts"` → `1 pass 3 fail` (200/304/503 cases failed; the disabled-404 passed coincidentally since the unrouted `.json` path already 404s via serveStatic). One test-harness fix during RED: the no-a2a server needed its OWN `policy` object (the Host-header port check keys on `policy.port`) — it was 403ing, which itself confirms the perimeter fronts the branch.
+Conclusion: safely unifiable. The ONLY divergence (runAgent w/ AbortSignal vs
+runArtifact w/ shape) lives entirely inside `runCase`, which the helper takes as a
+parameter — parameterized cleanly, not papered over. The judge argument-order
+difference (`verify.judge(prompt, model)`) is absorbed by the caller's adapter
+`judge: (model, prompt) => verify.judge(prompt, model)` matching the helper's
+`GoldenEvalBinding.judge: (model, prompt) => Promise<boolean>`.
 
-GREEN (after impl): `4 pass / 0 fail / 11 expect()`.
+## Helper design (reusable primitive for Task 7)
+```ts
+export type GoldenEvalBinding = {
+  cases: GoldenCase[];
+  judgeCandidates: () => JudgeCandidate[];
+  generatorFamily?: string;
+  runCase: (input: string) => Promise<string>;
+  judge: (model: string, prompt: string) => Promise<boolean>;
+};
+export async function runGoldenEval(b: GoldenEvalBinding): Promise<EvalResult | null>;
+```
+Task 7's `reevalArtifact` can call this with a resolved model + a loaded golden
+(pass `golden.cases` as `cases`, its own `judgeCandidates`/`generatorFamily`, its
+own `runCase`/`judge`) — no regeneration, no gate coupling. Task 7's logic is NOT
+built here.
 
-Gate:
-- `bun run typecheck` → clean.
-- `bun run lint:file -- <3 files>` → clean (ran `biome check --write` once to fix import-sort + line-wrap).
-- `bun run docs:check` → ✔ (also runs in pre-commit; passed).
-- Regression: `app.test.ts` + `app-hooks-route.test.ts` → `24 pass / 0 fail`.
+## One intentional deviation (noted)
+The old closures emitted `console.error('[verify] judge model unavailable …')` in
+the JudgeUnavailableError branch. The shared helper (per the task brief's canonical
+implementation) omits it. Rationale: (a) the brief's spec omits it; (b) the repo's
+no-console rule; (c) gate.ts already records the degrade as telemetry
+(`VERIFY_JUDGE_BELOW_BAR: true` + `golden_eval {skipped:true}`), so it stays
+observable; (d) no test asserts on the log line. The eval RESULT semantics (null on
+degrade) are byte-for-byte identical.
+
+## TDD
+RED — added `describe('runGoldenEval')` (5 tests: qualifying→EvalResult+judgeModel,
+C3 judge-binding uses the cross-family pick, below-bar→null, JudgeUnavailableError→
+null, other errors propagate) to `tests/verified-build/eval.test.ts`:
+```
+$ bun run test:file -- "tests/verified-build/eval.test.ts"
+SyntaxError: Export named 'runGoldenEval' not found … eval.ts
+ 0 pass / 1 fail / 1 error
+```
+GREEN — after implementing the helper + rewriting both closures:
+```
+$ bun run test:file -- "tests/verified-build/eval.test.ts" \
+    "tests/agent-builder/gate-integration.test.ts" \
+    "tests/crew-builder/gate-integration.test.ts"
+ 36 pass / 0 fail / 126 expect() calls / 3 files
+```
+Both gate-integration suites (the regression net proving behavior preserved, incl.
+"judge model that cannot be loaded degrades to runs", "below-bar", and "judge runs
+on the model selectJudge picked") pass UNCHANGED.
+
+## Gate
+```
+$ bun run typecheck   → tsc --noEmit, clean
+$ bun run lint:file -- src/verified-build/eval.ts src/agent-builder/builder.ts \
+    src/crew-builder/builder.ts tests/verified-build/eval.test.ts
+  Checked 4 files, no fixes applied.
+```
 
 ## Files changed
-- `src/server/a2a/card.ts` (new, ~78 lines)
-- `src/server/app.ts` (import + `ServerDeps.a2a` field + route branch)
-- `tests/server/a2a-card-route.test.ts` (new, 4 tests)
+- `src/verified-build/eval.ts` — added `GoldenEvalBinding` type + `runGoldenEval`; imports `selectJudge`/`JudgeUnavailableError`/`JudgeCandidate` from `./judge.ts`.
+- `src/agent-builder/builder.ts` — `goldenEval` delegates; import `runGoldenEval` (was `evalCases`), dropped now-unused `JudgeUnavailableError` (kept `selectJudge` — still used by `makeGolden`).
+- `src/crew-builder/builder.ts` — symmetric.
+- `tests/verified-build/eval.test.ts` — new `runGoldenEval` suite.
 
-## Security self-review
-
-1. **Genuinely unreachable when flag off?** YES. The card is built ONLY inside `handleAgentCard`, reached ONLY when `AGENT_A2A_ENABLED === true`. Flag read live per request (no cached/boot value). Disabled → featureless 404, no skills/URL/capabilities emitted. No other route builds or serves the card; `serveStatic` won't serve it (not a staticDir file, and the `.json` extension excludes it from the SPA fallback). No leak path.
-2. **Outside the session guard, inside the perimeter?** YES. Branch sits after `enforcePerimeter(req, deps.policy)` (returns early on a bad Host/Origin) and before `if (url.pathname.startsWith('/api'))`. Test 2 proves `200` with NO `Authorization` header (a 401 would mean it was wrongly behind the guard). The 503 test needed a port-matched policy to avoid a 403 — direct evidence the perimeter runs first.
-3. **Method/path scoping.** Only `GET` + the exact string path match; any other method or path falls through to `serveStatic` (→ plain 404), exposing nothing else.
-4. **Absent-dep degrade.** `!deps.a2a` → `503` (not the outer catch's opaque 500).
-
-## Concerns (minor)
-- Disabled route returns a JSON `{error:'not found'}` 404 vs serveStatic's text `not found` 404 — a caller could tell the well-known path is *recognized*, but the A2A spec makes this path universally known anyway, and NO capability content leaks. Not a capability oracle.
-- Per the brief, `publicBaseUrl` is resolved with `need()` INSIDE the branch (before the flag check runs in the handler). If `a2a` is wired but `publicBaseUrl` is unset, the request 500s (outer catch) rather than 404ing when the flag is off. In practice the daemon always wires `publicBaseUrl` alongside `a2a`; matches the brief's specified code exactly.
-
-Report path: `/Users/inderjotsingh/ai/.superpowers/sdd/task-6-report.md`
+## Self-review / concerns
+- `makeGolden` in both builders still calls `selectJudge` independently (unchanged
+  by this task) — a separate below-bar gate, out of scope here.
+- Pure extraction; no signature change to `evalCases`/`EvalDeps`/`GateDeps`, so no
+  other callers touched. docs-check passed in pre-commit.

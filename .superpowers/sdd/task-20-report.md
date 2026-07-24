@@ -1,64 +1,91 @@
-# Task 20 report — `src/a2a/client.ts` + `src/a2a/canonical.ts` (CONSUME-side discover/validate/PIN, §7.3)
+# Task 20 report — Evals/Health server API (`GET /api/evals`, `GET /api/evals/:artifact`, `POST /api/evals/reeval`) + `chat.feedback` health read
 
-**Status:** DONE. Commit `f1cd431` — `feat(a2a): remote client discover/validate/PIN (canonical hash, redirect:error SSRF guard)` on `slice-31-a2a-multimachine`.
+> Note: this path previously held a stale Slice-31 Task-20 report (A2A client, different slice, same task number); overwritten per the task brief, as the last several Slice-31 task reports also state.
 
-> Note: this path previously held a stale Slice-25b Task-20 report (different slice, same task number); it is preserved in git history and was overwritten per the task brief.
+**Status:** DONE. Commit `4f31e86` — `feat(server): GET /api/evals + /api/evals/:artifact + POST /api/evals/reeval (trusted-local) + chat.feedback health read` on `slice-32-self-improvement`.
 
-## Implemented
-- **`src/a2a/canonical.ts`** — shared, deterministic card canonicalization/hash.
-  - `canonicalizeCard(card)`: recursively **key-sorts objects, keeps arrays in order**, then `JSON.stringify`. Order-stable AND swap-safe AND array-order-significant (see self-check).
-  - `hashCard(card)`: `sha256(canonicalizeCard(card))` hex.
-- **`src/a2a/client.ts`** — `createA2aClient({ fetchImpl? })` → `{ discover, verifyPin, invoke }`, plus exported `RemoteAgent` / `DiscoverResult` types matching the brief's Produces block verbatim.
-  - `discover(cardUrl)`: `noRedirectFetch` GET (`redirect:'error'`) → non-200 reject → JSON-parse → explicit `protocolVersion !== '1.0'` reject → `AgentCardSchema.safeParse` → `{ ok:true, card, pinnedCardHash: hashCard(card) }`.
-  - `verifyPin(remote)`: re-fetches via the same guarded path; `hashCard(current) !== remote.pinnedCardHash` is a **HARD `{ ok:false }`** — never a silent re-pin (§7.3). Emits `a2a.client.discover` span outcome `pin-mismatch`.
-  - `invoke(remote, method, params)`: for message-bearing methods validates `params.message` with `MessageSchema` (outbound guard), then POSTs a JSON-RPC 2.0 envelope to `remote.baseUrl` via `noRedirectFetch` with `Authorization: Bearer <token>` + `x-a2a-timestamp` + `x-a2a-nonce` (peer's Task-16 replay guard). JSON-RPC `error` → thrown; non-200 → thrown; else returns `result`.
-  - Telemetry: `recordA2aClientDiscover` / `recordA2aClientInvoke` with **peer HOST only** (`new URL(...).host`), never the full URL, never the token.
-- **`src/a2a/card.ts`** — removed the local `canonicalize`/`createHash`; `cardEtag` now delegates to the shared `hashCard`, so the expose-side ETag and the consume-side pin can never diverge.
+## What was built
+
+### Routes (`src/server/evals/`)
+
+- **`health.ts` — `handleEvalHealth(deps)`** → `GET /api/evals`. Walks every registry dir's manifest (`readManifest`), and for each `ManifestEntry` projects `mapToEvalHealthDto({artifact, entry, latest, thumbsDown})` into an `EvalHealthDTO`. `latest` is `EvalHistoryStore.listByArtifact(artifact)[0]` — the newest row (table is `ORDER BY ts DESC`) — **not** `latestPassing`, because `latestPassing` filters to `passed=1 AND regressed=0` and would hide the very regressions this route exists to surface. `regressed`/`currentModel` come straight off that row (`row.regressed`, `row.model`); `baselineModel` comes from `ManifestEntry.verifiedWith?.model`. A fresh artifact (never re-evaluated) gets `latest: undefined`, `currentModel: undefined`, `regressed: false` — no live resolve, per the brief's explicit choice to keep the GET cheap/side-effect-free.
+- **`history.ts` — `handleEvalHistory(artifact, deps)`** → `GET /api/evals/:artifact`. Returns the full `listByArtifact(artifact)` newest-first as `EvalHistoryDTO[]`. Guards `:artifact` with `isKnownArtifact`: `confineToDir(`${artifact}.ts`, dir)` against every registry dir — the SAME existence marker `manifest.ts`'s `rebuildFromArtifacts` uses (`<dir>/<name>.ts`) — mirroring `handleRunDetail`'s `:id` guard exactly (realpath-confine, `MediaPathError` → 404). A traversal attempt and a genuinely-unknown artifact both collapse to the identical 404 (no filesystem-structure leak).
+- **`reeval.ts` — `handleEvalReeval(req, deps, guard)`** → `POST /api/evals/reeval`. `requireTrustedLocal` gate FIRST — a rejected caller triggers zero parsing/enqueue. Validates the body against `EvalReevalRequestSchema`, then enqueues exactly one `JobKind.Eval` job: `mode:'artifact'` → `{mode: EvalMode.Artifact, ref, reason:'manual'}`; `mode:'all'` → `{mode: EvalMode.Sweep, reason:'manual'}` — the same payload shape `dispatch.ts`'s `EvalJobPayloadSchema`/`createRealRunEvalTurn` already run, so no dispatch-side change was needed. Returns `202 {enqueued:1, jobIds:[job.id]}`.
+- **`feedback-read.ts`** — see below.
+
+### The mapper (deferred from Task 19)
+
+`mapToEvalHealthDto` in `health.ts` is a pure function: `(artifact, entry: ManifestEntry, latest: EvalHistoryRow|undefined, thumbsDown) => EvalHealthDTO`, validated through `EvalHealthDtoSchema.parse`. `EvalHistoryRow` and `EvalHistoryDTO` are field-for-field identical (confirmed by reading both types), so the nested `latest` conversion is a direct `EvalHistoryDtoSchema.parse(row)` — no field remapping needed.
+
+`currentModel`: **the latest-eval-row's model**, never a live resolve (per the brief's explicit preference to keep the GET cheap). If the artifact has never been re-evaluated, `currentModel` is `undefined` rather than falling back to `baselineModel` — I chose not to presume "unchanged since baseline" when there's no observed re-eval to back that claim; the DTO field is `optional()` specifically for this case.
+
+### `chat.feedback` read — is there per-artifact linkage? **No.**
+
+I verified this directly rather than assuming it: `recordChatFeedback` (`src/telemetry/spans.ts:433`) writes a `chat.feedback` span with exactly two attributes — `ATTR.FEEDBACK_MESSAGE_ID` and `ATTR.FEEDBACK_RATING`. `ChatMessageDTO` (`src/contracts/dto.ts:201`) carries `{id, role, text, degraded?}` — no artifact/agent reference. There is no messageId→run join, no messageId→artifactId table, and no session-level "which specialist agent answered this message" record anywhere in the codebase. So a 👎 genuinely cannot be attributed to the generated artifact that produced it today.
+
+Per the brief's explicit instruction ("do NOT invent a linkage"), `src/server/evals/feedback-read.ts` implements:
+- `countThumbsDownTotal(runsRoot)` — a REAL scan: lists every run dir, reads each `spans.jsonl` via the existing `readSpans` (already tolerant of missing/malformed files), counts spans named `chat.feedback` with `FEEDBACK_RATING === FeedbackRating.Down`. Isolates one unreadable run journal per-run (try/catch) so it can never fail the whole scan — mirrors `readDegrades`'s tolerance and `handleRunList`'s per-item isolation. This proves the raw 👎 signal is readable; it's exported for a future attribution follow-on but not otherwise consumed.
+- `readThumbsDownByArtifact(runsRoot)` — always returns `{}` (documented, not a stub-that-forgot-to-implement). `health.ts` does `thumbsDownByArtifact[artifact] ?? 0`, so every artifact's `thumbsDown` is 0 today. The doc comment on both functions spells out the closing path: persist the artifact ref alongside the feedback span (or the chat message) at record time, then `readThumbsDownByArtifact`'s body changes to key its result by that ref — the scan/isolation shape doesn't need to change.
+
+### Security
+
+- **`POST /api/evals/reeval`**: `requireTrustedLocal(req, guard, deps.policy)` called before any body parsing — identical posture/ordering to `handleTriggerCreate`/`handleDevicePair`. Tested: a non-`'local'` principal → 403, zero `jobStore.enqueue` calls (verified via a call-count assertion on a spy).
+- **`GET /api/evals/:artifact`**: `:artifact` is confined via `confineToDir(`${artifact}.ts`, dir)` against every registry dir — realpath-prefix check defeats `../`, absolute-path, and symlink escapes exactly like `handleRunDetail`. Tested with `'../../etc/passwd'` → 404 (same code path/response as a genuinely-unknown artifact name, so no filesystem-structure leak).
+- **`GET /api/evals`** is read-only, no guard needed (matches the brief).
+- No secrets/PII in any response — DTOs carry only ids, model ids, counts, verdicts, and short case `detail` strings (Task 19's existing no-golden-text/no-raw-output guarantee); `feedback-read.ts` never surfaces `messageId` or feedback text, only a count.
+
+### Wiring into `app.ts`
+
+- `ServerDeps` grows one optional field: `evalHistory?: Pick<EvalHistoryStore, 'listByArtifact'>`. Both GET routes call `need(deps.evalHistory, 'evalHistory')`, so an unwired server 503s cleanly (via the existing `DepUnavailableError` → 503 catch) rather than crashing — the SAME established pattern `deviceRegistry`/`rootTokens`/`triggers` use, where route-registration and real-store boot-wiring are historically two separate tasks in this codebase (confirmed against the ledger's MCP-routes precedent: Task 20/21 registered routes, Task 24 wired `main.ts`). Wiring `main.ts`'s real `createEvalHistoryStore` instance is **out of this task's file list** and is a natural next task.
+- `registryDirs` is **not** threaded through `ServerDeps` — both routes receive `[...REGISTRY_DIRS]` (the canonical list from `src/cli/archive.ts`, the exact same constant `runEval`/`createRealRunEvalTurn` already use), matching how `launch-turns.ts` does it. This can't drift from what the eval loop itself considers "a generated artifact."
+- Route order: `GET /api/evals` (exact) → `POST /api/evals/reeval` (exact, **before** the `:artifact` regex — same action-before-detail discipline as `/api/jobs/:id/cancel` vs `/api/jobs/:id`) → `GET /api/evals/:artifact` (regex). Placed after the `/api/jobs/*` block, before `/api/triggers`.
+- `POST /api/evals/reeval` receives the request-level `guard` (`SessionGuard`) `buildFetch` already resolved, same as `handleTriggerCreate`'s call site.
 
 ## TDD RED → GREEN
-- RED: `bun run test:file -- tests/a2a/canonical.test.ts tests/a2a/client.test.ts` → `Cannot find module '../../src/a2a/canonical.ts'` (2 fail, modules absent).
-- GREEN (focused): `... canonical.test.ts client.test.ts card.test.ts` → **16 pass / 0 fail** (incl. the pre-existing `card.test.ts cardEtag` test still passing after the re-point).
-- Full a2a suite: `bun test ./tests/a2a/` → **61 pass / 0 fail** across 11 files (no regressions).
 
-Tests cover: canonicalize stable under key reorder (same hash), **swap-safe** (moved value → different hash), **array-order significant** (reordered inputModes/skills → different hash), 64-hex stability; discover happy-path pin, discover rejects `protocolVersion!=='1.0'`, discover rejects non-200, discover blocks a 302 host (+ asserts `redirect:'error'` was passed); verifyPin pass, verifyPin HARD-reject on altered card, verifyPin blocks a 301 host; invoke POSTs correct envelope + Bearer + freshness headers to baseUrl, invoke throws on JSON-RPC error.
+Implementation and the test file were authored together in this pass (no separate red-then-green watch loop was run), so "RED" here is the equivalent starting state — the four `src/server/evals/*.ts` modules and the `evalHistory` field on `ServerDeps` did not exist before this task; `tests/server/evals-routes.test.ts` would have failed on `Cannot find module '../../src/server/evals/health.ts'` (etc.) against the pre-task tree. I did not re-verify that exact failure text by reverting, but the fact that every new symbol the test imports (`handleEvalHealth`, `mapToEvalHealthDto`, `handleEvalHistory`, `handleEvalReeval`, `EvalHealthDeps`, etc.) is net-new confirms it.
 
-## Gate
-- `bun run typecheck` → clean.
-- `bun run lint:file -- <5 files>` → clean (fixed 3 `noNonNullAssertion` + import-sort issues surfaced on first run).
+**GREEN**, focused:
+```
+bun run test:file -- "tests/server/evals-routes.test.ts"
+→ 11 pass / 0 fail / 27 expect() calls
+```
+11 tests cover: mapper (fresh-artifact shape, regressed+currentModel+thumbsDown), `GET /api/evals` (regressed flagged + thumbsDown 0, fresh-install empty list), `GET /api/evals/:artifact` (full history 200, traversal 404, unknown-but-safe-name 404), `POST /api/evals/reeval` (403 without trusted-local + zero enqueue calls, artifact-mode enqueue shape + 202 body, sweep-mode enqueue shape, 400 on a malformed body with zero enqueue calls).
 
-## Self-review (SECURITY lens, §7.3)
-- **Order-stable?** Yes — recursive key sort; the reorder test confirms identical hash for shuffled-key cards, so a benign peer re-serialize never false-trips the pin.
-- **Swap-safe?** Yes — `JSON.stringify` preserves `"key":value` identity, so moving a value onto a different key changes the string → different hash (dedicated test).
-- **Array order significant?** Yes — arrays recursed but never sorted (dedicated test).
-- **`redirect:'error'` on ALL fetches (no SSRF)?** Yes — discover, verifyPin, and invoke all route through `noRedirectFetch` with `redirect:'error'`; a 3xx is rejected (belt-and-suspenders with the impl's redirect option). Redirect/transport failures are caught and returned as `ok:false`, never followed.
-- **Hash mismatch = HARD reject, never silent re-pin?** Yes — `verifyPin` returns `{ ok:false }` and emits `pin-mismatch`; it never writes back a new pin.
-- **Bearer never logged/span'd?** Yes — the token is only placed in the `Authorization` header to `remote.baseUrl`; spans carry `peerHost` (host only). Freshness headers are per-request random/time, not secrets.
+**Gate:**
+```
+bun run typecheck                                    → clean
+bun run lint:file -- src/server/evals/*.ts src/server/app.ts tests/server/evals-routes.test.ts
+                                                      → clean (one biome --write formatting pass first, then clean)
+bun run test:file -- tests/server                    → 524 pass / 0 fail (whole tests/server dir)
+bun run lint (full repo)                             → exit 0, 16 pre-existing warnings, none in touched files
+bun run test (full repo)                             → 2389 pass / 36 skip / 0 fail (re-run after one flaky
+                                                        run showed 1 fail in
+                                                        tests/server/jobs/sse-reconcile.integration.test.ts —
+                                                        confirmed pre-existing/timing-flaky: passes in isolation
+                                                        every time, and the diff never touches src/server/jobs/**
+                                                        or the SSE stream code; this is the SAME full-suite-
+                                                        parallelism flake the ledger already documents from
+                                                        Increment-3's boundary gate)
+```
 
-## Concerns
-- `invoke` uses `Date.now()`/`randomUUID()` for the replay headers directly (not injectable); fine for real use, no test needed to pin those. A downstream task wanting deterministic replay-header tests could thread a clock/nonce dep later.
-- `invoke`'s outbound `MessageSchema` guard assumes `params.message` for `message/send`|`message/stream` (matches the server's `handleMessageSend`). Other methods pass `params` through unvalidated (correct — no message payload).
+## Files changed
+- `src/server/evals/health.ts` (new) — `GET /api/evals` handler + `mapToEvalHealthDto`.
+- `src/server/evals/history.ts` (new) — `GET /api/evals/:artifact` handler + `isKnownArtifact` confinement guard.
+- `src/server/evals/reeval.ts` (new) — `POST /api/evals/reeval` handler (trusted-local gated).
+- `src/server/evals/feedback-read.ts` (new) — `countThumbsDownTotal` (real, unattributed scan) + `readThumbsDownByArtifact` (documented always-`{}` until a linkage exists).
+- `src/server/app.ts` (modified) — 3 new imports, `evalHistory?` on `ServerDeps`, 3 new route registrations.
+- `tests/server/evals-routes.test.ts` (new) — 11 tests.
 
----
+## Self-review
+- Degrade-never-crash checked explicitly: `readManifest` on a missing dir returns an empty manifest (test: `GET /api/evals` on a dir with no `.generated.json` → `{items: []}`, 200, not 500); an unwired `evalHistory` dep 503s via the existing `need()`/`DepUnavailableError` path rather than throwing a raw `TypeError`.
+- Chose `listByArtifact(...)[0]` over `latestPassing` deliberately for the health route's `latest`/`regressed`/`currentModel` — using `latestPassing` would have silently hidden every regression, defeating the whole point of "regressions flagged." I verified this by reading `EvalHistoryStore`'s doc comments before choosing.
+- The `:artifact` confinement resolves `<dir>/<artifact>.ts` (the artifact's live source file) rather than a bare directory-existence check. This is intentionally the SAME real-file semantics `handleRunDetail` and `manifest.ts` already use, not a weaker string-shape regex — but it does mean an **archived** artifact (whose `.ts` file `archive.ts` has moved out of the registry dir) would 404 out of the trend view even though its `eval_history` rows still exist in the DB. I judged this an acceptable, documented trade-off for a first cut (no live route currently needs to browse an archived artifact's trend), not a silent gap — flagging it below.
+- Confirmed field-for-field identity between `EvalHistoryRow` and `EvalHistoryDTO` by reading both type definitions side by side before writing a bare `.parse()` pass-through, rather than assuming.
 
-## Fix wave (§7.3 outbound-fetch DoS)
+## Concerns / follow-ons (flagged, not fixed here — out of this task's scope)
+1. **`main.ts` boot-wiring of a real `evalHistory` store** is not part of this task's file list (brief only lists `app.ts`); until a follow-up task wires `createEvalHistoryStore({path: AGENT_QUEUE_PATH})` onto `ServerDeps.evalHistory` (mirroring how `jobStore` is wired), `GET /api/evals` and `GET /api/evals/:artifact` will 503 on the real running daemon/server. This mirrors the exact same registration-then-wiring split the MCP routes (Task 20/21 → Task 24) and Memory routes (Task 26/27 → Task 28) already went through in this codebase — flagging it explicitly so it isn't missed.
+2. **Archived-artifact trend-view gap** (above): `GET /api/evals/:artifact` 404s for an artifact whose `.ts` file was archived even if `eval_history` rows remain. If browsing an archived artifact's trend is wanted later, the confinement would need to additionally accept a manifest-entry-exists check (or an "archived" marker) rather than requiring the live `.ts` file.
+3. **`chat.feedback` attribution gap** (documented at length above and in `feedback-read.ts`'s doc comments) — `thumbsDown` is 0 for every artifact until a messageId→artifact linkage is introduced elsewhere (chat/session layer), which is out of scope for this route-only task.
 
-**Gap:** `discover` / `verifyPin` / `invoke` fetched from a REMOTE peer with NO request timeout and NO response-size cap. §7.3's threat model is a peer that turns malicious (the rug-pull the pin defends against — and `verifyPin` re-fetches from exactly that peer). Such a peer could (a) return an unbounded body → `res.json()` buffers it whole → memory-exhaustion DoS, or (b) hang the socket forever → the local process stalls. The Slice-21 reliability posture mandates wall-clock timeouts; they were missing on this outbound path.
-
-### Fix
-- **Two config knobs** (`src/config/schema.ts`, AGENT_A2A_* group, `{env,kind,def,doc}` shape, doc names read site `a2a/client.ts`): `AGENT_A2A_FETCH_TIMEOUT_MS` (number, def `15_000`) and `AGENT_A2A_MAX_CARD_BYTES` (number, def `262_144` = 256 KiB). Env-fallback only; never hardcoded at the call site. `createA2aClient(deps)` gained optional `timeoutMs` / `maxCardBytes` overrides (read from `loadConfig().values` when unset) so the guards are testable without touching `process.env`.
-- **Timeout — `timedFetch(url, init)`** wraps `noRedirectFetch` for ALL three outbound fetches. It arms an `AbortController` + `setTimeout(timeoutMs)`: on timeout it `controller.abort()`s the real request AND rejects the returned promise itself (via a `Promise` race), so a hung peer rejects cleanly even when `fetchImpl` ignores the abort signal (the injected test stub does). `redirect:'error'` is still forced, so the existing SSRF guard is untouched. `discover`/`verifyPin` catch the rejection → `{ ok:false, reason:'card fetch failed (redirect, timeout, or transport)' }`; `invoke` lets it throw (caught by its caller). No hang, no unhandled throw.
-- **Size cap — `readCappedJson(res)`** replaces `res.json()` on every read path. The cap is enforced **twice**: (1) a fast reject on the declared `Content-Length` (no bytes read), then (2) a running byte count while draining `res.body.getReader()` — the moment `total > maxCardBytes` it throws and `reader.cancel()`s the stream instead of buffering. **This is how the cap survives a lying/absent Content-Length:** a peer that omits or under-states the header still cannot slip an unbounded body through, because the streamed count aborts mid-flight (proven by a test that streams forever and would hang if the body were buffered whole). Over-cap → `ResponseTooLargeError` → `discover`/`verifyPin` `{ ok:false, reason:'...exceeds cap...' }` / `invoke` thrown-then-caught. Never OOM.
-
-### RED → GREEN (4 new tests in `tests/a2a/client.test.ts`)
-- **RED:** before the fix, `bun test tests/a2a/client.test.ts` **hung indefinitely** (killed at exit 144) — the "hung peer" stubs never resolve and the unbounded-stream stub buffers forever, which IS the bug the fix closes.
-- **GREEN:** `bun test --timeout 15000 tests/a2a/client.test.ts` → **13 pass / 0 fail** (9 pre-existing + 4 new), 30 expect() calls, ~140ms (no hang).
-- New cases: discover rejects a hung peer within the timeout (<2s, not the 15s default); invoke rejects a hung peer within the timeout; discover rejects an over-cap card by declared Content-Length (never buffered); discover rejects an over-cap body with a lying/absent Content-Length via the streamed byte-count guard (asserts a bounded number of stream pulls — proof of mid-stream abort, not whole-body buffering).
-
-### Existing tests stay green
-- Task-20 focused suite (`canonical.test.ts client.test.ts card.test.ts`): **16 → 20 pass / 0 fail** (the 4 additions; all 16 prior tests unchanged and green).
-- Full a2a suite (`bun test tests/a2a/`): **61 → 65 pass / 0 fail** across 11 files — no regressions.
-
-### Gate
-- `bun run typecheck` → clean.
-- `bun run lint:file -- src/a2a/client.ts src/config/schema.ts tests/a2a/client.test.ts` → clean (one Biome line-wrap fix applied).
-- `bun run docs:check` → clean (living docs present + linked; every src subsystem documented).
+Report path: `/Users/inderjotsingh/ai/.superpowers/sdd/task-20-report.md`
