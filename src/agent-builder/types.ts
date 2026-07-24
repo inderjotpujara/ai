@@ -1,7 +1,11 @@
 import type { z } from 'zod';
 import type { Agent } from '../core/agent-def.ts';
 import type { ModelRequirement } from '../core/types.ts';
-import type { ReuseKind, VerifiedLevel } from '../verified-build/types.ts';
+import type {
+  ReuseKind,
+  VerifiedLevel,
+  VerifiedWith,
+} from '../verified-build/types.ts';
 import type { WritePaths } from './write.ts';
 
 /** A curated-pack MCP server the generated agent needs, scoped to that agent. */
@@ -71,6 +75,11 @@ export type BuilderVerifyDeps = {
   dir: string;
   /** Downgrade a failing gate to an Unverified commit instead of aborting. */
   force?: boolean;
+  /** The model identity `resolveModel` picked for this build (Slice 32
+   *  self-improvement baseline) — captured once at deps-construction time
+   *  and written onto the committed `ManifestEntry` unchanged. Undefined
+   *  when no live resolve ran (e.g. a purely offline/test wiring). */
+  verifiedWith?: VerifiedWith;
   /** Consent for reusing an existing artifact when the reuse check lands in
    *  the Reuse (>=reuse band) or Offer (offer..reuse band) band. Absent ⇒
    *  the builder falls back to the generic `confirm`. The real impl encodes

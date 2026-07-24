@@ -53,7 +53,7 @@ const runDetailRoute = createRoute({
  *  `runDetailRoute`'s `graphKind`/`graphId`. Invalid/missing values fall
  *  back to `'overview'`. */
 export type OpsSearch = {
-  tab?: 'overview' | 'jobs' | 'triggers' | 'devices' | 'federation';
+  tab?: 'overview' | 'jobs' | 'triggers' | 'devices' | 'federation' | 'evals';
 };
 
 const opsRoute = createRoute({
@@ -65,7 +65,8 @@ const opsRoute = createRoute({
       search.tab === 'jobs' ||
       search.tab === 'triggers' ||
       search.tab === 'devices' ||
-      search.tab === 'federation'
+      search.tab === 'federation' ||
+      search.tab === 'evals'
         ? search.tab
         : 'overview',
   }),

@@ -26,6 +26,7 @@ export enum JobKind {
   Workflow = 'workflow', // RunKind.Workflow
   Pull = 'pull', // RunKind.Pull  (spec "model-pull")
   Build = 'build', // RunKind.Build (spec "builder")
+  Eval = 'eval', // RunKind.Eval (Slice 32: golden-set re-eval on a new model)
 }
 
 /** A queued task's durable record (camelCase TS side; columns are snake_case —

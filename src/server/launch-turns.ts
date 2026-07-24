@@ -1,29 +1,59 @@
+import { generateText, type LanguageModel } from 'ai';
 import { AGENTS, agentNames } from '../../agents/index.ts';
+import { CREWS } from '../../crews/index.ts';
+import { WORKFLOWS } from '../../workflows/index.ts';
 import { buildAgent } from '../agent-builder/builder.ts';
-import { makeRealBuilderDeps } from '../agent-builder/deps.ts';
+import {
+  builderModelRequirement,
+  makeRealBuilderDeps,
+  toJudgeCandidate,
+} from '../agent-builder/deps.ts';
 import type { BuilderDeps } from '../agent-builder/types.ts';
+import { REGISTRY_DIRS } from '../cli/archive.ts';
 import { runCrewCli } from '../cli/crew.ts';
 import { runFlow } from '../cli/flow.ts';
+import { createSelectHook } from '../cli/select-hook.ts';
 import { createSelectionRuntime } from '../cli/select-runtime.ts';
 import { withMcpRun } from '../cli/with-mcp-run.ts';
 import { withRunTelemetry } from '../cli/with-run.ts';
+import { loadConfig } from '../config/schema.ts';
 import { BuilderKind } from '../contracts/enums.ts';
 import type { Agent } from '../core/agent-def.ts';
 import { runGuardedAgent } from '../core/delegate.ts';
 import type { OrchestratorResult } from '../core/orchestrator.ts';
+import type { ResourceCapture } from '../core/resource-capture.ts';
+import type { ModelDeclaration } from '../core/types.ts';
 import { buildCrewOrWorkflow } from '../crew-builder/builder.ts';
 import { makeRealCrewBuilderDeps } from '../crew-builder/deps.ts';
 import type { CrewBuilderDeps } from '../crew-builder/types.ts';
+import { buildRegistry } from '../discovery/build-registry.ts';
 import { resolveDestDir } from '../provisioning/dest-dir.ts';
 import { runModelPullBridge } from '../provisioning/pull-bridge.ts';
 import { providerFor } from '../provisioning/registry.ts';
+import { createJobStore } from '../queue/store.ts';
+import { createModelManager } from '../resource/model-manager.ts';
+import { listLoadedModels } from '../resource/ollama-control.ts';
+import { resolveModel } from '../resource/selector.ts';
+import { runtimeFor } from '../runtime/registry.ts';
+import { type RunEvalDeps, runEval } from '../self-improve/executor.ts';
+import { createEvalHistoryStore } from '../self-improve/history.ts';
+import { replayGoldenCase } from '../self-improve/replay-case.ts';
+import { ATTR, inSpan } from '../telemetry/spans.ts';
+import { dryRunMs } from '../verified-build/config.ts';
+import { loadGolden } from '../verified-build/golden.ts';
+import { JudgeUnavailableError } from '../verified-build/judge.ts';
+import { upsertEntry } from '../verified-build/manifest.ts';
 import type { RunBuilderTurn } from './builders/build.ts';
 import {
   toBuildResultDto,
   toCrewBuildResultDto,
 } from './builders/map-result.ts';
 import type { RunCrewTurn } from './crews/run.ts';
-import type { RunAgentTurn } from './jobs/dispatch.ts';
+import {
+  EvalMode,
+  type RunAgentTurn,
+  type RunEvalTurn,
+} from './jobs/dispatch.ts';
 import type { RunModelPullTurn } from './models/pull.ts';
 import type { RunWorkflowTurn } from './workflows/run.ts';
 
@@ -200,6 +230,191 @@ export function createRealRunBuilderTurn(runsRoot: string): RunBuilderTurn {
  * this phase — an internally-owned `AbortController` is created per pull
  * (wiring a user-triggered cancel is a natural follow-on, not required here).
  */
+/**
+ * Real, non-test `RunEvalTurn` (Slice 32, Task 16): run a golden-set re-eval to
+ * completion under its own run scope, then return `runEval`'s terminal
+ * `OrchestratorResult`.
+ *
+ * Run scope: `withRunTelemetry` (NOT `withMcpRun`) — a re-eval REPLAYS an
+ * artifact's persisted golden set against the freshly-resolved model, and the
+ * baseline it diffs against was captured by the build-time golden eval, which
+ * itself runs the agent WITHOUT MCP tools (D4). Replaying with MCP mounted would
+ * grade against a different tool surface than the baseline, so the comparison
+ * must stay MCP-free; skipping `withMcpRun` also avoids the `mcp.mount` precursor
+ * root that `deriveRunKind` would otherwise classify ahead of `eval.reeval`.
+ *
+ * Root span: for `Artifact` mode `runArtifact` opens the `eval.reeval` root span
+ * itself (`withEvalReevalSpan`); for `Sweep`/`AffectedByPull` (which only
+ * enqueue per-artifact jobs and open no span of their own) this turn opens the
+ * `eval.reeval` root so those coordination runs still classify as `RunKind.Eval`
+ * — wrapping unconditionally would double-nest the Artifact-mode span, so the
+ * wrap is applied only to the non-Artifact modes.
+ *
+ * Dep construction: everything heavy is built INSIDE the returned closure
+ * (per-run), never at factory time — so `createRealRunEvalTurn(runsRoot)` at
+ * daemon/server boot only allocates a closure and can never crash boot (the
+ * Slice-31 lesson). The re-eval seams reuse the SAME primitives the builders
+ * wire (`makeRealBuilderDeps`): one `createModelManager`, one `buildRegistry`,
+ * `resolveModel` for drift-detection resolve, `createSelectHook` for the actual
+ * agent run (the canonical resolve+warm+degrade path), `toJudgeCandidate` +
+ * `generateText`-at-temperature-0 for the judge — no divergent second
+ * model-resolution path. The history store + queue store both open the SAME
+ * `jobs.db` (via `AGENT_QUEUE_PATH`, the directory `createJobStore` /
+ * `createEvalHistoryStore` join `jobs.db` onto) the daemon's pool drains, so no
+ * new path/DB is introduced.
+ */
+export function createRealRunEvalTurn(runsRoot: string): RunEvalTurn {
+  return async ({ mode, ref, reason, runId, signal }) =>
+    withRunTelemetry({ runsRoot, runId }, async () => {
+      // Same directory the daemon/server's queue + trigger stores use, so the
+      // eval-history table lives in the one jobs.db (never a second DB).
+      const queuePath = String(loadConfig().values.AGENT_QUEUE_PATH);
+      const history = createEvalHistoryStore({ path: queuePath });
+      const jobStore = createJobStore({ path: queuePath }, {});
+      const manager = createModelManager();
+
+      // The live model engine is built lazily + memoized on first real use, so a
+      // no-op pass (master switch off, or a sweep that finds nothing) never pays
+      // for `buildRegistry` or touches a model.
+      let engine:
+        | {
+            registry: ModelDeclaration[];
+            selectHook: ReturnType<typeof createSelectHook>;
+          }
+        | undefined;
+      const ensureEngine = async (): Promise<NonNullable<typeof engine>> => {
+        if (!engine) {
+          const registry = await buildRegistry();
+          const capture: ResourceCapture = {};
+          const selectHook = createSelectHook({
+            registry,
+            ensureReady: (d, o) => manager.ensureReady(d, o),
+            listLoaded: () => listLoadedModels(),
+            pinned: [],
+            capture,
+          });
+          engine = { registry, selectHook };
+        }
+        return engine;
+      };
+
+      // Judge model cache, mirroring `makeRealBuilderDeps`' `judgeModelFor`:
+      // resolve the id `selectJudge` picked to a LanguageModel via the SAME
+      // manager, degrade to `JudgeUnavailableError` (skip behavioral eval) if it
+      // vanished/can't load — never self-grade on the generator.
+      const judgeModels = new Map<string, LanguageModel>();
+      const judgeModelFor = async (id: string): Promise<LanguageModel> => {
+        const cached = judgeModels.get(id);
+        if (cached) return cached;
+        const { registry } = await ensureEngine();
+        const decl = registry.find((d) => d.model === id);
+        if (!decl) throw new JudgeUnavailableError(id);
+        try {
+          await manager.ensureReady(decl);
+          const lm = runtimeFor(decl.runtime).createModel(decl);
+          judgeModels.set(id, lm);
+          return lm;
+        } catch (err) {
+          if (err instanceof JudgeUnavailableError) throw err;
+          throw new JudgeUnavailableError(id);
+        }
+      };
+
+      const deps: RunEvalDeps = {
+        // The reusable-artifact registry dirs the reuse/archive readers scan —
+        // the ONE canonical list (`src/cli/archive.ts`) so it can't drift.
+        registryDirs: [...REGISTRY_DIRS],
+        runsRoot,
+        history,
+        upsertEntry,
+        jobStore,
+        loadGolden,
+        // Drift-detection resolve: the SAME requirement `makeRealBuilderDeps`
+        // resolved against to capture the entry's `verifiedWith` baseline, so
+        // `resolved.decl.model !== verifiedWith.model` compares like with like.
+        resolve: async (need) => {
+          const { registry } = await ensureEngine();
+          // I4: resolve against the SAME requirement the build-time capture used
+          // (`builderModelRequirement`), so `resolved.decl.model` compares like
+          // with like against the entry's `verifiedWith` — no uncensored
+          // asymmetry, no phantom drift. `role` (need) only colors error text.
+          return resolveModel(
+            builderModelRequirement(need || 'agent builder'),
+            registry,
+            {
+              ensureReady: (d, o) => manager.ensureReady(d, o),
+              listLoaded: () => listLoadedModels(),
+            },
+          );
+        },
+        // Replay one golden case against the CURRENT model, for whichever
+        // artifact class `refName` names — agent, crew, OR workflow (Task-16
+        // fix: agents-only made a drifted crew/workflow throw → terminal
+        // Failed). `replayGoldenCase` resolves the ref across all three
+        // registries and dispatches on shape, MIRRORING crew-builder's
+        // `runArtifact` (same `runCrew`/`runWorkflow` + `defaultRunAgentStep`/
+        // `tools:{}` call shapes) so every class replays MCP-free exactly as the
+        // build-time golden eval proved it. The agent branch keeps the SAME
+        // guarded-delegation + `createSelectHook` path (the hook resolves the
+        // live model, so the agent runs on "the model that would run today");
+        // crew/workflow use the default resolve their build-time eval used. A
+        // run failure returns its message (the judge then fails the case) rather
+        // than throwing; a ref in NONE of the registries is the only throw.
+        runCase: (refName, _model, input) =>
+          replayGoldenCase(refName, input, {
+            agents: AGENTS,
+            crews: CREWS,
+            workflows: WORKFLOWS,
+            runAgent: async (agent, task) => {
+              const { selectHook } = await ensureEngine();
+              return runGuardedAgent(agent, task, selectHook, signal);
+            },
+            workflowAgentMap: () => {
+              const map: Record<string, Agent> = {};
+              for (const [name, factory] of Object.entries(AGENTS)) {
+                map[name] = factory({});
+              }
+              return map;
+            },
+          }),
+        judgeCandidates: () => (engine?.registry ?? []).map(toJudgeCandidate),
+        // Runs on the SELECTED judge model (never the generator), deterministically
+        // (temperature 0) and bounded by `dryRunMs()` — same behavior as the builder
+        // verify gate's judge. Arg order is `(model, prompt)` because this closure
+        // implements `ReevalDeps.judge`/`GoldenEvalBinding.judge` (model-first) —
+        // NOT `BuilderVerifyDeps.judge` `(prompt, model)`. Inverting to match the
+        // builder would break the binding `runGoldenEval` calls; the divergence is
+        // a typed-seam difference by design, not drift.
+        judge: async (judgeModelId, prompt) => {
+          const r = await generateText({
+            model: await judgeModelFor(judgeModelId),
+            prompt,
+            temperature: 0,
+            abortSignal: AbortSignal.timeout(dryRunMs()),
+          });
+          return r.text.trim().toLowerCase().startsWith('yes');
+        },
+      };
+
+      try {
+        const exec = (): Promise<OrchestratorResult> =>
+          runEval({ mode, ref, reason, signal }, deps);
+        // Artifact mode opens its own `eval.reeval` root (withEvalReevalSpan);
+        // only the enqueue-only modes need the turn to open one.
+        return mode === EvalMode.Artifact
+          ? await exec()
+          : await inSpan('eval.reeval', async (span) => {
+              span.setAttribute(ATTR.EVAL_MODE, mode);
+              return exec();
+            });
+      } finally {
+        history.close();
+        jobStore.close();
+        await manager.unloadAll();
+      }
+    });
+}
+
 export function createRealRunModelPull(runsRoot: string): RunModelPullTurn {
   return ({ runtime, provider, modelRef, runId }) =>
     withRunTelemetry({ runsRoot, runId }, () =>

@@ -102,6 +102,10 @@ export const RUN_ROOT_NAMES: ReadonlySet<string> = new Set([
   'agent.build',
   'crew.build',
   'model.pull',
+  // Slice 32: a golden-set re-eval run (`eval.reeval`, opened by the eval turn /
+  // `withEvalReevalSpan`) — its own top-level root, so `deriveRunKind` reads it
+  // as `RunKind.Eval` and it never reads as perpetually in-flight.
+  'eval.reeval',
   'mcp.mount',
   'memory.recall',
   'memory.ingest',
@@ -124,6 +128,10 @@ export const TERMINAL_RUN_ROOTS: ReadonlySet<string> = new Set([
   'agent.build',
   'crew.build',
   'model.pull',
+  // Slice 32: an eval run IS a terminal root (like chat.run/agent.run) — it
+  // signals the eval run's OWN completion, not an ephemeral precursor — so the
+  // CLI `--follow` stopper + `summarizeRun` classify + terminate on it.
+  'eval.reeval',
 ]);
 
 export type RunSummary = {

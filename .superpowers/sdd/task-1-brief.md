@@ -1,80 +1,137 @@
-### Task 1: A2A wire contracts + parity test
+### Task 1: `VerifiedWith` type + `ManifestEntry.verifiedWith?` field + version bump
 
 **Files:**
-- Create: `src/contracts/a2a.ts`
-- Modify: `src/contracts/index.ts` (already `export *`; add `export * from './a2a.ts';`)
-- Test: `tests/contracts/a2a-contracts.test.ts`
+- Modify: `src/verified-build/types.ts:73` (`ManifestEntry`), `src/verified-build/manifest.ts:8` (`MANIFEST_VERSION`)
+- Create: `src/verified-build/verified-with.ts`
+- Test: `tests/verified-build/verified-with.test.ts`, extend `tests/verified-build/manifest.test.ts`
 
 **Interfaces:**
-- Consumes: `z` from `zod` only. (Contracts stay isomorphic — import only `zod` + other contracts/enums. **`JobKindWire` is deliberately NOT imported here**: no Task-1 schema uses it, so importing it would trip biome `noUnusedImports` and fail Task 1's `lint:file` gate. It is introduced in Task 17, the first task with a `JobKindWire`-typed wire schema — see the `A2aSkillEntryWireSchema` note there.)
-- Produces (all exported from `src/contracts/a2a.ts`):
-  - `enum TaskStateWire { Submitted='submitted', Working='working', Completed='completed', Failed='failed', Canceled='canceled', Rejected='rejected', InputRequired='input-required', AuthRequired='auth-required' }` — lowercase-hyphenated, the JSON-RPC casing.
-  - `enum A2aMethod { MessageSend='message/send', MessageStream='message/stream', TasksGet='tasks/get', TasksCancel='tasks/cancel', TasksResubscribe='tasks/resubscribe' }`.
-  - `PartSchema` — discriminated union on `kind`: `{ kind: z.literal('text'), text: z.string() }` | `{ kind: z.literal('file'), file: z.object({ name: z.string().optional(), mimeType: z.string().optional(), bytes: z.string() }) }` | `{ kind: z.literal('data'), data: z.record(z.string(), z.unknown()) }`.
-  - `MessageSchema` / `A2aMessage`: `{ role: z.enum(['user','agent']), parts: z.array(PartSchema), messageId: z.string(), contextId: z.string().optional(), taskId: z.string().optional() }`.
-  - `ArtifactSchema` / `A2aArtifact`: `{ artifactId: z.string(), name: z.string().optional(), parts: z.array(PartSchema) }`.
-  - `TaskStatusSchema`: `{ state: z.enum(TaskStateWire), message: MessageSchema.optional(), timestamp: z.string().optional() }`.
-  - `TaskSchema` / `A2aTask`: `{ id: z.string(), contextId: z.string(), status: TaskStatusSchema, artifacts: z.array(ArtifactSchema).default([]), history: z.array(MessageSchema).default([]), kind: z.literal('task') }`.
-  - `AgentSkillSchema`: `{ id: z.string(), name: z.string(), description: z.string(), tags: z.array(z.string()).default([]), inputModes: z.array(z.string()).optional(), outputModes: z.array(z.string()).optional() }`.
-  - `AgentCardSchema` / `A2aAgentCard`: `{ name, description, version, protocolVersion: z.literal('1.0'), url: z.string(), preferredTransport: z.string().default('JSONRPC'), skills: z.array(AgentSkillSchema), capabilities: z.object({ streaming: z.boolean(), pushNotifications: z.boolean() }), defaultInputModes: z.array(z.string()), defaultOutputModes: z.array(z.string()), securitySchemes: z.record(z.string(), z.unknown()), security: z.array(z.record(z.string(), z.array(z.string()))).default([]) }`.
-  - JSON-RPC envelopes: `JsonRpcRequestSchema` (`{ jsonrpc: z.literal('2.0'), id: z.union([z.string(), z.number()]).nullable(), method: z.string(), params: z.unknown().optional() }`), `JsonRpcErrorSchema` (`{ code: z.number(), message: z.string(), data: z.unknown().optional() }`), `JsonRpcResponseSchema` (`{ jsonrpc: z.literal('2.0'), id: z.union([z.string(), z.number()]).nullable(), result: z.unknown().optional(), error: JsonRpcErrorSchema.optional() }`).
+- Consumes: `RuntimeKind`, `ModelDeclaration` from `../core/types.ts`.
+- Produces (exported from `src/verified-build/types.ts`):
+  ```ts
+  export type VerifiedWith = {
+    runtime: RuntimeKind;   // decl.runtime
+    model: string;          // decl.model — the concrete resolved id/tag
+    paramsBillions: number; // decl.footprint.approxParamsBillions
+    numCtx: number;         // the numCtx resolveModel returned
+    quant?: string;         // best-effort, parsed from the model tag (R2); undefined when not derivable
+    capturedAtMs: number;   // Date.now() at commit
+  };
+  ```
+  `ManifestEntry` gains `verifiedWith?: VerifiedWith;` as its LAST field (undefined = no baseline / pre-Slice-32 entry).
+- Produces (exported from `src/verified-build/verified-with.ts`):
+  ```ts
+  export function parseQuant(model: string): string | undefined;
+  export function verifiedWithFrom(
+    resolved: { decl: ModelDeclaration; numCtx: number },
+    now?: number,
+  ): VerifiedWith;
+  ```
 
-- [ ] **Step 1: Write the failing test** — `TaskStateWire` values, `Part` union round-trip, and a `protocolVersion !== "1.0"` reject:
+- [ ] **Step 1: Write the failing tests**
 
 ```ts
+// tests/verified-build/verified-with.test.ts
 import { expect, test } from 'bun:test';
-import {
-  AgentCardSchema,
-  PartSchema,
-  TaskStateWire,
-} from '../../src/contracts/a2a.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
+import { parseQuant, verifiedWithFrom } from '../../src/verified-build/verified-with.ts';
 
-test('TaskStateWire holds the eight A2A v1.0 wire states', () => {
-  expect(Object.values(TaskStateWire).sort()).toEqual(
-    [
-      'auth-required',
-      'canceled',
-      'completed',
-      'failed',
-      'input-required',
-      'rejected',
-      'submitted',
-      'working',
-    ],
+test('parseQuant extracts a quant suffix from a model tag, else undefined', () => {
+  expect(parseQuant('qwen2.5:7b-instruct-q4_K_M')).toBe('q4_K_M');
+  expect(parseQuant('llama3.1-8b-q4_0')).toBe('q4_0');
+  expect(parseQuant('qwen2.5:7b')).toBeUndefined();
+});
+
+test('verifiedWithFrom maps a resolved decl+numCtx onto a VerifiedWith', () => {
+  const vw = verifiedWithFrom(
+    {
+      decl: {
+        runtime: RuntimeKind.Ollama,
+        model: 'qwen2.5:7b-instruct-q4_K_M',
+        params: {},
+        role: 'r',
+        footprint: { approxParamsBillions: 7, bytesPerWeight: 0.5 },
+      },
+      numCtx: 8192,
+    },
+    1000,
   );
-});
-
-test('PartSchema round-trips a text part and rejects an unknown kind', () => {
-  expect(PartSchema.parse({ kind: 'text', text: 'hi' })).toMatchObject({
-    kind: 'text',
-  });
-  expect(() => PartSchema.parse({ kind: 'audio', text: 'x' })).toThrow();
-});
-
-test('AgentCardSchema rejects a non-1.0 protocolVersion', () => {
-  const base = {
-    name: 'n', description: 'd', version: '1', protocolVersion: '0.3',
-    url: 'https://h/api/a2a', skills: [],
-    capabilities: { streaming: true, pushNotifications: false },
-    defaultInputModes: ['text/plain'], defaultOutputModes: ['text/plain'],
-    securitySchemes: {}, security: [],
-  };
-  expect(() => AgentCardSchema.parse(base)).toThrow();
-  expect(AgentCardSchema.parse({ ...base, protocolVersion: '1.0' })).toMatchObject({
-    protocolVersion: '1.0',
+  expect(vw).toEqual({
+    runtime: RuntimeKind.Ollama,
+    model: 'qwen2.5:7b-instruct-q4_K_M',
+    paramsBillions: 7,
+    numCtx: 8192,
+    quant: 'q4_K_M',
+    capturedAtMs: 1000,
   });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — `bun run test -- -t "TaskStateWire holds"` → FAIL (module not found).
-- [ ] **Step 3: Write minimal implementation** — create `src/contracts/a2a.ts` with the enums + schemas from the Produces block; add `export * from './a2a.ts';` to `src/contracts/index.ts`. Import only `zod` + `JobKindWire` (isomorphic — no engine imports).
-- [ ] **Step 4: Run test to verify it passes** — `bun run test -- -t "TaskStateWire holds"` → PASS (all three).
-- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/contracts/a2a.ts src/contracts/index.ts tests/contracts/a2a-contracts.test.ts`.
+```ts
+// tests/verified-build/manifest.test.ts — ADD these two tests
+import { MANIFEST_VERSION_FOR_TEST } from '../../src/verified-build/manifest.ts'; // if not exported, assert via readManifest of a fresh dir
+// (a) a v1 manifest entry with NO verifiedWith reads back as undefined, never throws:
+test('readManifest tolerates a v1 entry with no verifiedWith (undefined, no throw)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vb-'));
+  writeFileSync(
+    join(dir, '.generated.json'),
+    JSON.stringify({
+      version: 1,
+      entries: {
+        a: {
+          need: 'n', signature: { purpose: 'n', tools: [], modelTier: '', io: '', roles: [] },
+          vector: [], verifiedLevel: 'behaves', goldenPath: `${dir}/a.golden.json`,
+          createdAtMs: 1, lastUsedMs: 0, useCount: 0, lastEvalPass: true,
+        },
+      },
+    }),
+  );
+  const m = readManifest(dir);
+  expect(m.entries.a?.verifiedWith).toBeUndefined();
+});
+// (b) rebuildFromArtifacts leaves verifiedWith undefined (no live resolve offline):
+test('rebuildFromArtifacts leaves verifiedWith undefined', () => {
+  // seed a <name>.ts + <name>.golden.json in a temp dir with NO manifest, rebuild, assert entry.verifiedWith === undefined
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail** — `bun run test:file -- "tests/verified-build/verified-with.test.ts"` → FAIL (module not found).
+- [ ] **Step 3: Write minimal implementation** — add `VerifiedWith` + the field to `types.ts`; bump `const MANIFEST_VERSION = 2;` (`manifest.ts:8`); create `verified-with.ts`:
+
+```ts
+import type { ModelDeclaration } from '../core/types.ts';
+import type { VerifiedWith } from './types.ts';
+
+/** Best-effort quant parse from a model tag (R2): matches a trailing/embedded
+ *  `qN...` group like `q4_K_M` / `q4_0` / `q8_0`. Undefined when not present —
+ *  a quant-only swap may then be invisible to the drift diff (accepted this slice). */
+export function parseQuant(model: string): string | undefined {
+  const m = model.match(/(q\d+(?:_[0-9a-z]+)*)/i);
+  return m ? m[1] : undefined;
+}
+
+export function verifiedWithFrom(
+  resolved: { decl: ModelDeclaration; numCtx: number },
+  now: number = Date.now(),
+): VerifiedWith {
+  return {
+    runtime: resolved.decl.runtime,
+    model: resolved.decl.model,
+    paramsBillions: resolved.decl.footprint.approxParamsBillions,
+    numCtx: resolved.numCtx,
+    quant: parseQuant(resolved.decl.model),
+    capturedAtMs: now,
+  };
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass** — `bun run test:file -- "tests/verified-build/verified-with.test.ts" "tests/verified-build/manifest.test.ts"` → PASS.
+- [ ] **Step 5: Gate + commit** — `bun run typecheck && bun run lint:file -- src/verified-build/types.ts src/verified-build/manifest.ts src/verified-build/verified-with.ts tests/verified-build/verified-with.test.ts tests/verified-build/manifest.test.ts`.
 
 ```bash
-git add src/contracts/a2a.ts src/contracts/index.ts tests/contracts/a2a-contracts.test.ts
-git commit -m "feat(contracts): A2A v1.0 wire contracts (card/message/task/part + JSON-RPC + TaskStateWire)"
+git add src/verified-build/types.ts src/verified-build/manifest.ts src/verified-build/verified-with.ts tests/verified-build/verified-with.test.ts tests/verified-build/manifest.test.ts
+git commit -m "feat(verified-build): VerifiedWith model-identity type + ManifestEntry.verifiedWith field + MANIFEST_VERSION 1->2"
 ```
 
-*Model: Sonnet (mechanical schema definition mirroring the `dto.ts`/`enums.ts` convention).*
+*Model: Sonnet (pure type + helper + tolerance test).*
 

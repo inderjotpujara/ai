@@ -17,6 +17,11 @@ test('contract JobKind values stay isomorphic with queue', () => {
   expect(values(JobKindWire)).toEqual(values(JobKind));
 });
 
+test('JobKind gains Eval (Slice 32)', () => {
+  expect(JobKind.Eval as string).toBe('eval');
+  expect(JobKindWire.Eval as string).toBe('eval');
+});
+
 test('contract JobStatus values stay isomorphic with queue', () => {
   expect(values(JobStatusWire)).toEqual(values(JobStatus));
 });

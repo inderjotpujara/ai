@@ -6,6 +6,7 @@ import { runGuardedAgent } from '../core/delegate.ts';
 import {
   Capability,
   type ModelDeclaration,
+  type ModelRequirement,
   PreferPolicy,
   RuntimeKind,
 } from '../core/types.ts';
@@ -22,8 +23,10 @@ import { dryRunMs } from '../verified-build/config.ts';
 import {
   type JudgeCandidate,
   JudgeUnavailableError,
+  modelFamily,
 } from '../verified-build/judge.ts';
 import { ReuseKind } from '../verified-build/types.ts';
+import { verifiedWithFrom } from '../verified-build/verified-with.ts';
 import type { BuilderDeps, BuilderModel } from './types.ts';
 
 type GenerateTextFn = typeof generateText;
@@ -227,15 +230,31 @@ export function makeBuilderModel(
   };
 }
 
-/** Heuristic "model family" from its tag, e.g. "qwen3.5" from "qwen3.5:9b".
- *  The repo has no canonical model-family registry — this is only used to
- *  prefer a judge from a DIFFERENT family than the generator (selectJudge),
- *  a soft preference, not a correctness requirement. */
-function modelFamily(modelName: string): string {
-  return modelName.split(':')[0] ?? modelName;
+/** The ONE model requirement the agent builder resolves against to capture an
+ *  artifact's `verifiedWith` baseline. It is the SINGLE SOURCE OF TRUTH the
+ *  Slice-32 re-eval drift resolve (`server/launch-turns.ts`) MUST reuse — if the
+ *  two resolves differ (e.g. one passes `allowUncensored`, the other does not),
+ *  they select from different candidate sets and every artifact shows phantom
+ *  drift on every sweep (I4). `allowUncensored` is deliberately left UNSET here
+ *  (uncensored models stay filtered by `selectCandidates`); the builder is the
+ *  authority for what `verifiedWith` was captured against, so the re-eval aligns
+ *  to it, not the reverse. `role` affects only the resolve's error text (never
+ *  candidate selection), so the re-eval may pass the artifact's own need. */
+export function builderModelRequirement(
+  role = 'agent builder',
+): ModelRequirement {
+  return {
+    role,
+    requires: [Capability.Tools],
+    prefer: PreferPolicy.LargestThatFits,
+  };
 }
 
-function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
+/** Map a model declaration to a judge candidate (params in absolute count).
+ *  Exported so the re-eval turn (`server/launch-turns.ts`, Slice 32) builds its
+ *  `judgeCandidates` from the SAME construction the builders use — one judge
+ *  ladder, not a divergent copy. */
+export function toJudgeCandidate(decl: ModelDeclaration): JudgeCandidate {
   return {
     model: decl.model,
     params: decl.footprint.approxParamsBillions * 1e9,
@@ -262,17 +281,17 @@ export async function makeRealBuilderDeps(
   const manager = createModelManager();
   const registry = await buildRegistry();
   const { decl, numCtx } = await resolveModel(
-    {
-      role: 'agent builder',
-      requires: [Capability.Tools],
-      prefer: PreferPolicy.LargestThatFits,
-    },
+    builderModelRequirement(),
     registry,
     {
       ensureReady: (d, o) => manager.ensureReady(d, o),
       listLoaded: () => listLoadedModels(),
     },
   );
+  // Captured once, right at the live resolve, for the Slice 32
+  // self-improvement baseline — the ACTUAL resolved decl, never the
+  // generator/BuilderModel's own idea of what it's running on.
+  const verifiedWith = verifiedWithFrom({ decl, numCtx });
   const model = runtimeFor(decl.runtime).createModel(decl);
   // Resolve (and cache) a LanguageModel for the judge `selectJudge` picked —
   // the judge must run on THAT model, never the generator grading itself
@@ -346,6 +365,7 @@ export async function makeRealBuilderDeps(
       },
       generatorFamily: modelFamily(decl.model),
       dir: 'agents',
+      verifiedWith,
       // `--force` (I1): downgrade a failing gate to an Unverified commit
       // instead of aborting (see gate.ts).
       force: opts.force === true,

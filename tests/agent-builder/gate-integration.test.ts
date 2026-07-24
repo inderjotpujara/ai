@@ -9,12 +9,16 @@ import type {
   BuilderModel,
   BuilderVerifyDeps,
 } from '../../src/agent-builder/types.ts';
+import { RuntimeKind } from '../../src/core/types.ts';
 import { JudgeUnavailableError } from '../../src/verified-build/judge.ts';
 import {
   readManifest,
   upsertEntry,
 } from '../../src/verified-build/manifest.ts';
-import type { ManifestEntry } from '../../src/verified-build/types.ts';
+import type {
+  ManifestEntry,
+  VerifiedWith,
+} from '../../src/verified-build/types.ts';
 import {
   GoldenKind,
   ReuseKind,
@@ -432,6 +436,27 @@ describe('buildAgent — verify-then-commit gate (deps.verify present)', () => {
       delete process.env.AGENT_DRY_RUN_MS;
       delete process.env.AGENT_BUILD_MAX_REPAIRS;
     }
+  });
+
+  it('commit persists verifiedWith from the resolved model pick', async () => {
+    const { model } = fakeModel({});
+    const fakeVerifiedWith: VerifiedWith = {
+      runtime: RuntimeKind.Ollama,
+      model: 'A:7b',
+      paramsBillions: 7,
+      numCtx: 8192,
+      capturedAtMs: 1,
+    };
+    const { deps } = await makeDeps({
+      model,
+      verify: { verifiedWith: fakeVerifiedWith },
+    });
+
+    const r = await buildAgent('do a fresh thing', deps);
+
+    expect(r.kind).toBe('written');
+    const manifest = readManifest(deps.verify?.dir ?? '');
+    expect(manifest.entries.fresh_agent?.verifiedWith?.model).toBe('A:7b');
   });
 
   it('force true on a failing dry-run: commits at VerifiedLevel.Unverified', async () => {

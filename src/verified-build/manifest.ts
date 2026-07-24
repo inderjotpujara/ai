@@ -5,7 +5,7 @@ import { goldenPathFor, loadGolden } from './golden.ts';
 import type { Manifest, ManifestEntry } from './types.ts';
 import { VerifiedLevel } from './types.ts';
 
-const MANIFEST_VERSION = 1;
+const MANIFEST_VERSION = 2;
 
 function emptyManifest(): Manifest {
   return { version: MANIFEST_VERSION, entries: {} };

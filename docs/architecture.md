@@ -734,7 +734,7 @@ graph TD
 | **Web frontend** | `web/` (own Bun workspace member, NOT under `src/`) | Browser UI, feature-sliced by nav area (Slice 30b — Phase 1b scaffold; Phase 2 below turns Chat live): app shell + router + ⌘K skeleton, design tokens (light/dark), the contract client + transport-port interface — **plus (Phase 2, full narrative below)** a real streaming `features/chat/` (`useChat`/`DefaultChatTransport` + hand-authored AI-Elements/streamdown message rendering; stop, copy, regenerate, edit+resend, 👍/👎, drag-drop/paste-image upload, inline data-confirm) and `features/agents/`'s live agent/model rail (`useStatusEvents`) — **plus (Phase 4, full narrative below)** real `features/crews/` and `features/workflows/` list+detail screens with a **▶ Run** launch button, a generic `shared/dag/` `@xyflow/react` `DagView` (+ deterministic `layeredPositions` layout, no `dagre`) fed by `workflow-graph.ts`/`crew-graph.ts` (D7a's process-aware crew split), a run-detail live DAG overlay (D8, `features/runs/run-dag.ts`) with a Graph/Waterfall toggle, a Runs kind facet, and `jump-to-crew`/`jump-to-workflow` ⌘K commands — **plus (Phase 5, full narrative below)** real `features/builders/` (Agent/Crew/Workflow mode toggle, streamed narration + proposal `DagView` + mid-flow consent) and a real 3-tab `features/library/` (Models — inventory + live-progress pull; Memory — spaces/stats + upload→ingest + recall; MCP — browse/status + add-server + test-mount). Settings remains a stub; no cross-invocation persistence yet | `@contracts` (`src/contracts/`); serving the Vite build (`web/dist`) through `src/server/`'s static path is still **not wired** — `bun run web` still serves the Phase-1 stub HTML, so today's dev/live-verify workflow runs the Vite dev server and the BFF as two separate origins |
 | **DB migrations** | `src/db/` | Tiny shared `bun:sqlite` schema-versioning runner (Slice 30a, Task 8 — was bare `CREATE TABLE IF NOT EXISTS`, silently no-op-ing on schema drift): `migrate.ts`'s `migrate(db, migrations)` reads `PRAGMA user_version`, applies each pending `Migration.up` in its own transaction, bumps `user_version`, and returns the new version (idempotent — a second call against an up-to-date DB is a no-op). Consumed by `memory/sqlite-store.ts` (`MEMORY_MIGRATIONS`, v1 wraps the `spaces`/`documents` `CREATE TABLE`s verbatim so existing DBs are unaffected) | `bun:sqlite` `Database` only |
 | **Session / Chat history** | `src/session/` | Cross-invocation persistence for web chat conversations (Slice 30b Phase 6, complete — full narrative in §3g above): `migrations.ts`'s `SESSION_MIGRATIONS` (one migration; the DDL lives here, schema-versioning run by `db/migrate.ts`, mirrors `memory/sqlite-store.ts`'s `MEMORY_MIGRATIONS` idiom) creates `sessions` (`id` PK, `title`, `owner` default `'local'`, `created_at`/`updated_at`, nullable `last_message_at`/`run_id`) and `messages` (`id` PK, `session_id` FK→`sessions(id)`, nullable `parent_message_id`, `role`, `parts` JSON text, `created_at`, nullable `degraded`) plus `idx_messages_session(session_id, created_at)`. `parent_message_id` is written but unused this phase (reserved for Slice 41's edit-in-place threading); `degraded` flags an assistant turn that saw a `StatusEventType.Degrade` event. `store.ts`'s `createSessionStore` (mirrors `createMemoryStore`'s factory-returns-closure shape, reuses the WAL/busy_timeout/foreign_keys pragma trio from `memory/sqlite-store.ts`) exposes `upsertSession`/`getSession`/`renameSession`/`deleteSession`/`listSessions`/`appendMessage`/`getMessages` — every write is `INSERT OR IGNORE` on the row/message id, so a retried request for the same `sessionId`/message is a safe no-op, never a constraint-violation throw. Two consumers: `server/chat/handler.ts`'s `handleChat` calls `upsertSession` + `appendMessage` at both turn boundaries (user message before any engine work, assistant message only after `runChatTurn` resolves); `server/sessions/{list,detail,rename,delete,export}.ts` read/mutate/export the store for the browser's Sessions surface (`GET/PATCH/DELETE /api/sessions(/:id)`, `GET /api/sessions/:id/export` → Markdown) | `db/migrate.ts` |
-| **Queue** | `src/queue/` | Durable SQLite job queue — the heart of the always-on daemon (Slice 24, full narrative in §24). `store.ts`'s `createJobStore` (mirrors `createSessionStore`: WAL + `busy_timeout` + `foreign_keys`, `db/migrate.ts` `'init-jobs'` migration, `INSERT OR IGNORE` idempotency, keyset pagination, snake↔camel mappers): `enqueue`, atomic **`claimNext`** (`BEGIN IMMEDIATE`, `status='queued' AND available_at<=now` gated, `ORDER BY priority ASC, created_at ASC, id ASC` — priority-then-FIFO), `markDone/Failed/Interrupted/Canceled` (`markFailed` re-queues with a full-jitter `available_at` backoff, terminal at `max_attempts`), `listJobs`, `reconcileOrphans` (boot recovery). `pool.ts`'s `createWorkerPool` runs ≤`computeConcurrency()` claim loops with per-job `AbortController` cancel + bounded `drain`, error-isolated so a store throw can never wedge a loop (degrade-never-crash). `types.ts` = `enum JobStatus{Queued/Running/Done/Failed/Interrupted/Canceled}`, `enum JobPriority{High/Normal}`, `JobKind⊂RunKind`, `JobRecord`. The queue→execution seam is `src/server/jobs/dispatch.ts` (`createJobDispatch`): maps each `JobKind` to a `JobExecutor` that invokes the EXISTING run turn (`launch-turns.ts`) with the job's `runId` + pool `AbortSignal` — no execution logic duplicated. Job DTOs + wire enums live in `src/contracts/` | `db/migrate.ts`, `reliability/` (classify + backoff config), `contracts/`, `server/launch-turns.ts` |
+| **Queue** | `src/queue/` | Durable SQLite job queue — the heart of the always-on daemon (Slice 24, full narrative in §24). `store.ts`'s `createJobStore` (mirrors `createSessionStore`: WAL + `busy_timeout` + `foreign_keys`, `db/migrate.ts` `'init-jobs'` migration, `INSERT OR IGNORE` idempotency, keyset pagination, snake↔camel mappers): `enqueue`, atomic **`claimNext`** (`BEGIN IMMEDIATE`, `status='queued' AND available_at<=now` gated, `ORDER BY priority ASC, created_at ASC, id ASC` — priority-then-FIFO), `markDone/Failed/Interrupted/Canceled` (`markFailed` re-queues with a full-jitter `available_at` backoff, terminal at `max_attempts`), `listJobs`, `reconcileOrphans` (boot recovery). `pool.ts`'s `createWorkerPool` runs ≤`computeConcurrency()` claim loops with per-job `AbortController` cancel + bounded `drain`, error-isolated so a store throw can never wedge a loop (degrade-never-crash). `types.ts` = `enum JobStatus{Queued/Running/Done/Failed/Interrupted/Canceled}`, `enum JobPriority{High/Normal}`, `JobKind⊂RunKind`, `JobRecord`. The queue→execution seam is `src/server/jobs/dispatch.ts` (`createJobDispatch`): maps each `JobKind` to a `JobExecutor` that invokes the EXISTING run turn (`launch-turns.ts`) with the job's `runId` + pool `AbortSignal` — no execution logic duplicated. Slice 32 added a **`JobKind.Eval`** kind + dispatch case (`EvalMode {Sweep\|AffectedByPull\|Artifact}` + `EvalJobPayloadSchema`, invoking the injected `RunEvalTurn`; fails fast if unwired) carrying the self-improvement re-eval onto this same queue (§`src/self-improve/`). Job DTOs + wire enums live in `src/contracts/` | `db/migrate.ts`, `reliability/` (classify + backoff config), `contracts/`, `server/launch-turns.ts` |
 | **Daemon** | `src/daemon/` | Always-on daemon lifecycle (Slice 24, full narrative in §24). `core.ts`'s `createDaemon().start()` runs the §7.3 boot-ordering whose ORDER is the correctness core: double-start guard (`readLivePid`) → **`reconcileOrphans()` FIRST** (before the pool can claim) → `writePid` → `pool.start()` → `startWebServer({queue})` in **injected mode** (the daemon owns the single pool; the server never spins up a second on the same DB) → `SIGTERM`/`SIGINT` drain via `onShutdown`. `stop()` drains the pool (bounded), stops the server, clears the pid (idempotent). `pid.ts` = the PID-file contract (`~/.agent/daemon.pid`, 0600 in a 0700 dir; `readLivePid` auto-clears a stale file via a `process.kill(pid,0)` liveness probe). `launchd.ts` renders the macOS plist (`KeepAlive`/`RunAtLoad`, `daemon start-foreground` entrypoint); `spans.ts` emits `daemon.start`/`daemon.stop` + the `job.*` span helpers. `cli/daemon.ts` (`agent daemon install/start/stop/status/logs`) drives `launchctl` (macOS-only `install`; prints systemd guidance elsewhere) | `process/lifecycle.ts`, `queue/`, `server/main.ts`, `telemetry/spans.ts`, `node:fs`/`os`/`path` |
 | **Config** | `src/config/` | Single documented schema for every `AGENT_*` env knob (Slice 30a, Ops Surface Task 2 — was ~63 scattered `process.env.AGENT_*` reads, each with its own ad-hoc default): `schema.ts`'s `CONFIG_SPEC: ConfigEntry[]` (`{env, kind, def, doc}`, grouped by concern — core/reliability/memory/verification/verified-build/resource/provisioning/mcp/telemetry/logging/runs/workflow/media/voice) is the source of truth; `loadConfig(env?)` coerces + validates each entry (invalid number → default, mirroring `envNumber`) and returns `{values, sources}` (`'env'|'default'`); `cli/config.ts` (`bun run config`) dumps the effective table. `chat.ts`'s `main` calls `loadConfig()` once at startup to validate the environment eagerly (never throws — invalid values fall back to defaults). Scope note: this is the documented contract + validator, not a migration — the ~63 existing per-module reads (`reliability/config.ts`, `memory/*`, `verification/config.ts`, etc.) still read `process.env` directly; migrating them onto `loadConfig` is a tracked follow-on, and is the schema the Slice-30b settings UI reads/writes against | none — deliberately leaf-level, read by `cli/chat.ts` + `cli/config.ts` |
 | **Reliability** | `src/reliability/` | Cross-cutting in-run reliability layer (Slice 21 — see §21 for the full narrative): error-lane taxonomy (`classify.ts` — `enum Lane {Transient\|RouteWorthy\|Terminal}` + pure, never-throws `classify(err)`, unknown→Terminal); computed env-fallback config knobs (`config.ts` — `maxAttempts()`/`runTimeoutMs()`/`idleTimeoutMs()`/`breakerThreshold()`/`breakerCooldownMs()`/`breakerHalfOpenProbes()`/`retryBaseMs()`/`retryCapMs()`/`probeTimeoutMs()`); retry (`retry.ts` — `withRetry` full-jitter exponential backoff, attempt-cap, `AbortSignal`-abortable, retries **only** `Lane.Transient`, respects HTTP `Retry-After` via `parseRetryAfter`, + `abortableSleep`); timeouts (`timeout.ts` — `withWallClock` hard run-timeout race + `IdleWatchdog` firing on `now()-lastAdvanceAt` to catch silent stalls + `withIdleTimeout`); circuit breaker (`breaker.ts` — hand-rolled `CircuitBreaker` Closed/Open/HalfOpen state machine + `breakerFor(id)` shared registry keyed by dependency id, so correlated failures across invocations trip one breaker, + `resetBreakers()`); model degradation (`degrade.ts` — `degradeChain(candidates)` failure-domain-aware fallback ordering + `failureDomain(decl)`); user-facing degradation record (`ledger.ts` — `DegradationLedger` with `createLedger`/`formatLedger`/`serializeLedger` + `enum DegradeKind {ModelDegraded\|AgentDropped\|ToolSkipped\|Retried\|CircuitOpen}`); errors (`errors.ts` — `CircuitOpenError`, RouteWorthy); shared download-retry config (`download-retry.ts` — `defaultDownloadRetry()` + `downloadStallMs()`). Wired into `core/delegate.ts` (classify → degrade/drop + ledger record), `core/agent.ts` (`generateText` wrapped in `withWallClock(runTimeoutMs())`, **no** second backoff retry per D5), `core/orchestrator.ts` + `agents/super.ts` (thread the ledger to every delegate tool), `workflow/{types,run-step,engine}.ts` (`StepBase` gains `retry?`/`timeout?`; Tool/MCP steps get the breaker + optional `withRetry` + emit `DegradeKind.Retried`; the engine wraps every step in `withWallClock`), `crew/{engine,compile}.ts` (ledger threaded through both the sequential and hierarchical paths), `mcp/{client,mount}.ts` (`wrapToolsWithBreaker` wraps every mounted tool per server, keyed `mcp:<name>`), `resource/selector.ts` (`degradeChain` orders candidate fallback), `cli/select-hook.ts` (records `ModelDegraded` on an MLX→Ollama fallback), `cli/{chat,crew,flow}.ts` + `with-mcp-run.ts` (ledger lives on `McpRunContext`, persisted to `run.dir/degradation.jsonl`, printed to the user via `formatLedger`). Migrated onto it (Slice 21 consolidation): `provisioning/supervisor.ts` (now re-exports `withRetry`/`abortableSleep` from `retry.ts` and `IdleWatchdog` as `StallWatchdog` from `timeout.ts`), `provisioning/providers/{ollama,hf-fetch}.ts` (`defaultDownloadRetry()`/`downloadStallMs()` from `download-retry.ts`), `verified-build/dry-run.ts` (re-exports `withWallClock`), `runtime/{ollama,mlx-server}.ts` (probe `AbortSignal.timeout(1500)` literals → `probeTimeoutMs()`). Scope is **in-run only** — persistence/resume-after-crash is Slice 24, token-budgeted retries revisit at Slice 22 | `telemetry/spans.ts` (`ATTR.RELIABILITY_*` + `ERROR_TYPE` + `recordDegrade`), `process.env` (fallback-only pattern) |
@@ -759,7 +759,8 @@ graph TD
 | **Provisioning** | `src/provisioning/` | First-boot / on-demand model provisioning (Slice 14 — shipped): `runProvision` (`provisioner.ts`) orchestrates detect-host → two-phase catalog discovery with committed-snapshot fallback (`catalog/`, `registry.ts`) → hardware-fit ranking (`fit.ts`, `fitAndRank`) → per-model consent → disk preflight + stall/retry supervisor guards (`supervisor.ts`, now re-exporting `src/reliability`'s `withRetry`/`IdleWatchdog`, Slice 21) → **bounded-parallel** downloads (`DOWNLOAD_CONCURRENCY=2` on a TTY, sequential otherwise) through a runtime-agnostic `DownloadProvider` abstraction (`types.ts`, keyed by the download `ProviderKind`) with a unified progress protocol; adapters (`providers/`) — **Ollama live-verified end-to-end**, **HF-fetch (llama.cpp GGUF single-file + MLX whole-snapshot) now persists bytes to disk atomically and was real-snapshot live-verified in Slice 18**, **LM Studio download wired into `providerFor` and live-verified in Slice 26** (`ALTRUNTIME_LIVE=1`; poll-URL fixed); dest-dir resolution (`dest-dir.ts`); dependency-free UI (`ui/`, incl. `MultiProgressBar`); a manual `scripts/refresh-snapshot.ts`; CLI entry `bun run provision` plus a non-invasive TTY-gated auto-detect hook in `chat.ts`; telemetry via `withProvisionSpan` (§13) | `core/types.ts` (download `ProviderKind` + inference `RuntimeKind`) + `core/kind-map.ts`, `resource/footprint.ts` + `resource/hardware.ts` (fit math), `resource/ollama-control.ts` (install confirm), `discovery/catalog-source.ts` (shared discovery types), `telemetry/spans.ts` — no other subsystem depends on provisioning yet |
 | **Agent-builder** | `src/agent-builder/` | Specialist agent generation (Slice 17, Phase D): draft a proposal from a plain-language need (`generate.ts`), pick a minimal palette-only MCP-server subset (`suggest-tools.ts`), gate it structurally (`validate.ts`), get explicit consent, then write the agent file + registry entry + scoped `mcp.json` atomically (`write.ts`); `builder.ts`'s `buildAgent` sequences generate→suggest→validate→(bounded same-run retry)→consent→write under an `agent.build` span; `deps.ts` assembles the live tools-capable largest-that-fits model + fs paths + TTY consent prompt. Slice 18 (Task 24) adds the consent-gated **tool-code** path (`generate-tool.ts`/`validate-tool.ts`/`write-tool.ts`, `builder.ts`'s `buildTool`): it writes an **inert `<name>.proposal.ts`** for review only — never wired into any registry/index/`mcp.json`, so nothing in the run can import or activate it. Two triggers: `bun run agent-builder "<need>"` and a TTY-gated offer on a `{kind:'gap'}` chat outcome. Since Slice 20, when `BuilderDeps.verify` is wired (as `makeRealBuilderDeps` does), `buildAgent` runs **reuse-check → generate → … → consent → stage → verify → commit** through the verified-build gate instead of writing straight through — `write.ts` split into `writeAgentFile` (stage, disk only) + `registerAgent` (commit: index + `mcp.json` splice), and `BuildResult` gained `reused` / `failed-verification` variants + `level?` on `written` (§20). See §18 | `core/types.ts` (`ModelRequirement`, `Capability`, `PreferPolicy`), `mcp/pack.ts` (`STARTER_PACK`, `getPackEntry`), `agents/index.ts` (`agentNames`, the write target), `resource/selector.ts` + `resource/model-manager.ts` + `runtime/registry.ts` (live model), `verified-build/` (the Slice-20 gate), `core/delegate.ts` (`runGuardedAgent` for dry-run/golden-eval), `memory/embed.ts`+`embed-one.ts` (signature embedding), `telemetry/spans.ts` (`withAgentBuildSpan`) |
 | **Crew-builder** | `src/crew-builder/` | Crew/workflow generation from a plain-language need (Slice 19, Phase D follow-on to the agent-builder — see §19 for the full narrative). Declarative IR (`ir.ts`): Zod-validated `WorkflowIR`/`CrewIR` graphs — JSON-safe `InputDescriptor`/`PredicateDescriptor` closures (`fromInput`/`fromStep`/`fromTemplate`, `whenEquals`/`whenContains`/`whenTruthy`, `mapOver`; rendered by the matching `safe-helpers.ts` factories) so step inputs/branch predicates/map sources stay declarative data rather than compiled closures; step kinds `agent`/`tool`/`branch`/`map` (`WorkflowStepIRSchema`, discriminated union); crew members support inline definitions or `agentRef` reuse of a registered agent (`CrewMemberIRSchema`), with `CrewTaskIRSchema` binding a task to a member. `buildCrewOrWorkflow` (`builder.ts`) sequences **classify → analyze → (bounded regenerate: planNodes → planEdges → validate) → consent → resolveMissingAgents → transpile → write** under a `crew.build` span: `classify.ts` picks crew-vs-workflow, `analyze.ts` think-first prose-plans the decomposition (`.text`, no JSON), `plan-nodes.ts`/`plan-edges.ts` generate the node list then the fully-wired IR via the model, `validate.ts` structurally gates it (palette-only tools, known/to-be-built agent refs, snake_case id, member/task-id integrity, acyclicity via the **shared** `assertAcyclic` now extracted to `workflow/define.ts`) then semantically (an LLM-judge goal-alignment check, reached only when structural is clean), `resolve-members.ts` auto-builds genuinely-missing agents (delegating to the agent-builder's `buildAgent`) **once, after consent**, reconciling any renamed refs, `transpile.ts` deterministically renders the IR to a `crews/<id>.ts`/`workflows/<id>.ts` module (every value `JSON.stringify`'d, never raw-interpolated), and `write.ts` inserts it + a registry-index entry atomically. Two triggers: `bun run crew-builder "<need>" [--yes]` (`src/cli/crew-builder.ts`) and a TTY-gated `chat.ts` gap-offer (`offer-crew.ts`'s `shouldOfferCrew` multi-step heuristic, tried **before** falling through to the single-agent agent-builder offer). `deps.ts`'s `makeRealCrewBuilderDeps` reuses the agent-builder's live model/consent and wires the crew/workflow/agent/pack registries. **Live-verified** end to end on Ollama (§19). Since Slice 20, when `CrewBuilderDeps.verify` is wired, the tail of the pipeline runs through the verified-build gate — a post-classify **reuse check** against the matching registry's manifest, then (after consent + member resolution) **stage → verify → commit**: `write.ts` split into `writeCrewFile` (stage, disk only; the staged file is dynamic-imported, cache-busted, to obtain the runnable def) + `registerCrewOrWorkflow` (commit: index splice), and `CrewBuildResult` gained `reused` / `failed-verification` variants + `level?` on `written` (§20) | `agent-builder/` (model/consent reuse, `buildAgent` delegation), `crew/` + `workflow/` (`defineCrew`/`defineWorkflow` + `assertAcyclic` reuse; `crewAgentMap`/`buildCrewAgent`'s `agentRef`-miss-falls-back-to-inline-build behavior is what lets a freshly-built agent run in-process pre-restart), `agents/`, `mcp/pack.ts`, `verified-build/` (the Slice-20 gate), `telemetry/spans.ts` (`withCrewBuildSpan`) |
-| **Verified-build** | `src/verified-build/` | Behavioral verification of builder-generated artifacts (Slice 20, closes Phase D — see §20 for the full narrative): every agent-builder/crew-builder write becomes **stage → verify → commit**, so nothing lands in a registry index until it has actually run. One shared, cheapest-first gate (`gate.ts`, `verifyAndCommit`) serves all three `ArtifactKind`s: **(0) reuse check** *before any generation* — `signature.ts` distills the need into a `CapabilitySignature`, `memory/embed-one.ts` embeds its canonical text, and `reuse.ts` cosine-compares against the per-registry manifest sidecar (`manifest.ts`, `<registry>/.generated.json`) under `config.ts` `reuseBands()` (**≥0.85 Reuse — confirm-gated: ask, reuse on yes, generate on decline · 0.75–0.85 Offer — inform a close match exists, ask reuse-or-build · <0.75 generate**; non-interactive `--yes` auto-reuses a Reuse hit but declines an Offer hit → builds new); **(1) stage** to a staged def file only (the builders' split `writeAgentFile`/`writeCrewFile`), never the registry index; **(2) structural** via the existing validators (`validateProposal`/`validateStructural`); **(3) dry-run** — bounded REAL execution against a benign representative task (`dry-run.ts`, `withWallClock(dryRunMs())` — `withWallClock` re-exported from `src/reliability/timeout.ts` since Slice 21 — wall-clock race for all kinds; the **agent path additionally aborts in flight** via `AbortSignal.timeout(dryRunMs())` threaded down to `generateText` — crew/workflow runs are wall-clock-raced only, `runCrew`/`runWorkflow` take no signal yet), with a bounded **self-repair loop** on failure (`repair.ts`, ≤`maxRepairs()`=2, feeding the real runtime error back into a fresh regeneration that keeps the consented name/id); **(4) golden-eval** — auto-decompose the need into 3–7 binary cases (`golden.ts`), judged by the largest installed model clearing `judgeMinParams()`≈24e9, **preferring** a different family from the generator, falling back to same-family/largest (`judge.ts`, degrades to a skipped eval — never blocks); a case passes only on a unanimous yes over `evalRuns()`=3 judge runs, `GoldenKind.Grounded` cases judged through the verification layer's `checkClaim` (`eval.ts`); **(5) commit** — index splice + `<name>.golden.json` + manifest upsert at the earned `VerifiedLevel` (behaves/runs/unverified). A failed gate registers **nothing** and the staged file is **discarded** (the gate's `discard` deletes it on any non-committed outcome — failure or throw — so a rejected build never leaves an orphan file); `verify.force` (CLI `--force`) downgrades a failure to an `unverified` commit instead. Also: usage aggregation from every run's `spans.jsonl` (`usage.ts`) and reversible **archive** of idle near-duplicates (`archive.ts`, `bun run archive [--prune]`). `types.ts`/`config.ts` carry the shared vocabulary (`VerifiedLevel`, `ReuseKind`, `GoldenKind`, `ArtifactKind`, `CapabilitySignature`, `Manifest*`, `VerificationResult`) + env-fallback-only live thresholds | `agent-builder/` + `crew-builder/` (the two callers, which inject stage/dry-run/eval/commit closures), `memory/embed-one.ts` (embedOne/cosine), `telemetry/spans.ts` (`withBuildVerifySpan`/`withBuildArchiveSpan`), the `agents/`/`crews/`/`workflows/` registries + their `.generated.json` sidecars, `runs/<id>/spans.jsonl` (usage) |
+| **Verified-build** | `src/verified-build/` | Behavioral verification of builder-generated artifacts (Slice 20, closes Phase D — see §20 for the full narrative): every agent-builder/crew-builder write becomes **stage → verify → commit**, so nothing lands in a registry index until it has actually run. One shared, cheapest-first gate (`gate.ts`, `verifyAndCommit`) serves all three `ArtifactKind`s: **(0) reuse check** *before any generation* — `signature.ts` distills the need into a `CapabilitySignature`, `memory/embed-one.ts` embeds its canonical text, and `reuse.ts` cosine-compares against the per-registry manifest sidecar (`manifest.ts`, `<registry>/.generated.json`) under `config.ts` `reuseBands()` (**≥0.85 Reuse — confirm-gated: ask, reuse on yes, generate on decline · 0.75–0.85 Offer — inform a close match exists, ask reuse-or-build · <0.75 generate**; non-interactive `--yes` auto-reuses a Reuse hit but declines an Offer hit → builds new); **(1) stage** to a staged def file only (the builders' split `writeAgentFile`/`writeCrewFile`), never the registry index; **(2) structural** via the existing validators (`validateProposal`/`validateStructural`); **(3) dry-run** — bounded REAL execution against a benign representative task (`dry-run.ts`, `withWallClock(dryRunMs())` — `withWallClock` re-exported from `src/reliability/timeout.ts` since Slice 21 — wall-clock race for all kinds; the **agent path additionally aborts in flight** via `AbortSignal.timeout(dryRunMs())` threaded down to `generateText` — crew/workflow runs are wall-clock-raced only, `runCrew`/`runWorkflow` take no signal yet), with a bounded **self-repair loop** on failure (`repair.ts`, ≤`maxRepairs()`=2, feeding the real runtime error back into a fresh regeneration that keeps the consented name/id); **(4) golden-eval** — auto-decompose the need into 3–7 binary cases (`golden.ts`), judged by the largest installed model clearing `judgeMinParams()`≈24e9, **preferring** a different family from the generator, falling back to same-family/largest (`judge.ts`, degrades to a skipped eval — never blocks); a case passes only on a unanimous yes over `evalRuns()`=3 judge runs, `GoldenKind.Grounded` cases judged through the verification layer's `checkClaim` (`eval.ts`); **(5) commit** — index splice + `<name>.golden.json` + manifest upsert at the earned `VerifiedLevel` (behaves/runs/unverified). A failed gate registers **nothing** and the staged file is **discarded** (the gate's `discard` deletes it on any non-committed outcome — failure or throw — so a rejected build never leaves an orphan file); `verify.force` (CLI `--force`) downgrades a failure to an `unverified` commit instead. Also: usage aggregation from every run's `spans.jsonl` (`usage.ts`) and reversible **archive** of idle near-duplicates (`archive.ts`, `bun run archive [--prune]`). `types.ts`/`config.ts` carry the shared vocabulary (`VerifiedLevel`, `ReuseKind`, `GoldenKind`, `ArtifactKind`, `CapabilitySignature`, `Manifest*`, `VerificationResult`) + env-fallback-only live thresholds. **Slice 32 additions:** `eval.ts` extracts a shared `runGoldenEval` binding (select-judge + `evalCases`, degrade-to-null on no/unloadable judge) now used by **both** builders' `goldenEval` closures **and** the self-improve re-eval engine — one eval path, no divergent copy; `judge.ts`'s `modelFamily` sits next to `selectJudge` so both share it; and `types.ts` gains `ManifestEntry.verifiedWith` (a `VerifiedWith` model-identity baseline, `MANIFEST_VERSION` 1→2) captured at gate commit via `verified-with.ts`'s `verifiedWithFrom` — the drift baseline the self-improvement loop diffs against (§`src/self-improve/`) | `agent-builder/` + `crew-builder/` (the two callers, which inject stage/dry-run/eval/commit closures), `memory/embed-one.ts` (embedOne/cosine), `telemetry/spans.ts` (`withBuildVerifySpan`/`withBuildArchiveSpan`), the `agents/`/`crews/`/`workflows/` registries + their `.generated.json` sidecars, `runs/<id>/spans.jsonl` (usage), `self-improve/` (consumes `runGoldenEval` + `verifiedWith`) |
+| **Self-improve** | `src/self-improve/` | Continuous re-eval on model swap (Slice 32 — full narrative in §`src/self-improve/`): replays a generated artifact's **persisted** golden set whenever the model under it drifts, catching a silent regression, then **demotes + surfaces** it (never regenerates/repairs). `config.ts` (four `AGENT_REEVAL_*` knobs — `reevalEnabled`/`reevalSweepCron`/`reevalHysteresis`/`reevalRerunCases`, `Number.isFinite` coercion honoring explicit `0`); `reeval.ts` (`reevalArtifact` — generation-free golden replay via the shared `verified-build/eval.ts` `runGoldenEval`; `ReevalSkip {NoGolden\|JudgeUnavailable}` degrade); `replay-case.ts` (`replayGoldenCase` — resolves a ref across agent/crew/workflow registries + dispatches on shape, MCP-free, Task-16 fix); `regression.ts` (D4 — the **pure** `decideRegression`: per-case regressed set + bounded unanimous-fail re-run + hysteresis band → `Pass`/`Regression`/`WithinNoise`/`Inconclusive`, only `Regression` demotes); `action.ts` (D5 — `applyRegressionOutcome`: always append a row, only a confirmed regression demotes `Behaves→Unverified` idempotently + `recordDegrade` + `eval.regression` event, no PII); `history.ts`+`history-migrations.ts` (append-only `eval_history` in the shared `jobs.db` via the `JOBS_DB_MIGRATIONS` superset; leaf module breaks the migrate→history import cycle); `executor.ts` (`runEval` — `Sweep`/`AffectedByPull`/`Artifact`; master switch gates all but the manual `Artifact`; hot-first ordering, R4 de-dup, R5 seed, degrade-never-crash); `spans.ts` (`eval.reeval` root + `eval.regression` event via `telemetry/spans.ts`). Detection = two repo `TriggerDef`s (`triggers/index.ts`: `reeval-sweep` Cron + `reeval-on-pull` JobChain, **no new `TriggerType`**); the work rides the Slice-24 queue as `JobKind.Eval`; surfaced via `GET/POST /api/evals*` + the Ops **Evals/Health** tab + `bun run reeval` | `verified-build/` (`runGoldenEval`, `verifiedWith`, `readManifest`, `usage`), `queue/` (`JobKind.Eval`, `jobs.db`), `triggers/` (`JOBS_DB_MIGRATIONS`, repo trigger defs), `reliability/ledger.ts` (`DegradeKind.ModelDegraded`), `telemetry/spans.ts`, `server/jobs/dispatch.ts` (`EvalMode`) |
 
 **Key decoupling:** `core/agent.ts` takes a generic `ToolSet` — it doesn't know tools come from MCP. Same agent code is unit-tested with an in-process tool + mock model, and run for real with MCP-sourced tools.
 
@@ -1232,6 +1233,23 @@ Each run is an **OpenTelemetry trace** written to `runs/<id>/spans.jsonl`, viewa
 **`RunKind` — what a run IS, not how it started (Slice 30b Phase 4).** `src/run/run-dto.ts`'s `deriveRunKind(rootSpanNames)` reads a run's *existing* root-span names (`crew.run`/`workflow.run`/`agent.run`, else `Chat`) — no new span or attribute — and stamps the contract-owned `RunKind` enum onto `RunDTO.kind`/`RunListItemDTO.kind`. It is distinct from `RunOrigin` (how a run was *triggered* — manual/schedule/webhook/…, still reserved). The web Runs browser (§ "Runs" below) surfaces a **kind facet** (`RunListQuery.kind`) so a crew/workflow run launched from the new Crews/Workflows areas (§ "Crews & Workflows" below) is findable in the same list chat/agent runs live in.
 
 **`RunKind.Build`/`RunKind.Pull` (Slice 30b Phase 5).** `deriveRunKind` gains two more recognized root-span names: `agent.build`/`crew.build` → `Build` (the guided-build wizard, § "Builders + Library" below) and `model.pull` → `Pull` (the Models-tab pull, same section) — purely additive, every pre-existing root name/kind mapping is untouched. The per-run routing section above (`spans.ts`) also gains a second incremental-progress case beyond Phase 4's workflow step spans: `model.pull`'s progress ticks are each their own short-lived `model.pull.progress` **child span** (opens and closes synchronously per tick), so `SimpleSpanProcessor` flushes each tick to `spans.jsonl` immediately and the live-tailing stream surfaces it as an orphan child while the root stays open — no mid-span attribute mutation the stream format can't express, and no new stream code (§ "Builders + Library" below, the pull→spans bridge).
+
+**`RunKind.Eval` + `eval.*` spans (Slice 32).** `deriveRunKind` gains one more
+recognized root-span name — `eval.reeval` → `RunKind.Eval` (purely additive,
+matched by the `JobKindWire.Eval` wire mirror) — so a self-improvement re-eval
+run is a first-class, filterable run kind. Per the standing rule, the
+self-improvement subsystem (§`src/self-improve/`) adds its own helpers to
+`src/self-improve/spans.ts` (reusing `telemetry/spans.ts`'s `inSpan`/`ATTR`, not
+a parallel path): `withEvalReevalSpan` opens the `eval.reeval` root
+(`eval.artifact`/`eval.mode`/`eval.baseline_model`/`eval.current_model`/`eval.outcome`
++ golden/judge attrs) and `recordEvalRegression` adds an `eval.regression` event
+(`eval.regressed_count`/`eval.drop` + degrade from/to — counts + model ids only,
+never golden/output text). Slice 32 also makes the **`chat.feedback` span** an
+*readable* eval seam: recorded since Slice 30b Phase 2 (`recordChatFeedback`,
+`chat.feedback.rating`), the Evals/Health surface's `countThumbsDownTotal`
+*proves* it is consumable, but has no production caller yet (tests only) — the
+surfaced per-artifact count is **0** pending a messageId→artifact attribution
+join (§`src/self-improve/` caveats).
 
 **Persistence — Sessions + chat recall (Slice 30b Phase 6, § "Persistence" /
 §3g above).** `memory.recall`'s span (already wired since Slice 12) is reused
@@ -4061,6 +4079,187 @@ run-history plumbing).
 
 ---
 
+### `src/self-improve/` — continuous re-eval loop (Slice 32)
+
+The verified-build gate (§20) proves a generated artifact **once, at creation**,
+against the model that happened to be resolved then; nothing re-checked it as
+models were pulled or the catalog shifted underneath it. This subsystem closes
+that gap: it **re-evaluates an artifact's persisted golden set whenever the model
+underneath it changes**, catches a silent behavioral regression, and demotes +
+surfaces it — a *generation-free* loop (it never regenerates or repairs, only
+replays what was already proven). The end-to-end lane matches
+`docs/diagrams/slice-32-self-improvement/self-improvement-loop.png`:
+
+**baseline capture → detection → replay → regression decision → action →
+history → Ops surface.**
+
+**Baseline capture (`ManifestEntry.verifiedWith`, `verified-build/verified-with.ts`).**
+When the gate commits an artifact at a passing eval, it now also records the
+**model identity it verified against** — a `VerifiedWith` (`runtime`, `model`,
+`paramsBillions`, `numCtx`, best-effort `quant?` parsed from the tag,
+`capturedAtMs`), built by `verifiedWithFrom(resolved, now)`. `MANIFEST_VERSION`
+bumped `1 → 2`; `verifiedWith` is **absent** on pre-Slice-32 entries and on any
+entry rebuilt offline (`rebuildFromArtifacts`), since no live resolve ran — those
+are *seeded* on the first sweep rather than diffed (below). Drift is detected by
+comparing the freshly-resolved model tag against this baseline
+(`resolved.decl.model !== entry.verifiedWith.model`); a **quant-only swap can be
+invisible** to that tag-level diff (accepted this slice).
+
+**Detection — two repo triggers, no new machinery (`triggers/index.ts`, repo root).**
+Two `TriggerDef` entries in the repo `TRIGGERS` registry ride the **existing**
+Slice-25 trigger substrate (no new `TriggerType`), synced into the store by
+`syncRepoTriggers` at daemon boot:
+- **`reeval-sweep`** — a **Cron** trigger (`schedule` from `reevalSweepCron()`,
+  default `0 4 * * *`) enqueuing a `JobKind.Eval` job with `{mode: Sweep}` — the
+  periodic drift sweep over every reusable artifact.
+- **`reeval-on-pull`** — a **JobChain** trigger (`onKind: Pull`,
+  `onStatus: Done`) enqueuing `{mode: AffectedByPull}` — fires after **every**
+  completed `model.pull`, so a just-pulled model immediately re-checks what it
+  affects.
+Registration is deliberately **not** gated by the master switch — a disabled
+loop still shows both triggers (as disabled-*effect*, not absent) in the Ops
+console; `reevalEnabled()` gates *execution* in the executor, not registration.
+
+**The `Eval` job (queue seam, `src/server/jobs/dispatch.ts`).** A new
+`JobKind.Eval` (⊂ `RunKind`; `RunKind.Eval`/`JobKindWire.Eval` wire mirrors;
+`deriveRunKind` maps the `eval.reeval` root span → `RunKind.Eval`) carries the
+work through the **same Slice-24 durable queue**. Its dispatch case validates an
+`EvalJobPayloadSchema` (`mode` + optional `ref` + `reason`; `ref` **required iff**
+`mode=artifact`, else `.parse` throws a terminal defect) and invokes the injected
+`RunEvalTurn`; an `Eval` job dispatched with no `runEvalTurn` dep **fails fast**
+(never a silent no-op), mirroring the `a2aRef`/`runAgentTurn` guard.
+`createRealRunEvalTurn(runsRoot)` (`src/server/launch-turns.ts`) wraps `runEval`
+under a `withRunTelemetry` `eval.reeval` run root and is wired into both the
+daemon (`src/cli/daemon.ts`) and the standalone server (`src/server/main.ts`); it
+reuses the **same** live primitives the builders wire
+(`makeRealBuilderDeps` — one `createModelManager`, `resolveModel`,
+`createSelectHook`, `toJudgeCandidate` + temperature-0 `generateText` judge), and
+opens the `eval_history` + queue stores on the **same `jobs.db`** the pool drains
+(`AGENT_QUEUE_PATH`) — no divergent second model-resolution path, no second DB.
+
+**The executor (`executor.ts`, `runEval`).** The master switch gates Sweep and
+AffectedByPull but **not** `Artifact` — a *manual* single-artifact eval (the CLI /
+`POST /api/evals/reeval` / Ops "re-eval now") still runs and can still demote when
+the loop is disabled:
+- **`runSweep`** — collect every manifest entry across `REGISTRY_DIRS`, order
+  **hot-first** by `aggregateUsage` (degrading to unordered if that throws, §7.2);
+  an entry with **no baseline** is *seeded inline* (R5 — capture `verifiedWith` +
+  the first history row, **never** a regression/demote); a drifted entry enqueues
+  a **single per-artifact** `Eval` job, de-duped against any pending Queued/Running
+  eval for the same `ref` (R4, `hasPendingEval`).
+- **`runPull`** — one re-resolve pass over all entries (§7.5 **coalesce**: a mass
+  pull enqueues N per-artifact jobs, never N nested sweeps); entries with no
+  baseline are skipped (seeding is the sweep's job).
+- **`runArtifact`** — evaluate **+ decide + act** for ONE artifact: `reevalArtifact`
+  → `decideRegression` → `applyRegressionOutcome`, under one `withEvalReevalSpan`.
+Degrade-never-crash is enforced throughout — one artifact's failure is logged and
+**never aborts the sweep**; `aggregateUsage` was hardened so a malformed span line
+can't abort ordering (§7.2).
+
+**Replay (`reeval.ts`, generation-free).** `reevalArtifact` loads the artifact's
+persisted golden set (`loadGolden`; missing → `ReevalSkip.NoGolden`), re-resolves
+the model, and runs the **shared** `runGoldenEval` binding against it — it
+**never** stages, structurally validates, dry-runs, or regenerates. A below-bar
+judge → `ReevalSkip.JudgeUnavailable`. Both skips are a **uniform non-fatal
+degrade** — neither a pass nor a regression, so there is simply nothing to diff.
+`replay-case.ts`'s `replayGoldenCase` resolves the `ref` across **all three**
+registries (agent → crew → workflow) and dispatches on shape — mirroring
+crew-builder's `runArtifact` (`runCrew(def, task, {tools:{}})` /
+`runWorkflow(...)`) so each artifact class replays MCP-free the same way its
+build-time eval proved it (Task-16 fix: an agents-only lookup made a drifted
+crew/workflow throw → terminal `Failed`).
+
+**Regression decision (`regression.ts`, D4 — the correctness core).**
+`decideRegression` is a **pure** function (its only effect is calling the injected
+bounded-`rerun` seam) yielding one of four verdicts — `Pass` / `Regression` /
+`WithinNoise` / `Inconclusive` — of which **only `Regression` authorizes a
+demote**. Noise-robustness is two layers, both mirroring `evalCases`' unanimous-Yes
+rule: **(1) per-case** detection (a case regressed iff it *passed at baseline and
+fails now* — an aggregate pass-rate can stay flat while one case silently flips);
+**(2) bounded unanimous-fail confirmation** — each regressed case is re-run
+`reevalRerunCases()` (default **2**) more times on the SAME resolved model + judge
+and is confirmed only if it fails on **every** re-run (recovers on any → dropped
+as noise). Then a **hysteresis band**: the aggregate drop over the confirmed set
+must **strictly exceed** `reevalHysteresis()` (default **0.15**) — `drop === H` is
+within-noise. A below-bar judge → `Inconclusive` (nothing gradeable, never a
+demote).
+
+**Action (`action.ts`, D5).** `applyRegressionOutcome` turns the verdict into
+durable effects. On **every** verdict it appends exactly one append-only
+`eval_history` row (a re-eval is a historical fact). **Only a confirmed
+`Regression`** additionally, in order: **(2)** auto-demotes `verifiedLevel`
+`Behaves → Unverified` via `upsertEntry` (atomic + **idempotent** — an
+already-Unverified entry re-writes the same); **(3)** `recordDegrade({kind:
+ModelDegraded, from, to})`; **(4)** emits the `eval.regression` span event
+(counts / drop / model ids only — **no golden text, no output, no PII**). There is
+**no auto-repair, no re-route, no regeneration** — a regression demotes and
+surfaces; a human / rebuild re-verifies later.
+
+**History (`history.ts` + `history-migrations.ts`).** `eval_history` is
+**append-only** — `insert` + `listByArtifact` (ts DESC) + `latestPassing` (the
+newest passed-and-not-regressed row, the baseline `decideRegression` diffs
+against); deliberately **no** `update`/`delete`. It lives in the **one `jobs.db`**
+the queue + trigger stores share, migrated via the `JOBS_DB_MIGRATIONS`
+**superset** (never a standalone list — `migrate()` tracks one `PRAGMA
+user_version` per *database*, so a second independent list over the same file
+would collide). `history-migrations.ts` is a leaf module (imports neither
+`triggers/migrations.ts` nor `history.ts`) purely to break the
+`migrations.ts → history.ts → migrations.ts` import cycle.
+
+**Config (`config.ts`).** Four env-fallback-only knobs backing the `AGENT_REEVAL_*`
+`CONFIG_SPEC` entries (§2 Config): `reevalEnabled()` (default on — the master
+switch), `reevalSweepCron()` (`0 4 * * *`), `reevalHysteresis()` (`0.15`),
+`reevalRerunCases()` (`2`). `envNumber` uses `Number.isFinite` coercion (not the
+legacy `Number(x)||fallback` idiom) so an explicit `AGENT_REEVAL_HYSTERESIS=0`
+("demote on any confirmed regression") is honored rather than falling back.
+
+**Telemetry (`spans.ts`).** `withEvalReevalSpan` opens the `eval.reeval` **root**
+span (so `deriveRunKind` classifies the run) via `telemetry/spans.ts`'s `inSpan`
+— reusing the shared helpers exactly like `daemon/spans.ts`, a no-op without a
+tracer — carrying `eval.artifact` / `eval.mode` / `eval.baseline_model` /
+`eval.current_model` / `eval.outcome` + golden/judge attrs; `recordEvalRegression`
+adds the `eval.regression` event (`eval.regressed_count` / `eval.drop` +
+degrade from/to) on the active span. Additionally, the **`chat.feedback` span**
+(recorded since Slice 30b Phase 2 as the Slice-31 eval seam) is **readable** —
+`server/evals/feedback-read.ts`'s `countThumbsDownTotal` scans every run journal
+for `chat.feedback` spans rated `FeedbackRating.Down` and proves the signal is
+consumable — but it has **no production caller yet** (tests only); the health
+surface's per-artifact `thumbsDown` is **0**, pending the attribution join below.
+
+**HTTP + CLI surface.** `server/evals/` adds `GET /api/evals` (`handleEvalHealth`
+— per-artifact health rollup: baseline `verifiedWith` vs. the latest `eval_history`
+row, `regressed` flag, and 👎 count), `GET /api/evals/:artifact` (the history
+trend), and `POST /api/evals/reeval` (**`requireTrustedLocal`-gated** — a mutating
+enqueue behind the same privileged-local posture as trigger-create/device-pair;
+a rejected caller leaves zero side effect). The isomorphic wire DTOs live in
+`src/contracts/evals.ts` (`EvalHealthDTO`, `EvalHistoryDTO`, reeval request /
+response — never carrying golden-case text or raw output). `bun run reeval
+[--all | --agent <name>]` (`src/cli/reeval.ts`) is **enqueue-only** — it pushes a
+`JobKind.Eval` job onto the same `jobs.db` the daemon's pool drains (never runs
+inline); a bare `reeval` with no args **fails closed** (usage, non-zero exit,
+nothing enqueued — never a silent full sweep).
+
+**Honest caveats (in the code, not glossed):**
+- **Crew/workflow re-eval resolves against a default requirement** — the drift
+  resolve uses `role: need || 'agent builder'` + `Capability.Tools`, not each
+  member's own per-agent model pick, so crew/workflow drift detection is
+  coarser than an agent's.
+- **The 👎 `chat.feedback` signal is an unattributed *count only*** —
+  `readThumbsDownByArtifact` returns `{}` (so every artifact's `thumbsDown`
+  defaults to 0) because `recordChatFeedback` persists only `{messageId, rating}`
+  and there is **no messageId → artifactId join** anywhere in the codebase yet.
+  `countThumbsDownTotal` proves the signal is readable; per-artifact attribution
+  is a documented follow-on (persist the artifact ref at feedback-record time).
+- **Quant-only model swaps** may not trip drift (tag-level diff, above).
+
+**Ops surface.** The `/ops` console gains an **Evals/Health tab**
+(`web/src/features/ops/evals-tab.tsx` + `use-evals.ts`, router `tab: 'evals'`):
+the per-artifact health rollup with a filled/hollow (never color-only) verdict
+strip trend, expandable per-artifact history, and a "re-eval now" button hitting
+`POST /api/evals/reeval`.
+
+---
+
 ## 24. Always-on daemon + task queue + resumable jobs + secure remote access (Slice 24, Phase E; Slice 25b added the Ops-console HTTP surfaces below — the web UI itself is its own section immediately after this one)
 
 Through Slice 23 the BFF was a **foreground** `Bun.serve` whose runs were
@@ -4504,11 +4703,14 @@ engine), and writes a `trigger_firings` audit row for every outcome
 webhook lookup, never the raw token; `secret_ref` POINTER only, never a raw
 secret column) and `trigger_firings` (`trigger_id, fired_at, job_id?,
 run_id?, outcome`). `src/triggers/migrations.ts` exports
-`JOBS_DB_MIGRATIONS = [...JOB_MIGRATIONS, ...TRIGGER_MIGRATIONS]` — the
-AUTHORITATIVE ordered list `createTriggerStore` runs — because `migrate()`
+`JOBS_DB_MIGRATIONS = [...JOB_MIGRATIONS, ...TRIGGER_MIGRATIONS,
+...EVAL_HISTORY_MIGRATIONS]` — the AUTHORITATIVE ordered list `createTriggerStore`
+(and, since Slice 32, `createEvalHistoryStore`) runs — because `migrate()`
 tracks one `PRAGMA user_version` per database, not per caller; running the
-combined superset means whichever store opens `jobs.db` first, the other's
-later `migrate()` call is a correct no-op over an already-advanced version.
+combined superset means whichever store opens `jobs.db` first, the others'
+later `migrate()` calls are a correct no-op over an already-advanced version.
+Slice 32 appended `EVAL_HISTORY_MIGRATIONS` (the append-only `eval_history`
+table) to this same superset — never a standalone list (§`src/self-improve/`).
 `JobRecord`/`JobInput` gained `origin?: RunOrigin` and `chainDepth: number`
 (`src/queue/migrations.ts`'s `add-origin-and-chain-depth`, two plain `ALTER
 TABLE` columns) threaded through `JobStore.enqueue`.
@@ -4528,6 +4730,17 @@ repo TS file can't hold a raw secret, so it can never be made to fire).
 Console/API-created rows (`origin=console`) get full CRUD; the console may
 only pause/resume a repo-origin row, never edit/delete it (`PATCH`/`DELETE`
 on a repo trigger beyond enable/disable → `403`).
+
+**Slice-32 repo triggers (no new machinery).** The self-improvement loop
+(§`src/self-improve/`) registers **two** repo `TriggerDef`s in this same
+`triggers/index.ts` registry — `reeval-sweep` (a **Cron** def, schedule from
+`reevalSweepCron()`, → `JobKind.Eval`/`EvalMode.Sweep`) and `reeval-on-pull`
+(a **JobChain** def, `onKind: Pull`/`onStatus: Done`, →
+`JobKind.Eval`/`EvalMode.AffectedByPull`) — riding the **existing** Cron +
+JobChain trigger types with **no new `TriggerType`**, picked up by
+`syncRepoTriggers` at boot like any other repo def. Registration is not gated
+by the re-eval master switch (that gates *execution* in the executor), so a
+disabled loop still shows both triggers as disabled-effect in the console.
 
 **Composition — `engine.ts`.** `createTriggersEngine` builds the store, then
 ONE shared `fire` injected into the scheduler, watcher, and chain observer
@@ -4660,8 +4873,8 @@ replay is not nonce-deduped (see above).
 root→session auth entirely **backend-only** — the only client was the CLI.
 Slice 25b adds the operator surface: one new top-level nav entry **Ops** at
 `/ops` (`web/src/app/app-shell.tsx`'s `NAV`, `web/src/app/router.tsx`'s
-`opsRoute`) with a roving-tabindex sub-nav — **five tabs since Slice 31** —
-whose active tab is a `?tab=overview|jobs|triggers|devices|federation`
+`opsRoute`) with a roving-tabindex sub-nav — **six tabs since Slice 32** —
+whose active tab is a `?tab=overview|jobs|triggers|devices|federation|evals`
 search param (`OpsSearch`, deep-linkable, plus a `go-ops` + per-tab `⌘K`
 commands in `web/src/app/commands.ts`): **Overview** (daemon/queue health
 cards + a redacted logs tail), **Jobs** (the queue table + detail drawer +
@@ -4670,9 +4883,13 @@ read-only IA-only **stub** — cron/webhook/event → `JobKind`, "arrives in
 Slice 25", no backend wiring; **replaced by a fully live tab in Slice 25**,
 see the `src/triggers/` subsystem section above for the shipped backend +
 console), **Devices & Access** (bind posture, device pairing with a QR,
-revoke, break-glass root rotate), and **Federation** (A2A EXPOSE/CONSUME
+revoke, break-glass root rotate), **Federation** (A2A EXPOSE/CONSUME
 console, added Slice 31 — `web/src/features/ops/federation-tab.tsx`, see the
-`src/a2a/` subsystem section above for the full narrative). It follows the
+`src/a2a/` subsystem section above for the full narrative), and **Evals/Health**
+(added Slice 32 — `web/src/features/ops/evals-tab.tsx` + `use-evals.ts`: the
+per-artifact re-eval health rollup with a filled/hollow verdict-strip trend,
+expandable per-artifact history, and a "re-eval now" button; see the
+`src/self-improve/` subsystem section above). It follows the
 existing feature-module
 conventions exactly
 (`web/src/features/ops/`, `data-testid="area-ops"`, one `RegionErrorBoundary`

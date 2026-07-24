@@ -10,11 +10,11 @@ import {
   representativeTask,
   withWallClock,
 } from '../verified-build/dry-run.ts';
-import { evalCases } from '../verified-build/eval.ts';
+import { runGoldenEval } from '../verified-build/eval.ts';
 import type { GateDeps } from '../verified-build/gate.ts';
 import { verifyAndCommit } from '../verified-build/gate.ts';
 import { generateGolden, goldenPathFor } from '../verified-build/golden.ts';
-import { JudgeUnavailableError, selectJudge } from '../verified-build/judge.ts';
+import { selectJudge } from '../verified-build/judge.ts';
 import { upsertEntry } from '../verified-build/manifest.ts';
 import { renderReuseOffer, reuseDecision } from '../verified-build/reuse.ts';
 import {
@@ -243,43 +243,27 @@ async function verifyAndCommitCrewOrWorkflow(
     },
     goldenEval: async (def, golden) => {
       const { def: runnable } = def as StagedArtifact;
-      const judgePick = selectJudge({
-        candidates: verify.judgeCandidates,
+      // Delegate to the ONE shared eval-binding path (Task 6): the
+      // crew/workflow transport (wall-clock-bounded runArtifact — no
+      // AbortSignal seam yet, so the bound is the wall clock at the call
+      // site) lives in `runCase`; judge model selection, C3 binding, and the
+      // JudgeUnavailableError → null degrade are the helper's job.
+      return runGoldenEval({
+        cases: golden.cases,
+        judgeCandidates: verify.judgeCandidates,
         generatorFamily: verify.generatorFamily,
+        runCase: async (input) => {
+          try {
+            const r = await withWallClock(dryRunMs(), () =>
+              verify.runArtifact(runnable, shape, input),
+            );
+            return 'text' in r ? r.text : `error: ${r.error}`;
+          } catch (err) {
+            return `error: ${String(err)}`;
+          }
+        },
+        judge: (model, prompt) => verify.judge(prompt, model),
       });
-      // Unreachable when makeGolden gated golden generation on the same
-      // pick — kept as defense so a below-bar judge can never grade.
-      if (judgePick.model === null) return null;
-      const judgeModelId = judgePick.model;
-      try {
-        return await evalCases(golden.cases, {
-          runCase: async (input) => {
-            try {
-              const r = await withWallClock(dryRunMs(), () =>
-                verify.runArtifact(runnable, shape, input),
-              );
-              return 'text' in r ? r.text : `error: ${r.error}`;
-            } catch (err) {
-              return `error: ${String(err)}`;
-            }
-          },
-          // Bind the SELECTED judge model id into every judge call (C3): the
-          // judge must run on the model selectJudge picked, not the generator.
-          judge: (prompt) => verify.judge(prompt, judgeModelId),
-          judgeModel: judgeModelId,
-          belowBar: judgePick.belowBar,
-        });
-      } catch (err) {
-        // Never-crash policy: a judge model that can't be loaded degrades to
-        // skipping behavioral eval (gate commits `runs`), never crashes.
-        if (err instanceof JudgeUnavailableError) {
-          console.error(
-            '[verify] judge model unavailable — skipping behavioral eval, committing verified: runs',
-          );
-          return null;
-        }
-        throw err;
-      }
     },
     // The gate's ONE golden generation (C4). A below-bar judge returns null
     // BEFORE generating — no golden is paid for when nothing can grade it.
@@ -315,6 +299,7 @@ async function verifyAndCommitCrewOrWorkflow(
         lastUsedMs: 0,
         useCount: 0,
         lastEvalPass: level === VerifiedLevel.Behaves,
+        verifiedWith: verify.verifiedWith,
       });
       if (golden) {
         atomicWrite(goldenPath, `${JSON.stringify(golden, null, 2)}\n`);

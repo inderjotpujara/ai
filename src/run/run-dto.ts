@@ -53,6 +53,7 @@ export function deriveRunKind(rootSpanNames: string[]): RunKind {
   if (rootSpanNames.includes('mcp.mount')) return RunKind.Mcp;
   if (rootSpanNames.includes('memory.recall')) return RunKind.Memory;
   if (rootSpanNames.includes('memory.ingest')) return RunKind.Memory;
+  if (rootSpanNames.includes('eval.reeval')) return RunKind.Eval;
   if (rootSpanNames.includes('chat.run')) return RunKind.Chat;
   return RunKind.Chat;
 }

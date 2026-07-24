@@ -70,4 +70,26 @@ describe('aggregateUsage', () => {
   test('missing runs root yields empty map', () => {
     expect(aggregateUsage(join(root, 'does-not-exist'))).toEqual({});
   });
+
+  test('skips a malformed line (valid JSON, no attributes) without throwing', () => {
+    const dir = join(root, 'run-1');
+    mkdirSync(dir, { recursive: true });
+    const goodBefore = JSON.stringify(span({ 'crew.id': 'c1' }, 1_000));
+    const goodAfter = JSON.stringify(span({ 'crew.id': 'c2' }, 2_000));
+    // Interleave malformed-but-valid-JSON lines: a bare number, a bare
+    // string, and an object with no `attributes` key at all.
+    const lines = [
+      goodBefore,
+      '1',
+      '"x"',
+      JSON.stringify({ name: 'x' }),
+      goodAfter,
+    ];
+    writeFileSync(join(dir, 'spans.jsonl'), `${lines.join('\n')}\n`);
+    expect(() => aggregateUsage(root)).not.toThrow();
+    expect(aggregateUsage(root)).toEqual({
+      c1: { useCount: 1, lastUsedMs: 1_000 },
+      c2: { useCount: 1, lastUsedMs: 2_000 },
+    });
+  });
 });

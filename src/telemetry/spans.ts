@@ -171,7 +171,7 @@ export const ATTR = {
   RUN_STREAM_RESUMES: 'run.stream.resumes',
   RUN_STREAM_OUTCOME: 'run.stream.outcome',
   RUN_STREAM_RUN_ID: 'run.stream.run_id',
-  // Chat feedback (Slice 30b Phase 2; Slice 31 consumes it for the eval loop)
+  // Chat feedback (Slice 30b Phase 2; Slice 32 consumes it for the eval loop)
   FEEDBACK_MESSAGE_ID: 'chat.feedback.message_id',
   FEEDBACK_RATING: 'chat.feedback.rating',
   // Model pull (Slice 30b Phase 5, §7.2)
@@ -208,6 +208,14 @@ export const ATTR = {
   A2A_TASK_STATE: 'a2a.task.state',
   A2A_PEER_HOST: 'a2a.peer.host',
   A2A_OUTCOME: 'a2a.outcome',
+  // Self-improvement / continuous re-eval (Slice 32). NEVER a secret/PII value.
+  EVAL_ARTIFACT: 'eval.artifact',
+  EVAL_MODE: 'eval.mode',
+  EVAL_BASELINE_MODEL: 'eval.baseline_model',
+  EVAL_CURRENT_MODEL: 'eval.current_model',
+  EVAL_OUTCOME: 'eval.outcome',
+  EVAL_REGRESSED_COUNT: 'eval.regressed_count',
+  EVAL_DROP: 'eval.drop',
 } as const;
 
 export type ModelSelectInfo = {
@@ -419,7 +427,7 @@ export function withRunStreamSpan<T>(
  * One-shot span for `POST /api/feedback` (Slice 30b Phase 2): records the
  * 👍/👎 on a chat message as its own `chat.feedback` span (no parent request
  * span carries useful attributes here, unlike `withServerRequestSpan`).
- * Slice 31 will query these spans to close the eval loop — this is just the
+ * Slice 32 queries these spans to close the eval loop — this is just the
  * telemetry seam, no consumer yet.
  */
 export function recordChatFeedback(info: {

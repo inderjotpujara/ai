@@ -5,7 +5,10 @@ import {
   type JobRecord,
   JobStatus,
 } from '../../../src/queue/types.ts';
-import { createJobDispatch } from '../../../src/server/jobs/dispatch.ts';
+import {
+  createJobDispatch,
+  EvalMode,
+} from '../../../src/server/jobs/dispatch.ts';
 
 const fakeJob = (kind: JobKind, payload: unknown): JobRecord => ({
   id: 'job-1',
@@ -197,4 +200,56 @@ test('B3: a chat job with a2aRef but no runAgentTurn dep fails (never falls thro
       new AbortController().signal,
     ),
   ).rejects.toThrow(/a2aRef/);
+});
+
+test('Slice 32: Eval job dispatches to runEvalTurn with the parsed mode/ref/reason/runId', async () => {
+  const calls: unknown[] = [];
+  const controller = new AbortController();
+  const dispatch = createJobDispatch({
+    ...baseDeps(),
+    runEvalTurn: async (i) => {
+      calls.push(i);
+      return { kind: 'answer', text: 'ok' } as never;
+    },
+  });
+  const res = await dispatch(JobKind.Eval)(
+    fakeJob(JobKind.Eval, {
+      mode: 'artifact',
+      ref: 'file_qa',
+      reason: 'manual',
+    }),
+    controller.signal,
+  );
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({
+    mode: EvalMode.Artifact,
+    ref: 'file_qa',
+    reason: 'manual',
+    runId: 'run-xyz',
+  });
+  expect((calls[0] as { signal: AbortSignal }).signal).toBe(controller.signal);
+  expect(res).toEqual({ kind: 'answer', text: 'ok' });
+});
+
+test('Slice 32: an Eval job with no runEvalTurn dep wired fails (never a silent no-op)', async () => {
+  const dispatch = createJobDispatch(baseDeps()); // no runEvalTurn wired
+  await expect(
+    dispatch(JobKind.Eval)(
+      fakeJob(JobKind.Eval, { mode: 'sweep' }),
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(/runEvalTurn/);
+});
+
+test('Slice 32: an Eval job with mode=artifact and no ref is a permanent defect (schema throws)', async () => {
+  const dispatch = createJobDispatch({
+    ...baseDeps(),
+    runEvalTurn: async () => ({ kind: 'answer', text: 'ok' }) as never,
+  });
+  await expect(
+    dispatch(JobKind.Eval)(
+      fakeJob(JobKind.Eval, { mode: 'artifact' }),
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(/ref required for mode=artifact/);
 });

@@ -27,3 +27,7 @@ test('deriveRunKind maps chat.run → Chat and still maps agent.run → Agent (D
   // The generic agent.run capability is intact for a future standalone-agent run.
   expect(deriveRunKind(['agent.run'])).toBe(RunKind.Agent);
 });
+
+test('deriveRunKind maps eval.reeval root to RunKind.Eval (Slice 32)', () => {
+  expect(deriveRunKind(['eval.reeval'])).toBe(RunKind.Eval);
+});
